@@ -4,10 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { spawnSync } from 'child_process';
-import { constants, statSync } from 'fs';
+import { constants, existsSync, readFileSync, statSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
-import manifests from '../../../cgmanifest.json' with { type: 'json' };
 import { additionalDeps } from './dep-lists.ts';
 import type { DebianArchString } from './types.ts';
 
@@ -30,10 +29,19 @@ function calculatePackageDeps(binaryPath: string, arch: DebianArchString, chromi
 	}
 
 	// Get the Chromium dpkg-shlibdeps file.
-	const chromiumManifest = manifests.registrations.filter(registration => {
-		return registration.component.type === 'git' && registration.component.git!.name === 'chromium';
-	});
-	const dpkgShlibdepsUrl = `https://raw.githubusercontent.com/chromium/chromium/${chromiumManifest[0].version}/third_party/dpkg-shlibdeps/dpkg-shlibdeps.pl`;
+	const cgmanifestPath = path.join(path.dirname(path.dirname(path.dirname(path.dirname(new URL(import.meta.url).pathname)))), 'cgmanifest.json');
+	let chromiumVersion: string | undefined;
+	if (existsSync(cgmanifestPath)) {
+		const manifests = JSON.parse(readFileSync(cgmanifestPath, 'utf8'));
+		const chromiumManifest = manifests.registrations.filter((registration: { component: { type: string; git?: { name: string } } }) => {
+			return registration.component.type === 'git' && registration.component.git?.name === 'chromium';
+		});
+		chromiumVersion = chromiumManifest[0]?.version;
+	}
+	if (!chromiumVersion) {
+		throw new Error('Cannot determine Chromium version: cgmanifest.json not found or missing chromium entry.');
+	}
+	const dpkgShlibdepsUrl = `https://raw.githubusercontent.com/chromium/chromium/${chromiumVersion}/third_party/dpkg-shlibdeps/dpkg-shlibdeps.pl`;
 	const dpkgShlibdepsScriptLocation = `${tmpdir()}/dpkg-shlibdeps.pl`;
 	const result = spawnSync('curl', [dpkgShlibdepsUrl, '-o', dpkgShlibdepsScriptLocation]);
 	if (result.status !== 0) {
