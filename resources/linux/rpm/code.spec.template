@@ -1,7 +1,7 @@
 Name:     @@NAME@@
 Version:  @@VERSION@@
 Release:  @@RELEASE@@.el8
-Summary:  Code editing. Redefined.
+Summary:  AI-native code editing.
 Group:    Development/Tools
 Vendor:   Jeff Roche
 Packager: Jeff Roche <jeff@forge-ide.dev>
@@ -25,6 +25,7 @@ Forge IDE is an AI-native code editor built for developers who want intelligent 
 %define __strip @@STRIP@@
 
 %install
+%define _stagedir %{_topdir}/BUILD
 # Destination directories
 mkdir -p %{buildroot}%{_bindir}
 mkdir -p %{buildroot}%{_datadir}/%{name}
@@ -35,17 +36,17 @@ mkdir -p %{buildroot}%{_datadir}/pixmaps
 mkdir -p %{buildroot}%{_datadir}/bash-completion/completions
 mkdir -p %{buildroot}%{_datadir}/zsh/site-functions
 # Application
-cp -r usr/share/%{name}/* %{buildroot}%{_datadir}/%{name}
+cp -r %{_stagedir}/usr/share/%{name}/* %{buildroot}%{_datadir}/%{name}
 ln -s %{_datadir}/%{name}/bin/%{name} %{buildroot}%{_bindir}/%{name}
 # Support files
-cp -r usr/share/applications/%{name}.desktop %{buildroot}%{_datadir}/applications
-cp -r usr/share/applications/%{name}-url-handler.desktop %{buildroot}%{_datadir}/applications
-cp -r usr/share/appdata/%{name}.appdata.xml %{buildroot}%{_datadir}/appdata
-cp -r usr/share/mime/packages/%{name}-workspace.xml %{buildroot}%{_datadir}/mime/packages/%{name}-workspace.xml
-cp -r usr/share/pixmaps/@@ICON@@.png %{buildroot}%{_datadir}/pixmaps
+cp -r %{_stagedir}/usr/share/applications/%{name}.desktop %{buildroot}%{_datadir}/applications
+cp -r %{_stagedir}/usr/share/applications/%{name}-url-handler.desktop %{buildroot}%{_datadir}/applications
+cp -r %{_stagedir}/usr/share/appdata/%{name}.appdata.xml %{buildroot}%{_datadir}/appdata
+cp -r %{_stagedir}/usr/share/mime/packages/%{name}-workspace.xml %{buildroot}%{_datadir}/mime/packages/%{name}-workspace.xml
+cp -r %{_stagedir}/usr/share/pixmaps/@@ICON@@.png %{buildroot}%{_datadir}/pixmaps
 # Shell completions
-cp usr/share/bash-completion/completions/%{name} %{buildroot}%{_datadir}/bash-completion/completions/%{name}
-cp usr/share/zsh/site-functions/_%{name} %{buildroot}%{_datadir}/zsh/site-functions/_%{name}
+cp %{_stagedir}/usr/share/bash-completion/completions/%{name} %{buildroot}%{_datadir}/bash-completion/completions/%{name}
+cp %{_stagedir}/usr/share/zsh/site-functions/_%{name} %{buildroot}%{_datadir}/zsh/site-functions/_%{name}
 
 %post
 # Remove the legacy bin command if this is the stable build

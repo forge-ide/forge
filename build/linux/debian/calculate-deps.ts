@@ -10,11 +10,30 @@ import path from 'path';
 import { additionalDeps } from './dep-lists.ts';
 import type { DebianArchString } from './types.ts';
 
+const REPO_ROOT = path.dirname(path.dirname(path.dirname(path.dirname(new URL(import.meta.url).pathname))));
+
 export function generatePackageDeps(files: string[], arch: DebianArchString, chromiumSysroot: string, vscodeSysroot: string): Set<string>[] {
 	const dependencies: Set<string>[] = files.map(file => calculatePackageDeps(file, arch, chromiumSysroot, vscodeSysroot));
 	const additionalDepsSet = new Set(additionalDeps);
 	dependencies.push(additionalDepsSet);
 	return dependencies;
+}
+
+function getChromiumVersionFromElectron(): string {
+	const npmrc = readFileSync(path.join(REPO_ROOT, '.npmrc'), 'utf8');
+	const electronVersion = /^target="(.*)"$/m.exec(npmrc)![1];
+	const result = spawnSync('curl', [
+		'-sf',
+		`https://raw.githubusercontent.com/electron/electron/v${electronVersion}/DEPS`,
+	], { encoding: 'utf8' });
+	if (result.status !== 0) {
+		throw new Error(`Failed to fetch Electron DEPS for v${electronVersion}`);
+	}
+	const match = /'chromium_version':\s*\n\s*'([^']+)'/.exec(result.stdout);
+	if (!match) {
+		throw new Error(`Could not parse chromium_version from Electron v${electronVersion} DEPS`);
+	}
+	return match[1];
 }
 
 // Based on https://source.chromium.org/chromium/chromium/src/+/main:chrome/installer/linux/debian/calculate_package_deps.py.
@@ -28,8 +47,8 @@ function calculatePackageDeps(binaryPath: string, arch: DebianArchString, chromi
 		console.error('Tried to stat ' + binaryPath + ' but failed.');
 	}
 
-	// Get the Chromium dpkg-shlibdeps file.
-	const cgmanifestPath = path.join(path.dirname(path.dirname(path.dirname(path.dirname(new URL(import.meta.url).pathname)))), 'cgmanifest.json');
+	// Get the Chromium version: prefer cgmanifest.json (upstream VS Code), fall back to Electron release API.
+	const cgmanifestPath = path.join(REPO_ROOT, 'cgmanifest.json');
 	let chromiumVersion: string | undefined;
 	if (existsSync(cgmanifestPath)) {
 		const manifests = JSON.parse(readFileSync(cgmanifestPath, 'utf8'));
@@ -39,7 +58,7 @@ function calculatePackageDeps(binaryPath: string, arch: DebianArchString, chromi
 		chromiumVersion = chromiumManifest[0]?.version;
 	}
 	if (!chromiumVersion) {
-		throw new Error('Cannot determine Chromium version: cgmanifest.json not found or missing chromium entry.');
+		chromiumVersion = getChromiumVersionFromElectron();
 	}
 	const dpkgShlibdepsUrl = `https://raw.githubusercontent.com/chromium/chromium/${chromiumVersion}/third_party/dpkg-shlibdeps/dpkg-shlibdeps.pl`;
 	const dpkgShlibdepsScriptLocation = `${tmpdir()}/dpkg-shlibdeps.pl`;
