@@ -26,6 +26,7 @@
 }
 
 .mcp-hover-contents .mcp-hover-setting .mcp-hover-setting-label {
+	font-family: var(--font-body);
 	cursor: pointer;
 	color: var(--vscode-foreground);
 	font-size: 12px;
