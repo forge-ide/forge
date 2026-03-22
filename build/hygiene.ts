@@ -23,6 +23,13 @@ const copyrightHeaderLines = [
 	' *--------------------------------------------------------------------------------------------*/',
 ];
 
+// Forge-authored files use a MIT-only header without a copyright holder line
+const forgeMitHeaderLines = [
+	'/*---------------------------------------------------------------------------------------------',
+	' *  Licensed under the MIT License. See License.txt in the project root for license information.',
+	' *--------------------------------------------------------------------------------------------*/',
+];
+
 interface VinylFileWithLines extends VinylFile {
 	__lines: string[];
 }
@@ -107,12 +114,10 @@ export function hygiene(some: NodeJS.ReadWriteStream | string[] | undefined, run
 	const copyrights = es.through(function (file: VinylFileWithLines) {
 		const lines = file.__lines;
 
-		for (let i = 0; i < copyrightHeaderLines.length; i++) {
-			if (lines[i] !== copyrightHeaderLines[i]) {
-				console.error(file.relative + ': Missing or bad copyright statement');
-				errorCount++;
-				break;
-			}
+		const matchesCopyright = (header: string[]) => header.every((line, i) => lines[i] === line);
+		if (!matchesCopyright(copyrightHeaderLines) && !matchesCopyright(forgeMitHeaderLines)) {
+			console.error(file.relative + ': Missing or bad copyright statement');
+			errorCount++;
 		}
 
 		this.emit('data', file);

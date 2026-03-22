@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-title VSCode Dev
+title Forge Dev
 
 pushd %~dp0\..
 

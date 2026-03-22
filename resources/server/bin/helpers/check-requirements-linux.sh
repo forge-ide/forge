@@ -17,7 +17,7 @@ set -e
 # Provides a way to skip the server requirements check from
 # outside the install flow. A system process can create this
 # file before the server is downloaded and installed.
-if [ -f "/tmp/vscode-skip-server-requirements-check" ] || [ -n "$VSCODE_SERVER_CUSTOM_GLIBC_LINKER" ]; then
+if [ -f "/tmp/forge-skip-server-requirements-check" ] || [ -n "$VSCODE_SERVER_CUSTOM_GLIBC_LINKER" ]; then
     echo "!!! WARNING: Skipping server pre-requisite check !!!"
     echo "!!! Server stability is not guaranteed. Proceed at your own risk. !!!"
     exit 0
@@ -107,7 +107,7 @@ if [ "$OS_ID" = "alpine" ]; then
         fi
     done
     if [ "$(printf '%s\n' "1.2.3" "$musl_version" | sort -V | head -n1)" != "1.2.3" ]; then
-        echo "Error: Unsupported alpine distribution. Please refer to our supported distro section https://aka.ms/vscode-remote/linux for additional information."
+        echo "Error: Unsupported alpine distribution. Please refer to our supported distro section https://github.com/forge-ide/forge/blob/main/docs/supported-linux-distros.md for additional information."
         exit 99
     fi
     found_required_glibc=1
@@ -155,7 +155,7 @@ else
 fi
 
 if [ "$found_required_glibc" = "0" ] || [ "$found_required_glibcxx" = "0" ]; then
-	echo "Error: Missing required dependencies. Please refer to our FAQ https://aka.ms/vscode-remote/faq/old-linux for additional information."
+	echo "Error: Missing required dependencies. Please refer to our FAQ https://github.com/forge-ide/forge/blob/main/docs/faq-old-linux.md for additional information."
 	# Custom exit code based on https://tldp.org/LDP/abs/html/exitcodes.html
 	exit 99
 fi

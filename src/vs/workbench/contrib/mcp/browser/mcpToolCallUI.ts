@@ -100,8 +100,8 @@ export class McpToolCallUI extends Disposable {
 						'--color-ring-success': 'var(--vscode-testing-iconPassed)',
 						'--color-ring-warning': 'var(--vscode-inputValidation-warningBorder)',
 
-						'--font-sans': 'var(--vscode-font-family)',
-						'--font-mono': 'var(--vscode-editor-font-family)',
+						'--font-sans': 'var(--font-body)',
+						'--font-mono': 'var(--font-mono)',
 
 						'--font-weight-normal': 'normal',
 						'--font-weight-medium': '500',

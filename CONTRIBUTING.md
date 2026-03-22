@@ -1,99 +1,120 @@
-# Contributing to VS Code
+# Contributing to Forge IDE
 
-Welcome, and thank you for your interest in contributing to VS Code!
-
-There are several ways in which you can contribute, beyond writing code. The goal of this document is to provide a high-level overview of how you can get involved.
+Thank you for your interest in contributing to Forge! This document covers how to get involved, report issues, and submit changes.
 
 ## Asking Questions
 
-
-Have a question? Instead of opening an issue, please ask on [Stack Overflow](https://stackoverflow.com/questions/tagged/visual-studio-code) using the tag `visual-studio-code`.
-
-The active community will be eager to assist you. Your well-worded question will serve as a resource to others searching for help.
-
-## Providing Feedback
-
-Your comments and feedback are welcome, and the development team is available via a handful of different channels.
-
-See the [Feedback Channels](https://github.com/microsoft/vscode/wiki/Feedback-Channels) wiki page for details on how to share your thoughts.
+Have a question about using or building Forge? Open a [GitHub Discussion](https://github.com/forge-ide/forge/discussions) — it's the best place for Q&A, ideas, and general conversation.
 
 ## Reporting Issues
 
-Have you identified a reproducible problem in VS Code? Do you have a feature request? We want to hear about it! Here's how you can report your issue as effectively as possible.
+Found a bug or want to request a feature? [Open an issue](https://github.com/forge-ide/forge/issues/new) on GitHub.
 
-### Identify Where to Report
+### Before Opening an Issue
 
-The VS Code project is distributed across multiple repositories. Try to file the issue against the correct repository. Check the list of [Related Projects](https://github.com/microsoft/vscode/wiki/Related-Projects) if you aren't sure which repo is correct.
+- Search [existing issues](https://github.com/forge-ide/forge/issues) to avoid duplicates.
+- If the issue is with an AI provider (Anthropic, OpenAI, etc.) rather than Forge itself, check whether it reproduces with a different provider.
 
-Can you recreate the issue even after [disabling all extensions](https://code.visualstudio.com/docs/editor/extension-gallery#_disable-an-extension)? If you find the issue is caused by an extension you have installed, please file an issue on the extension's repo directly.
+### What to Include in a Bug Report
 
-### Look For an Existing Issue
+- Forge version (`Help > About`)
+- Operating system and version
+- Steps to reproduce (numbered, minimal)
+- What you expected vs. what happened
+- Any error output from `Help > Toggle Developer Tools`
 
-Before you create a new issue, please do a search in [open issues](https://github.com/microsoft/vscode/issues) to see if the issue or feature request has already been filed.
+## Branching Strategy
 
-Be sure to scan through the [most popular](https://github.com/microsoft/vscode/issues?q=is%3Aopen+is%3Aissue+label%3Afeature-request+sort%3Areactions-%2B1-desc) feature requests.
+Forge uses a **forking model**. All contributions — including from maintainers — go through a pull request from a personal fork. Nobody pushes directly to `forge-ide/forge`.
 
-If you find your issue already exists, make relevant comments and add your [reaction](https://github.com/blog/2119-add-reactions-to-pull-requests-issues-and-comments). Use a reaction in place of a "+1" comment:
+### Workflow
 
-* 👍 - upvote
-* 👎 - downvote
+```sh
+1. Fork forge-ide/forge to your GitHub account
+2. Clone your fork: git clone https://github.com/YOUR_USERNAME/forge.git
+3. Add the upstream remote: git remote add upstream https://github.com/forge-ide/forge.git
+4. Create a branch off main: git checkout -b fix/mcp-reconnect
+5. Make your changes and commit
+6. Keep your branch up to date: git fetch upstream && git rebase upstream/main
+7. Push to your fork: git push origin fix/mcp-reconnect
+8. Open a pull request: your fork's branch → forge-ide/forge:main
+```
 
-If you cannot find an existing issue that describes your bug or feature, create a new issue using the guidelines below.
+### Branch naming
 
-### Writing Good Bug Reports and Feature Requests
+| Prefix | Use for | Example |
+| --- | --- | --- |
+| `feature/` | New capabilities | `feature/gemini-provider` |
+| `fix/` | Bug fixes | `fix/mcp-reconnect-backoff` |
+| `design/` | Visual / CSS only | `design/ember-token-update` |
+| `docs/` | Documentation only | `docs/branching-strategy` |
 
-File a single issue per problem and feature request. Do not enumerate multiple bugs or feature requests in the same issue.
+Names should be lowercase, hyphen-separated, and specific.
 
-Do not add your issue as a comment to an existing issue unless it's for the identical input. Many issues look similar but have different causes.
+### The `upstream-sync` branch
 
-The more information you can provide, the more likely someone will be successful at reproducing the issue and finding a fix.
+There is an `upstream-sync` branch that tracks `microsoft/vscode:main` and is merged into `main` monthly. This is a maintainer-only branch — do not base work on it and do not merge it into your feature branch. Always rebase against `main`.
 
-The built-in tool for reporting an issue, which you can access by using `Report Issue` in VS Code's Help menu, can help streamline this process by automatically providing the version of VS Code, all your installed extensions, and your system info. Additionally, the tool will search among existing issues to see if a similar issue already exists.
+---
 
-Please include the following with each issue:
+## Contributing Code
 
-* Version of VS Code
-* Your operating system
-* List of extensions that you have installed
-* Reproducible steps (1... 2... 3...) that cause the issue
-* What you expected to see, versus what you actually saw
-* Images, animations, or a link to a video showing the issue occurring
-* A code snippet that demonstrates the issue or a link to a code repository the developers can easily pull down to recreate the issue locally
-  * **Note:** Because the developers need to copy and paste the code snippet, including a code snippet as a media file (i.e. .gif) is not sufficient.
-* Errors from the Dev Tools Console (open from the menu: Help > Toggle Developer Tools)
+### Setup
 
-### Creating Pull Requests
+```bash
+git clone https://github.com/forge-ide/forge.git
+cd forge
+npm install
+npm run compile
+./scripts/code.sh   # macOS / Linux
+scripts\code.bat    # Windows
+```
 
-* Please refer to the article on [creating pull requests](https://github.com/microsoft/vscode/wiki/How-to-Contribute#pull-requests) and contributing to this project.
+### Before You Write Code
 
-### Final Checklist
+Read [AGENT.md](.claude/CLAUDE.md) — it explains the layered architecture, DI system, and what is safe to change. It also lists areas that require extra care and things that must not be changed. Reading it fully will save you time.
 
-Please remember to do the following:
+### Code Style
 
-* [ ] Search the issue repository to ensure your report is a new issue
-* [ ] Recreate the issue after disabling all extensions
-* [ ] Simplify your code around the issue to better isolate the problem
+- Tabs for indentation, not spaces
+- `noImplicitAny` and `strictNullChecks` are enforced — never use `any`
+- PascalCase for types and enums; camelCase for functions, methods, and variables
+- Arrow functions preferred over anonymous function expressions
+- Always wrap loop and conditional bodies in curly braces
+- Use `async/await` — do not mix with `.then()/.catch()` chains
+- Wrap all event listener subscriptions in `this._register(...)` to prevent leaks
 
-Don't feel bad if the developers can't reproduce the issue right away. They will simply ask for more information!
+### Design Rules
 
-### Follow Your Issue
+All UI changes must follow [DESIGN.md](DESIGN.md):
 
-Once submitted, your report will go into the [issue tracking](https://github.com/microsoft/vscode/wiki/Issue-Tracking) workflow. Be sure to understand what will happen next, so you know what to expect and how to continue to assist throughout the process.
+- Colors: `var(--color-*)` tokens only — no raw hex values
+- Fonts: Barlow Condensed (headings), Barlow (body), Fira Code (code/identifiers) — no others
+- Spacing: `var(--sp-*)` tokens only — no raw pixel values
+- Active state: `iron-750` background + `ember-400` indicator (left border for items, bottom border for tabs)
 
-## Automated Issue Management
+### Testing Your Changes
 
-We use GitHub Actions to help us manage issues. These Actions and their descriptions can be [viewed here](https://github.com/microsoft/vscode-github-triage-actions). Some examples of what these Actions do are:
+Run the relevant unit tests before submitting:
 
-* Automatically close any issue marked `info-needed` if there has been no response in the past 7 days.
-* Automatically lock issues 45 days after they are closed.
-* Automatically implement the VS Code [feature request pipeline](https://github.com/microsoft/vscode/wiki/Issues-Triaging#managing-feature-requests).
+```bash
+yarn test --run src/vs/platform/ai    # example: AI provider tests
+yarn run compile                       # verify zero TypeScript errors
+```
 
-If you believe the bot got something wrong, please open a new issue and let us know.
+See AGENT.md section 10 for the full manual test checklist for each area (canvas, MCP, agents, providers).
 
-## Contributing Fixes
+### Pull Requests
 
-If you are interested in writing code to fix issues, please see [How to Contribute](https://github.com/microsoft/vscode/wiki/How-to-Contribute) in the wiki.
+- One logical change per PR — avoid bundling unrelated fixes
+- Reference the issue your PR addresses (`Closes #123`)
+- Describe what changed and why, not just what the diff shows
+- Do not suppress TypeScript errors with `@ts-ignore` or `@ts-expect-error` unless the existing file already uses this pattern
 
-## Thank You
+## Security
 
-Your contributions to open source, large or small, make great projects like this possible. Thank you for taking the time to contribute.
+If you discover a security vulnerability, please **do not** open a public issue. Email [security@forge-ide.com](mailto:security@forge-ide.com) with details. We will respond promptly.
+
+## License
+
+By contributing to Forge, you agree that your contributions will be licensed under the [MIT License](LICENSE.txt).
