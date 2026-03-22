@@ -12,6 +12,7 @@ const open = require('open');
 const minimist = require('minimist');
 
 const APP_ROOT = path.join(__dirname, '..');
+const product = require(path.join(APP_ROOT, 'product.json'));
 
 async function main() {
 	const args = minimist(process.argv.slice(2), {
@@ -140,8 +141,8 @@ ${importMapJson}
 		import { create, URI } from '${fileRoot}/vs/sessions/${useMock ? 'test/sessions.web.test.internal' : 'sessions.web.main.internal'}.js';
 		create(document.body, {
 			productConfiguration: {
-				nameShort: 'Sessions (Web)',
-				nameLong: 'Sessions (Web)',
+				nameShort: product.nameShort + ' Sessions',
+				nameLong: product.nameLong + ' Sessions (Web)',
 				enableTelemetry: false,
 			},
 			${additionalBuiltinExtensions}
