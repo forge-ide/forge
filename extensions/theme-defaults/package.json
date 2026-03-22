@@ -14,18 +14,6 @@
   "contributes": {
     "themes": [
       {
-        "id": "VS Code Light",
-        "label": "%vsCodeLightThemeLabel%",
-        "uiTheme": "vs",
-        "path": "./themes/2026-light.json"
-      },
-      {
-        "id": "VS Code Dark",
-        "label": "%vsCodeDarkThemeLabel%",
-        "uiTheme": "vs-dark",
-        "path": "./themes/2026-dark.json"
-      },
-      {
         "id": "Dark+",
         "label": "%darkPlusColorThemeLabel%",
         "uiTheme": "vs-dark",
@@ -48,18 +36,6 @@
         "label": "%lightModernThemeLabel%",
         "uiTheme": "vs",
         "path": "./themes/light_modern.json"
-      },
-      {
-        "id": "Visual Studio Dark",
-        "label": "%darkColorThemeLabel%",
-        "uiTheme": "vs-dark",
-        "path": "./themes/dark_vs.json"
-      },
-      {
-        "id": "Visual Studio Light",
-        "label": "%lightColorThemeLabel%",
-        "uiTheme": "vs",
-        "path": "./themes/light_vs.json"
       },
       {
         "id": "Default High Contrast",
