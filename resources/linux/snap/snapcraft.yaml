@@ -1,10 +1,9 @@
 name: @@NAME@@
 version: '@@VERSION@@'
-summary: Code editing. Redefined.
+summary: AI-native code editing for developers.
 description: |
-  Visual Studio Code is a new choice of tool that combines the
-  simplicity of a code editor with what developers need for the core
-  edit-build-debug cycle.
+  Forge IDE is an AI-native code editor built for developers who want
+  intelligent assistance throughout the edit-build-debug cycle.
 
 architectures:
   - build-on: amd64
