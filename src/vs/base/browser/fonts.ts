@@ -17,6 +17,12 @@ import { isElectron, isMacintosh, isWindows } from '../common/platform.js';
  */
 export const DEFAULT_FONT_FAMILY = isWindows ? '"Segoe WPC", "Segoe UI", sans-serif' : isMacintosh ? '-apple-system, BlinkMacSystemFont, sans-serif' : 'system-ui, "Ubuntu", "Droid Sans", sans-serif';
 
+/**
+ * The preferred monospace font-family to be used in CSS. Fira Code is the Forge design-system
+ * monospace font; the remaining entries are platform fallbacks in case it has not loaded yet.
+ */
+export const DEFAULT_MONOSPACE_FONT_FAMILY = isWindows ? '"Fira Code", "Courier New", monospace' : isMacintosh ? '"Fira Code", Menlo, Monaco, monospace' : '"Fira Code", "Ubuntu Mono", "Droid Sans Mono", monospace';
+
 interface FontData {
 	readonly family: string;
 }
