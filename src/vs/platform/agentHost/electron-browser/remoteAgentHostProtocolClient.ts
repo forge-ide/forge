@@ -58,7 +58,7 @@ export class RemoteAgentHostProtocolClient extends Disposable implements IAgentC
 	}
 
 	get address(): string {
-		return this._transport['_address'];
+		return this._transport.address;
 	}
 
 	get defaultDirectory(): string | undefined {

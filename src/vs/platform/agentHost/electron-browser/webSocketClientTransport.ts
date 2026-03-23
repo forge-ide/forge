@@ -36,6 +36,10 @@ export class WebSocketClientTransport extends Disposable implements IProtocolTra
 		return this._ws?.readyState === WebSocket.OPEN;
 	}
 
+	get address(): string {
+		return this._address;
+	}
+
 	constructor(
 		private readonly _address: string,
 		private readonly _connectionToken?: string,
