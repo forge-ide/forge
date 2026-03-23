@@ -433,8 +433,10 @@ export class Mangler {
 		this.log = log;
 		this.config = config;
 
+		// Reduce worker count in CI to avoid OOM
+		const maxWorkers = process.env.CI ? 2 : 4;
 		this.renameWorkerPool = workerpool.pool(path.join(import.meta.dirname, 'renameWorker.ts'), {
-			maxWorkers: 4,
+			maxWorkers,
 			minWorkers: 'max'
 		});
 	}
