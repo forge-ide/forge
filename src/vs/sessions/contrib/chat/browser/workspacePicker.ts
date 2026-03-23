@@ -18,10 +18,6 @@ import { IStorageService, StorageScope, StorageTarget } from '../../../../platfo
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
 import { renderIcon } from '../../../../base/browser/ui/iconLabel/iconLabels.js';
 import { GITHUB_REMOTE_FILE_SCHEME, SessionWorkspace } from '../../sessions/common/sessionWorkspace.js';
-import { IRemoteAgentHostService } from '../../../../platform/agentHost/common/remoteAgentHostService.js';
-import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
-import { agentHostAuthority } from '../../remoteAgentHost/browser/remoteAgentHost.contribution.js';
-import { AGENT_HOST_FS_SCHEME, agentHostUri } from '../../remoteAgentHost/browser/agentHostFileSystemProvider.js';
 
 const OPEN_REPO_COMMAND = 'github.copilot.chat.cloudSessions.openRepository';
 const STORAGE_KEY_LAST_PROJECT = 'sessions.lastPickedProject';
@@ -37,7 +33,6 @@ const LEGACY_STORAGE_KEY_RECENT_REPOS = 'agentSessions.recentlyPickedRepos';
 
 const COMMAND_BROWSE_FOLDERS = 'command:browseFolders';
 const COMMAND_BROWSE_REPOS = 'command:browseRepos';
-const COMMAND_BROWSE_REMOTE_AGENT_HOSTS = 'command:browseRemoteAgentHosts';
 
 /**
  * Serializable form of a project entry for storage.
@@ -45,8 +40,6 @@ const COMMAND_BROWSE_REMOTE_AGENT_HOSTS = 'command:browseRemoteAgentHosts';
 interface IStoredProject {
 	readonly uri: UriComponents;
 	readonly checked?: boolean;
-	/** Cached display name for remote agent host connections. */
-	readonly remoteName?: string;
 }
 
 /**
@@ -79,8 +72,6 @@ export class WorkspacePicker extends Disposable {
 		@IFileDialogService private readonly fileDialogService: IFileDialogService,
 		@ICommandService private readonly commandService: ICommandService,
 		@IUriIdentityService private readonly uriIdentityService: IUriIdentityService,
-		@IRemoteAgentHostService private readonly remoteAgentHostService: IRemoteAgentHostService,
-		@IQuickInputService private readonly quickInputService: IQuickInputService,
 	) {
 		super();
 
@@ -209,8 +200,6 @@ export class WorkspacePicker extends Disposable {
 					this._browseForFolder();
 				} else if (uriStr === COMMAND_BROWSE_REPOS) {
 					this._browseForRepo();
-				} else if (uriStr === COMMAND_BROWSE_REMOTE_AGENT_HOSTS) {
-					this._browseForRemoteAgentHost();
 				} else {
 					this._selectProject(this._fromStored(item));
 				}
@@ -267,7 +256,7 @@ export class WorkspacePicker extends Disposable {
 
 	private _selectProject(project: SessionWorkspace, fireEvent = true): void {
 		this._selectedProject = project;
-		const stored = this._withCachedRemoteName(this._toStored(project));
+		const stored = this._toStored(project);
 		this._addToRecents(stored);
 		this.storageService.store(STORAGE_KEY_LAST_PROJECT, JSON.stringify(stored), StorageScope.PROFILE, StorageTarget.MACHINE);
 		this._updateTriggerLabel();
@@ -303,65 +292,7 @@ export class WorkspacePicker extends Disposable {
 		}
 	}
 
-	private async _browseForRemoteAgentHost(): Promise<void> {
-		const connections = this.remoteAgentHostService.connections;
-		if (connections.length === 0) {
-			return;
-		}
-
-		// Show remote picker even with a single connection so the user
-		// can see which remote they are connecting to.
-		let selectedAddress: string;
-		let selectedName: string;
-		let defaultDirectory: string | undefined;
-		{
-			const picks = connections.map(c => ({
-				label: c.name,
-				description: c.address,
-				address: c.address,
-				defaultDirectory: c.defaultDirectory,
-			}));
-
-			const picked = await this.quickInputService.pick(picks, {
-				title: localize('selectRemote', "Select Remote"),
-				placeHolder: localize('selectRemotePlaceholder', "Choose a remote agent host"),
-			});
-			if (!picked) {
-				return;
-			}
-			selectedAddress = picked.address;
-			selectedName = picked.label;
-			defaultDirectory = picked.defaultDirectory;
-		}
-
-		// Open a folder picker scoped to the remote filesystem.
-		// The defaultUri carries both the scheme (agenthost) and authority
-		// (sanitized address), so SimpleFileDialog stays scoped to this
-		// particular remote connection.
-		const authority = agentHostAuthority(selectedAddress);
-		const defaultUri = defaultDirectory
-			? agentHostUri(authority, defaultDirectory)
-			: agentHostUri(authority, '/');
-
-		try {
-			const selected = await this.fileDialogService.showOpenDialog({
-				canSelectFiles: false,
-				canSelectFolders: true,
-				canSelectMany: false,
-				title: localize('selectRemoteFolder', "Select Folder on {0}", selectedName),
-				availableFileSystems: [AGENT_HOST_FS_SCHEME],
-				defaultUri,
-			});
-			if (selected?.[0]) {
-				this._selectProject(new SessionWorkspace(selected[0]));
-			}
-		} catch {
-			// dialog was cancelled or failed
-		}
-	}
-
 	private _addToRecents(stored: IStoredProject): void {
-		stored = this._withCachedRemoteName(stored);
 		this._recentProjects = [
 			stored,
 			...this._recentProjects.filter(p => !this._isSameProject(p, stored)),
@@ -379,8 +310,7 @@ export class WorkspacePicker extends Disposable {
 		// Collect all projects (current + recents), deduped
 		const allProjects: IStoredProject[] = [];
 		if (this._selectedProject) {
-			const stored = this._withCachedRemoteName(this._toStored(this._selectedProject));
-			allProjects.push(stored);
+			allProjects.push(this._toStored(this._selectedProject));
 		}
 		for (const project of this._recentProjects) {
 			if (!allProjects.some(p => this._isSameProject(p, project))) {
@@ -388,15 +318,10 @@ export class WorkspacePicker extends Disposable {
 			}
 		}
 
-		// Split into folders, repos, and remotes, sort each group alphabetically
-		const isStoredFolder = (p: IStoredProject) => {
-			const scheme = URI.revive(p.uri).scheme;
-			return scheme !== GITHUB_REMOTE_FILE_SCHEME && scheme !== AGENT_HOST_FS_SCHEME;
-		};
-		const isStoredRemote = (p: IStoredProject) => URI.revive(p.uri).scheme === AGENT_HOST_FS_SCHEME;
+		// Split into folders and repos, sort each group alphabetically
+		const isStoredFolder = (p: IStoredProject) => URI.revive(p.uri).scheme !== GITHUB_REMOTE_FILE_SCHEME;
 		const folders = allProjects.filter(p => isStoredFolder(p)).sort((a, b) => this._getStoredProjectLabel(a).localeCompare(this._getStoredProjectLabel(b)));
-		const repos = allProjects.filter(p => !isStoredFolder(p) && !isStoredRemote(p)).sort((a, b) => this._getStoredProjectLabel(a).localeCompare(this._getStoredProjectLabel(b)));
-		const remotes = allProjects.filter(p => isStoredRemote(p)).sort((a, b) => this._getStoredProjectLabel(a).localeCompare(this._getStoredProjectLabel(b)));
+		const repos = allProjects.filter(p => !isStoredFolder(p)).sort((a, b) => this._getStoredProjectLabel(a).localeCompare(this._getStoredProjectLabel(b)));
 
 		const selectedStored = this._selectedProject ? this._toStored(this._selectedProject) : undefined;
 		const isSelected = (p: IStoredProject) => !!selectedStored && this._isSameProject(p, selectedStored);
@@ -425,18 +350,6 @@ export class WorkspacePicker extends Disposable {
 			});
 		}
 
-		// Then remotes
-		for (const project of remotes) {
-			const selected = isSelected(project);
-			items.push({
-				kind: ActionListItemKind.Action,
-				label: this._getStoredProjectLabel(project),
-				group: { title: '', icon: Codicon.remote },
-				item: selected ? { ...project, checked: true } : project,
-				onRemove: () => this._removeProject(project),
-			});
-		}
-
 		// Separator + Browse actions
 		if (items.length > 0) {
 			items.push({ kind: ActionListItemKind.Separator, label: '' });
@@ -453,14 +366,6 @@ export class WorkspacePicker extends Disposable {
 			group: { title: '', icon: Codicon.repo },
 			item: { uri: URI.parse(COMMAND_BROWSE_REPOS).toJSON() },
 		});
-		if (this.remoteAgentHostService.connections.length > 0) {
-			items.push({
-				kind: ActionListItemKind.Action,
-				label: localize('browseRemotes', "Browse Remotes..."),
-				group: { title: '', icon: Codicon.remote },
-				item: { uri: URI.parse(COMMAND_BROWSE_REMOTE_AGENT_HOSTS).toJSON() },
-			});
-		}
 
 		return items;
 	}
@@ -479,7 +384,7 @@ export class WorkspacePicker extends Disposable {
 		const project = this._selectedProject;
 		const label = project ? this._getProjectLabel(project) : localize('pickWorkspace', "Pick a Workspace");
 		const icon = project
-			? (project.isRemoteAgentHost ? Codicon.remote : project.isFolder ? Codicon.folder : Codicon.repo)
+			? (project.isFolder ? Codicon.folder : Codicon.repo)
 			: Codicon.project;
 
 		dom.append(this._triggerElement, renderIcon(icon));
@@ -489,17 +394,11 @@ export class WorkspacePicker extends Disposable {
 	}
 
 	private _getProjectLabel(project: SessionWorkspace): string {
-		return this._getStoredProjectLabel(this._withCachedRemoteName(this._toStored(project)));
+		return this._getStoredProjectLabel(this._toStored(project));
 	}
 
 	private _getStoredProjectLabel(project: IStoredProject): string {
 		const uri = URI.revive(project.uri);
-		// TODO@roblourens HACK
-		if (uri.scheme === AGENT_HOST_FS_SCHEME) {
-			const folderName = basename(uri) || uri.path || '/';
-			const remoteName = this._getRemoteName(uri.authority) ?? project.remoteName ?? uri.authority;
-			return `${folderName} [${remoteName}]`;
-		}
 		if (uri.scheme !== GITHUB_REMOTE_FILE_SCHEME) {
 			return basename(uri);
 		}
@@ -507,46 +406,12 @@ export class WorkspacePicker extends Disposable {
 		return uri.path.substring(1).replace(/\/HEAD$/, '');
 	}
 
-	/**
-	 * Resolves a sanitized authority back to a user-facing remote name.
-	 */
-	private _getRemoteName(authority: string): string | undefined {
-		for (const conn of this.remoteAgentHostService.connections) {
-			if (agentHostAuthority(conn.address) === authority) {
-				return conn.name;
-			}
-		}
-		return undefined;
-	}
-
 	private _toStored(project: SessionWorkspace): IStoredProject {
-		const uri = project.uri;
-		const stored: IStoredProject = { uri: uri.toJSON() };
-		if (uri.scheme === AGENT_HOST_FS_SCHEME) {
-			const remoteName = this._getRemoteName(uri.authority);
-			if (remoteName) {
-				return { ...stored, remoteName };
-			}
-		}
-		return stored;
+		return { uri: project.uri.toJSON() };
 	}
 
 	private _fromStored(stored: IStoredProject): SessionWorkspace {
 		return new SessionWorkspace(URI.revive(stored.uri));
-	}
-
-	/**
-	 * If the stored project is missing a cached remoteName, tries to recover
-	 * it from the recents list so labels remain stable across restarts.
-	 */
-	private _withCachedRemoteName(stored: IStoredProject): IStoredProject {
-		if (!stored.remoteName && URI.revive(stored.uri).scheme === AGENT_HOST_FS_SCHEME) {
-			const cached = this._recentProjects.find(p => this._isSameProject(p, stored));
-			if (cached?.remoteName) {
-				return { ...stored, remoteName: cached.remoteName };
-			}
-		}
-		return stored;
 	}
 
 	private _isSameProject(a: IStoredProject, b: IStoredProject): boolean {
