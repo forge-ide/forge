@@ -341,6 +341,10 @@ const skippedExportMangledSymbols = [
 	// Don't mangle extension entry points
 	'activate',
 	'deactivate',
+	// Don't mangle test helper classes that are dynamically imported
+	'ConfirmTerminalCommandTool',
+	'ScriptedMockAgent',
+	'MockAgent',
 ];
 
 class DeclarationData {
