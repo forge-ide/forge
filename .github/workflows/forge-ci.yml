@@ -6,14 +6,25 @@ on:
       - main
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
 jobs:
-  lint-and-compile:
-    name: Lint & TypeScript
-    runs-on: ubuntu-latest
+  setup-cache:
+    name: Setup Cache
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
 
     permissions:
       contents: read
+
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+      npm_config_arch: x64
+      VSCODE_ARCH: x64
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - name: Checkout
@@ -25,28 +36,29 @@ jobs:
           node-version-file: .nvmrc
 
       - name: Install system dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config \
-            libgtk-3-0 \
-            libxkbfile-dev \
-            libkrb5-dev \
-            libgbm1
-
-      - name: Prepare node_modules cache key
-        run: mkdir -p .build && node build/azure-pipelines/common/computeNodeModulesCacheKey.ts linux x64 $(node -p process.arch) > .build/packagelockhash
+        run: bash build/github/install-system-deps.sh ci
 
       - name: Restore node_modules cache
         id: cache-node-modules
-        uses: actions/cache/restore@v4
+        uses: actions/cache@v4
         with:
-          path: .build/node_modules_cache
-          key: "node_modules-linux-${{ hashFiles('.build/packagelockhash') }}"
+          path: |
+            node_modules
+            build/node_modules
+            extensions/node_modules
+            extensions/**/node_modules
+            .vscode/extensions/**/node_modules
+          key: node_modules-linux-x64-${{ hashFiles('package-lock.json', 'build/package-lock.json', 'extensions/**/package-lock.json', '.vscode/extensions/**/package-lock.json', '.npmrc', 'build/.npmrc', 'build/.cachesalt') }}
+          restore-keys: node_modules-linux-x64-
 
-      - name: Extract node_modules cache
-        if: steps.cache-node-modules.outputs.cache-hit == 'true'
-        run: tar -xzf .build/node_modules_cache/cache.tgz
+      - name: Install dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: |
+          for i in {1..5}; do
+            npm ci && break
+            [ $i -eq 5 ] && exit 1
+            echo "Retrying npm ci ($i)..."
+          done
 
       - name: Install build dependencies
         if: steps.cache-node-modules.outputs.cache-hit != 'true'
@@ -57,44 +69,77 @@ jobs:
             [ $i -eq 5 ] && exit 1
             echo "Retrying npm ci ($i)..."
           done
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install extensions dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: |
+          find extensions .vscode/extensions -name "package-lock.json" -not -path "*/node_modules/*" | while read lockfile; do
+            dir=$(dirname "$lockfile")
+            echo "Installing $dir"
+            npm ci --prefix "$dir"
+          done
+
+  lint-and-typecheck:
+    name: Lint & TypeScript
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    needs: setup-cache
+
+    permissions:
+      contents: read
+
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+      npm_config_arch: x64
+      VSCODE_ARCH: x64
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install system dependencies
+        run: bash build/github/install-system-deps.sh ci
+
+      - name: Restore node_modules cache
+        id: cache-node-modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            build/node_modules
+            extensions/node_modules
+            extensions/**/node_modules
+            .vscode/extensions/**/node_modules
+          key: node_modules-linux-x64-${{ hashFiles('package-lock.json', 'build/package-lock.json', 'extensions/**/package-lock.json', '.vscode/extensions/**/package-lock.json', '.npmrc', 'build/.npmrc', 'build/.cachesalt') }}
+          restore-keys: node_modules-linux-x64-
 
       - name: Install dependencies
         if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: npm ci
+
+      - name: Install build dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        working-directory: build
+        run: npm ci
+
+      - name: Install extensions dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
         run: |
-          source ./build/azure-pipelines/linux/setup-env.sh
-          for i in {1..5}; do
-            npm ci && break
-            [ $i -eq 5 ] && exit 1
-            echo "Retrying npm ci ($i)..."
+          find extensions .vscode/extensions -name "package-lock.json" -not -path "*/node_modules/*" | while read lockfile; do
+            dir=$(dirname "$lockfile")
+            echo "Installing $dir"
+            npm ci --prefix "$dir"
           done
-        env:
-          npm_config_arch: x64
-          VSCODE_ARCH: x64
-          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create node_modules archive
-        if: steps.cache-node-modules.outputs.cache-hit != 'true'
-        run: |
-          node build/azure-pipelines/common/listNodeModules.ts .build/node_modules_list.txt
-          mkdir -p .build/node_modules_cache
-          tar -czf .build/node_modules_cache/cache.tgz --files-from .build/node_modules_list.txt
-
-      - name: Save node_modules cache
-        if: steps.cache-node-modules.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: .build/node_modules_cache
-          key: "node_modules-linux-${{ hashFiles('.build/packagelockhash') }}"
 
       - name: TypeScript compile
         run: npm run compile
-        env:
-          npm_config_arch: x64
-          VSCODE_ARCH: x64
 
       - name: ESLint
         run: npm run eslint
@@ -110,11 +155,19 @@ jobs:
 
   unit-tests:
     name: Unit Tests (Node.js)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
+    needs: setup-cache
 
     permissions:
       contents: read
+
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+      npm_config_arch: x64
+      VSCODE_ARCH: x64
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - name: Checkout
@@ -126,76 +179,41 @@ jobs:
           node-version-file: .nvmrc
 
       - name: Install system dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config \
-            libgtk-3-0 \
-            libxkbfile-dev \
-            libkrb5-dev \
-            libgbm1
-
-      - name: Prepare node_modules cache key
-        run: mkdir -p .build && node build/azure-pipelines/common/computeNodeModulesCacheKey.ts linux x64 $(node -p process.arch) > .build/packagelockhash
+        run: bash build/github/install-system-deps.sh ci
 
       - name: Restore node_modules cache
         id: cache-node-modules
-        uses: actions/cache/restore@v4
+        uses: actions/cache@v4
         with:
-          path: .build/node_modules_cache
-          key: "node_modules-linux-${{ hashFiles('.build/packagelockhash') }}"
+          path: |
+            node_modules
+            build/node_modules
+            extensions/node_modules
+            extensions/**/node_modules
+            .vscode/extensions/**/node_modules
+          key: node_modules-linux-x64-${{ hashFiles('package-lock.json', 'build/package-lock.json', 'extensions/**/package-lock.json', '.vscode/extensions/**/package-lock.json', '.npmrc', 'build/.npmrc', 'build/.cachesalt') }}
+          restore-keys: node_modules-linux-x64-
 
-      - name: Extract node_modules cache
-        if: steps.cache-node-modules.outputs.cache-hit == 'true'
-        run: tar -xzf .build/node_modules_cache/cache.tgz
+      - name: Install dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: npm ci
 
       - name: Install build dependencies
         if: steps.cache-node-modules.outputs.cache-hit != 'true'
         working-directory: build
+        run: npm ci
+
+      - name: Install extensions dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
         run: |
-          for i in {1..5}; do
-            npm ci && break
-            [ $i -eq 5 ] && exit 1
-            echo "Retrying npm ci ($i)..."
+          find extensions .vscode/extensions -name "package-lock.json" -not -path "*/node_modules/*" | while read lockfile; do
+            dir=$(dirname "$lockfile")
+            echo "Installing $dir"
+            npm ci --prefix "$dir"
           done
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install dependencies
-        if: steps.cache-node-modules.outputs.cache-hit != 'true'
-        run: |
-          source ./build/azure-pipelines/linux/setup-env.sh
-          for i in {1..5}; do
-            npm ci && break
-            [ $i -eq 5 ] && exit 1
-            echo "Retrying npm ci ($i)..."
-          done
-        env:
-          npm_config_arch: x64
-          VSCODE_ARCH: x64
-          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create node_modules archive
-        if: steps.cache-node-modules.outputs.cache-hit != 'true'
-        run: |
-          node build/azure-pipelines/common/listNodeModules.ts .build/node_modules_list.txt
-          mkdir -p .build/node_modules_cache
-          tar -czf .build/node_modules_cache/cache.tgz --files-from .build/node_modules_list.txt
-
-      - name: Save node_modules cache
-        if: steps.cache-node-modules.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: .build/node_modules_cache
-          key: "node_modules-linux-${{ hashFiles('.build/packagelockhash') }}"
 
       - name: Compile
         run: npm run compile
-        env:
-          npm_config_arch: x64
-          VSCODE_ARCH: x64
 
       - name: Run node unit tests
         run: npm run test-node
