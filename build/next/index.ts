@@ -836,6 +836,7 @@ ${tslib}`,
 			banner,
 			loader: {
 				'.ttf': 'file',
+				'.woff2': 'file',
 				'.svg': 'file',
 				'.png': 'file',
 				'.sh': 'file',
