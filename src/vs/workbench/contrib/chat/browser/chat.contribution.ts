@@ -8,7 +8,6 @@ import { Disposable, DisposableMap, DisposableStore } from '../../../../base/com
 import { Schemas } from '../../../../base/common/network.js';
 import { isMacintosh } from '../../../../base/common/platform.js';
 import { PolicyCategory } from '../../../../base/common/policy.js';
-import { AgentHostEnabledSettingId } from '../../../../platform/agentHost/common/agentService.js';
 import { registerEditorFeature } from '../../../../editor/common/editorFeatures.js';
 import * as nls from '../../../../nls.js';
 import { AccessibleViewRegistry } from '../../../../platform/accessibility/browser/accessibleViewRegistry.js';
@@ -722,13 +721,6 @@ configurationRegistry.registerConfiguration({
 					}
 				}
 			}
-		},
-		[AgentHostEnabledSettingId]: {
-			type: 'boolean',
-			description: nls.localize('chat.agentHost.enabled', "When enabled, some agents run in a separate agent host process."),
-			default: false,
-			tags: ['experimental', 'advanced'],
-			included: product.quality !== 'stable',
 		},
 		[ChatConfiguration.PlanAgentDefaultModel]: {
 			type: 'string',
