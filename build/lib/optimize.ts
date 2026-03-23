@@ -248,6 +248,13 @@ export function minifyTask(src: string, sourceMapBaseUrl?: string): (cb: any) =>
 					packages: 'external', // "external all the things", see https://esbuild.github.io/api/#packages
 					platform: 'neutral', // makes esm
 					target: [target],
+					loader: {
+						'.ttf': 'file',
+						'.woff2': 'file',
+						'.svg': 'file',
+						'.png': 'file',
+					},
+					assetNames: 'media/[name]',
 					write: false,
 				}).then(res => {
 					const jsOrCSSFile = res.outputFiles.find(f => /\.(js|css)$/.test(f.path))!;
