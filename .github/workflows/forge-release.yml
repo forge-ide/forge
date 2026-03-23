@@ -1,0 +1,44 @@
+name: Forge Release
+
+on:
+  push:
+    tags: ['v[0-9]*']
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    uses: ./.github/workflows/forge-build.yml
+    secrets: inherit
+
+  create-github-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-22.04
+    needs: build
+    permissions:
+      contents: write
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+
+      - name: Flatten artifact directories
+        run: find dist/ -mindepth 2 -type f -exec mv {} dist/ \;
+
+      - name: Create draft GitHub Release
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          gh release create "v${VERSION}" \
+            --title "Forge IDE v${VERSION}" \
+            --generate-notes \
+            --draft \
+            dist/*
