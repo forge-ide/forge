@@ -220,11 +220,6 @@ import './contrib/chatDebug/browser/chatDebug.contribution.js';
 import './contrib/workspace/browser/workspace.contribution.js';
 import './contrib/welcome/browser/welcome.contribution.js';
 
-// Remote Agent Host
-import '../platform/agentHost/electron-browser/agentHostService.js';
-import '../platform/agentHost/electron-browser/remoteAgentHostService.js';
-import './contrib/remoteAgentHost/browser/remoteAgentHost.contribution.js';
-
 //#endregion
 
 export { main } from './electron-browser/sessions.main.js';

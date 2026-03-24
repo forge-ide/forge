@@ -5,7 +5,6 @@
 
 import assert from 'assert';
 
-import { Event } from '../../../../../base/common/event.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { mock } from '../../../../../base/test/common/mock.js';
@@ -16,22 +15,16 @@ import { ICommandService } from '../../../../../platform/commands/common/command
 import { IFileDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
 import { IUriIdentityService } from '../../../../../platform/uriIdentity/common/uriIdentity.js';
 import { ExtUri } from '../../../../../base/common/resources.js';
-import { IRemoteAgentHostService, IRemoteAgentHostConnectionInfo } from '../../../../../platform/agentHost/common/remoteAgentHostService.js';
-import { IQuickInputService } from '../../../../../platform/quickinput/common/quickInput.js';
 import { WorkspacePicker } from '../../browser/workspacePicker.js';
 import { SessionWorkspace, GITHUB_REMOTE_FILE_SCHEME } from '../../../sessions/common/sessionWorkspace.js';
-import { AGENT_HOST_FS_SCHEME, agentHostUri } from '../../../remoteAgentHost/browser/agentHostFileSystemProvider.js';
-import { agentHostAuthority } from '../../../remoteAgentHost/browser/remoteAgentHost.contribution.js';
 
 suite('WorkspacePicker', () => {
 
 	const ds = ensureNoDisposablesAreLeakedInTestSuite();
 	let instantiationService: TestInstantiationService;
-	let connections: IRemoteAgentHostConnectionInfo[];
 
 	setup(() => {
 		instantiationService = ds.add(new TestInstantiationService());
-		connections = [];
 
 		instantiationService.stub(IStorageService, ds.add(new InMemoryStorageService()));
 		instantiationService.stub(IActionWidgetService, new class extends mock<IActionWidgetService>() {
@@ -42,12 +35,6 @@ suite('WorkspacePicker', () => {
 		instantiationService.stub(IUriIdentityService, new class extends mock<IUriIdentityService>() {
 			override readonly extUri = new ExtUri(uri => false);
 		});
-		instantiationService.stub(IRemoteAgentHostService, new class extends mock<IRemoteAgentHostService>() {
-			override readonly onDidChangeConnections = Event.None;
-			override get connections() { return connections; }
-			override getConnection() { return undefined; }
-		});
-		instantiationService.stub(IQuickInputService, new class extends mock<IQuickInputService>() { });
 	});
 
 	function createPicker(): WorkspacePicker {
@@ -65,20 +52,6 @@ suite('WorkspacePicker', () => {
 		assert.strictEqual(picker.selectedProject.uri.path, '/home/user/project');
 	});
 
-	test('setSelectedProject with remote agent host URI', () => {
-		const picker = createPicker();
-		const authority = agentHostAuthority('http://myremote:3000');
-		const remoteUri = agentHostUri(authority, '/home/user/project');
-		const project = new SessionWorkspace(remoteUri);
-
-		picker.setSelectedProject(project);
-
-		assert.ok(picker.selectedProject);
-		assert.strictEqual(picker.selectedProject.isRemoteAgentHost, true);
-		assert.strictEqual(picker.selectedProject.uri.scheme, AGENT_HOST_FS_SCHEME);
-		assert.strictEqual(picker.selectedProject.uri.path, '/home/user/project');
-	});
-
 	test('setSelectedProject with GitHub repo URI', () => {
 		const picker = createPicker();
 		const repoUri = URI.from({ scheme: GITHUB_REMOTE_FILE_SCHEME, authority: 'github', path: '/owner/repo/HEAD' });
@@ -92,9 +65,7 @@ suite('WorkspacePicker', () => {
 
 	test('onDidSelectProject fires when project is selected', () => {
 		const picker = createPicker();
-		const authority = agentHostAuthority('http://myremote:3000');
-		const remoteUri = agentHostUri(authority, '/remote/path');
-		const project = new SessionWorkspace(remoteUri);
+		const project = new SessionWorkspace(URI.file('/some/project'));
 
 		let fired: SessionWorkspace | undefined;
 		ds.add(picker.onDidSelectProject(p => { fired = p; }));
@@ -102,8 +73,8 @@ suite('WorkspacePicker', () => {
 		picker.setSelectedProject(project, true);
 
 		assert.ok(fired);
-		assert.strictEqual(fired.isRemoteAgentHost, true);
-		assert.strictEqual(fired.uri.path, '/remote/path');
+		assert.strictEqual(fired.isFolder, true);
+		assert.strictEqual(fired.uri.path, '/some/project');
 	});
 
 	test('onDidSelectProject does not fire when fireEvent is false', () => {
@@ -151,46 +122,4 @@ suite('WorkspacePicker', () => {
 		assert.strictEqual(picker.selectedProject.uri.path, '/selected');
 	});
 
-	test('remote project persists and restores from storage', () => {
-		const storageService = ds.add(new InMemoryStorageService());
-		instantiationService.stub(IStorageService, storageService);
-
-		// Create picker and select a remote project
-		const picker1 = ds.add(instantiationService.createInstance(WorkspacePicker));
-		const authority = agentHostAuthority('http://myremote:3000');
-		const remoteUri = agentHostUri(authority, '/home/user/project');
-		picker1.setSelectedProject(new SessionWorkspace(remoteUri), false);
-
-		// Create a second picker -- it should restore from storage
-		const picker2 = ds.add(instantiationService.createInstance(WorkspacePicker));
-		assert.ok(picker2.selectedProject);
-		assert.strictEqual(picker2.selectedProject.isRemoteAgentHost, true);
-		assert.strictEqual(picker2.selectedProject.uri.path, '/home/user/project');
-		assert.strictEqual(picker2.selectedProject.uri.authority, authority);
-	});
-
-	test('trigger label uses cached remoteName when connection is unavailable', () => {
-		const storageService = ds.add(new InMemoryStorageService());
-		instantiationService.stub(IStorageService, storageService);
-
-		const address = 'http://myremote:3000';
-		const authority = agentHostAuthority(address);
-
-		// Simulate a live connection so remoteName gets cached
-		connections = [{ address, name: 'macbook', clientId: 'test-client' }];
-		const picker1 = ds.add(instantiationService.createInstance(WorkspacePicker));
-		const remoteUri = agentHostUri(authority, '/home/user/project');
-		picker1.setSelectedProject(new SessionWorkspace(remoteUri), false);
-
-		// Simulate startup with no connections available
-		connections = [];
-		const picker2 = ds.add(instantiationService.createInstance(WorkspacePicker));
-
-		// Render and check the trigger label uses cached "macbook", not encoded authority
-		const container = document.createElement('div');
-		picker2.render(container);
-		const label = container.querySelector('.sessions-chat-dropdown-label');
-		assert.ok(label);
-		assert.strictEqual(label.textContent, 'project [macbook]');
-	});
 });

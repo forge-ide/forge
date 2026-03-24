@@ -56,7 +56,7 @@ import { NewChatContextAttachments } from './newChatContextAttachments.js';
 import { IGitService } from '../../../../workbench/contrib/git/common/gitService.js';
 import { SessionTypePicker, IsolationPicker } from './sessionTargetPicker.js';
 import { BranchPicker } from './branchPicker.js';
-import { AgentHostNewSession, INewSession, ISessionOptionGroup, RemoteNewSession } from './newSession.js';
+import { INewSession, ISessionOptionGroup, RemoteNewSession } from './newSession.js';
 import { CloudModelPicker } from './modelPicker.js';
 import { WorkspacePicker } from './workspacePicker.js';
 import { SessionWorkspace } from '../../sessions/common/sessionWorkspace.js';
@@ -70,8 +70,6 @@ import { ChatHistoryNavigator } from '../../../../workbench/contrib/chat/common/
 import { IHistoryNavigationWidget } from '../../../../base/browser/history.js';
 import { NewChatPermissionPicker } from './newChatPermissionPicker.js';
 import { registerAndCreateHistoryNavigationContext, IHistoryNavigationContext } from '../../../../platform/history/browser/contextScopedHistoryWidget.js';
-import { IRemoteAgentHostService } from '../../../../platform/agentHost/common/remoteAgentHostService.js';
-import { getRemoteAgentHostSessionTarget } from '../../remoteAgentHost/browser/remoteAgentHost.contribution.js';
 
 const STORAGE_KEY_DRAFT_STATE = 'sessions.draftState';
 const MIN_EDITOR_HEIGHT = 50;
@@ -182,7 +180,6 @@ class NewChatWidget extends Disposable implements IHistoryNavigationWidget {
 		@IGitService private readonly gitService: IGitService,
 		@IStorageService private readonly storageService: IStorageService,
 		@IWorkspaceTrustRequestService private readonly workspaceTrustRequestService: IWorkspaceTrustRequestService,
-		@IRemoteAgentHostService private readonly remoteAgentHostService: IRemoteAgentHostService,
 	) {
 		super();
 		this._history = this._register(this.instantiationService.createInstance(ChatHistoryNavigator, ChatAgentLocation.Chat));
@@ -328,20 +325,7 @@ class NewChatWidget extends Disposable implements IHistoryNavigationWidget {
 	}
 
 	private async _createNewSession(project?: SessionWorkspace): Promise<void> {
-		const isAgentHost = project?.isRemoteAgentHost ?? false;
-		let target: AgentSessionTarget;
-		if (isAgentHost) {
-			// Find the matching remote agent host session type from the URI authority
-			// TODO@roblourens HACK - view should not do this
-			const remoteTarget = getRemoteAgentHostSessionTarget(this.remoteAgentHostService.connections, project!.uri.authority);
-			if (!remoteTarget) {
-				this.logService.error(`Failed to find remote agent host session type for authority: ${project!.uri.authority}`);
-				return;
-			}
-			target = remoteTarget;
-		} else {
-			target = project?.isRepo ? AgentSessionProviders.Cloud : AgentSessionProviders.Background;
-		}
+		const target: AgentSessionTarget = project?.isRepo ? AgentSessionProviders.Cloud : AgentSessionProviders.Background;
 
 		const resource = getResourceForNewChatSession({
 			type: target,
@@ -350,7 +334,7 @@ class NewChatWidget extends Disposable implements IHistoryNavigationWidget {
 		});
 
 		try {
-			const session = await this.sessionsManagementService.createNewSessionForTarget(target, resource, { agentHost: isAgentHost });
+			const session = await this.sessionsManagementService.createNewSessionForTarget(target, resource);
 			if (project) {
 				session.setProject(project);
 			}
@@ -386,9 +370,7 @@ class NewChatWidget extends Disposable implements IHistoryNavigationWidget {
 
 		this._sessionTypePicker.setProject(session.project);
 
-		if (session instanceof AgentHostNewSession) {
-			this._renderAgentHostSessionPickers();
-		} else if (session instanceof RemoteNewSession) {
+		if (session instanceof RemoteNewSession) {
 			this._renderRemoteSessionPickers(session, true);
 			listeners.add(session.onDidChangeOptionGroups(() => {
 				this._renderRemoteSessionPickers(session);
@@ -704,24 +686,6 @@ class NewChatWidget extends Disposable implements IHistoryNavigationWidget {
 
 		// Project picker (unified folder + repo picker)
 		this._workspacePicker.render(pickersRow);
-	}
-
-	// --- Agent Host session pickers ---
-
-	/**
-	 * Agent Host sessions use the standard model picker and mode picker
-	 * but don't need repo, folder, isolation, branch, or cloud option pickers.
-	 */
-	private _renderAgentHostSessionPickers(): void {
-		this._clearAllPickers();
-		if (this._localModelPickerContainer) {
-			this._localModelPickerContainer.style.display = '';
-		}
-		this._modePicker.setVisible(true);
-		this._permissionPicker.setVisible(false);
-		this._cloudModelPicker.setVisible(false);
-		this._branchPicker.setVisible(false);
-		this._isolationPicker.setVisible(false);
 	}
 
 	// --- Local session pickers ---

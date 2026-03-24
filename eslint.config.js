@@ -1074,7 +1074,6 @@ export default tseslint.config(
 			'local/code-no-static-node-module-import': [
 				'error',
 				// Files that run in separate processes, not on the electron-main startup path
-				'src/vs/platform/agentHost/node/copilot/**/*.ts',
 				'src/vs/platform/files/node/watcher/**/*.ts',
 				'src/vs/platform/terminal/node/**/*.ts',
 				// Files that use small, safe modules

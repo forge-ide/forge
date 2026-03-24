@@ -10,8 +10,6 @@ export const GITHUB_REMOTE_FILE_SCHEME = 'github-remote-file';
 
 /**
  * URI scheme for agent host remote filesystems.
- * Must match {@link AGENT_HOST_FS_SCHEME} in `agentHostFileSystemProvider.ts`
- * (which lives in the `browser` layer and cannot be imported here).
  */
 export const AGENT_HOST_SCHEME = 'agenthost';
 
