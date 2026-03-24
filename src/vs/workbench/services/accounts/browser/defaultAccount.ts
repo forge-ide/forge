@@ -85,7 +85,10 @@ interface IMcpRegistryResponse {
 	readonly mcp_registries: ReadonlyArray<IMcpRegistryProvider>;
 }
 
-function toDefaultAccountConfig(defaultChatAgent: IDefaultChatAgent): IDefaultAccountConfig {
+function toDefaultAccountConfig(defaultChatAgent: IDefaultChatAgent | undefined): IDefaultAccountConfig | undefined {
+	if (!defaultChatAgent) {
+		return undefined;
+	}
 	return {
 		preferredExtensions: [
 			defaultChatAgent.chatExtensionId,
@@ -128,7 +131,7 @@ export class DefaultAccountService extends Disposable implements IDefaultAccount
 	private readonly _onDidChangeCopilotTokenInfo = this._register(new Emitter<ICopilotTokenInfo | null>());
 	readonly onDidChangeCopilotTokenInfo = this._onDidChangeCopilotTokenInfo.event;
 
-	private readonly defaultAccountConfig: IDefaultAccountConfig;
+	private readonly defaultAccountConfig: IDefaultAccountConfig | undefined;
 	private defaultAccountProvider: IDefaultAccountProvider | null = null;
 
 	constructor(
@@ -136,6 +139,9 @@ export class DefaultAccountService extends Disposable implements IDefaultAccount
 	) {
 		super();
 		this.defaultAccountConfig = toDefaultAccountConfig(productService.defaultChatAgent);
+		if (!this.defaultAccountConfig) {
+			this.initBarrier.open();
+		}
 	}
 
 	async getDefaultAccount(): Promise<IDefaultAccount | null> {
@@ -148,7 +154,9 @@ export class DefaultAccountService extends Disposable implements IDefaultAccount
 			return this.defaultAccountProvider.getDefaultAccountAuthenticationProvider();
 		}
 		return {
-			...this.defaultAccountConfig.authenticationProvider.default,
+			...this.defaultAccountConfig?.authenticationProvider.default,
+			id: this.defaultAccountConfig?.authenticationProvider.default.id ?? '',
+			name: this.defaultAccountConfig?.authenticationProvider.default.name ?? '',
 			enterprise: false
 		};
 	}
@@ -912,8 +920,11 @@ class DefaultAccountProviderContribution extends Disposable implements IWorkbenc
 		@IDefaultAccountService defaultAccountService: IDefaultAccountService,
 	) {
 		super();
-		const defaultAccountProvider = this._register(instantiationService.createInstance(DefaultAccountProvider, toDefaultAccountConfig(productService.defaultChatAgent)));
-		defaultAccountService.setDefaultAccountProvider(defaultAccountProvider);
+		const config = toDefaultAccountConfig(productService.defaultChatAgent);
+		if (config) {
+			const defaultAccountProvider = this._register(instantiationService.createInstance(DefaultAccountProvider, config));
+			defaultAccountService.setDefaultAccountProvider(defaultAccountProvider);
+		}
 	}
 }
 
