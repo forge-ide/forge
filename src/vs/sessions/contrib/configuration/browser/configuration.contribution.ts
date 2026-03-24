@@ -68,7 +68,7 @@ Registry.as<IConfigurationRegistry>(Extensions.Configuration).registerDefaultCon
 		'workbench.editor.useModal': 'all',
 		'workbench.editor.modalMinWidth': 600,
 		'workbench.panel.showLabels': false,
-		'workbench.colorTheme': 'VS Code Dark',
+		'workbench.colorTheme': 'Forge Dark',
 
 		'window.menuStyle': 'custom',
 		'window.dialogStyle': 'custom',

@@ -39,8 +39,8 @@ export enum ThemeSettings {
 }
 
 export namespace ThemeSettingDefaults {
-	export const COLOR_THEME_DARK = 'VS Code Dark';
-	export const COLOR_THEME_LIGHT = 'VS Code Light';
+	export const COLOR_THEME_DARK = 'Forge Dark';
+	export const COLOR_THEME_LIGHT = 'Forge Light';
 	export const COLOR_THEME_HC_DARK = 'Default High Contrast';
 	export const COLOR_THEME_HC_LIGHT = 'Default High Contrast Light';
 
