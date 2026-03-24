@@ -768,30 +768,73 @@ yarn watch
 .\scripts\code.bat         # Windows
 ```
 
-### Production build
+### Production build (minified, from source)
 
-VS Code's gulp-based build system is used directly. Forge adds its own product configuration on top.
+VS Code's gulp-based build system is used directly. Forge adds its own product configuration on top. The build must run in order — each step depends on the previous one.
 
 ```bash
-# macOS ARM
-yarn gulp vscode-darwin-arm64
+# 1. Install dependencies (if not already done)
+npm ci
+cd build && npm ci && cd ..
 
-# macOS Intel
-yarn gulp vscode-darwin-x64
+# 2. Compile TypeScript with name mangling (production)
+npm run compile-build
 
-# Linux .deb
-yarn gulp vscode-linux-x64-deb
+# 3. Compile extensions for production (can run in parallel with step 4)
+npm run compile-extensions-build
 
-# Linux .rpm
-yarn gulp vscode-linux-x64-rpm
+# 4. Bundle and minify VS Code core (can run in parallel with step 3)
+npm run minify-vscode
+
+# 5. Assemble the minified application for your platform
+npm run gulp vscode-linux-x64-min-ci     # Linux x64
+# npm run gulp vscode-darwin-arm64-min-ci # macOS ARM (untested)
+# npm run gulp vscode-darwin-x64-min-ci  # macOS Intel (untested)
 ```
+
+Output: `../Forge-linux-x64/` (a self-contained application directory).
+
+### Packaging (Linux RPM)
+
+Requires `rpmbuild` installed on the system (`dnf install rpm-build` on Fedora).
+
+```bash
+# 6. Prepare RPM directory structure and spec file
+npm run gulp vscode-linux-x64-prepare-rpm
+
+# 7. Build the RPM
+npm run gulp vscode-linux-x64-build-rpm
+```
+
+Output: `.build/linux/rpm/x86_64/forge-<version>-<timestamp>.el8.x86_64.rpm`
+
+### Packaging (Linux DEB)
+
+Requires `dpkg` and `fakeroot` installed on the system.
+
+```bash
+npm run gulp vscode-linux-x64-prepare-deb
+npm run gulp vscode-linux-x64-build-deb
+```
+
+Output: `.build/linux/deb/amd64/deb/forge-<version>-<timestamp>_amd64.deb`
+
+### Timing expectations
+
+| Step | Approximate time |
+|---|---|
+| compile-build (with mangling) | ~17 min |
+| compile-extensions-build | ~15 sec |
+| minify-vscode | ~25 sec |
+| assemble min-ci | ~15 sec |
+| RPM prepare + build | ~4 min |
 
 ### GitHub Actions CI
 
 Every PR runs:
-1. `yarn` — dependency install
-2. `yarn run compile` — TypeScript typecheck
-3. `yarn run lint` — ESLint
+1. `npm ci` — dependency install
+2. `npm run compile` — TypeScript typecheck
+3. `npm run lint` — ESLint
 4. Build smoke test (compile only, not package)
 
 Releases run the full package pipeline for all platforms via matrix strategy.
