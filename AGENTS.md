@@ -247,6 +247,10 @@ Branch naming: `feature/`, `fix/`, `design/`, `docs/` prefixes, lowercase, hyphe
 
 The full branching strategy is documented in `ARCHITECTURE.md` section 3.
 
+### Upstream URLs
+
+The upstream organization is `forge-ide`. When referencing Forge in code (URLs, branding, issue links, OAuth client URIs, license URLs, etc.), always use the **upstream** URL `https://github.com/forge-ide/forge` — never a personal fork URL. Personal forks are for development only and must not appear in shipped code.
+
 ### Never introduce
 
 - **Raw hex values in component CSS.** Always use design tokens (`var(--color-*)`).
@@ -258,6 +262,7 @@ The full branching strategy is documented in `ARCHITECTURE.md` section 3.
 - **`any` type.** TypeScript is strict. If you don't know the type, find it — don't use `any`.
 - **Unregistered event listeners.** Always wrap in `this._register(...)`.
 - **Animations for decoration.** Animations only communicate state changes. See DESIGN.md section 9.
+- **Personal fork URLs in code.** All URLs referencing Forge must use the upstream `forge-ide/forge` organization, not any personal fork.
 
 ---
 
