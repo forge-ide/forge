@@ -447,7 +447,13 @@ function applyConfigProfilesToMap(configProfiles: { [key: string]: IUnresolvedTe
 		if (value === null || !isObject(value) || (!hasKey(value, { path: true }) && !hasKey(value, { source: true }))) {
 			profilesMap.delete(profileName);
 		} else {
-			value.icon = value.icon || profilesMap.get(profileName)?.icon;
+			const existing = profilesMap.get(profileName);
+			value.icon = value.icon || existing?.icon;
+			// If there's an auto-detected profile with an absolute path and the config
+			// only specifies a basename, preserve the auto-detected absolute path
+			if (existing?.isAutoDetected && hasKey(existing, { path: true }) && hasKey(value, { path: true }) && isString(value.path) && isString(existing.path) && basename(value.path) === value.path && existing.path !== value.path) {
+				value.path = existing.path;
+			}
 			profilesMap.set(profileName, value);
 		}
 	}

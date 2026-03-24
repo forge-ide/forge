@@ -226,6 +226,9 @@ suite('Workbench - TerminalProfiles', () => {
 	function createFsProvider(expectedPaths: string[], etcShellsContent: string = ''): IFsProvider {
 		const provider = {
 			async existsFile(path: string): Promise<boolean> {
+				if (path === '/etc/shells') {
+					return etcShellsContent.length > 0;
+				}
 				return expectedPaths.includes(path);
 			},
 			async readFile(path: string): Promise<Buffer> {
