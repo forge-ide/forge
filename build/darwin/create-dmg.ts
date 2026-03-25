@@ -161,7 +161,7 @@ async function main(buildDir?: string, outDir?: string): Promise<void> {
 	const dmgName = `${product.nameShort}-darwin-${arch}`;
 	const artifactPath = path.join(outDir, `${dmgName}.dmg`);
 	const backgroundPath = path.join(import.meta.dirname, `dmg-background-${quality}.tiff`);
-	const diskIconPath = path.join(root, 'resources', 'darwin', 'code.icns');
+	const diskIconPath = path.join(root, 'resources', 'darwin', 'forge.icns');
 	const title = product.nameLong;
 
 	if (!fs.existsSync(appPath)) {
