@@ -12,15 +12,12 @@ import fancyLog from 'fancy-log';
 import glob from 'glob';
 import gulp from 'gulp';
 import filter from 'gulp-filter';
-import plumber from 'gulp-plumber';
-import sourcemaps from 'gulp-sourcemaps';
 import * as path from 'path';
 import * as nodeUtil from 'util';
 import * as ext from './lib/extensions.ts';
+import { runEsbuildExtensionTranspile } from './lib/esbuild.ts';
 import { getVersion } from './lib/getVersion.ts';
-import { createReporter } from './lib/reporter.ts';
 import * as task from './lib/task.ts';
-import * as tsb from './lib/tsb/index.ts';
 import { createTsgoStream, spawnTsgo } from './lib/tsgo.ts';
 import * as util from './lib/util.ts';
 import watcher from './lib/watch/index.ts';
@@ -113,9 +110,6 @@ const tasks = compilations.map(function (tsconfigFile) {
 	const absolutePath = path.join(root, tsconfigFile);
 	const relativeDirname = path.dirname(tsconfigFile.replace(/^(.*\/)?extensions\//i, ''));
 
-	const overrideOptions: { sourceMap?: boolean; inlineSources?: boolean; base?: string } = {};
-	overrideOptions.sourceMap = true;
-
 	const name = relativeDirname.replace(/\//g, '-');
 
 	const srcRoot = path.dirname(tsconfigFile);
@@ -126,59 +120,13 @@ const tasks = compilations.map(function (tsconfigFile) {
 	const out = path.join(srcRoot, 'out');
 	const baseUrl = getBaseUrl(out);
 
-	function createPipeline(build: boolean, emitError?: boolean, transpileOnly?: boolean) {
-		const reporter = createReporter('extensions');
-
-		overrideOptions.inlineSources = Boolean(build);
-		overrideOptions.base = path.dirname(absolutePath);
-
-		const compilation = tsb.create(absolutePath, overrideOptions, { verbose: false, transpileOnly, transpileOnlyIncludesDts: transpileOnly, transpileWithEsbuild: true }, err => reporter(err.toString()));
-
-		const pipeline = function () {
-			const input = es.through();
-			const tsFilter = filter(['**/*.ts', '!**/lib/lib*.d.ts', '!**/node_modules/**'], { restore: true, dot: true });
-			const output = input
-				.pipe(plumber({
-					errorHandler: function (err) {
-						if (err && !err.__reporter__) {
-							reporter(err);
-						}
-					}
-				}))
-				.pipe(tsFilter)
-				.pipe(util.loadSourcemaps())
-				.pipe(compilation())
-				.pipe(build ? util.stripSourceMappingURL() : es.through())
-				.pipe(sourcemaps.write('.', {
-					sourceMappingURL: !build ? undefined : f => `${baseUrl}/${f.relative}.map`,
-					addComment: !!build,
-					includeContent: !!build,
-					// note: trailing slash is important, else the source URLs in V8's file coverage are incorrect
-					sourceRoot: '../src/',
-				}))
-				.pipe(tsFilter.restore)
-				.pipe(reporter.end(!!emitError));
-
-			return es.duplex(input, output);
-		};
-
-		// add src-stream for project files
-		pipeline.tsProjectSrc = () => {
-			return compilation.src(srcOpts);
-		};
-		return pipeline;
-	}
-
 	const cleanTask = task.define(`clean-extension-${name}`, util.rimraf(out));
 
-	const transpileTask = task.define(`transpile-extension:${name}`, task.series(cleanTask, () => {
-		const pipeline = createPipeline(false, true, true);
+	const transpileTask = task.define(`transpile-extension:${name}`, task.series(cleanTask, async () => {
 		const nonts = gulp.src(src, srcOpts).pipe(filter(['**', '!**/*.ts']));
-		const input = es.merge(nonts, pipeline.tsProjectSrc());
-
-		return input
-			.pipe(pipeline())
-			.pipe(gulp.dest(out));
+		const copyNonTs = util.streamToPromise(nonts.pipe(gulp.dest(out)));
+		const transpile = runEsbuildExtensionTranspile(path.join(root, srcBase), path.join(root, out));
+		await Promise.all([copyNonTs, transpile]);
 	}));
 
 	const compileTask = task.define(`compile-extension:${name}`, task.series(cleanTask, async () => {

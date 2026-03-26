@@ -39,6 +39,33 @@ export function runEsbuildTranspile(outDir: string, excludeTests: boolean): Prom
 }
 
 /**
+ * Transpile a TypeScript extension source directory to JavaScript via esbuild.
+ *
+ * @param srcDir Absolute path to the extension's TypeScript source directory.
+ * @param outDir Absolute path to the output directory.
+ */
+export function runEsbuildExtensionTranspile(srcDir: string, outDir: string): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const scriptPath = path.join(root, 'build/next/extensions.ts');
+		const args = [scriptPath, '--src', srcDir, '--out', outDir];
+
+		const proc = cp.spawn(process.execPath, args, {
+			cwd: root,
+			stdio: 'inherit'
+		});
+
+		proc.on('error', reject);
+		proc.on('close', code => {
+			if (code === 0) {
+				resolve();
+			} else {
+				reject(new Error(`esbuild extension transpile failed with exit code ${code} (src: ${srcDir})`));
+			}
+		});
+	});
+}
+
+/**
  * Bundle via esbuild for a specific build target.
  *
  * @param outDir Output directory for the bundle.
