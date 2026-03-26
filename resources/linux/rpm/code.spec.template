@@ -16,6 +16,9 @@ AutoReq:  0
 %global __brp_strip %{nil}
 %global __brp_strip_comment_note %{nil}
 
+# Use xz compression for smaller package size
+%define _binary_payload w7.xzdio
+
 %description
 Forge IDE is an AI-native code editor built for developers who want intelligent assistance throughout the edit-build-debug cycle. See https://github.com/forge-ide/forge for installation instructions and FAQ.
 
