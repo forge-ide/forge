@@ -338,7 +338,7 @@ jobs:
         run: cd build && npm ci
 
       - name: Typecheck
-        run: npm run compile
+        run: npm run compile-check-ts-native
 
   typecheck-windows:
     name: Typecheck (Windows)
@@ -361,4 +361,4 @@ jobs:
         run: cd build && npm ci
 
       - name: Typecheck
-        run: npm run compile
+        run: npm run compile-check-ts-native
