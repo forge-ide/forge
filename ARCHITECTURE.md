@@ -82,6 +82,7 @@ Forge is a hard fork of `microsoft/vscode`. It is not a downstream extension, a 
 An `upstream-sync` branch tracks `microsoft/vscode:main`. It is merged into `main` monthly (not continuously) after reviewing the VS Code changelog for breaking changes. The goal is to receive bug fixes and platform improvements without being blocked by them.
 
 **Merge frequency:** Monthly. Before each merge, review the VS Code changelog at github.com/microsoft/vscode/releases for changes to:
+
 - `IEditorGroupsService` (quad canvas dependency)
 - `IInstantiationService` (service registration)
 - `workbench/browser/parts/` (layout system)
@@ -104,7 +105,7 @@ Forge uses a **forking model** for contributions. Nobody commits to `forge-ide/f
 
 #### Contributor workflow (forking model)
 
-```
+```text
 1. Fork forge-ide/forge to your personal GitHub account
 2. Clone your fork locally
 3. Create a branch off main:  git checkout -b fix/mcp-reconnect
@@ -130,7 +131,7 @@ Keep branch names lowercase, hyphen-separated, and specific enough to understand
 
 The `upstream-sync` branch is managed by maintainers only and is not a development branch:
 
-```
+```text
 1. At the start of each month, fetch microsoft/vscode:main
 2. Merge (or rebase) into upstream-sync
 3. Review the VS Code changelog for breaking changes to Forge-touched areas
@@ -164,6 +165,8 @@ Never merge `upstream-sync` into your feature branch — rebase against `main` i
 
 ### What we add
 
+These directories are the target state for v0.1.0. They do not exist yet — they are created as part of Phase 2 implementation.
+
 - The entire AI layer (`src/vs/platform/ai/`)
 - The MCP integration (`src/vs/workbench/services/forge/mcp/`)
 - The agent system (`src/vs/workbench/services/forge/agent/`)
@@ -176,7 +179,7 @@ Never merge `upstream-sync` into your feature branch — rebase against `main` i
 
 ## 4. High-Level Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                         Electron Shell                          │
 │  ┌───────────────────────────────────────────────────────────┐  │
@@ -245,7 +248,9 @@ Forge inherits VS Code's multi-process Electron architecture:
 
 Only Forge-specific directories are documented here. The rest of the structure follows `microsoft/vscode` conventions — see their wiki for that.
 
-```
+The `src/vs/` subtree below reflects the target state for v0.1.0. The Forge-specific source directories under `src/vs/platform/ai/` and `src/vs/workbench/services/forge/` do not exist yet — they are created as part of Phase 2 implementation.
+
+```text
 forge/
 ├── src/
 │   └── vs/
@@ -291,24 +296,19 @@ forge/
 │                       └── forgeConfigService.ts  ← forge.config.ts loader
 │
 ├── extensions/
-│   └── forge-theme/                         ← Built-in Forge dark theme
+│   └── forge-theme/                         ← Built-in Forge themes
 │       ├── package.json
 │       └── themes/
-│           └── forge-dark.json
-│
-├── resources/
-│   └── forge/                               ← Brand assets (icons, splash)
-│       ├── icon.svg
-│       └── icons/                           ← Platform icon sizes
+│           ├── forge-dark.json
+│           └── forge-light.json
 │
 ├── product.json                             ← Identity overrides (name, dirs)
-├── forge.config.ts                          ← Example config for the repo itself
 ├── ARCHITECTURE.md                          ← This file
 ├── DESIGN.md                                ← Design system reference
-├── LATER.md                                 ← Deferred ideas, not backlog
+├── LATER.md                                 ← Deferred platform items (pre-launch blockers)
 └── .github/
     └── workflows/
-        ├── forge-ci.yml                     ← Lint, typecheck, build check
+        ├── forge-ci.yml                     ← Compile, lint, hygiene, layer checks, unit tests
         └── forge-release.yml                ← Release packaging
 ```
 
@@ -344,7 +344,7 @@ registerSingleton(IAIProviderService, AIProviderService, InstantiationType.Eager
 
 Services initialize in this order. Do not create circular dependencies.
 
-```
+```text
 IForgeConfigService          ← reads forge.config.ts, no dependencies
   ↓
 IAIProviderService           ← reads config, initializes providers
@@ -491,7 +491,7 @@ The `@` context system is implemented as a `CompletionItemProvider` for the chat
 Context types and their injection behavior:
 
 | Type | How injected |
-|---|---|
+| --- | --- |
 | File | Full file content in a `<file>` XML block in the system prompt |
 | Selection | Selected text in a `<selection>` block |
 | Git diff | Output of `git diff HEAD` in a `<diff>` block |
@@ -509,7 +509,7 @@ Token budget: context is injected in priority order. If total context exceeds `m
 
 MCP servers run as child processes managed by `IMCPService`. Each server communicates via stdio using the `@modelcontextprotocol/sdk`'s `StdioClientTransport`. The service manages the lifecycle of all connections and exposes a unified tool registry to the AI layer.
 
-```
+```text
 IMCPService
 ├── connects to servers on startup (from forge.config.ts)
 ├── exposes listTools() → MCPTool[] (union of all server tools)
@@ -571,6 +571,7 @@ mcp: [
 ### What is an agent
 
 A `ForgeAgent` is a self-contained AI execution loop. It has:
+
 - A system prompt defining its role and constraints
 - A task string (what it needs to accomplish)
 - Access to a subset of MCP tools
@@ -731,7 +732,7 @@ Standard VS Code settings are used for user preferences that don't belong in the
 ### What is persisted
 
 | Data | Storage | Location |
-|---|---|---|
+| --- | --- | --- |
 | API keys | `ISecretStorage` (system keychain) | OS keychain |
 | Workspace layout | `IStorageService` workspace scope | `.forge/workspace.json` |
 | Conversation history | `IStorageService` workspace scope | `.forge/conversations/` |
@@ -780,16 +781,18 @@ cd build && npm ci && cd ..
 # 2. Compile TypeScript with name mangling (production)
 npm run compile-build
 
-# 3. Compile extensions for production (can run in parallel with step 4)
+# 3. Compile extensions for production
 npm run compile-extensions-build
 
-# 4. Bundle and minify VS Code core (can run in parallel with step 3)
-npm run minify-vscode
+# 4. Download built-in extensions
+npm run download-builtin-extensions
 
-# 5. Assemble the minified application for your platform
+# 5. Run core CI validation (hygiene, layer checks)
+npm run gulp core-ci
+
+# 6. Assemble the minified application for your platform
 npm run gulp vscode-linux-x64-min-ci     # Linux x64
-# npm run gulp vscode-darwin-arm64-min-ci # macOS ARM (untested)
-# npm run gulp vscode-darwin-x64-min-ci  # macOS Intel (untested)
+# npm run gulp vscode-linux-arm64-min-ci  # Linux arm64
 ```
 
 Output: `../Forge-linux-x64/` (a self-contained application directory).
@@ -819,25 +822,59 @@ npm run gulp vscode-linux-x64-build-deb
 
 Output: `.build/linux/deb/amd64/deb/forge-<version>-<timestamp>_amd64.deb`
 
+### Container build (local Linux, Podman)
+
+`build/container/build.sh` wraps the full production build inside a Podman container so the host doesn't need system packages, npm dependencies, or a matching glibc version. Useful for local testing of release artifacts without polluting the host.
+
+**Prerequisites:** Podman installed and rootless Podman configured (no other dependencies needed on the host).
+
+```bash
+# x64 tarball (default)
+./build/container/build.sh
+
+# arm64 tarball (emulated via QEMU — 3–5× slower than native)
+./build/container/build.sh --arch arm64
+
+# All Linux package formats
+./build/container/build.sh --formats tarball,deb,rpm
+
+# Build the container image only (no build run)
+./build/container/build.sh --image-only
+
+# Force a clean image rebuild, then produce a deb
+./build/container/build.sh --no-cache --formats deb --output ./dist
+```
+
+Artifacts land in `./dist/` by default. The container image (`forge-build-x64` / `forge-build-arm64`) is cached by Podman — subsequent runs reuse npm install layers as long as package manifests haven't changed. First build takes ~30 min; incremental builds (source change only) are much faster.
+
+**How it works:** Source is COPYed into the container (not bind-mounted) for hermetic, cacheable builds. `BUILD_SOURCEVERSION` is passed as an env var so the VS Code build system doesn't need a `.git` directory inside the container. No sysroots are used for cross-arch — `--platform linux/arm64` triggers QEMU emulation natively.
+
+See `build/container/README.md` for the full reference and `build/container/Containerfile` for the image definition.
+
 ### Timing expectations
 
 | Step | Approximate time |
-|---|---|
+| --- | --- |
 | compile-build (with mangling) | ~17 min |
 | compile-extensions-build | ~15 sec |
-| minify-vscode | ~25 sec |
+| download-builtin-extensions | ~30 sec |
+| core-ci | ~25 sec |
 | assemble min-ci | ~15 sec |
 | RPM prepare + build | ~4 min |
 
 ### GitHub Actions CI
 
-Every PR runs:
+Every PR runs (via `forge-ci.yml`):
+
 1. `npm ci` — dependency install
 2. `npm run compile` — TypeScript typecheck
-3. `npm run lint` — ESLint
-4. Build smoke test (compile only, not package)
+3. `npm run eslint` — ESLint
+4. `npm run stylelint` — CSS/style lint
+5. `npm run hygiene` — copyright headers and whitespace checks
+6. `npm run valid-layers-check` — layer dependency validation
+7. Unit tests (`npm run test-node`)
 
-Releases run the full package pipeline for all platforms via matrix strategy.
+Releases run the full package pipeline for all platforms via matrix strategy (`forge-release.yml`).
 
 ### Platform notes
 
