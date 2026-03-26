@@ -8,7 +8,6 @@ import fs from 'fs';
 import gulp from 'gulp';
 import path from 'path';
 import * as monacodts from './monaco-api.ts';
-import * as nls from './nls.ts';
 import { createReporter } from './reporter.ts';
 import * as util from './util.ts';
 import fancyLog from 'fancy-log';
@@ -86,7 +85,6 @@ export function createCompile(src: string, { build, emitError, transpileOnly, pr
 			.pipe(util.loadSourcemaps())
 			.pipe(compilation(token))
 			.pipe(noDeclarationsFilter)
-			.pipe(util.$if(build, nls.nls({ preserveEnglish })))
 			.pipe(noDeclarationsFilter.restore)
 			.pipe(util.$if(!transpileOnly, sourcemaps.write('.', {
 				addComment: false,

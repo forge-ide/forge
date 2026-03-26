@@ -7,7 +7,7 @@
 - **310 gulp tasks** across 12 gulpfile modules, inherited from VS Code upstream
 - **esbuild migration is ~90% complete** for core builds via `build/next/index.ts`
 - Dev workflow already uses esbuild (`useEsbuildTranspile = true` in `build/buildConfig.ts`)
-- CI builds have both old (`core-ci-old`, gulp+tsc) and new (`core-ci`, esbuild) paths
+- CI builds use `core-ci` (esbuild) — the old `core-ci-old` gulp+tsc path has been removed
 - Extensions compilation has **not** been migrated to esbuild
 
 ## Target Platforms
@@ -28,7 +28,7 @@ Safe to remove with no impact on any build target.
 ### Files to Delete
 
 | File | Lines | Reason |
-|------|-------|--------|
+| --- | --- | --- |
 | `build/gulpfile.scan.ts` | 131 | Debug symbol extraction for Microsoft crash telemetry. Forge has no telemetry. |
 | `build/lib/standalone.ts` | ~100 | Only used by Monaco standalone distribution tasks. |
 | `build/monaco/` | directory | ~~Monaco standalone distribution config.~~ **Cannot delete** — `build/lib/monaco-api.ts` reads `monaco.d.ts.recipe` during every compile via `MonacoGenerator` in `compilation.ts`. |
@@ -103,25 +103,23 @@ Safe to remove with no impact on any build target.
 
 Extract to a shared module (e.g., `build/lib/esbuild.ts`) and import from both gulpfiles.
 
-#### 2d. Remove old bundling pipeline
-
-Audit result (2026-03-25): only `treeshaking.ts` was confirmed dead. The others are still active.
+#### 2d. Remove old bundling pipeline ✅ Complete (2026-03-25)
 
 **Deleted:**
 
 | File | Lines | Reason |
-|------|-------|--------|
-| ~~`build/lib/treeshaking.ts`~~ | 927 | Zero imports anywhere. Superseded by esbuild's native tree-shaking. **Deleted.** |
+| --- | --- | --- |
+| ~~`build/lib/treeshaking.ts`~~ | 927 | Zero imports anywhere. Superseded by esbuild's native tree-shaking. |
+| ~~`build/lib/optimize.ts`~~ | 295 | Replaced by `runEsbuildBundle()` in `gulpfile.vscode.ts` and `gulpfile.reh.ts`. |
+| ~~`build/lib/bundle.ts`~~ | 66 | Only used by `optimize.ts` and a type-only import in `buildfile.ts`. Both removed. |
+| ~~`build/lib/nls.ts`~~ | 273 | Gulp NLS stream removed from `compilation.ts`. NLS is now handled entirely by `build/next/nls-plugin.ts` + `finalizeNLS()` at bundle time, which also writes to `out-build/` for backwards compatibility. |
 
-**Still active — cannot delete yet:**
+**Additional cleanup in this phase:**
 
-| File | Lines | Still Used By |
-|------|-------|---------------|
-| `build/lib/optimize.ts` | 295 | `gulpfile.vscode.ts` (`bundleTask`, `minifyTask`) and `gulpfile.reh.ts` (`bundleTask`, `minifyTask`) |
-| `build/lib/bundle.ts` | 66 | `buildfile.ts` (type import `IEntryPoint`) and `optimize.ts` (`removeAllTSBoilerplate`) |
-| `build/lib/nls.ts` | 273 | `compilation.ts` line 89 — NLS metadata generation during every compile |
-
-These three will become removable only after `gulpfile.vscode.ts` and `gulpfile.reh.ts` bundling tasks are migrated to esbuild, and after the gulp NLS stream in `compilation.ts` is replaced by `build/next/nls-plugin.ts`.
+- `gulpfile.vscode.ts`: removed `bundleVSCodeTask`, `minifyVSCodeTask`, `core-ci-old`, dead `else` branch in the per-platform packaging loop, and the `buildfile`/`optimize` imports.
+- `gulpfile.reh.ts`: removed all entry-point and resource arrays that fed the old `optimize.bundleTask`; bundle/minify tasks now call `runEsbuildBundle()` directly.
+- `buildfile.ts`: removed `IEntryPoint` import from `bundle.ts`; return type is now an inline `{ name: string }`.
+- `compilation.ts`: removed `nls.ts` import and the `.pipe(nls.nls(...))` stream step.
 
 #### 2e. TypeScript mangling — accept the boundary
 

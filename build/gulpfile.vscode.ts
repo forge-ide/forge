@@ -17,8 +17,6 @@ import * as util from './lib/util.ts';
 import { getVersion } from './lib/getVersion.ts';
 import { readISODate, writeISODate } from './lib/date.ts';
 import * as task from './lib/task.ts';
-import buildfile from './buildfile.ts';
-import * as optimize from './lib/optimize.ts';
 import { inlineMeta } from './lib/inlineMeta.ts';
 import packageJson from '../package.json' with { type: 'json' };
 import product from '../product.json' with { type: 'json' };
@@ -28,11 +26,9 @@ import { getProductionDependencies } from './lib/dependencies.ts';
 import { config } from './lib/electron.ts';
 import { createAsar } from './lib/asar.ts';
 import minimist from 'minimist';
-import { compileBuildWithoutManglingTask, compileBuildWithManglingTask } from './gulpfile.compile.ts';
 import { compileNonNativeExtensionsBuildTask, compileNativeExtensionsBuildTask, compileAllExtensionsBuildTask, compileExtensionMediaBuildTask, cleanExtensionsBuildTask } from './gulpfile.extensions.ts';
 import { copyCodiconsTask } from './lib/compilation.ts';
 import type { EmbeddedProductInfo } from './lib/embeddedType.ts';
-import { useEsbuildTranspile } from './buildConfig.ts';
 import { runEsbuildTranspile, runEsbuildBundle } from './lib/esbuild.ts';
 import { promisify } from 'util';
 import globCallback from 'glob';
@@ -44,20 +40,6 @@ const glob = promisify(globCallback);
 const rcedit = promisify(rceditCallback);
 const root = path.dirname(import.meta.dirname);
 const commit = getVersion(root);
-
-// Build
-const vscodeEntryPoints = [
-	buildfile.workerEditor,
-	buildfile.workerExtensionHost,
-	buildfile.workerNotebook,
-	buildfile.workerLanguageDetection,
-	buildfile.workerLocalFileSearch,
-	buildfile.workerProfileAnalysis,
-	buildfile.workerOutputLinks,
-	buildfile.workerBackgroundTokenization,
-	buildfile.workbenchDesktop,
-	buildfile.code
-].flat();
 
 const vscodeResourceIncludes = [
 
@@ -139,32 +121,6 @@ const bootstrapEntryPoints = [
 	'out-build/bootstrap-fork.js'
 ];
 
-const bundleVSCodeTask = task.define('bundle-vscode', task.series(
-	util.rimraf('out-vscode'),
-	// Optimize: bundles source files automatically based on
-	// import statements based on the passed in entry points.
-	// In addition, concat window related bootstrap files into
-	// a single file.
-	optimize.bundleTask(
-		{
-			out: 'out-vscode',
-			esm: {
-				src: 'out-build',
-				entryPoints: [
-					...vscodeEntryPoints,
-					...bootstrapEntryPoints
-				],
-				resources: vscodeResources,
-				skipTSBoilerplateRemoval: entryPoint => entryPoint === 'vs/code/electron-browser/workbench/workbench' || entryPoint === 'vs/sessions/electron-browser/sessions'
-			}
-		}
-	)
-));
-gulp.task(bundleVSCodeTask);
-
-// esbuild-based bundle tasks (drop-in replacement for bundle-vscode / minify-vscode)
-// runEsbuildTranspile and runEsbuildBundle are imported from ./lib/esbuild.ts
-
 function runTsGoTypeCheck(): Promise<void> {
 	return new Promise((resolve, reject) => {
 		const proc = cp.spawn('tsgo', ['--project', 'src/tsconfig.json', '--noEmit', '--skipLibCheck'], {
@@ -188,22 +144,6 @@ const sourceMappingURLBase = `https://main.vscode-cdn.net/sourcemaps/${commit}`;
 const isCI = !!process.env['CI'] || !!process.env['BUILD_ARTIFACTSTAGINGDIRECTORY'] || !!process.env['GITHUB_WORKSPACE'];
 const useCdnSourceMapsForPackagingTasks = isCI;
 const stripSourceMapsInPackagingTasks = isCI;
-const minifyVSCodeTask = task.define('minify-vscode', task.series(
-	bundleVSCodeTask,
-	util.rimraf('out-vscode-min'),
-	optimize.minifyTask('out-vscode', `${sourceMappingURLBase}/core`)
-));
-gulp.task(minifyVSCodeTask);
-
-gulp.task(task.define('core-ci-old', task.series(
-	gulp.task('compile-build-with-mangling') as task.Task,
-	task.parallel(
-		gulp.task('minify-vscode') as task.Task,
-		gulp.task('minify-vscode-reh') as task.Task,
-		gulp.task('minify-vscode-reh-web') as task.Task,
-	)
-)));
-
 gulp.task(task.define('core-ci', task.series(
 	copyCodiconsTask,
 	compileNonNativeExtensionsBuildTask,
@@ -664,37 +604,25 @@ BUILD_TARGETS.forEach(buildTarget => {
 		const vscodeTaskCI = task.define(`vscode${dashed(platform)}${dashed(arch)}${dashed(minified)}-ci`, task.series(...packageTasks));
 		gulp.task(vscodeTaskCI);
 
-		let vscodeTask: task.Task;
-		if (useEsbuildTranspile) {
-			const esbuildBundleTask = task.define(
-				`esbuild-bundle${dashed(platform)}${dashed(arch)}${dashed(minified)}`,
-				() => runEsbuildBundle(
-					sourceFolderName,
-					!!minified,
-					true,
-					'desktop',
-					minified && useCdnSourceMapsForPackagingTasks ? `${sourceMappingURLBase}/core` : undefined
-				)
-			);
-			vscodeTask = task.define(`vscode${dashed(platform)}${dashed(arch)}${dashed(minified)}`, task.series(
-				copyCodiconsTask,
-				cleanExtensionsBuildTask,
-				compileNonNativeExtensionsBuildTask,
-				compileExtensionMediaBuildTask,
-				writeISODate('out-build'),
-				esbuildBundleTask,
-				vscodeTaskCI
-			));
-		} else {
-			vscodeTask = task.define(`vscode${dashed(platform)}${dashed(arch)}${dashed(minified)}`, task.series(
-				minified ? compileBuildWithManglingTask : compileBuildWithoutManglingTask,
-				cleanExtensionsBuildTask,
-				compileNonNativeExtensionsBuildTask,
-				compileExtensionMediaBuildTask,
-				minified ? minifyVSCodeTask : bundleVSCodeTask,
-				vscodeTaskCI
-			));
-		}
+		const esbuildBundleTask = task.define(
+			`esbuild-bundle${dashed(platform)}${dashed(arch)}${dashed(minified)}`,
+			() => runEsbuildBundle(
+				sourceFolderName,
+				!!minified,
+				true,
+				'desktop',
+				minified && useCdnSourceMapsForPackagingTasks ? `${sourceMappingURLBase}/core` : undefined
+			)
+		);
+		const vscodeTask = task.define(`vscode${dashed(platform)}${dashed(arch)}${dashed(minified)}`, task.series(
+			copyCodiconsTask,
+			cleanExtensionsBuildTask,
+			compileNonNativeExtensionsBuildTask,
+			compileExtensionMediaBuildTask,
+			writeISODate('out-build'),
+			esbuildBundleTask,
+			vscodeTaskCI
+		));
 		gulp.task(vscodeTask);
 
 		return vscodeTask;

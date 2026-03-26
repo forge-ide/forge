@@ -3,9 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import type { IEntryPoint } from './lib/bundle.ts';
-
-function createModuleDescription(name: string): IEntryPoint {
+function createModuleDescription(name: string): { name: string } {
 	return {
 		name
 	};
