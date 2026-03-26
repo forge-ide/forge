@@ -1,0 +1,67 @@
+FROM ubuntu:22.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG NODE_VERSION=22.22.1
+ARG VSCODE_ARCH=x64
+ARG BUILD_COMMIT=""
+
+# Layer 1 — System deps (union of ci + package modes, without snapcraft)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+	build-essential \
+	pkg-config \
+	libgtk-3-0 \
+	libxkbfile-dev \
+	libkrb5-dev \
+	libgbm1 \
+	rpm \
+	fakeroot \
+	dpkg \
+	python3 \
+	git \
+	ca-certificates \
+	curl \
+	xz-utils \
+	&& rm -rf /var/lib/apt/lists/*
+
+# Layer 2 — Node.js (via tarball; arch detected at build time so --platform drives the right binary)
+RUN ARCH=$(uname -m | sed 's/x86_64/x64/' | sed 's/aarch64/arm64/') && \
+	curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${ARCH}.tar.xz" \
+	| tar -xJ --strip-components=1 -C /usr/local
+
+RUN useradd -m -s /bin/bash builder
+
+ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+ENV npm_config_arch=${VSCODE_ARCH}
+ENV BUILD_SOURCEVERSION=${BUILD_COMMIT}
+
+WORKDIR /workspace
+RUN mkdir -p /workspace/forge && chown -R builder:builder /workspace
+
+# Layer 3 — npm install (ordered so dep layers survive source changes)
+# Step 1: root + build/ manifests only
+COPY --chown=builder:builder package.json package-lock.json .npmrc .nvmrc /workspace/forge/
+COPY --chown=builder:builder build/package.json build/package-lock.json build/.npmrc /workspace/forge/build/
+COPY --chown=builder:builder build/npm/ /workspace/forge/build/npm/
+COPY --chown=builder:builder remote/.npmrc /workspace/forge/remote/
+
+USER builder
+WORKDIR /workspace/forge
+
+RUN npm ci --ignore-scripts
+RUN cd build && npm ci --ignore-scripts
+
+# Step 2: extension manifests
+COPY --chown=builder:builder extensions/ /workspace/forge/extensions/
+COPY --chown=builder:builder .vscode/extensions/ /workspace/forge/.vscode/extensions/
+
+RUN find extensions .vscode/extensions -name "package-lock.json" -not -path "*/node_modules/*" \
+	-execdir pwd \; | xargs -P 4 -I{} npm ci --prefix {} --ignore-scripts
+
+# Step 3: full source (invalidates only compilation layers, not npm install layers)
+USER root
+COPY --chown=builder:builder . /workspace/forge/
+USER builder
+
+# Step 4: run postinstall now that full source is available
+RUN node build/npm/postinstall.ts
