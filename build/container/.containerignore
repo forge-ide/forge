@@ -1,0 +1,9 @@
+.git
+node_modules
+build/node_modules
+extensions/**/node_modules
+.vscode/extensions/**/node_modules
+.build
+out
+out-*
+dist

@@ -55,7 +55,17 @@ export async function getDependencies(packageType: 'deb' | 'rpm', buildDir: stri
 
 	const appPath = path.join(buildDir, applicationName);
 	// Add the native modules
-	const files = findResult.stdout.toString().trimEnd().split('\n');
+	const allNodeFiles = findResult.stdout.toString().trimEnd().split('\n');
+
+	// Filter out cross-architecture prebuilds to avoid dpkg-shlibdeps analyzing binaries for the wrong arch
+	const archFilter = arch === 'amd64' ? 'x64' : arch === 'arm64' ? 'arm64' : 'armhf';
+	const files = allNodeFiles.filter(file => {
+		// Skip prebuilds for other architectures
+		if (file.includes('/prebuilds/')) {
+			return file.includes(`/prebuilds/linux-${archFilter}/`);
+		}
+		return true;
+	});
 	// Add the tunnel binary.
 	files.push(path.join(buildDir, 'bin', product.tunnelApplicationName));
 	// Add the main executable.

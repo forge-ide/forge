@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Platforms to build (comma-separated: linux,windows,darwin)'
+        required: false
+        default: 'linux,windows,darwin'
   workflow_call:
 
 concurrency:
@@ -13,6 +18,7 @@ concurrency:
 jobs:
   build-linux-x64:
     name: Build (Linux x64)
+    if: ${{ github.event_name != 'workflow_dispatch' || contains(github.event.inputs.platforms, 'linux') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     env:
@@ -109,6 +115,7 @@ jobs:
 
   package-linux-x64:
     name: Package (Linux x64)
+    if: ${{ github.event_name != 'workflow_dispatch' || contains(github.event.inputs.platforms, 'linux') }}
     runs-on: ubuntu-22.04
     needs: build-linux-x64
     timeout-minutes: 45
@@ -210,6 +217,7 @@ jobs:
 
   build-linux-arm64:
     name: Build and Package (Linux arm64)
+    if: ${{ github.event_name != 'workflow_dispatch' || contains(github.event.inputs.platforms, 'linux') }}
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 120
     env:
@@ -319,6 +327,7 @@ jobs:
 
   typecheck-macos:
     name: Typecheck (macOS)
+    if: ${{ github.event_name != 'workflow_dispatch' || contains(github.event.inputs.platforms, 'darwin') }}
     runs-on: macos-latest
     timeout-minutes: 30
     env:
@@ -342,6 +351,7 @@ jobs:
 
   typecheck-windows:
     name: Typecheck (Windows)
+    if: ${{ github.event_name != 'workflow_dispatch' || contains(github.event.inputs.platforms, 'windows') }}
     runs-on: windows-latest
     timeout-minutes: 30
     env:
