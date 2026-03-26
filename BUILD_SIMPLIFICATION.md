@@ -72,7 +72,6 @@ Safe to remove with no impact on any build target.
 
 | Feature | File | Blocker |
 |---------|------|---------|
-| Extensions compilation | `gulpfile.extensions.ts` | No blocker — just not migrated yet |
 | TypeScript-to-TypeScript mangling (rename private members) | `build/lib/mangle/index.ts` | Requires TS language service; **cannot** be done in esbuild |
 | Monaco `.d.ts` extraction | `build/lib/monaco-api.ts` | Requires TS compiler API |
 | `core-ci-pr` task | `gulpfile.vscode.ts` | Still uses old gulp+tsc path |
@@ -86,14 +85,15 @@ Safe to remove with no impact on any build target.
 - In `gulpfile.vscode.ts`, redefine `core-ci-pr` to use `runEsbuildTranspile()` and `runEsbuildBundle()` (same as `core-ci` but without minification or with `--minify=false`)
 - Verify PR builds still pass
 
-#### 2b. Migrate extension compilation to esbuild
+#### 2b. Migrate extension transpilation to esbuild ✅ Complete (2026-03-25)
 
-`gulpfile.extensions.ts` compiles 36 extensions, each generating 3 gulp tasks (108 total). This is the single largest source of task count.
+`gulpfile.extensions.ts` generates 3 gulp tasks per extension (transpile, compile, watch). The compile and watch tasks already used tsgo; only the transpile tasks still went through `tsb`.
 
-- Extensions already have esbuild configs for web builds (`compile-web-extensions-build`)
-- Add a `build/next/extensions.ts` module that compiles all extensions via esbuild
-- Replace per-extension gulp tasks with a single esbuild invocation per extension
-- Keep the gulp task as a thin wrapper that calls the esbuild module (same pattern as `runEsbuildBundle()`)
+**What changed:**
+
+- `build/next/extensions.ts` (new) — standalone script that transpiles a single extension `src/` to `out/` using `esbuild.transform()`, matching the pattern in `build/next/index.ts`
+- `build/lib/esbuild.ts` — added `runEsbuildExtensionTranspile(srcDir, outDir)` that spawns `extensions.ts` as a child process
+- `build/gulpfile.extensions.ts` — removed `tsb` import, `createReporter` import, `plumber`/`sourcemaps` imports, `overrideOptions` variable, and `createPipeline()` function (~50 lines); transpile task body replaced with `runEsbuildExtensionTranspile()`
 
 #### 2c. Extract duplicate esbuild wrappers
 
