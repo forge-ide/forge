@@ -75,11 +75,7 @@ jobs:
       - name: Install extensions dependencies
         if: steps.cache-node-modules.outputs.cache-hit != 'true'
         run: |
-          find extensions .vscode/extensions -name "package-lock.json" -not -path "*/node_modules/*" | while read lockfile; do
-            dir=$(dirname "$lockfile")
-            echo "Installing $dir"
-            npm ci --prefix "$dir"
-          done
+          find extensions .vscode/extensions -name "package-lock.json" -not -path "*/node_modules/*" -execdir pwd \; | xargs -P 4 -I{} npm ci --prefix {}
 
   lint-and-typecheck:
     name: Lint & TypeScript
@@ -136,11 +132,7 @@ jobs:
       - name: Install extensions dependencies
         if: steps.cache-node-modules.outputs.cache-hit != 'true'
         run: |
-          find extensions .vscode/extensions -name "package-lock.json" -not -path "*/node_modules/*" | while read lockfile; do
-            dir=$(dirname "$lockfile")
-            echo "Installing $dir"
-            npm ci --prefix "$dir"
-          done
+          find extensions .vscode/extensions -name "package-lock.json" -not -path "*/node_modules/*" -execdir pwd \; | xargs -P 4 -I{} npm ci --prefix {}
 
       - name: TypeScript compile
         run: npm run compile
@@ -212,11 +204,7 @@ jobs:
       - name: Install extensions dependencies
         if: steps.cache-node-modules.outputs.cache-hit != 'true'
         run: |
-          find extensions .vscode/extensions -name "package-lock.json" -not -path "*/node_modules/*" | while read lockfile; do
-            dir=$(dirname "$lockfile")
-            echo "Installing $dir"
-            npm ci --prefix "$dir"
-          done
+          find extensions .vscode/extensions -name "package-lock.json" -not -path "*/node_modules/*" -execdir pwd \; | xargs -P 4 -I{} npm ci --prefix {}
 
       - name: Compile
         run: npm run compile
@@ -224,3 +212,4 @@ jobs:
       - name: Run node unit tests
         run: npm run test-node
         timeout-minutes: 15
+        # TODO: add coverage reporting once Forge services have tests
