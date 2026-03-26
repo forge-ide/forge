@@ -8,7 +8,6 @@ import fs from 'fs';
 import gulp from 'gulp';
 import path from 'path';
 import * as monacodts from './monaco-api.ts';
-import * as nls from './nls.ts';
 import { createReporter } from './reporter.ts';
 import * as util from './util.ts';
 import fancyLog from 'fancy-log';
@@ -16,8 +15,6 @@ import ansiColors from 'ansi-colors';
 import os from 'os';
 import File from 'vinyl';
 import * as task from './task.ts';
-import { Mangler } from './mangle/index.ts';
-import type { RawSourceMap } from 'source-map';
 import ts from 'typescript';
 import watch from './watch/index.ts';
 import bom from 'gulp-bom';
@@ -86,7 +83,6 @@ export function createCompile(src: string, { build, emitError, transpileOnly, pr
 			.pipe(util.loadSourcemaps())
 			.pipe(compilation(token))
 			.pipe(noDeclarationsFilter)
-			.pipe(util.$if(build, nls.nls({ preserveEnglish })))
 			.pipe(noDeclarationsFilter.restore)
 			.pipe(util.$if(!transpileOnly, sourcemaps.write('.', {
 				addComment: false,
@@ -121,7 +117,7 @@ export function transpileTask(src: string, out: string, esbuild?: boolean): task
 	return task;
 }
 
-export function compileTask(src: string, out: string, build: boolean, options: { disableMangle?: boolean; preserveEnglish?: boolean } = {}): task.StreamTask {
+export function compileTask(src: string, out: string, build: boolean, options: { preserveEnglish?: boolean } = {}): task.StreamTask {
 
 	const task = () => {
 
@@ -136,31 +132,7 @@ export function compileTask(src: string, out: string, build: boolean, options: {
 			generator.execute();
 		}
 
-		// mangle: TypeScript to TypeScript
-		let mangleStream = es.through();
-		if (build && !options.disableMangle) {
-			let ts2tsMangler: Mangler | undefined = new Mangler(compile.projectPath, (...data) => fancyLog(ansiColors.blue('[mangler]'), ...data), { mangleExports: true, manglePrivateFields: true });
-			const newContentsByFileName = ts2tsMangler.computeNewFileContents(new Set(['saveState']));
-			mangleStream = es.through(async function write(data: File & { sourceMap?: RawSourceMap }) {
-				type TypeScriptExt = typeof ts & { normalizePath(path: string): string };
-				const tsNormalPath = (ts as TypeScriptExt).normalizePath(data.path);
-				const newContents = (await newContentsByFileName).get(tsNormalPath);
-				if (newContents !== undefined) {
-					data.contents = Buffer.from(newContents.out);
-					data.sourceMap = newContents.sourceMap && JSON.parse(newContents.sourceMap);
-				}
-				this.push(data);
-			}, async function end() {
-				// free resources
-				(await newContentsByFileName).clear();
-
-				this.push(null);
-				ts2tsMangler = undefined;
-			});
-		}
-
 		return srcPipe
-			.pipe(mangleStream)
 			.pipe(generator.stream)
 			.pipe(compile())
 			.pipe(gulp.dest(out));

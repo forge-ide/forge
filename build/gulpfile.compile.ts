@@ -9,19 +9,12 @@ import * as date from './lib/date.ts';
 import * as task from './lib/task.ts';
 import * as compilation from './lib/compilation.ts';
 
-function makeCompileBuildTask(disableMangle: boolean) {
-	return task.series(
-		util.rimraf('out-build'),
-		date.writeISODate('out-build'),
-		compilation.compileApiProposalNamesTask,
-		compilation.compileTask('src', 'out-build', true, { disableMangle })
-	);
-}
-
-// Local/PR compile, including nls and inline sources in sourcemaps, minification, no mangling
-export const compileBuildWithoutManglingTask = task.define('compile-build-without-mangling', task.series(compilation.copyCodiconsTask, makeCompileBuildTask(true)));
-gulp.task(compileBuildWithoutManglingTask);
-
-// CI compile, including nls and inline sources in sourcemaps, mangling, minification, for build
-export const compileBuildWithManglingTask = task.define('compile-build-with-mangling', task.series(compilation.copyCodiconsTask, makeCompileBuildTask(false)));
-gulp.task(compileBuildWithManglingTask);
+// Compile src/ to out-build/ with nls and inline sources in sourcemaps
+export const compileBuildTask = task.define('compile-build', task.series(
+	compilation.copyCodiconsTask,
+	util.rimraf('out-build'),
+	date.writeISODate('out-build'),
+	compilation.compileApiProposalNamesTask,
+	compilation.compileTask('src', 'out-build', true)
+));
+gulp.task(compileBuildTask);

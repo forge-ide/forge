@@ -11,24 +11,11 @@ import pall from 'p-all';
 import path from 'path';
 import VinylFile from 'vinyl';
 import vfs from 'vinyl-fs';
-import { all, copyrightFilter, eslintFilter, indentationFilter, stylelintFilter, tsFormattingFilter, unicodeFilter } from './filters.ts';
+import { all, eslintFilter, indentationFilter, stylelintFilter, tsFormattingFilter, unicodeFilter } from './filters.ts';
 import eslint from './gulp-eslint.ts';
 import * as formatter from './lib/formatter.ts';
 import gulpstylelint from './stylelint.ts';
 
-const copyrightHeaderLines = [
-	'/*---------------------------------------------------------------------------------------------',
-	' *  Copyright (c) Microsoft Corporation. All rights reserved.',
-	' *  Licensed under the MIT License. See License.txt in the project root for license information.',
-	' *--------------------------------------------------------------------------------------------*/',
-];
-
-// Forge-authored files use a MIT-only header without a copyright holder line
-const forgeMitHeaderLines = [
-	'/*---------------------------------------------------------------------------------------------',
-	' *  Licensed under the MIT License. See License.txt in the project root for license information.',
-	' *--------------------------------------------------------------------------------------------*/',
-];
 
 interface VinylFileWithLines extends VinylFile {
 	__lines: string[];
@@ -111,18 +98,6 @@ export function hygiene(some: NodeJS.ReadWriteStream | string[] | undefined, run
 		this.emit('data', file);
 	});
 
-	const copyrights = es.through(function (file: VinylFileWithLines) {
-		const lines = file.__lines;
-
-		const matchesCopyright = (header: string[]) => header.every((line, i) => lines[i] === line);
-		if (!matchesCopyright(copyrightHeaderLines) && !matchesCopyright(forgeMitHeaderLines)) {
-			console.error(file.relative + ': Missing or bad copyright statement');
-			errorCount++;
-		}
-
-		this.emit('data', file);
-	});
-
 	const formatting = es.map(function (file: any, cb) {
 		try {
 			const rawInput = file.contents!.toString('utf8');
@@ -171,9 +146,7 @@ export function hygiene(some: NodeJS.ReadWriteStream | string[] | undefined, run
 		.pipe(unicode)
 		.pipe(unicodeFilterStream.restore)
 		.pipe(filter(Array.from(indentationFilter)))
-		.pipe(indentation)
-		.pipe(filter(Array.from(copyrightFilter)))
-		.pipe(copyrights);
+		.pipe(indentation);
 
 	const streams: NodeJS.ReadWriteStream[] = [
 		result.pipe(filter(Array.from(tsFormattingFilter))).pipe(formatting)

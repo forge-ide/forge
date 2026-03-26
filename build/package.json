@@ -39,7 +39,6 @@
     "@types/through": "^0.0.29",
     "@types/through2": "^2.0.36",
     "@types/vinyl": "^2.0.12",
-    "@types/workerpool": "^6.4.0",
     "@types/xml2js": "0.0.33",
     "@vscode/iconv-lite-umd": "0.7.1",
     "@vscode/ripgrep": "^1.17.1",
@@ -59,7 +58,6 @@
     "through2": "^4.0.2",
     "tree-sitter": "^0.22.4",
     "vscode-universal-bundler": "^0.1.3",
-    "workerpool": "^6.4.0",
     "yauzl": "^2.10.0",
     "zx": "^8.8.5"
   },

@@ -94,7 +94,6 @@ export const indentationFilter = Object.freeze<string[]>([
 
 	// except specific folders
 	'!test/automation/out/**',
-	'!test/monaco/out/**',
 	'!test/smoke/out/**',
 	'!extensions/terminal-suggest/src/shell/zshBuiltinsCache.ts',
 	'!extensions/terminal-suggest/src/shell/fishBuiltinsCache.ts',
@@ -106,7 +105,6 @@ export const indentationFilter = Object.freeze<string[]>([
 	'!extensions/ipynb/notebook-out/**',
 	'!extensions/vscode-api-tests/testWorkspace/**',
 	'!extensions/vscode-api-tests/testWorkspace2/**',
-	'!build/monaco/**',
 	'!build/win32/**',
 	'!build/checker/**',
 	'!src/vs/workbench/contrib/terminal/common/scripts/psreadline/**',

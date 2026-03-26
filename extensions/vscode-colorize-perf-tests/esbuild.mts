@@ -2,10 +2,17 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
+import * as path from 'node:path';
+import { run } from '../esbuild-extension-common.mts';
 
-// eslint-disable-next-line local/code-no-standalone-editor
-import * as monaco from './out/vs/editor/editor.main.js';
+const srcDir = path.join(import.meta.dirname, 'src');
+const outDir = path.join(import.meta.dirname, 'dist');
 
-monaco.editor.create(document.getElementById('container'), {
-	value: 'Hello world'
-});
+run({
+	platform: 'node',
+	entryPoints: {
+		'colorizerTestMain': path.join(srcDir, 'colorizerTestMain.ts'),
+	},
+	srcDir,
+	outdir: outDir,
+}, process.argv);

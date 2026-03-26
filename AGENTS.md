@@ -138,10 +138,10 @@ These areas are Forge additions with no VS Code internals dependencies. Changes 
 ### Freely modifiable
 
 ```
-src/vs/platform/ai/              ← AI provider interface and implementations
-src/vs/workbench/services/forge/ ← All Forge services (MCP, layout, agents, plugins)
-src/vs/workbench/browser/forge/  ← Forge-specific UI (onboarding, etc.)
-src/vs/workbench/browser/parts/editor/forgeChat/ ← Chat pane UI
+src/vs/platform/ai/              ← AI provider interface and implementations [Phase 2 — does not exist yet]
+src/vs/workbench/services/forge/ ← All Forge services (MCP, layout, agents, plugins) [Phase 2 — does not exist yet]
+src/vs/workbench/browser/forge/  ← Forge-specific UI (onboarding, etc.) [Phase 2 — does not exist yet]
+src/vs/workbench/browser/parts/editor/forgeChat/ ← Chat pane UI [Phase 2 — does not exist yet]
 extensions/forge-theme/          ← Default theme
 resources/forge/                 ← Brand assets
 product.json                     ← Identity overrides
