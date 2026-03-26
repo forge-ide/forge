@@ -105,16 +105,23 @@ Extract to a shared module (e.g., `build/lib/esbuild.ts`) and import from both g
 
 #### 2d. Remove old bundling pipeline
 
-Once `core-ci-pr` and extensions are migrated, the following become dead code:
+Audit result (2026-03-25): only `treeshaking.ts` was confirmed dead. The others are still active.
 
-| File | Lines | Was Used By |
-|------|-------|-------------|
-| `build/lib/optimize.ts` | 295 | Old gulp bundling (`bundleESMTask`, `minifyTask`) |
-| `build/lib/bundle.ts` | 66 | TypeScript boilerplate removal for old bundles |
-| `build/lib/treeshaking.ts` | 927 | Legacy tree-shaking — esbuild does this natively |
-| `build/lib/nls.ts` | 273 | Gulp NLS stream — replaced by `build/next/nls-plugin.ts` |
+**Deleted:**
 
-**Do not remove these until all tasks that reference them are confirmed migrated.**
+| File | Lines | Reason |
+|------|-------|--------|
+| ~~`build/lib/treeshaking.ts`~~ | 927 | Zero imports anywhere. Superseded by esbuild's native tree-shaking. **Deleted.** |
+
+**Still active — cannot delete yet:**
+
+| File | Lines | Still Used By |
+|------|-------|---------------|
+| `build/lib/optimize.ts` | 295 | `gulpfile.vscode.ts` (`bundleTask`, `minifyTask`) and `gulpfile.reh.ts` (`bundleTask`, `minifyTask`) |
+| `build/lib/bundle.ts` | 66 | `buildfile.ts` (type import `IEntryPoint`) and `optimize.ts` (`removeAllTSBoilerplate`) |
+| `build/lib/nls.ts` | 273 | `compilation.ts` line 89 — NLS metadata generation during every compile |
+
+These three will become removable only after `gulpfile.vscode.ts` and `gulpfile.reh.ts` bundling tasks are migrated to esbuild, and after the gulp NLS stream in `compilation.ts` is replaced by `build/next/nls-plugin.ts`.
 
 #### 2e. TypeScript mangling — accept the boundary
 
