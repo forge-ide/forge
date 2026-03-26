@@ -91,8 +91,8 @@ jobs:
       - name: Compile extensions build
         run: npm run compile-extensions-build
 
-      - name: Minify VS Code
-        run: npm run minify-vscode
+      - name: Bundle and minify (esbuild)
+        run: npm run gulp core-ci
 
       - name: Assemble Forge Linux x64
         run: npm run gulp vscode-linux-x64-min-ci
@@ -277,8 +277,8 @@ jobs:
       - name: Compile extensions build
         run: npm run compile-extensions-build
 
-      - name: Minify VS Code
-        run: npm run minify-vscode
+      - name: Bundle and minify (esbuild)
+        run: npm run gulp core-ci
 
       - name: Assemble Forge Linux arm64
         run: npm run gulp vscode-linux-arm64-min-ci
