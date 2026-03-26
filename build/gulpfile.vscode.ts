@@ -33,6 +33,7 @@ import { compileNonNativeExtensionsBuildTask, compileNativeExtensionsBuildTask, 
 import { copyCodiconsTask } from './lib/compilation.ts';
 import type { EmbeddedProductInfo } from './lib/embeddedType.ts';
 import { useEsbuildTranspile } from './buildConfig.ts';
+import { runEsbuildTranspile, runEsbuildBundle } from './lib/esbuild.ts';
 import { promisify } from 'util';
 import globCallback from 'glob';
 import rceditCallback from 'rcedit';
@@ -162,61 +163,7 @@ const bundleVSCodeTask = task.define('bundle-vscode', task.series(
 gulp.task(bundleVSCodeTask);
 
 // esbuild-based bundle tasks (drop-in replacement for bundle-vscode / minify-vscode)
-function runEsbuildTranspile(outDir: string, excludeTests: boolean): Promise<void> {
-	return new Promise((resolve, reject) => {
-		const scriptPath = path.join(root, 'build/next/index.ts');
-		const args = [scriptPath, 'transpile', '--out', outDir];
-		if (excludeTests) {
-			args.push('--exclude-tests');
-		}
-
-		const proc = cp.spawn(process.execPath, args, {
-			cwd: root,
-			stdio: 'inherit'
-		});
-
-		proc.on('error', reject);
-		proc.on('close', code => {
-			if (code === 0) {
-				resolve();
-			} else {
-				reject(new Error(`esbuild transpile failed with exit code ${code} (outDir: ${outDir})`));
-			}
-		});
-	});
-}
-
-function runEsbuildBundle(outDir: string, minify: boolean, nls: boolean, target: 'desktop' | 'server' | 'server-web' = 'desktop', sourceMapBaseUrl?: string): Promise<void> {
-	return new Promise((resolve, reject) => {
-		// const tsxPath = path.join(root, 'build/node_modules/tsx/dist/cli.mjs');
-		const scriptPath = path.join(root, 'build/next/index.ts');
-		const args = [scriptPath, 'bundle', '--out', outDir, '--target', target];
-		if (minify) {
-			args.push('--minify');
-			args.push('--mangle-privates');
-		}
-		if (nls) {
-			args.push('--nls');
-		}
-		if (sourceMapBaseUrl) {
-			args.push('--source-map-base-url', sourceMapBaseUrl);
-		}
-
-		const proc = cp.spawn(process.execPath, args, {
-			cwd: root,
-			stdio: 'inherit'
-		});
-
-		proc.on('error', reject);
-		proc.on('close', code => {
-			if (code === 0) {
-				resolve();
-			} else {
-				reject(new Error(`esbuild bundle failed with exit code ${code} (outDir: ${outDir}, minify: ${minify}, nls: ${nls}, target: ${target})`));
-			}
-		});
-	});
-}
+// runEsbuildTranspile and runEsbuildBundle are imported from ./lib/esbuild.ts
 
 function runTsGoTypeCheck(): Promise<void> {
 	return new Promise((resolve, reject) => {
@@ -275,11 +222,15 @@ gulp.task(task.define('core-ci', task.series(
 )));
 
 const coreCIPR = task.define('core-ci-pr', task.series(
-	gulp.task('compile-build-without-mangling') as task.Task,
+	copyCodiconsTask,
+	compileNonNativeExtensionsBuildTask,
+	compileExtensionMediaBuildTask,
+	writeISODate('out-build'),
+	task.define('esbuild-out-build-pr', () => runEsbuildTranspile('out-build', false)),
 	task.parallel(
-		gulp.task('minify-vscode') as task.Task,
-		gulp.task('minify-vscode-reh') as task.Task,
-		gulp.task('minify-vscode-reh-web') as task.Task,
+		task.define('esbuild-vscode-pr', () => runEsbuildBundle('out-vscode', false, true, 'desktop')),
+		task.define('esbuild-vscode-reh-pr', () => runEsbuildBundle('out-vscode-reh', false, true, 'server')),
+		task.define('esbuild-vscode-reh-web-pr', () => runEsbuildBundle('out-vscode-reh-web', false, true, 'server-web')),
 	)
 ));
 gulp.task(coreCIPR);

@@ -5,12 +5,10 @@
 
 import gulp from 'gulp';
 import * as path from 'path';
-import * as cp from 'child_process';
 import es from 'event-stream';
 import * as util from './lib/util.ts';
 import { getVersion } from './lib/getVersion.ts';
 import * as task from './lib/task.ts';
-import * as optimize from './lib/optimize.ts';
 import { readISODate } from './lib/date.ts';
 import product from '../product.json' with { type: 'json' };
 import rename from 'gulp-rename';
@@ -23,6 +21,7 @@ import { copyCodiconsTask } from './lib/compilation.ts';
 import * as extensions from './lib/extensions.ts';
 import jsonEditor from 'gulp-json-editor';
 import buildfile from './buildfile.ts';
+import { runEsbuildBundle } from './lib/esbuild.ts';
 
 const REPO_ROOT = path.dirname(import.meta.dirname);
 const BUILD_ROOT = path.dirname(REPO_ROOT);
@@ -32,37 +31,7 @@ const commit = getVersion(REPO_ROOT);
 const quality = (product as { quality?: string }).quality;
 const version = (quality && quality !== 'stable') ? `${packageJson.version}-${quality}` : packageJson.version;
 
-// esbuild-based bundle for standalone web
-function runEsbuildBundle(outDir: string, minify: boolean, nls: boolean, sourceMapBaseUrl?: string): Promise<void> {
-	return new Promise((resolve, reject) => {
-		const scriptPath = path.join(REPO_ROOT, 'build/next/index.ts');
-		const args = [scriptPath, 'bundle', '--out', outDir, '--target', 'web'];
-		if (minify) {
-			args.push('--minify');
-			args.push('--mangle-privates');
-		}
-		if (nls) {
-			args.push('--nls');
-		}
-		if (sourceMapBaseUrl) {
-			args.push('--source-map-base-url', sourceMapBaseUrl);
-		}
-
-		const proc = cp.spawn(process.execPath, args, {
-			cwd: REPO_ROOT,
-			stdio: 'inherit'
-		});
-
-		proc.on('error', reject);
-		proc.on('close', code => {
-			if (code === 0) {
-				resolve();
-			} else {
-				reject(new Error(`esbuild web bundle failed with exit code ${code} (outDir: ${outDir}, minify: ${minify}, nls: ${nls})`));
-			}
-		});
-	});
-}
+// runEsbuildBundle is imported from ./lib/esbuild.ts
 
 export const vscodeWebResourceIncludes = [
 
@@ -144,32 +113,10 @@ export const createVSCodeWebFileContentMapper = (extensionsRoot: string, product
 	};
 };
 
-const bundleVSCodeWebTask = task.define('bundle-vscode-web-OLD', task.series(
-	util.rimraf('out-vscode-web'),
-	optimize.bundleTask(
-		{
-			out: 'out-vscode-web',
-			esm: {
-				src: 'out-build',
-				entryPoints: vscodeWebEntryPoints,
-				resources: vscodeWebResources,
-				fileContentMapper: createVSCodeWebFileContentMapper('.build/web/extensions', product)
-			}
-		}
-	)
-));
-
-const minifyVSCodeWebTask = task.define('minify-vscode-web-OLD', task.series(
-	bundleVSCodeWebTask,
-	util.rimraf('out-vscode-web-min'),
-	optimize.minifyTask('out-vscode-web', `https://main.vscode-cdn.net/sourcemaps/${commit}/core`)
-));
-gulp.task(minifyVSCodeWebTask);
-
 // esbuild-based tasks (new)
 const sourceMappingURLBase = `https://main.vscode-cdn.net/sourcemaps/${commit}`;
-const esbuildBundleVSCodeWebTask = task.define('esbuild-vscode-web', () => runEsbuildBundle('out-vscode-web', false, true));
-const esbuildBundleVSCodeWebMinTask = task.define('esbuild-vscode-web-min', () => runEsbuildBundle('out-vscode-web-min', true, true, `${sourceMappingURLBase}/core`));
+const esbuildBundleVSCodeWebTask = task.define('esbuild-vscode-web', () => runEsbuildBundle('out-vscode-web', false, true, 'web'));
+const esbuildBundleVSCodeWebMinTask = task.define('esbuild-vscode-web-min', () => runEsbuildBundle('out-vscode-web-min', true, true, 'web', `${sourceMappingURLBase}/core`));
 
 function packageTask(sourceFolderName: string, destinationFolderName: string) {
 	const destination = path.join(BUILD_ROOT, destinationFolderName);

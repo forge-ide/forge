@@ -52,7 +52,6 @@ export const dirs = [
 	'remote/web',
 	'test/automation',
 	'test/integration/browser',
-	'test/monaco',
 	'test/smoke',
 	'test/mcp',
 	'.vscode/extensions/vscode-selfhost-import-aid',
