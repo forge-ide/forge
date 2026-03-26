@@ -16,7 +16,7 @@ import filter from 'gulp-filter';
 import { getProductionDependencies } from './lib/dependencies.ts';
 import vfs from 'vinyl-fs';
 import packageJson from '../package.json' with { type: 'json' };
-import { compileBuildWithManglingTask } from './gulpfile.compile.ts';
+import { compileBuildTask } from './gulpfile.compile.ts';
 import { copyCodiconsTask } from './lib/compilation.ts';
 import * as extensions from './lib/extensions.ts';
 import jsonEditor from 'gulp-json-editor';
@@ -192,7 +192,7 @@ const dashed = (str: string) => (str ? `-${str}` : ``);
 	gulp.task(vscodeWebTaskCI);
 
 	const vscodeWebTask = task.define(`vscode-web${dashed(minified)}`, task.series(
-		compileBuildWithManglingTask,
+		compileBuildTask,
 		vscodeWebTaskCI
 	));
 	gulp.task(vscodeWebTask);

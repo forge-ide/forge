@@ -121,13 +121,19 @@ Extract to a shared module (e.g., `build/lib/esbuild.ts`) and import from both g
 - `buildfile.ts`: removed `IEntryPoint` import from `bundle.ts`; return type is now an inline `{ name: string }`.
 - `compilation.ts`: removed `nls.ts` import and the `.pipe(nls.nls(...))` stream step.
 
-#### 2e. TypeScript mangling — accept the boundary
+#### 2e. TypeScript mangling — accept the boundary ✅ Complete (2026-03-25)
 
-`build/lib/mangle/index.ts` performs cross-file private member renaming using the TypeScript language service. This **cannot** be replicated in esbuild (esbuild doesn't expose the TS AST). This is the one piece that will remain outside the esbuild path.
+`build/lib/mangle/index.ts` performed cross-file private member renaming using the TypeScript language service. This **cannot** be replicated in esbuild (esbuild doesn't expose the TS AST).
 
-Options:
-1. **Keep it as a pre-pass**: Run mangling on TS source before esbuild transpiles. This is roughly what happens today.
-2. **Drop it**: Accept slightly larger bundles. Mangling saves ~5-10% on bundle size. Evaluate whether the complexity is worth the savings for Forge's use case.
+**Decision: Dropped.** The ~5-10% bundle size savings don't justify maintaining a 900-line TypeScript LanguageService dependency in the build pipeline for a beta product. The esbuild path already handles native `#` private fields via `build/next/private-to-property.ts`. Can be reinstated post-beta if bundle size benchmarks show it's worth the complexity.
+
+**What changed:**
+
+- Deleted `build/lib/mangle/` (3 files, ~900 lines)
+- `build/lib/compilation.ts` — removed `Mangler` import, `RawSourceMap` import, `disableMangle` option, and the mangle pipeline block
+- `build/gulpfile.compile.ts` — collapsed `compile-build-with-mangling` and `compile-build-without-mangling` into a single `compile-build` task
+- `package.json` — updated `compile-build` script to point to the renamed gulp task
+- `build/package.json` — removed `workerpool` and `@types/workerpool` dependencies
 
 ---
 
