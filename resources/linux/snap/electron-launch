@@ -204,7 +204,7 @@ function compile_giomodules {
   fi
 }
 if [ "$needs_update" = true ]; then
-  async_exec compile_giomodules "/snap/core20/current/usr/lib/$ARCH"
+  async_exec compile_giomodules "/snap/core22/current/usr/lib/$ARCH"
 fi
 
 # Setup compiled gsettings schema
@@ -233,7 +233,7 @@ function compile_schemas {
   fi
 }
 if [ "$needs_update" = true ]; then
-  async_exec compile_schemas "/snap/core20/current/usr/lib/$ARCH/glib-2.0/glib-compile-schemas"
+  async_exec compile_schemas "/snap/core22/current/usr/lib/$ARCH/glib-2.0/glib-compile-schemas"
 fi
 
 # Gdk-pixbuf loaders
