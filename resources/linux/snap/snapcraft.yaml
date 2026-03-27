@@ -27,7 +27,6 @@ parts:
       - libcairo2
       - libcanberra-gtk3-module
       - libcurl3-gnutls
-      - libcurl3-nss
       - libcurl4
       - libegl1
       - libdrm2

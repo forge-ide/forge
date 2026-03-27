@@ -14,7 +14,7 @@ Usage: $0 [OPTIONS]
 
 Options:
   --arch ARCH       x64 (default) or arm64
-  --formats FMTS    Comma-separated: tarball,rpm,deb (default: tarball)
+  --formats FMTS    Comma-separated: tarball,rpm,deb,snap (default: tarball)
   --output DIR      Artifact destination (default: ./dist)
   --memory MEM      Container memory limit (default: 12g)
   --no-cache        Disable Podman layer cache
@@ -85,8 +85,11 @@ for fmt in "${FMT_LIST[@]}"; do
     deb)
       BUILD_CMDS="${BUILD_CMDS} && npm run gulp vscode-linux-${ARCH}-prepare-deb && npm run gulp vscode-linux-${ARCH}-build-deb"
       ;;
+    snap)
+      BUILD_CMDS="${BUILD_CMDS} && npm run gulp vscode-linux-${ARCH}-prepare-snap && npm run gulp vscode-linux-${ARCH}-build-snap"
+      ;;
     *)
-      echo "Unknown format: $fmt (must be tarball, rpm, or deb)" >&2
+      echo "Unknown format: $fmt (must be tarball, rpm, deb, or snap)" >&2
       exit 1
       ;;
   esac
@@ -121,6 +124,10 @@ for fmt in "${FMT_LIST[@]}"; do
     deb)
       mkdir -p "${OUTPUT}/deb"
       podman cp "${CONTAINER}:/workspace/forge/.build/linux/deb/." "${OUTPUT}/deb/"
+      ;;
+    snap)
+      mkdir -p "${OUTPUT}/snap"
+      podman cp "${CONTAINER}:/workspace/forge/.build/linux/snap/." "${OUTPUT}/snap/"
       ;;
   esac
 done
