@@ -5,7 +5,7 @@ ARG NODE_VERSION=22.22.1
 ARG VSCODE_ARCH=x64
 ARG BUILD_COMMIT=""
 
-# Layer 1 — System deps (union of ci + package modes, without snapcraft)
+# Layer 1 — System deps (union of ci + package modes)
 RUN apt-get update && apt-get install -y --no-install-recommends \
 	build-essential \
 	pkg-config \
@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	rpm \
 	fakeroot \
 	dpkg \
+	snapcraft \
 	python3 \
 	git \
 	ca-certificates \
