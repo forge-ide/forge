@@ -287,7 +287,7 @@ function prepareSnapPackage(arch: string) {
 
 function buildSnapPackage(arch: string) {
 	const cwd = getSnapBuildPath(arch);
-	return () => exec('snapcraft pack --destructive-mode', { cwd });
+	return () => exec('snapcraft pack', { cwd });
 }
 
 const BUILD_TARGETS = [
