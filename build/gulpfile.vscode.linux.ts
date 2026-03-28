@@ -231,6 +231,15 @@ function getSnapBuildPath(arch: string): string {
 	return `.build/linux/snap/${arch}/${product.applicationName}-${arch}`;
 }
 
+function getGnuTriplet(arch: string): string {
+	switch (arch) {
+		case 'x64': return 'x86_64-linux-gnu';
+		case 'armhf': return 'arm-linux-gnueabihf';
+		case 'arm64': return 'aarch64-linux-gnu';
+		default: throw new Error(`Unknown arch: ${arch}`);
+	}
+}
+
 function prepareSnapPackage(arch: string) {
 	const binaryDir = `../${product.nameShort}-linux-${arch}`;
 	const destination = getSnapBuildPath(arch);
@@ -264,6 +273,7 @@ function prepareSnapPackage(arch: string) {
 			.pipe(replace('@@VERSION@@', commit!.substr(0, 8)))
 			// Possible run-on values https://snapcraft.io/docs/architectures
 			.pipe(replace('@@ARCHITECTURE@@', arch === 'x64' ? 'amd64' : arch))
+			.pipe(replace('@@ARCH_TRIPLET@@', getGnuTriplet(arch)))
 			.pipe(rename('snap/snapcraft.yaml'));
 
 		const electronLaunch = gulp.src('resources/linux/snap/electron-launch', { base: '.' })
