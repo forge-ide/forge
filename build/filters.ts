@@ -89,6 +89,7 @@ export const indentationFilter = Object.freeze<string[]>([
 	'!resources/linux/snap/electron-launch',
 	'!build/ext.js',
 	'!build/darwin/patch-dmg.py',
+	'!build/container/patch-snapcraft-linker.py',
 	'!build/npm/gyp/patches/gyp_spectre_mitigation_support.patch',
 	'!product.overrides.json',
 
@@ -178,6 +179,7 @@ export const copyrightFilter = Object.freeze<string[]>([
 	'!**/*.woff2',
 	'!build/**/*.init',
 	'!build/darwin/patch-dmg.py',
+	'!build/container/patch-snapcraft-linker.py',
 	'!build/linux/libcxx-fetcher.*',
 	'!build/npm/gyp/custom-headers/*.patch',
 	'!resources/linux/snap/snapcraft.yaml',

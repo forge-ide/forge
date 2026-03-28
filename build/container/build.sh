@@ -16,7 +16,7 @@ Options:
   --arch ARCH       x64 (default) or arm64
   --formats FMTS    Comma-separated: tarball,rpm,deb,snap (default: tarball)
   --output DIR      Artifact destination (default: ./dist)
-  --memory MEM      Container memory limit (default: 12g)
+  --memory MEM      Container memory limit (default: 16g)
   --no-cache        Disable Podman layer cache
   --image-only      Build image only, don't run build
 EOF

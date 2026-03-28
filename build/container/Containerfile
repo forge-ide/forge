@@ -16,13 +16,53 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	rpm \
 	fakeroot \
 	dpkg \
-	snapcraft \
-	python3 \
+	python3-apt \
+	python3-dev \
+	python3-pip \
+	python3-toml \
+	python3-yaml \
 	git \
 	ca-certificates \
 	curl \
 	xz-utils \
+	patchelf \
+	execstack \
+	snapd \
+	squashfs-tools \
 	&& rm -rf /var/lib/apt/lists/*
+
+# Layer 1b — snapcraft via pip (the apt snapcraft package is a transitional stub that requires the
+# snap store; pip gives us the Python snapcraft that works in a container)
+# snapcraft's setup.py calls `git describe` to determine its version; pip builds in a
+# tempdir with no .git, so we seed a dummy repo and point GIT_DIR at it.
+# snapcraft==4.8.1 pins pyyaml==5.3 and installs it as a pure-Python wheel (no C bindings).
+# We then uninstall pip's pyyaml so Python falls back to the apt python3-yaml package
+# (Ubuntu 22.04: pyyaml 5.4.1 compiled with libyaml C bindings), which satisfies snapcraft's
+# CSafeDumper requirement. pyyaml 5.4.1 is API-compatible with 5.3.
+RUN git init /pip-git && \
+	git -C /pip-git config user.email "build@forge" && \
+	git -C /pip-git config user.name "build" && \
+	git -C /pip-git commit --allow-empty -m "init" && \
+	git -C /pip-git tag -a 4.8.1 -m "4.8.1" && \
+	GIT_DIR=/pip-git/.git pip3 install "snapcraft==4.8.1" && \
+	python3 -c "\
+import glob, re; \
+import sysconfig; site = sysconfig.get_path('purelib'); \
+files = glob.glob(site + '/snapcraft-*.dist-info/METADATA'); \
+[open(f,'w').write(re.sub(r'(?i)(pyyaml)==5\.3', r'\1>=5.3', open(f).read())) for f in files]; \
+print('Patched', files)" && \
+	pip3 uninstall -y pyyaml && \
+	python3 -c "from yaml import CSafeDumper; print('pyyaml C bindings OK')" && \
+	rm -rf /pip-git && \
+	ln -s /usr/local/share/snapcraft /usr/share/snapcraft && \
+	mkdir -p /snap/core22 && \
+	ln -s / /snap/core22/current
+
+# Layer 1c — patch snapcraft linker detection to accept ld-linux-x86-64.so.2 style names
+# snapcraft 4.8.1 only recognises ld-<version>.so but the x86_64 dynamic linker is
+# ld-linux-x86-64.so.2; add core22 to the known linker versions and widen both regexes.
+COPY build/container/patch-snapcraft-linker.py /tmp/patch-snapcraft-linker.py
+RUN python3 /tmp/patch-snapcraft-linker.py && rm /tmp/patch-snapcraft-linker.py
 
 # Layer 2 — Node.js (via tarball; arch detected at build time so --platform drives the right binary)
 RUN ARCH=$(uname -m | sed 's/x86_64/x64/' | sed 's/aarch64/arm64/') && \
@@ -31,6 +71,7 @@ RUN ARCH=$(uname -m | sed 's/x86_64/x64/' | sed 's/aarch64/arm64/') && \
 
 RUN useradd -m -s /bin/bash builder
 
+ENV SNAPCRAFT_BUILD_ENVIRONMENT=host
 ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 ENV npm_config_arch=${VSCODE_ARCH}

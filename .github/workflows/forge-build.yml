@@ -190,6 +190,8 @@ jobs:
           npm run gulp vscode-linux-x64-build-rpm
 
       - name: Build snap package
+        env:
+          SNAPCRAFT_BUILD_ENVIRONMENT: host
         run: |
           npm run gulp vscode-linux-x64-prepare-snap
           npm run gulp vscode-linux-x64-build-snap
