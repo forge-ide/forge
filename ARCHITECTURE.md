@@ -165,15 +165,17 @@ Never merge `upstream-sync` into your feature branch — rebase against `main` i
 
 ### What we add
 
-These directories are the target state for v0.1.0. They do not exist yet — they are created as part of Phase 2 implementation.
+These directories are the target state for v0.1.0. Most do not exist yet — they are created as part of Phase 2 implementation.
 
-- The entire AI layer (`src/vs/platform/ai/`)
-- The MCP integration (`src/vs/workbench/services/forge/mcp/`)
-- The agent system (`src/vs/workbench/services/forge/agent/`)
-- The Forge layout service (`src/vs/workbench/services/forge/layout/`)
-- The Forge chat editor input (`src/vs/workbench/browser/parts/editor/forgeChat/`)
-- The onboarding flow (`src/vs/workbench/browser/forge/onboarding/`)
-- The plugin loader (`src/vs/workbench/services/forge/plugins/`)
+- The AI layer common interfaces (`src/vs/platform/ai/common/`) — **exists**
+- The AI layer node implementations (`src/vs/platform/ai/node/`) — **exists** (Anthropic, OpenAI, Gemini, Mistral, Local)
+- The AI layer browser implementation (`src/vs/platform/ai/browser/`) — not yet
+- The MCP integration (`src/vs/workbench/services/forge/mcp/`) — not yet
+- The agent system (`src/vs/workbench/services/forge/agent/`) — not yet
+- The Forge layout service (`src/vs/workbench/services/forge/layout/`) — not yet
+- The Forge chat editor input (`src/vs/workbench/browser/parts/editor/forgeChat/`) — not yet
+- The onboarding flow (`src/vs/workbench/browser/forge/onboarding/`) — not yet
+- The plugin loader (`src/vs/workbench/services/forge/plugins/`) — not yet
 
 ---
 
@@ -229,7 +231,8 @@ External
 │  AI Providers   │  │   MCP Servers     │  │  Local Models    │
 │  Anthropic API  │  │  filesystem npx   │  │  Ollama :11434   │
 │  OpenAI API     │  │  github npx       │  │  LM Studio       │
-│  Custom endpoint│  │  postgres npx     │  │                  │
+│  Gemini API     │  │  postgres npx     │  │                  │
+│  Mistral API    │  │                   │  │                  │
 └─────────────────┘  └───────────────────┘  └──────────────────┘
 ```
 
@@ -248,7 +251,7 @@ Forge inherits VS Code's multi-process Electron architecture:
 
 Only Forge-specific directories are documented here. The rest of the structure follows `microsoft/vscode` conventions — see their wiki for that.
 
-The `src/vs/` subtree below reflects the target state for v0.1.0. The Forge-specific source directories under `src/vs/platform/ai/` and `src/vs/workbench/services/forge/` do not exist yet — they are created as part of Phase 2 implementation.
+The `src/vs/` subtree below reflects the target state for v0.1.0. The common interfaces under `src/vs/platform/ai/common/` exist; all other Forge-specific directories are created as part of Phase 2 implementation.
 
 ```text
 forge/
@@ -265,6 +268,8 @@ forge/
 │       │       └── node/
 │       │           ├── anthropicProvider.ts ← Anthropic implementation
 │       │           ├── openaiProvider.ts    ← OpenAI implementation
+│       │           ├── geminiProvider.ts    ← Google Gemini implementation
+│       │           ├── mistralProvider.ts   ← Mistral implementation
 │       │           └── localProvider.ts     ← Local/Ollama implementation
 │       └── workbench/
 │           ├── browser/
@@ -327,10 +332,12 @@ All Forge service interfaces are prefixed with `IForge` or `IAI` and live in `co
 export const IAIProviderService = createDecorator<IAIProviderService>('aiProviderService');
 export interface IAIProviderService {
   readonly _serviceBrand: undefined;
-  getActiveProvider(): IAIProvider;
-  resolve(name: string): IAIProvider;
-  register(name: string, provider: IAIProvider): void;
-  listProviders(): ProviderInfo[];
+  readonly onDidChangeProvider: Event<string>; // fires the new active provider name
+  registerProvider(name: string, provider: IAIProvider): void;
+  getProvider(name: string): IAIProvider | undefined;
+  getActiveProvider(): IAIProvider;  // throws if no active provider is set
+  setActiveProvider(name: string): void;
+  listProviders(): string[];
 }
 
 // Pattern: implement in browser/ or node/
