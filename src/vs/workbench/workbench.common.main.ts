@@ -139,6 +139,9 @@ import './services/log/common/defaultLogLevels.js';
 import '../platform/ai/browser/aiProviderService.js';
 import './services/forge/common/forgeConfigService.js';
 
+// Forge contributions
+import './browser/parts/editor/forgeChat/forgeChat.contribution.js';
+
 import { InstantiationType, registerSingleton } from '../platform/instantiation/common/extensions.js';
 import { GlobalExtensionEnablementService } from '../platform/extensionManagement/common/extensionEnablementService.js';
 import { IAllowedExtensionsService, IGlobalExtensionEnablementService } from '../platform/extensionManagement/common/extensionManagement.js';
