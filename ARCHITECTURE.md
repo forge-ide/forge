@@ -168,7 +168,8 @@ Never merge `upstream-sync` into your feature branch — rebase against `main` i
 These directories are the target state for v0.1.0. Most do not exist yet — they are created as part of Phase 2 implementation.
 
 - The AI layer common interfaces (`src/vs/platform/ai/common/`) — **exists**
-- The AI layer browser/node implementations (`src/vs/platform/ai/browser/`, `src/vs/platform/ai/node/`) — not yet
+- The AI layer node implementations (`src/vs/platform/ai/node/`) — **exists** (Anthropic, OpenAI, Gemini, Mistral, Local)
+- The AI layer browser implementation (`src/vs/platform/ai/browser/`) — not yet
 - The MCP integration (`src/vs/workbench/services/forge/mcp/`) — not yet
 - The agent system (`src/vs/workbench/services/forge/agent/`) — not yet
 - The Forge layout service (`src/vs/workbench/services/forge/layout/`) — not yet
@@ -230,7 +231,8 @@ External
 │  AI Providers   │  │   MCP Servers     │  │  Local Models    │
 │  Anthropic API  │  │  filesystem npx   │  │  Ollama :11434   │
 │  OpenAI API     │  │  github npx       │  │  LM Studio       │
-│  Custom endpoint│  │  postgres npx     │  │                  │
+│  Gemini API     │  │  postgres npx     │  │                  │
+│  Mistral API    │  │                   │  │                  │
 └─────────────────┘  └───────────────────┘  └──────────────────┘
 ```
 
@@ -266,6 +268,8 @@ forge/
 │       │       └── node/
 │       │           ├── anthropicProvider.ts ← Anthropic implementation
 │       │           ├── openaiProvider.ts    ← OpenAI implementation
+│       │           ├── geminiProvider.ts    ← Google Gemini implementation
+│       │           ├── mistralProvider.ts   ← Mistral implementation
 │       │           └── localProvider.ts     ← Local/Ollama implementation
 │       └── workbench/
 │           ├── browser/

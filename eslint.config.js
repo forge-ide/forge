@@ -1078,6 +1078,8 @@ export default tseslint.config(
 				'src/vs/platform/terminal/node/**/*.ts',
 				// Files that use small, safe modules
 				'src/vs/platform/environment/node/argv.ts',
+				// AI provider implementations use SDK packages
+				'src/vs/platform/ai/node/**/*.ts',
 			]
 		}
 	},
@@ -1495,11 +1497,17 @@ export default tseslint.config(
 					// - electron-main
 					'when': 'hasNode',
 					'allow': [
+						'@anthropic-ai/sdk',
+						'@anthropic-ai/sdk/**',
+						'@google/generative-ai',
+						'@google/generative-ai/**',
 						'@github/copilot-sdk',
 						'@parcel/watcher',
 						'@vscode/sqlite3',
 						'@vscode/vscode-languagedetection',
 						'@vscode/ripgrep',
+						'@mistralai/mistralai',
+						'@mistralai/mistralai/**',
 						'@vscode/iconv-lite-umd',
 						'@vscode/native-watchdog',
 						'@vscode/policy-watcher',
@@ -1522,6 +1530,8 @@ export default tseslint.config(
 						'native-keymap',
 						'net',
 						'node-pty',
+						'openai',
+						'openai/**',
 						'os',
 						// 'path', NOT allowed: use src/vs/base/common/path.ts instead
 						'perf_hooks',
