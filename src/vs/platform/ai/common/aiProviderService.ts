@@ -5,7 +5,7 @@
 
 import { createDecorator } from '../../instantiation/common/instantiation.js';
 import { Event } from '../../../base/common/event.js';
-import { IAIProvider } from './aiProvider.js';
+import type { IAIProvider } from './aiProvider.js';
 
 export const IAIProviderService = createDecorator<IAIProviderService>('aiProviderService');
 

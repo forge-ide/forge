@@ -5,7 +5,7 @@
 
 import { Mistral } from '@mistralai/mistralai';
 import type { Messages } from '@mistralai/mistralai/models/components/chatcompletionrequest.js';
-import { AICompletionRequest, AICompletionResponse, AIStreamChunk, AIValidationResult, IAIProvider } from '../common/aiProvider.js';
+import type { AICompletionRequest, AICompletionResponse, AIStreamChunk, AIValidationResult, IAIProvider } from '../common/aiProvider.js';
 
 export class MistralProvider implements IAIProvider {
 

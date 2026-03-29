@@ -98,8 +98,9 @@ All UI changes must follow [DESIGN.md](DESIGN.md):
 Run the relevant unit tests before submitting:
 
 ```bash
-yarn test --run src/vs/platform/ai    # example: AI provider tests
-yarn run compile                       # verify zero TypeScript errors
+./scripts/test.sh --run src/vs/platform/ai/test/common/providerRegistry.test.ts  # common/browser tests
+npm run test-node -- --run src/vs/platform/ai/test/node/anthropicProvider.test.ts # node tests
+npm run compile                        # verify zero TypeScript errors
 ```
 
 See AGENT.md section 10 for the full manual test checklist for each area (canvas, MCP, agents, providers).

@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { GoogleGenerativeAI, type Content } from '@google/generative-ai';
-import { AICompletionRequest, AICompletionResponse, AIStreamChunk, AIValidationResult, IAIProvider } from '../common/aiProvider.js';
+import type { AICompletionRequest, AICompletionResponse, AIStreamChunk, AIValidationResult, IAIProvider } from '../common/aiProvider.js';
 
 export class GeminiProvider implements IAIProvider {
 

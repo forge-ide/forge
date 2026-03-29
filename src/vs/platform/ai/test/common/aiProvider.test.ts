@@ -5,7 +5,7 @@
 
 import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
-import {
+import type {
 	IAIProvider,
 	AIMessage,
 	AICompletionRequest,
