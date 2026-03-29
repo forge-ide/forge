@@ -4,9 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'assert';
-import { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
-import { IAIProvider, AICompletionRequest, AICompletionResponse, AIStreamChunk } from '../../common/aiProvider.js';
+import type { IAIProvider, AICompletionRequest, AICompletionResponse, AIStreamChunk } from '../../common/aiProvider.js';
 import { AIProviderService } from '../../browser/aiProviderService.js';
 import { NullLogService } from '../../../log/common/log.js';
 
@@ -28,17 +27,11 @@ function makeMockProvider(name: string): IAIProvider {
 
 suite('AIProviderService', () => {
 
-	const disposables = new DisposableStore();
+	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
 	let service: AIProviderService;
-
-	ensureNoDisposablesAreLeakedInTestSuite();
 
 	setup(() => {
 		service = disposables.add(new AIProviderService(new NullLogService()));
-	});
-
-	teardown(() => {
-		disposables.clear();
 	});
 
 	test('registerProvider adds a provider that can be retrieved with getProvider', () => {

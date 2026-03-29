@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { IAIProvider } from './aiProvider.js';
+import type { IAIProvider } from './aiProvider.js';
 
 /**
  * In-memory registry mapping provider names to their IAIProvider instances.

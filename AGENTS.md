@@ -588,10 +588,14 @@ When writing or modifying any UI code, check every item in this list:
 
 ### Unit tests
 
-Unit tests live alongside the files they test: `[filename].test.ts` in the same directory. Run with:
+Unit tests live alongside the files they test: `[filename].test.ts` in the same directory. Use the correct runner for each test type:
 
 ```bash
-yarn test --run src/vs/platform/ai
+# common/ and browser/ tests — Electron renderer
+./scripts/test.sh --run src/vs/platform/ai/test/common/providerRegistry.test.ts
+
+# node/ tests — Node.js runtime (required for tests importing npm packages)
+npm run test-node -- --run src/vs/platform/ai/test/node/anthropicProvider.test.ts
 ```
 
 All new public methods on service implementations should have unit tests. Mocking pattern for AI providers:
@@ -609,7 +613,7 @@ const mockProvider = new AnthropicProvider(
 Before submitting any change, verify that TypeScript compiles cleanly:
 
 ```bash
-yarn run compile
+npm run compile
 ```
 
 There should be zero new errors. Never suppress TypeScript errors with `// @ts-ignore` or `// @ts-expect-error` unless the original codebase already used this pattern in the same file.

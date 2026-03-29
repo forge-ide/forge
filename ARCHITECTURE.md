@@ -766,10 +766,10 @@ Forge has no telemetry. VS Code's telemetry is disabled in `product.json`. No da
 
 ```bash
 # Install dependencies
-yarn
+npm install
 
 # Start the TypeScript compiler in watch mode
-yarn watch
+npm run watch
 
 # Launch Forge in a development window
 ./scripts/code.sh          # macOS/Linux
