@@ -99,8 +99,8 @@ suite('ForgeConfigService', () => {
 
 		const service = createService();
 
-		// Allow async config loading to complete
-		await new Promise<void>(resolve => setTimeout(resolve, 200));
+		// Wait for async config loading via the change event
+		await Event.toPromise(service.onDidChange);
 
 		const config = service.getConfig();
 
@@ -115,8 +115,8 @@ suite('ForgeConfigService', () => {
 
 		const service = createService();
 
-		// Allow async config loading to complete
-		await new Promise<void>(resolve => setTimeout(resolve, 200));
+		// Invalid JSON falls back to defaults — no change event fires since config stays as defaults
+		await new Promise<void>(resolve => setTimeout(resolve, 150));
 
 		const config = service.getConfig();
 

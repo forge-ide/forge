@@ -79,10 +79,13 @@ export class ForgeConfigService extends Disposable implements IForgeConfigServic
 		}
 		this._register(this.fileService.watch(this.globalConfigUri));
 
-		// Reload on file changes (debounced)
+		// Reload only when forge.json files change (debounced)
 		this._register(
 			Event.debounce(
-				this.fileService.onDidFilesChange,
+				Event.filter(this.fileService.onDidFilesChange, e =>
+					(this.workspaceConfigUri !== undefined && e.affects(this.workspaceConfigUri))
+					|| e.affects(this.globalConfigUri)
+				),
 				() => undefined,
 				100,
 			)(() => {
@@ -107,8 +110,11 @@ export class ForgeConfigService extends Disposable implements IForgeConfigServic
 			...(parsed ?? {}),
 		};
 
+		const changed = JSON.stringify(newConfig) !== JSON.stringify(this.config);
 		this.config = newConfig;
-		this._onDidChange.fire(this.config);
+		if (changed) {
+			this._onDidChange.fire(this.config);
+		}
 	}
 
 	private async tryReadConfigFile(uri: URI | undefined): Promise<Partial<ForgeConfig> | undefined> {
@@ -116,12 +122,19 @@ export class ForgeConfigService extends Disposable implements IForgeConfigServic
 			return undefined;
 		}
 
+		let text: string;
 		try {
 			const content = await this.fileService.readFile(uri);
-			const text = content.value.toString();
-			return JSON.parse(text) as Partial<ForgeConfig>;
+			text = content.value.toString();
 		} catch {
-			// File doesn't exist or is unreadable — not an error
+			// File doesn't exist or is unreadable — expected
+			return undefined;
+		}
+
+		try {
+			return JSON.parse(text) as Partial<ForgeConfig>;
+		} catch (parseError) {
+			this.logService.warn(`[ForgeConfigService] Invalid JSON in ${uri.path}`, parseError);
 			return undefined;
 		}
 	}

@@ -44,6 +44,10 @@ export class AIProviderService extends Disposable implements IAIProviderService 
 	}
 
 	setActiveProvider(name: string): void {
+		if (!this.registry.resolve(name)) {
+			this.logService.warn(`[AIProviderService] Cannot set active provider: '${name}' is not registered`);
+			return;
+		}
 		this.activeProviderName = name;
 		this.logService.info(`[AIProviderService] Active provider set to: ${name}`);
 		this._onDidChangeProvider.fire(name);

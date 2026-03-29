@@ -115,6 +115,19 @@ suite('AIProviderService', () => {
 		assert.deepStrictEqual(service.listProviders(), []);
 	});
 
+	test('setActiveProvider ignores unregistered provider name', () => {
+		service.registerProvider('anthropic', makeMockProvider('anthropic'));
+		service.setActiveProvider('anthropic');
+
+		const fired: string[] = [];
+		disposables.add(service.onDidChangeProvider(name => fired.push(name)));
+
+		service.setActiveProvider('nonexistent');
+
+		assert.strictEqual(service.getActiveProvider()?.name, 'anthropic');
+		assert.deepStrictEqual(fired, []);
+	});
+
 	test('switching active provider updates getActiveProvider', () => {
 		const anthropic = makeMockProvider('anthropic');
 		const openai = makeMockProvider('openai');
