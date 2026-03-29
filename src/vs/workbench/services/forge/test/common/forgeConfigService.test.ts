@@ -51,13 +51,12 @@ function makeEnvironmentService(): Partial<IEnvironmentService> {
 
 suite('ForgeConfigService', () => {
 
-	const disposables = new DisposableStore();
+	let disposables: DisposableStore;
 	let fileService: IFileService;
 	let workspaceUri: URI;
 
-	ensureNoDisposablesAreLeakedInTestSuite();
-
 	setup(() => {
+		disposables = new DisposableStore();
 		fileService = disposables.add(new FileService(new NullLogService()));
 		const fsProvider = disposables.add(new InMemoryFileSystemProvider());
 		disposables.add(fileService.registerProvider(Schemas.file, fsProvider));
@@ -65,8 +64,10 @@ suite('ForgeConfigService', () => {
 	});
 
 	teardown(() => {
-		disposables.clear();
+		disposables.dispose();
 	});
+
+	ensureNoDisposablesAreLeakedInTestSuite();
 
 	function createService(): ForgeConfigService {
 		const contextService = makeWorkspaceContextService(workspaceUri);
