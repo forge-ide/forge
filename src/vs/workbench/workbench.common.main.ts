@@ -135,6 +135,10 @@ import './services/inlineCompletions/common/inlineCompletionsUnification.js';
 import './services/chat/common/chatEntitlementService.js';
 import './services/log/common/defaultLogLevels.js';
 
+// Forge services
+import '../platform/ai/browser/aiProviderService.js';
+import './services/forge/common/forgeConfigService.js';
+
 import { InstantiationType, registerSingleton } from '../platform/instantiation/common/extensions.js';
 import { GlobalExtensionEnablementService } from '../platform/extensionManagement/common/extensionEnablementService.js';
 import { IAllowedExtensionsService, IGlobalExtensionEnablementService } from '../platform/extensionManagement/common/extensionManagement.js';
