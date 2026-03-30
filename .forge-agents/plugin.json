@@ -1,0 +1,6 @@
+{
+  "name": "forge-coding-agents",
+  "displayName": "Forge Coding Agents",
+  "description": "Agent configs for common coding tasks: plan, develop, review, test, debug, document, refactor, verify, migrate.",
+  "version": "0.1.0"
+}

@@ -324,6 +324,7 @@ export class ChatEntitlementService extends Disposable implements IChatEntitleme
 		}
 
 		if (!productService.defaultChatAgent) {
+			ChatEntitlementContextKeys.Setup.hidden.bindTo(this.contextKeyService).set(true); // Forge: hide VS Code built-in chat UI
 			return; // we need a default chat agent configured going forward from here
 		}
 

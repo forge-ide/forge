@@ -627,13 +627,17 @@ export abstract class AbstractExtensionGalleryService implements IExtensionGalle
 		this.unpkgResourceApi = productService.extensionsGallery?.extensionUrlTemplate;
 		this.extensionsEnabledWithApiProposalVersion = productService.extensionsEnabledWithApiProposalVersion?.map(id => id.toLowerCase()) ?? [];
 		this.commonHeadersPromise = resolveMarketplaceHeaders(
-			productService.version,
+			productService.vscodeVersion ?? productService.version,
 			productService,
 			this.environmentService,
 			this.configurationService,
 			this.fileService,
 			storageService,
 			this.telemetryService);
+	}
+
+	private getProductVersion(): IProductVersion {
+		return { version: this.productService.vscodeVersion ?? this.productService.version, date: this.productService.date };
 	}
 
 	isEnabled(): boolean {
@@ -740,7 +744,7 @@ export abstract class AbstractExtensionGalleryService implements IExtensionGalle
 				includePreRelease,
 				versions,
 				compatible: !!options.compatible,
-				productVersion: options.productVersion ?? { version: this.productService.version, date: this.productService.date },
+				productVersion: options.productVersion ?? this.getProductVersion(),
 				isQueryForReleaseVersionFromPreReleaseVersion
 			},
 			extensionGalleryManifest,
@@ -936,7 +940,7 @@ export abstract class AbstractExtensionGalleryService implements IExtensionGalle
 		return prereleaseVersion ?? releaseVersion ?? null;
 	}
 
-	async getCompatibleExtension(extension: IGalleryExtension, includePreRelease: boolean, targetPlatform: TargetPlatform, productVersion: IProductVersion = { version: this.productService.version, date: this.productService.date }): Promise<IGalleryExtension | null> {
+	async getCompatibleExtension(extension: IGalleryExtension, includePreRelease: boolean, targetPlatform: TargetPlatform, productVersion: IProductVersion = this.getProductVersion()): Promise<IGalleryExtension | null> {
 		if (isNotWebExtensionInWebTargetPlatform(extension.allTargetPlatforms, targetPlatform)) {
 			return null;
 		}
@@ -960,7 +964,7 @@ export abstract class AbstractExtensionGalleryService implements IExtensionGalle
 		return result[0] ?? null;
 	}
 
-	async isExtensionCompatible(extension: IGalleryExtension, includePreRelease: boolean, targetPlatform: TargetPlatform, productVersion: IProductVersion = { version: this.productService.version, date: this.productService.date }): Promise<boolean> {
+	async isExtensionCompatible(extension: IGalleryExtension, includePreRelease: boolean, targetPlatform: TargetPlatform, productVersion: IProductVersion = this.getProductVersion()): Promise<boolean> {
 		return this.isValidVersion(
 			{
 				id: extension.identifier.id,
@@ -1156,7 +1160,7 @@ export abstract class AbstractExtensionGalleryService implements IExtensionGalle
 		}
 
 		const runQuery = async (query: Query, token: CancellationToken) => {
-			const { extensions, total } = await this.queryGalleryExtensions(query, { targetPlatform: CURRENT_TARGET_PLATFORM, compatible: false, includePreRelease: !!options.includePreRelease, productVersion: options.productVersion ?? { version: this.productService.version, date: this.productService.date } }, extensionGalleryManifest, token);
+			const { extensions, total } = await this.queryGalleryExtensions(query, { targetPlatform: CURRENT_TARGET_PLATFORM, compatible: false, includePreRelease: !!options.includePreRelease, productVersion: options.productVersion ?? this.getProductVersion() }, extensionGalleryManifest, token);
 
 			const result: IGalleryExtension[] = [];
 			let defaultChatAgentExtension: IGalleryExtension | undefined;
@@ -1827,7 +1831,7 @@ export abstract class AbstractExtensionGalleryService implements IExtensionGalle
 		}
 
 		const versions: IRawGalleryExtensionVersion[] = [];
-		const productVersion = { version: this.productService.version, date: this.productService.date };
+		const productVersion = this.getProductVersion();
 		await Promise.all(galleryExtensions[0].versions.map(async (version) => {
 			try {
 				if (
@@ -1968,7 +1972,7 @@ export abstract class AbstractExtensionGalleryService implements IExtensionGalle
 			}
 			if (result.migrateToPreRelease) {
 				for (const [unsupportedPreReleaseExtensionId, preReleaseExtensionInfo] of Object.entries(result.migrateToPreRelease)) {
-					if (!preReleaseExtensionInfo.engine || isEngineValid(preReleaseExtensionInfo.engine, this.productService.version, this.productService.date)) {
+					if (!preReleaseExtensionInfo.engine || isEngineValid(preReleaseExtensionInfo.engine, this.getProductVersion().version, this.productService.date)) {
 						deprecated[unsupportedPreReleaseExtensionId.toLowerCase()] = {
 							disallowInstall: true,
 							extension: {

@@ -5,6 +5,7 @@
 
 import { Dimension, IDomPosition } from '../../../../../base/browser/dom.js';
 import { CancellationToken } from '../../../../../base/common/cancellation.js';
+import { DisposableStore } from '../../../../../base/common/lifecycle.js';
 import { IEditorOpenContext } from '../../../../common/editor.js';
 import { EditorPane } from '../editorPane.js';
 import { IEditorGroup } from '../../../../services/editor/common/editorGroupsService.js';
@@ -13,6 +14,7 @@ import { IThemeService } from '../../../../../platform/theme/common/themeService
 import { IStorageService } from '../../../../../platform/storage/common/storage.js';
 import { IEditorOptions } from '../../../../../platform/editor/common/editor.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
+import { IForgeConfigService } from '../../../../services/forge/common/forgeConfigService.js';
 import { ForgeChatInput } from './forgeChatInput.js';
 import { ForgeChatView } from './forgeChatView.js';
 
@@ -21,6 +23,7 @@ export class ForgeChatEditorPane extends EditorPane {
 
 	private container: HTMLElement | undefined;
 	private chatView: ForgeChatView | undefined;
+	private readonly _inputListeners = this._register(new DisposableStore());
 
 	constructor(
 		group: IEditorGroup,
@@ -28,6 +31,7 @@ export class ForgeChatEditorPane extends EditorPane {
 		@IThemeService themeService: IThemeService,
 		@IStorageService storageService: IStorageService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
+		@IForgeConfigService private readonly forgeConfigService: IForgeConfigService,
 	) {
 		super(ForgeChatEditorPane.ID, group, telemetryService, themeService, storageService);
 	}
@@ -48,7 +52,13 @@ export class ForgeChatEditorPane extends EditorPane {
 		token: CancellationToken,
 	): Promise<void> {
 		await super.setInput(input, options, context, token);
-		this.chatView?.setProvider(input.providerName);
+		this.chatView?.setConversation(input.conversationId, input.providerName);
+
+		// Keep tab title in sync when forge.json config loads or changes
+		this._inputListeners.clear();
+		this._inputListeners.add(this.forgeConfigService.onDidChange(config => {
+			input.setProviderName(config.provider);
+		}));
 	}
 
 	override layout(dimension: Dimension, _position?: IDomPosition): void {

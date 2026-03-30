@@ -135,10 +135,13 @@ The `upstream-sync` branch is managed by maintainers only and is not a developme
 1. At the start of each month, fetch microsoft/vscode:main
 2. Merge (or rebase) into upstream-sync
 3. Review the VS Code changelog for breaking changes to Forge-touched areas
-4. Run the full build and CI suite on upstream-sync
-5. Open a PR from upstream-sync → main with a summary of upstream changes
-6. Merge after CI passes and at least one maintainer reviews
+4. Update "vscodeVersion" in product.json to match the new upstream VS Code version
+5. Run the full build and CI suite on upstream-sync
+6. Open a PR from upstream-sync → main with a summary of upstream changes
+7. Merge after CI passes and at least one maintainer reviews
 ```
+
+**Why step 4 matters:** Forge keeps its own semver in `package.json` (`0.x.y`), separate from the upstream VS Code version. Built-in extensions check `engines.vscode` against the product version — if these don't match, extensions fail to activate. The `vscodeVersion` field in `product.json` is used primarily for extension compatibility checks, marketplace communication, and extension host initialization, while `package.json` version remains Forge's own release version.
 
 Never merge `upstream-sync` into your feature branch — rebase against `main` instead.
 
