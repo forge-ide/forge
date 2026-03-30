@@ -176,6 +176,7 @@ These directories are the target state for v0.1.0. Most do not exist yet — the
 - The MCP integration (`src/vs/workbench/services/forge/mcp/`) — not yet
 - The agent system (`src/vs/workbench/services/forge/agent/`) — not yet
 - The Forge layout service (`src/vs/workbench/services/forge/layout/`) — not yet
+- The Forge AI activity bar viewlet (`src/vs/workbench/contrib/forgeAI/`) — **exists** (sidebar entry point, `Codicon.sparkle` temporary icon)
 - The Forge chat editor input (`src/vs/workbench/browser/parts/editor/forgeChat/`) — not yet
 - The onboarding flow (`src/vs/workbench/browser/forge/onboarding/`) — not yet
 - The plugin loader (`src/vs/workbench/services/forge/plugins/`) — not yet
@@ -275,6 +276,16 @@ forge/
 │       │           ├── mistralProvider.ts   ← Mistral implementation
 │       │           └── localProvider.ts     ← Local/Ollama implementation
 │       └── workbench/
+│           ├── contrib/
+│           │   └── forgeAI/                 ← Activity bar viewlet (sidebar entry point)
+│           │       ├── common/
+│           │       │   └── forgeAI.ts       ← View container/view IDs, context keys
+│           │       └── browser/
+│           │           ├── forgeAI.contribution.ts  ← Registration wiring
+│           │           ├── forgeAIViewlet.ts         ← ViewPaneContainer
+│           │           ├── forgeAIWorkspaceView.ts   ← ViewPane (provider info, New Chat)
+│           │           └── media/
+│           │               └── forgeAIViewlet.css
 │           ├── browser/
 │           │   ├── parts/
 │           │   │   └── editor/

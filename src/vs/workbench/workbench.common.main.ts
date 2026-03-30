@@ -141,6 +141,7 @@ import './services/forge/common/forgeConfigService.js';
 
 // Forge contributions
 import './browser/parts/editor/forgeChat/forgeChat.contribution.js';
+import './contrib/forgeAI/browser/forgeAI.contribution.js';
 
 import { InstantiationType, registerSingleton } from '../platform/instantiation/common/extensions.js';
 import { GlobalExtensionEnablementService } from '../platform/extensionManagement/common/extensionEnablementService.js';
