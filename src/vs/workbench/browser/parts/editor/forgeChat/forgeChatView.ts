@@ -8,6 +8,9 @@ import { $, append, addDisposableListener, EventType } from '../../../../../base
 import { IAIProviderService } from '../../../../../platform/ai/common/aiProviderService.js';
 import { AIMessage } from '../../../../../platform/ai/common/aiProvider.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
+import { IForgeConfigService } from '../../../../services/forge/common/forgeConfigService.js';
+
+const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
 export class ForgeChatView extends Disposable {
 	private readonly messagesContainer: HTMLElement;
@@ -16,17 +19,25 @@ export class ForgeChatView extends Disposable {
 	private readonly providerDot: HTMLElement;
 	private readonly modelLabel: HTMLElement;
 
+	private currentConversationId: string = '';
+	private readonly conversations = new Map<string, AIMessage[]>();
 	private messages: AIMessage[] = [];
-	private providerName: string = 'anthropic';
-	private model: string = 'claude-sonnet-4-6';
+	private providerName: string = '';
+	private model: string = '';
 	private isStreaming = false;
 
 	constructor(
 		parent: HTMLElement,
 		@IAIProviderService private readonly aiProviderService: IAIProviderService,
 		@ILogService private readonly logService: ILogService,
+		@IForgeConfigService private readonly forgeConfigService: IForgeConfigService,
 	) {
 		super();
+
+		// Initialize from forge.json config
+		const config = this.forgeConfigService.getConfig();
+		this.providerName = config.provider;
+		this.model = config.model ?? DEFAULT_MODEL;
 
 		// Root
 		const root = $('.forge-chat-pane');
@@ -75,13 +86,35 @@ export class ForgeChatView extends Disposable {
 			this.providerName = name;
 			this.updateHeader();
 		}));
+
+		this._register(this.forgeConfigService.onDidChange(config => {
+			this.model = config.model ?? this.model;
+			this.updateHeader();
+		}));
 	}
 
-	setProvider(providerName: string, model?: string): void {
+	setConversation(conversationId: string, providerName: string, model?: string): void {
+		// Save current conversation's messages
+		if (this.currentConversationId) {
+			this.conversations.set(this.currentConversationId, this.messages);
+		}
+
+		// Switch to new conversation
+		this.currentConversationId = conversationId;
 		this.providerName = providerName;
 		if (model) {
 			this.model = model;
 		}
+
+		// Restore or start fresh
+		this.messages = this.conversations.get(conversationId) ?? [];
+
+		// Rebuild message DOM
+		this.messagesContainer.textContent = '';
+		for (const msg of this.messages) {
+			this.appendMessageElement(msg.role, msg.content);
+		}
+
 		this.updateHeader();
 	}
 
@@ -104,7 +137,9 @@ export class ForgeChatView extends Disposable {
 		const provider = this.aiProviderService.getActiveProvider();
 		if (!provider) {
 			this.logService.warn('[ForgeChatView] No active provider');
-			this.appendMessageElement('assistant', 'No AI provider configured. Please set up a provider first.');
+			const errorContent = 'No AI provider configured. Please set up a provider first.';
+			this.messages.push({ role: 'assistant', content: errorContent });
+			this.appendMessageElement('assistant', errorContent);
 			return;
 		}
 

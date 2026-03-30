@@ -14,11 +14,23 @@ export class ForgeChatInput extends EditorInput {
 
 	private readonly _uri: URI;
 
+	private _providerName: string;
+
+	get providerName(): string { return this._providerName; }
+
+	setProviderName(name: string): void {
+		if (name !== this._providerName) {
+			this._providerName = name;
+			this._onDidChangeLabel.fire();
+		}
+	}
+
 	constructor(
-		readonly providerName: string,
+		providerName: string,
 		readonly conversationId: string,
 	) {
 		super();
+		this._providerName = providerName;
 		this._uri = URI.from({ scheme: FORGE_CHAT_SCHEME, path: `/${conversationId}` });
 	}
 
@@ -26,7 +38,7 @@ export class ForgeChatInput extends EditorInput {
 	override get editorId(): string | undefined { return ForgeChatInput.ID; }
 	override get resource(): URI { return this._uri; }
 	override get capabilities(): EditorInputCapabilities {
-		return EditorInputCapabilities.Readonly | EditorInputCapabilities.Singleton;
+		return EditorInputCapabilities.Readonly;
 	}
 
 	override getName(): string {
