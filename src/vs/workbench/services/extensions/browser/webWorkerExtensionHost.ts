@@ -298,11 +298,11 @@ export class WebWorkerExtensionHost extends Disposable implements IExtensionHost
 		let nlsUrlWithDetails: URI | undefined = undefined;
 		// Only use the nlsBaseUrl if we are using a language other than the default, English.
 		if (nlsBaseUrl && this._productService.commit && !platform.Language.isDefaultVariant()) {
-			nlsUrlWithDetails = URI.joinPath(URI.parse(nlsBaseUrl), this._productService.commit, this._productService.version, platform.Language.value());
+			nlsUrlWithDetails = URI.joinPath(URI.parse(nlsBaseUrl), this._productService.commit, this._productService.vscodeVersion ?? this._productService.version, platform.Language.value());
 		}
 		return {
 			commit: this._productService.commit,
-			version: this._productService.version,
+			version: this._productService.vscodeVersion ?? this._productService.version,
 			quality: this._productService.quality,
 			date: this._productService.date,
 			parentPid: 0,
