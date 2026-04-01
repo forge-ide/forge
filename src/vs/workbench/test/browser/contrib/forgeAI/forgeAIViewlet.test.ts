@@ -65,7 +65,7 @@ function createTestView(
 	const defaultConfigEmitter = disposables.add(new Emitter<ForgeConfig>());
 	const defaultForgeConfigService: Pick<IForgeConfigService, 'onDidChange' | 'getConfig'> = {
 		onDidChange: defaultConfigEmitter.event,
-		getConfig(): ForgeConfig { return { provider: 'anthropic', model: 'claude-sonnet-4-6' }; },
+		getConfig(): ForgeConfig { return { defaultProvider: 'anthropic', defaultModel: 'claude-sonnet-4-6', providers: [{ name: 'anthropic', models: [{ id: 'claude-sonnet-4-6' }] }] }; },
 	};
 
 	const commandService = (overrides.commandService ?? noop) as ICommandService;
@@ -115,8 +115,15 @@ function createTestView(
 		getActiveWorkspace() { return undefined; },
 	};
 
+	const aiProviderService = {
+		onDidChangeProviders: noopEvent,
+		listProviders() { return []; },
+		getDefaultProviderName() { return undefined; },
+	};
+
 	return disposables.add(new TestableForgeAIWorkspaceView(
 		options,
+		aiProviderService as never, // aiProviderService
 		commandService,
 		forgeConfigService,
 		forgeLayoutService as IForgeLayoutService,
@@ -253,7 +260,7 @@ suite('Forge AI Viewlet', () => {
 			const mockForgeConfigService: Pick<IForgeConfigService, 'onDidChange' | 'getConfig'> = {
 				onDidChange: onDidChangeEmitter.event,
 				getConfig(): ForgeConfig {
-					return { provider: 'anthropic', model: 'claude-sonnet-4-6' };
+					return { defaultProvider: 'anthropic', defaultModel: 'claude-sonnet-4-6', providers: [{ name: 'anthropic', models: [{ id: 'claude-sonnet-4-6' }] }] };
 				},
 			};
 
@@ -280,7 +287,7 @@ suite('Forge AI Viewlet', () => {
 			const mockForgeConfigService: Pick<IForgeConfigService, 'onDidChange' | 'getConfig'> = {
 				onDidChange: onDidChangeEmitter.event,
 				getConfig(): ForgeConfig {
-					return { provider: 'openai', model: 'gpt-4o' };
+					return { defaultProvider: 'openai', defaultModel: 'gpt-4o', providers: [{ name: 'openai', models: [{ id: 'gpt-4o' }] }] };
 				},
 			};
 
@@ -299,7 +306,7 @@ suite('Forge AI Viewlet', () => {
 
 		test('updates provider display when config changes', () => {
 			const onDidChangeEmitter = disposables.add(new Emitter<ForgeConfig>());
-			let currentConfig: ForgeConfig = { provider: 'anthropic', model: 'claude-sonnet-4-6' };
+			let currentConfig: ForgeConfig = { defaultProvider: 'anthropic', defaultModel: 'claude-sonnet-4-6', providers: [{ name: 'anthropic', models: [{ id: 'claude-sonnet-4-6' }] }] };
 			const mockForgeConfigService: Pick<IForgeConfigService, 'onDidChange' | 'getConfig'> = {
 				onDidChange: onDidChangeEmitter.event,
 				getConfig(): ForgeConfig {
@@ -320,7 +327,7 @@ suite('Forge AI Viewlet', () => {
 			assert.ok(providerLabel.textContent?.includes('anthropic'));
 
 			// Simulate config change
-			currentConfig = { provider: 'openai', model: 'gpt-4o' };
+			currentConfig = { defaultProvider: 'openai', defaultModel: 'gpt-4o', providers: [{ name: 'openai', models: [{ id: 'gpt-4o' }] }] };
 			onDidChangeEmitter.fire(currentConfig);
 
 			assert.ok(providerLabel.textContent?.includes('openai'), `Expected updated label to include "openai", got "${providerLabel.textContent}"`);

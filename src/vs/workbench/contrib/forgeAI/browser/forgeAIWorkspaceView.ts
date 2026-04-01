@@ -20,6 +20,7 @@ import { IThemeService } from '../../../../platform/theme/common/themeService.js
 import { IViewDescriptorService } from '../../../common/views.js';
 import { IViewletViewOptions } from '../../../browser/parts/views/viewsViewlet.js';
 import { ViewPane } from '../../../browser/parts/views/viewPane.js';
+import { IAIProviderService } from '../../../../platform/ai/common/aiProviderService.js';
 import { IForgeConfigService } from '../../../services/forge/common/forgeConfigService.js';
 import { ForgeLayout, IForgeLayoutService } from '../../../services/forge/common/forgeLayoutService.js';
 import { IForgeWorkspaceService } from '../../../services/forge/common/forgeWorkspaceService.js';
@@ -68,6 +69,7 @@ export class ForgeAIWorkspaceView extends ViewPane {
 
 	constructor(
 		options: IViewletViewOptions,
+		@IAIProviderService private readonly aiProviderService: IAIProviderService,
 		@ICommandService private readonly commandService: ICommandService,
 		@IForgeConfigService private readonly forgeConfigService: IForgeConfigService,
 		@IForgeLayoutService private readonly forgeLayoutService: IForgeLayoutService,
@@ -88,6 +90,7 @@ export class ForgeAIWorkspaceView extends ViewPane {
 		this.hasWorkspacesKey = FORGE_AI_HAS_WORKSPACES.bindTo(contextKeyService);
 
 		this._register(this.forgeConfigService.onDidChange(() => this.updateProviderDisplay()));
+		this._register(this.aiProviderService.onDidChangeProviders(() => this.updateProviderDisplay()));
 		this._register(this.forgeLayoutService.onDidChangeLayout(layout => this.updateActiveLayoutButton(layout)));
 		this._register(this.forgeWorkspaceService.onDidChangeWorkspaces(() => this.renderWorkspaceList()));
 		this._register(this.forgeWorkspaceService.onDidChangeActiveWorkspace(() => this.renderWorkspaceList()));
@@ -268,9 +271,15 @@ export class ForgeAIWorkspaceView extends ViewPane {
 		}
 
 		const config = this.forgeConfigService.getConfig();
-		const providerName = config.provider || localize('forgeAI.noProvider', "None");
-		const modelName = config.model ? ` / ${config.model}` : '';
-		this.providerLabel.textContent = providerName + modelName;
+		const registered = this.aiProviderService.listProviders();
+		const defaultName = config.defaultProvider || localize('forgeAI.noProvider', "None");
+		const modelName = config.defaultModel ? ` / ${config.defaultModel}` : '';
+
+		if (registered.length > 1) {
+			this.providerLabel.textContent = `${defaultName}${modelName} (+${registered.length - 1})`;
+		} else {
+			this.providerLabel.textContent = defaultName + modelName;
+		}
 	}
 
 	private updateActiveLayoutButton(activeLayout: ForgeLayout): void {

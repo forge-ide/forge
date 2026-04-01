@@ -99,7 +99,7 @@ export class ForgeLayoutService extends Disposable implements IForgeLayoutServic
 			return;
 		}
 
-		const resolvedProvider = providerId ?? this.forgeConfigService.getConfig().provider;
+		const resolvedProvider = providerId ?? this.forgeConfigService.getConfig().defaultProvider;
 		const conversationId = generateUuid();
 		const chatInput = new ForgeChatInput(resolvedProvider, conversationId);
 
@@ -273,13 +273,13 @@ export class ForgeLayoutService extends Disposable implements IForgeLayoutServic
 		const rightGroup = groups[1];
 		const config = this.forgeConfigService.getConfig();
 		const conversationId = generateUuid();
-		const chatInput = new ForgeChatInput(config.provider, conversationId);
+		const chatInput = new ForgeChatInput(config.defaultProvider, conversationId);
 
 		this._paneGroupMap.clear();
 		this._paneStateMap.clear();
 		this._paneStateMap.set('tr', {
 			position: 'tr',
-			providerId: config.provider,
+			providerId: config.defaultProvider,
 			conversationId,
 		});
 

@@ -99,6 +99,12 @@ import './services/power/electron-browser/powerService.js';
 // sandboxed renderer. A proper fix requires an IPC channel to the main process.
 // For now the browser stub in workbench.common.main.ts provides a no-op fallback.
 
+// Forge — credential service (SecretStorage + env var fallback)
+import './services/forge/electron-browser/forgeCredentialService.js';
+
+// Forge — provider bootstrap (reads config, resolves credentials, sets default provider)
+import './services/forge/electron-browser/forgeProviderBootstrap.js';
+
 import { registerSingleton } from '../platform/instantiation/common/extensions.js';
 import { IUserDataInitializationService, UserDataInitializationService } from './services/userData/browser/userDataInit.js';
 import { SyncDescriptor } from '../platform/instantiation/common/descriptors.js';

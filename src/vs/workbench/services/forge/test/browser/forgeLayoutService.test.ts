@@ -86,8 +86,9 @@ class MockEditorGroupView extends TestEditorGroupView {
 
 function makeForgeConfigService(overrides?: Partial<ForgeConfig>): IForgeConfigService {
 	const config: ForgeConfig = {
-		provider: 'anthropic',
-		model: 'claude-sonnet-4-6',
+		defaultProvider: 'anthropic',
+		defaultModel: 'claude-sonnet-4-6',
+		providers: [{ name: 'anthropic', models: [{ id: 'claude-sonnet-4-6' }] }],
 		...overrides,
 	};
 	return {
@@ -95,6 +96,8 @@ function makeForgeConfigService(overrides?: Partial<ForgeConfig>): IForgeConfigS
 		onDidChange: Event.None,
 		getConfig() { return { ...config }; },
 		async updateConfig() { },
+		resolveModel() { return undefined; },
+		getProviders() { return config.providers; },
 	};
 }
 

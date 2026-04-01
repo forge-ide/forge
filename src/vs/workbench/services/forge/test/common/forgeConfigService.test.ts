@@ -85,15 +85,17 @@ suite('ForgeConfigService', () => {
 
 		const config = service.getConfig();
 
-		assert.strictEqual(config.provider, 'anthropic');
-		assert.strictEqual(config.model, 'claude-sonnet-4-6');
+		assert.strictEqual(config.defaultProvider, 'anthropic');
+		assert.strictEqual(config.defaultModel, 'claude-sonnet-4-6');
 	});
 
 	test('getConfig returns parsed config from forge.json', async () => {
 		const forgeConfig: ForgeConfig = {
-			provider: 'openai',
-			model: 'gpt-4o',
-			maxTokens: 2048,
+			defaultProvider: 'openai',
+			defaultModel: 'gpt-4o',
+			providers: [
+				{ name: 'openai', models: [{ id: 'gpt-4o', maxTokens: 2048 }] },
+			],
 		};
 		const configUri = URI.joinPath(workspaceUri, 'forge.json');
 		await fileService.writeFile(configUri, VSBuffer.fromString(JSON.stringify(forgeConfig)));
@@ -105,9 +107,10 @@ suite('ForgeConfigService', () => {
 
 		const config = service.getConfig();
 
-		assert.strictEqual(config.provider, 'openai');
-		assert.strictEqual(config.model, 'gpt-4o');
-		assert.strictEqual(config.maxTokens, 2048);
+		assert.strictEqual(config.defaultProvider, 'openai');
+		assert.strictEqual(config.defaultModel, 'gpt-4o');
+		assert.strictEqual(config.providers.length, 1);
+		assert.strictEqual(config.providers[0].models[0].maxTokens, 2048);
 	});
 
 	test('getConfig returns default config when forge.json has invalid JSON', async () => {
@@ -122,7 +125,7 @@ suite('ForgeConfigService', () => {
 		const config = service.getConfig();
 
 		// Should gracefully fall back to defaults, not throw
-		assert.strictEqual(config.provider, 'anthropic');
+		assert.strictEqual(config.defaultProvider, 'anthropic');
 	});
 
 	test('updateConfig merges partial config and fires onDidChange', async () => {
@@ -131,11 +134,11 @@ suite('ForgeConfigService', () => {
 		const changes: ForgeConfig[] = [];
 		disposables.add(service.onDidChange(config => changes.push(config)));
 
-		await service.updateConfig({ model: 'gpt-4o-mini' });
+		await service.updateConfig({ defaultModel: 'gpt-4o-mini' });
 
 		assert.ok(changes.length >= 1, 'onDidChange should fire');
 		const lastConfig = changes[changes.length - 1];
-		assert.strictEqual(lastConfig.model, 'gpt-4o-mini');
-		assert.strictEqual(lastConfig.provider, 'anthropic'); // default preserved
+		assert.strictEqual(lastConfig.defaultModel, 'gpt-4o-mini');
+		assert.strictEqual(lastConfig.defaultProvider, 'anthropic'); // default preserved
 	});
 });
