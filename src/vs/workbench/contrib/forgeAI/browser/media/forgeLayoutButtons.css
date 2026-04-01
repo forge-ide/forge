@@ -1,0 +1,136 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Forge IDE. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.forge-layout-section {
+	display: flex;
+	flex-direction: column;
+	gap: var(--sp-2, 8px);
+}
+
+.forge-layout-buttons {
+	display: flex;
+	gap: var(--sp-1, 4px);
+	padding: var(--sp-2, 8px) 0;
+}
+
+.forge-layout-btn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 28px;
+	height: 28px;
+	background: var(--color-surface-3, var(--vscode-editor-background));
+	border: none;
+	border-radius: var(--r-sm, 3px);
+	color: var(--color-text-secondary, var(--vscode-descriptionForeground));
+	cursor: pointer;
+	padding: var(--sp-2, 8px);
+}
+
+.forge-layout-btn:hover {
+	background: var(--color-surface-2, var(--vscode-list-hoverBackground));
+}
+
+.forge-layout-btn.active {
+	background: var(--color-surface-2, var(--vscode-list-activeSelectionBackground));
+	border-bottom: 2px solid var(--color-brand, var(--vscode-statusBar-background));
+}
+
+.forge-layout-btn svg {
+	width: 16px;
+	height: 16px;
+	fill: currentColor;
+}
+
+/* --- Workspace Section --- */
+
+.forge-workspace-section {
+	display: flex;
+	flex-direction: column;
+	gap: var(--sp-2, 8px);
+	margin-top: var(--sp-3, 12px);
+}
+
+.forge-workspace-actions {
+	display: flex;
+	gap: var(--sp-1, 4px);
+	padding: var(--sp-1, 4px) 0;
+}
+
+.forge-workspace-action-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: var(--sp-1, 4px) var(--sp-2, 8px);
+	background: var(--color-surface-3, var(--vscode-editor-background));
+	border: none;
+	border-radius: var(--r-sm, 3px);
+	color: var(--color-text-secondary, var(--vscode-descriptionForeground));
+	cursor: pointer;
+	font-family: 'Barlow Condensed', sans-serif;
+	font-weight: 700;
+	font-size: 12px;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+}
+
+.forge-workspace-action-btn:hover {
+	background: var(--color-surface-2, var(--vscode-list-hoverBackground));
+	color: var(--color-text-primary, var(--vscode-foreground));
+}
+
+.forge-workspace-list {
+	display: flex;
+	flex-direction: column;
+	gap: var(--sp-1, 4px);
+}
+
+.forge-workspace-empty {
+	color: var(--color-text-secondary, var(--vscode-descriptionForeground));
+	font-size: 12px;
+	padding: var(--sp-2, 8px) 0;
+}
+
+.forge-workspace-item {
+	display: flex;
+	align-items: center;
+	gap: var(--sp-2, 8px);
+	padding: var(--sp-1, 4px) var(--sp-2, 8px);
+	border-radius: var(--r-sm, 3px);
+	cursor: pointer;
+	color: var(--color-text-secondary, var(--vscode-descriptionForeground));
+}
+
+.forge-workspace-item:hover {
+	background: var(--color-surface-2, var(--vscode-list-hoverBackground));
+}
+
+.forge-workspace-item.active {
+	background: var(--color-surface-2, var(--vscode-list-activeSelectionBackground));
+	border-left: 2px solid var(--color-brand, var(--vscode-statusBar-background));
+	color: var(--color-text-primary, var(--vscode-foreground));
+}
+
+.forge-workspace-item-icon {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+	width: 16px;
+	height: 16px;
+}
+
+.forge-workspace-item-icon svg {
+	width: 14px;
+	height: 14px;
+	fill: currentColor;
+}
+
+.forge-workspace-item-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 12px;
+}
