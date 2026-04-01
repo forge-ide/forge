@@ -96,4 +96,74 @@ suite('ProviderRegistry', () => {
 
 		assert.deepStrictEqual(registry.list(), []);
 	});
+
+	// --- Phase 3.5: has() and unregister() ---
+
+	test('has returns true for registered provider', () => {
+		const registry = new ProviderRegistry();
+		registry.register('anthropic', makeProvider('anthropic'));
+
+		assert.strictEqual(registry.has('anthropic'), true);
+	});
+
+	test('has returns false for unregistered provider', () => {
+		const registry = new ProviderRegistry();
+
+		assert.strictEqual(registry.has('nonexistent'), false);
+	});
+
+	test('has returns false after provider is unregistered', () => {
+		const registry = new ProviderRegistry();
+		registry.register('anthropic', makeProvider('anthropic'));
+
+		registry.unregister('anthropic');
+
+		assert.strictEqual(registry.has('anthropic'), false);
+	});
+
+	test('unregister removes provider, subsequent resolve returns undefined', () => {
+		const registry = new ProviderRegistry();
+		const provider = makeProvider('anthropic');
+		registry.register('anthropic', provider);
+
+		registry.unregister('anthropic');
+
+		assert.strictEqual(registry.resolve('anthropic'), undefined);
+	});
+
+	test('unregister removes provider from list', () => {
+		const registry = new ProviderRegistry();
+		registry.register('anthropic', makeProvider('anthropic'));
+		registry.register('openai', makeProvider('openai'));
+
+		registry.unregister('anthropic');
+
+		assert.deepStrictEqual(registry.list(), ['openai']);
+	});
+
+	test('unregister returns false for non-existent provider', () => {
+		const registry = new ProviderRegistry();
+
+		assert.strictEqual(registry.unregister('nonexistent'), false);
+	});
+
+	test('unregister returns true for existing provider', () => {
+		const registry = new ProviderRegistry();
+		registry.register('anthropic', makeProvider('anthropic'));
+
+		assert.strictEqual(registry.unregister('anthropic'), true);
+	});
+
+	test('unregister then re-register works correctly', () => {
+		const registry = new ProviderRegistry();
+		const first = makeProvider('anthropic', ['model-1']);
+		const second = makeProvider('anthropic', ['model-2']);
+
+		registry.register('anthropic', first);
+		registry.unregister('anthropic');
+		registry.register('anthropic', second);
+
+		assert.strictEqual(registry.resolve('anthropic'), second);
+		assert.deepStrictEqual(registry.list(), ['anthropic']);
+	});
 });

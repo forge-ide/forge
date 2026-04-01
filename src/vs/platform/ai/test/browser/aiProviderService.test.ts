@@ -121,4 +121,94 @@ suite('AIProviderService', () => {
 
 		assert.deepStrictEqual(fired, [['anthropic'], ['anthropic', 'openai']]);
 	});
+
+	// --- Phase 3.5: New interface methods ---
+	// These tests target the updated IAIProviderService interface.
+	// They will pass once the service is updated to include:
+	//   unregisterProvider, has, onDidChangeProviders, getDefaultProviderName
+
+	suite('Phase 3.5 — updated interface', () => {
+
+		test('unregisterProvider removes a previously registered provider', () => {
+			service.registerProvider('anthropic', makeMockProvider('anthropic'));
+
+			service.unregisterProvider('anthropic');
+
+			assert.strictEqual(service.getProvider('anthropic'), undefined);
+		});
+
+		test('unregisterProvider removes provider from listProviders', () => {
+			service.registerProvider('anthropic', makeMockProvider('anthropic'));
+			service.registerProvider('openai', makeMockProvider('openai'));
+
+			service.unregisterProvider('anthropic');
+
+			assert.deepStrictEqual(service.listProviders(), ['openai']);
+		});
+
+		test('has returns true for registered provider', () => {
+			service.registerProvider('anthropic', makeMockProvider('anthropic'));
+
+			assert.strictEqual(service.has('anthropic'), true);
+		});
+
+		test('has returns false for unregistered provider', () => {
+			assert.strictEqual(service.has('nonexistent'), false);
+		});
+
+		test('has returns false after unregisterProvider', () => {
+			service.registerProvider('anthropic', makeMockProvider('anthropic'));
+			service.unregisterProvider('anthropic');
+
+			assert.strictEqual(service.has('anthropic'), false);
+		});
+
+		test('onDidChangeProviders fires on registerProvider', () => {
+			const fired: number[] = [];
+			disposables.add(service.onDidChangeProviders(() => fired.push(1)));
+
+			service.registerProvider('anthropic', makeMockProvider('anthropic'));
+
+			assert.strictEqual(fired.length, 1, 'onDidChangeProviders should fire once on register');
+		});
+
+		test('onDidChangeProviders fires on unregisterProvider', () => {
+			service.registerProvider('anthropic', makeMockProvider('anthropic'));
+
+			const fired: number[] = [];
+			disposables.add(service.onDidChangeProviders(() => fired.push(1)));
+
+			service.unregisterProvider('anthropic');
+
+			assert.strictEqual(fired.length, 1, 'onDidChangeProviders should fire once on unregister');
+		});
+
+		test('onDidChangeProviders fires for each register and unregister call', () => {
+			const fired: number[] = [];
+			disposables.add(service.onDidChangeProviders(() => fired.push(1)));
+
+			service.registerProvider('anthropic', makeMockProvider('anthropic'));
+			service.registerProvider('openai', makeMockProvider('openai'));
+			service.unregisterProvider('anthropic');
+
+			assert.strictEqual(fired.length, 3, 'onDidChangeProviders should fire 3 times');
+		});
+
+		test('getDefaultProviderName returns the config default', () => {
+			// The default provider name comes from config.default
+			const defaultName = service.getDefaultProviderName();
+
+			assert.strictEqual(typeof defaultName, 'string');
+			assert.ok(defaultName.length > 0, 'default provider name should not be empty');
+		});
+
+		test('listProviders returns all registered provider names after multiple operations', () => {
+			service.registerProvider('anthropic', makeMockProvider('anthropic'));
+			service.registerProvider('openai', makeMockProvider('openai'));
+			service.registerProvider('local', makeMockProvider('local'));
+			service.unregisterProvider('openai');
+
+			assert.deepStrictEqual(service.listProviders(), ['anthropic', 'local']);
+		});
+	});
 });
