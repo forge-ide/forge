@@ -138,6 +138,10 @@ import './services/log/common/defaultLogLevels.js';
 // Forge services
 import '../platform/ai/browser/aiProviderService.js';
 import './services/forge/common/forgeConfigService.js';
+import './services/forge/browser/forgeLayoutService.js';
+import './services/forge/browser/forgeGitDiffService.js';
+import './services/forge/browser/forgeContextService.js';
+import './services/forge/browser/forgeWorkspaceService.js';
 
 // Forge contributions
 import './browser/parts/editor/forgeChat/forgeChat.contribution.js';

@@ -72,8 +72,8 @@
 		"editor.foreground": "#eae6de",
 		"editor.lineHighlightBackground": "#0d0f13",
 		"editor.lineHighlightBorder": "#00000000",
-		"editor.selectionBackground": "#181c2666",
-		"editor.selectionHighlightBackground": "#181c2640",
+		"editor.selectionBackground": "#3a4a6699",
+		"editor.selectionHighlightBackground": "#3a4a6655",
 		"editor.wordHighlightBackground": "#252f3e66",
 		"editor.wordHighlightStrongBackground": "#3a455866",
 		"editor.findMatchBackground": "#ff4a1266",
@@ -91,7 +91,7 @@
 		"editorRuler.foreground": "#1c2230",
 		"editorOverviewRuler.border": "#07080a",
 		"editorOverviewRuler.findMatchForeground": "#ff4a1280",
-		"editorOverviewRuler.selectionHighlightForeground": "#181c2666",
+		"editorOverviewRuler.selectionHighlightForeground": "#3a4a66cc",
 		"editorOverviewRuler.wordHighlightForeground": "#252f3e80",
 		"editorOverviewRuler.wordHighlightStrongForeground": "#3a455880",
 		"editorOverviewRuler.modifiedForeground": "#7aaaff80",
@@ -100,7 +100,7 @@
 		"editorOverviewRuler.errorForeground": "#ff4a12cc",
 		"editorOverviewRuler.warningForeground": "#ffaa33cc",
 		"editorOverviewRuler.infoForeground": "#7aaaff80",
-		"minimap.selectionHighlight": "#181c2666",
+		"minimap.selectionHighlight": "#3a4a66cc",
 		"minimap.findMatchHighlight": "#ff4a1280",
 
 		// ── Editor widgets ────────────────────────────────────────────────────

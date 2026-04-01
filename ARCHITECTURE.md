@@ -175,7 +175,8 @@ These directories are the target state for v0.1.0. Most do not exist yet — the
 - The AI layer browser implementation (`src/vs/platform/ai/browser/`) — not yet
 - The MCP integration (`src/vs/workbench/services/forge/mcp/`) — not yet
 - The agent system (`src/vs/workbench/services/forge/agent/`) — not yet
-- The Forge layout service (`src/vs/workbench/services/forge/layout/`) — not yet
+- The Forge layout service (`src/vs/workbench/services/forge/common/` + `src/vs/workbench/services/forge/browser/`) — **exists**
+- The Forge workspace service (`src/vs/workbench/services/forge/common/` + `src/vs/workbench/services/forge/browser/`) — **exists**
 - The Forge AI activity bar viewlet (`src/vs/workbench/contrib/forgeAI/`) — **exists** (sidebar entry point, `Codicon.sparkle` temporary icon)
 - The Forge chat editor input (`src/vs/workbench/browser/parts/editor/forgeChat/`) — not yet
 - The onboarding flow (`src/vs/workbench/browser/forge/onboarding/`) — not yet
@@ -285,7 +286,8 @@ forge/
 │           │           ├── forgeAIViewlet.ts         ← ViewPaneContainer
 │           │           ├── forgeAIWorkspaceView.ts   ← ViewPane (provider info, New Chat)
 │           │           └── media/
-│           │               └── forgeAIViewlet.css
+│           │               ├── forgeAIViewlet.css
+│           │               └── forgeLayoutButtons.css ← Layout preset button styles
 │           ├── browser/
 │           │   ├── parts/
 │           │   │   └── editor/
@@ -299,8 +301,32 @@ forge/
 │           │           └── steps/
 │           └── services/
 │               └── forge/                   ← All Forge-specific services
-│                   ├── layout/
-│                   │   └── forgeLayoutService.ts  ← Quad canvas layout
+│                   ├── common/
+│                   │   ├── forgeConfigService.ts      ← IForgeConfigService interface + impl
+│                   │   ├── forgeLayoutService.ts      ← IForgeLayoutService interface
+│                   │   ├── forgeContextTypes.ts       ← Context types, priority enum, token budget
+│                   │   ├── forgeContextService.ts     ← IForgeContextService interface
+│                   │   ├── forgeGitDiffService.ts     ← IForgeGitDiffService interface
+│                   │   ├── forgeWorkspaceService.ts   ← IForgeWorkspaceService interface
+│                   │   └── forgeWorkspaceTypes.ts     ← ForgeWorkspaceConfig, SerializedConversation
+│                   ├── browser/
+│                   │   ├── forgeLayoutService.ts      ← ForgeLayoutService browser impl
+│                   │   ├── forgeContextService.ts     ← ForgeContextService browser impl
+│                   │   ├── forgeWorkspaceService.ts   ← ForgeWorkspaceService browser impl
+│                   │   ├── contextProviders/           ← Context provider implementations (browser layer)
+│                   │   │   ├── forgeFileContextProvider.ts          ← File context resolution with middle truncation
+│                   │   │   ├── forgeActiveEditorContextProvider.ts  ← Auto-attach active editor (workbench contribution)
+│                   │   │   └── forgePaneHistoryContextProvider.ts   ← Cross-pane conversation history context
+│                   │   └── media/
+│                   │       └── forgeContext.css        ← Context chip styles
+│                   ├── node/
+│                   │   └── contextProviders/           ← Context providers requiring Node.js
+│                   │       └── forgeGitDiffContextProvider.ts  ← Git diff via child_process.execFile
+│                   ├── test/
+│                   │   ├── common/
+│                   │   │   └── forgeConfigService.test.ts
+│                   │   └── browser/
+│                   │       └── forgeLayoutService.test.ts
 │                   ├── mcp/
 │                   │   ├── mcpService.ts          ← IMCPService implementation
 │                   │   ├── mcpServer.ts           ← Single server connection
@@ -309,10 +335,8 @@ forge/
 │                   │   ├── forgeAgent.ts          ← Agent execution loop
 │                   │   ├── forgeAgentService.ts   ← IForgeAgentService
 │                   │   └── forgeAgentMonitor.ts   ← Monitor state
-│                   ├── plugins/
-│                   │   └── forgePluginService.ts  ← Plugin loader
-│                   └── config/
-│                       └── forgeConfigService.ts  ← forge.config.ts loader
+│                   └── plugins/
+│                       └── forgePluginService.ts  ← Plugin loader
 │
 ├── extensions/
 │   └── forge-theme/                         ← Built-in Forge themes
@@ -349,7 +373,7 @@ export interface IAIProviderService {
   readonly onDidChangeProvider: Event<string>; // fires the new active provider name
   registerProvider(name: string, provider: IAIProvider): void;
   getProvider(name: string): IAIProvider | undefined;
-  getActiveProvider(): IAIProvider;  // throws if no active provider is set
+  getActiveProvider(): IAIProvider | undefined;  // returns undefined if no active provider is set
   setActiveProvider(name: string): void;
   listProviders(): string[];
 }
@@ -372,7 +396,15 @@ IAIProviderService           ← reads config, initializes providers
   ↓
 IMCPService                  ← reads config, launches MCP child processes
   ↓
-IForgeLayoutService          ← depends on IEditorGroupsService (VS Code)
+IForgeLayoutService          ← depends on IEditorGroupsService, IStorageService, IForgeConfigService, ILogService
+  ↓
+IForgeContextService         ← depends on IFileService, IEditorService, IEditorGroupsService, IQuickInputService, IForgeLayoutService, ILogService, IInstantiationService, IForgeGitDiffService, IWorkspaceContextService
+  ↓
+IForgeWorkspaceService       ← depends on IStorageService, IForgeLayoutService, ILogService. InstantiationType: Delayed. Registered via self-registering module.
+  ↓
+IForgeGitDiffService         ← depends on ILogService. Node-only, registered in workbench.desktop.main.ts. InstantiationType: Delayed.
+  ↓
+ForgeActiveEditorContextProvider ← workbench contribution (not a service). Registered via registerWorkbenchContribution2, WorkbenchPhase.AfterRestored. Depends on IEditorService, IForgeLayoutService, IForgeContextService, IFileService, IConfigurationService, ILogService.
   ↓
 IForgeAgentService           ← depends on IAIProviderService + IMCPService
   ↓
@@ -390,7 +422,7 @@ Every AI provider implements this interface. No provider-specific code should ev
 ```typescript
 export interface IAIProvider {
   readonly name: string;
-  readonly models: string[];
+  readonly availableModels: string[];
 
   // Single-shot completion
   complete(request: AICompletionRequest): Promise<AICompletionResponse>;
@@ -398,16 +430,12 @@ export interface IAIProvider {
   // Streaming completion — yields tokens as they arrive
   stream(request: AICompletionRequest): AsyncIterable<AIStreamChunk>;
 
-  // Tool-use aware completion (for MCP integration)
-  completeWithTools(
-    request: AICompletionRequest,
-    tools: MCPTool[]
-  ): Promise<AICompletionWithToolsResponse>;
-
   // Validate that the configured credentials work
-  validateCredentials(): Promise<ValidationResult>;
+  validateCredentials(): Promise<AIValidationResult>;
 }
 ```
+
+> **Note:** `completeWithTools()` is planned for MCP integration but does not exist in the `IAIProvider` interface yet. It will be added when the MCP tool loop is implemented.
 
 ### Adding a new provider
 
@@ -485,6 +513,19 @@ type ForgeLayout = 'focus' | 'split' | 'quad' | 'code+ai';
 type PanePosition = 'tl' | 'tr' | 'bl' | 'br';
 ```
 
+### Layout commands
+
+Layout presets are exposed as commands with keybindings:
+
+| Command | Keybinding | Description |
+| --- | --- | --- |
+| `forge.layout.focus` | `Ctrl+Shift+1` | Single pane, maximized |
+| `forge.layout.split` | `Ctrl+Shift+2` | Side-by-side split |
+| `forge.layout.codeai` | `Ctrl+Shift+3` | Code editor left, AI pane right |
+| `forge.layout.quad` | `Ctrl+Shift+4` | 2×2 grid — four independent panes |
+
+Commands are registered in `forgeAI.contribution.ts` and delegate to `IForgeLayoutService.setLayout()`. Layout state is persisted to `IStorageService` (workspace scope) and restored on workspace reopen.
+
 ### ForgeChatInput
 
 The `ForgeChatInput` is a custom `EditorInput` subclass. This is the correct VS Code pattern for custom editor types — it gives us tab management, split support, and serialization for session restore for free.
@@ -507,20 +548,96 @@ export class ForgeChatInput extends EditorInput {
 
 ### Context system
 
-The `@` context system is implemented as a `CompletionItemProvider` for the chat input field. When `@` is typed, it opens a quick pick showing available context sources. Selected sources are added as `ForgeContextChip` objects that are serialized into the system prompt before the AI request.
+The context system is managed by `IForgeContextService` (registered in `workbench.common.main.ts`, `InstantiationType.Delayed`). It gathers workspace context for AI requests and exposes it through the `@` chip UI in the chat input.
+
+**Trigger:** Typing `@` in the chat input opens a quick pick (`IQuickInputService`) showing available context sources. Selected sources are added as `ForgeContextChip` objects that are serialized into the system prompt before the AI request.
 
 Context types and their injection behavior:
 
 | Type | How injected |
 | --- | --- |
-| File | Full file content in a `<file>` XML block in the system prompt |
+| ActiveEditor | Content of the focused editor tab in a `<file>` XML block |
 | Selection | Selected text in a `<selection>` block |
-| Git diff | Output of `git diff HEAD` in a `<diff>` block |
+| File | Full file content in a `<file>` XML block in the system prompt |
+| GitDiff | Output of `git diff HEAD` in a `<diff>` block |
 | Symbol | Symbol definition from LSP in a `<symbol>` block |
-| Pane history | Previous pane's messages as `<context>` conversation history |
-| Whole file | Same as File — explicit version of the auto-context |
+| PaneHistory | Previous pane's messages as `<context>` conversation history |
 
-Token budget: context is injected in priority order. If total context exceeds `maxContextTokens` (default: 60% of the model's context window), older/lower-priority context is dropped and a warning chip is shown.
+**Priority ordering:** Context is injected in priority order (highest first):
+
+```text
+ActiveEditor > Selection > File > GitDiff > Symbol > PaneHistory
+```
+
+**Token budget:** Default budget is 8000 tokens per request. Token count is estimated as `Math.ceil(content.length / 4)`. Context items are added in priority order until the budget is exhausted. Items that exceed the remaining budget are dropped and a warning chip is shown in the input.
+
+### Context providers
+
+Context providers implement the resolution logic for each context type. They are registered with `IForgeContextService` and resolve context items into content strings for injection into AI requests.
+
+| Provider | Layer | Description |
+| --- | --- | --- |
+| `ForgeFileContextProvider` | browser | Reads files via `IFileService`. Applies middle truncation at 32,000 chars by default — keeps the first and last portions of large files with a `[...truncated...]` marker. |
+| `IForgeGitDiffService` | node | Runs `git diff HEAD` via `child_process.execFile` with a 5-second timeout. Node-layer only because it requires child process spawning. Registered in `workbench.desktop.main.ts`. |
+| `ForgeActiveEditorContextProvider` | browser | Workbench contribution that auto-attaches the active editor's content as context when `forge.autoAttachActiveEditor` is `true`. Listens for editor focus changes and routes context to the nearest AI pane via `IForgeLayoutService`. |
+| `ForgePaneHistoryContextProvider` | browser | Exposes other panes' conversation history as context. Resolution is lazy — history is only serialized when the context item is resolved, not when it is attached. |
+
+**Configuration:** `forge.autoAttachActiveEditor` (boolean, default: `false`) — when enabled, the active editor's content is automatically attached as context to the nearest AI pane on editor focus change.
+
+### Workspace system
+
+`IForgeWorkspaceService` manages named session collections. A workspace captures the current canvas layout, pane states, and provider assignments so users can save and restore different working configurations (e.g., "debugging with Claude" vs. "code review with GPT-4").
+
+**Interface:**
+
+```typescript
+export interface IForgeWorkspaceService {
+  readonly onDidChangeActiveWorkspace: Event<ForgeWorkspaceConfig | undefined>;
+  readonly onDidChangeWorkspaces: Event<void>;
+  getWorkspaces(): ForgeWorkspaceConfig[];
+  getActiveWorkspace(): ForgeWorkspaceConfig | undefined;
+  createWorkspace(name: string): Promise<ForgeWorkspaceConfig>;
+  saveActiveWorkspace(): Promise<void>;
+  switchWorkspace(id: string): Promise<void>;
+  deleteWorkspace(id: string): Promise<void>;
+  renameWorkspace(id: string, newName: string): Promise<void>;
+}
+```
+
+**Data model:**
+
+A `ForgeWorkspaceConfig` captures a snapshot of the canvas state:
+
+```typescript
+interface ForgeWorkspaceConfig {
+  readonly id: string;           // UUID
+  readonly name: string;         // User-chosen label
+  readonly createdAt: number;    // Epoch ms
+  readonly layout: ForgeLayout;  // 'focus' | 'split' | 'quad' | 'code+ai'
+  readonly panes: ForgePaneState[];
+  readonly conversations: SerializedConversation[];
+}
+```
+
+**Storage strategy:**
+
+| Data | Scope | Rationale |
+| --- | --- | --- |
+| Workspace list | `StorageScope.PROFILE` | Shared across VS Code workspaces so the same named sessions are available everywhere |
+| Active workspace ID | `StorageScope.WORKSPACE` | Per VS Code workspace — different projects can have different active sessions |
+
+**Switching workspaces:** `switchWorkspace(id)` restores the saved layout via `IForgeLayoutService.setLayout()` and reopens panes with their saved provider assignments. Conversation history is stored in the config but replay is not yet implemented (beta limitation).
+
+**Known limitation:** `StorageScope.PROFILE` does not notify other windows when data changes. Cross-window sync of workspace lists is deferred to post-beta. Each window sees the workspace list as it was when that window loaded.
+
+**Workspace commands:**
+
+| Command | Description |
+| --- | --- |
+| `forge.workspace.create` | Create a new workspace from the current canvas state |
+| `forge.workspace.save` | Save the current layout and pane state to the active workspace |
+| `forge.workspace.switch` | Switch to a different workspace (restores its layout) |
+| `forge.workspace.delete` | Delete a workspace |
 
 ---
 
@@ -757,6 +874,8 @@ Standard VS Code settings are used for user preferences that don't belong in the
 | API keys | `ISecretStorage` (system keychain) | OS keychain |
 | Workspace layout | `IStorageService` workspace scope | `.forge/workspace.json` |
 | Conversation history | `IStorageService` workspace scope | `.forge/conversations/` |
+| Named workspaces | `IStorageService` profile scope (`forge.workspaces`) | VS Code profile storage |
+| Active workspace ID | `IStorageService` workspace scope (`forge.activeWorkspaceId`) | VS Code workspace storage |
 | MCP server config | `forge.config.ts` | Workspace root |
 | User preferences | VS Code settings | Standard VS Code locations |
 | Plugin manifests | Filesystem | `~/.forge/plugins/` |
