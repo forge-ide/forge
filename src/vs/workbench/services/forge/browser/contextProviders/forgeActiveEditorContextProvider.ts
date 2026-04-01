@@ -67,14 +67,16 @@ export class ForgeActiveEditorContextProvider extends Disposable implements IWor
 		try {
 			const fileContent = await this.fileService.readFile(resource);
 			const text = fileContent.value.toString();
+			const maxChars = 32000;
+			const content = text.length > maxChars ? text.substring(0, maxChars) + '\n[...truncated]' : text;
 			const fileName = resource.path.split('/').pop() ?? resource.path;
 
 			const item: ForgeContextItem = {
 				type: ForgeContextType.ActiveEditor,
 				label: fileName,
 				detail: resource.path,
-				content: text,
-				tokenEstimate: Math.ceil(text.length / 4),
+				content,
+				tokenEstimate: Math.ceil(content.length / 4),
 				uri: resource,
 			};
 
