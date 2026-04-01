@@ -20,6 +20,7 @@ import { IWorkspaceContextService, WorkbenchState } from '../../../../platform/w
 interface WatermarkEntry {
 	readonly id: string;
 	readonly text: string;
+	readonly alwaysShow?: boolean;
 	readonly when?: {
 		native?: ContextKeyExpression;
 		web?: ContextKeyExpression;
@@ -41,6 +42,8 @@ const toggleTerminal: WatermarkEntry = { text: localize({ key: 'watermark.toggle
 const startDebugging: WatermarkEntry = { text: localize('watermark.startDebugging', "Start Debugging"), id: 'workbench.action.debug.start', when: { web: ContextKeyExpr.equals('terminalProcessSupported', true) } };
 const openSettings: WatermarkEntry = { text: localize('watermark.openSettings', "Open Settings"), id: 'workbench.action.openSettings' };
 
+const forgeNewChat: WatermarkEntry = { text: localize('watermark.forgeNewChat', "New AI Chat"), id: 'forge.chat.new', alwaysShow: true };
+
 const baseEntries: WatermarkEntry[] = [
 	openChat,
 	showCommands,
@@ -54,6 +57,7 @@ const emptyWindowEntries: WatermarkEntry[] = coalesce([
 ]);
 
 const workspaceEntries: WatermarkEntry[] = [
+	forgeNewChat,
 	...baseEntries,
 ];
 
@@ -165,7 +169,7 @@ export class EditorGroupWatermark extends Disposable {
 
 			for (const entry of entries) {
 				const keys = this.keybindingService.lookupKeybinding(entry.id);
-				if (!keys) {
+				if (!keys && !entry.alwaysShow) {
 					continue;
 				}
 
@@ -173,10 +177,11 @@ export class EditorGroupWatermark extends Disposable {
 				const dt = append(dl, $('dt'));
 				dt.textContent = entry.text;
 
-				const dd = append(dl, $('dd'));
-
-				const label = this.keybindingLabels.add(new KeybindingLabel(dd, OS, { renderUnboundKeybindings: true, ...defaultKeybindingLabelStyles }));
-				label.set(keys);
+				if (keys) {
+					const dd = append(dl, $('dd'));
+					const label = this.keybindingLabels.add(new KeybindingLabel(dd, OS, { renderUnboundKeybindings: true, ...defaultKeybindingLabelStyles }));
+					label.set(keys);
+				}
 			}
 		};
 
@@ -195,7 +200,7 @@ export class EditorGroupWatermark extends Disposable {
 				return !contextKey /* works without context */ || this.contextKeyService.contextMatchesRules(contextKey);
 			})
 			.filter(entry => !!CommandsRegistry.getCommand(entry.id))
-			.filter(entry => !!this.keybindingService.lookupKeybinding(entry.id));
+			.filter(entry => entry.alwaysShow || !!this.keybindingService.lookupKeybinding(entry.id));
 
 		return filteredEntries;
 	}

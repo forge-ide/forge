@@ -1,0 +1,53 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Forge IDE. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.forge-context-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--sp-1, 4px);
+	background: var(--color-surface-3, var(--vscode-input-background));
+	border-radius: var(--r-sm, 3px);
+	padding: var(--sp-1, 4px) var(--sp-2, 8px);
+	font-family: 'Fira Code', monospace;
+	font-size: 11px;
+	color: var(--color-text-secondary, var(--vscode-descriptionForeground));
+}
+
+.forge-context-chip .forge-context-chip-type {
+	width: 12px;
+	height: 12px;
+	color: var(--color-text-tertiary, var(--vscode-disabledForeground));
+}
+
+.forge-context-chip .remove {
+	width: 12px;
+	height: 12px;
+	color: var(--color-text-tertiary, var(--vscode-disabledForeground));
+	cursor: pointer;
+	background: none;
+	border: none;
+	padding: 0;
+}
+
+.forge-context-chip .remove:hover {
+	color: var(--color-brand, var(--vscode-statusBar-background));
+}
+
+.forge-context-chip.automatic {
+	border: 1px dashed var(--color-border, var(--vscode-panel-border));
+}
+
+.forge-context-chip.dropped {
+	text-decoration: line-through;
+	color: var(--color-text-tertiary, var(--vscode-disabledForeground));
+}
+
+/* Per-type chip icon colors */
+.forge-context-chip[data-type="file"] .forge-context-chip-type { color: var(--color-iron-300, var(--vscode-descriptionForeground)); }
+.forge-context-chip[data-type="selection"] .forge-context-chip-type { color: var(--color-ember-300, var(--vscode-textLink-foreground)); }
+.forge-context-chip[data-type="gitDiff"] .forge-context-chip-type { color: var(--color-ember-200, var(--vscode-gitDecoration-modifiedResourceForeground)); }
+.forge-context-chip[data-type="symbol"] .forge-context-chip-type { color: var(--color-iron-300, var(--vscode-symbolIcon-fieldForeground)); }
+.forge-context-chip[data-type="paneHistory"] .forge-context-chip-type { color: var(--color-iron-400, var(--vscode-descriptionForeground)); }
+.forge-context-chip[data-type="activeEditor"] .forge-context-chip-type { color: var(--color-ember-300, var(--vscode-textLink-foreground)); }

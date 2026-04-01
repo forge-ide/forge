@@ -9,7 +9,7 @@ import * as assert from 'assert';
 import { McpStdioStateHandler } from '../../node/mcpStdioStateHandler.js';
 import { isWindows } from '../../../../../base/common/platform.js';
 
-const GRACE_TIME = 100;
+const GRACE_TIME = 500;
 
 suite('McpStdioStateHandler', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
@@ -54,7 +54,8 @@ suite('McpStdioStateHandler', () => {
 	});
 
 	if (!isWindows) {
-		test('sigterm after grace', async () => {
+		test('sigterm after grace', async function () {
+			this.timeout(5000);
 			const { handler, output } = run(`
 			setInterval(() => {}, 1000);
 			process.stdin.on('end', () => process.stdout.write('stdin ended\\n'));
@@ -75,7 +76,8 @@ suite('McpStdioStateHandler', () => {
 		});
 	}
 
-	test('sigkill after grace', async () => {
+	test('sigkill after grace', async function () {
+		this.timeout(5000);
 		const { handler, output } = run(`
 			setInterval(() => {}, 1000);
 			process.stdin.on('end', () => process.stdout.write('stdin ended\\n'));

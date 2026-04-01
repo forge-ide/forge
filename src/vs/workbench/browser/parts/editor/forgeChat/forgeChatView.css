@@ -3,6 +3,13 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+:root {
+	--color-provider-anthropic: #ff4a12;
+	--color-provider-openai:    #ffaa33;
+	--color-provider-local:     #7aaaff;
+	--color-provider-custom:    #8a9aac;
+}
+
 .forge-chat-pane {
 	display: flex;
 	flex-direction: column;
@@ -30,9 +37,13 @@
 	width: 8px;
 	height: 8px;
 	border-radius: 50%;
-	background: var(--vscode-statusBar-background);
+	background: var(--color-provider-custom, var(--vscode-statusBar-background));
 	flex-shrink: 0;
 }
+
+.forge-provider-dot.provider-anthropic { background: var(--color-provider-anthropic); }
+.forge-provider-dot.provider-openai    { background: var(--color-provider-openai); }
+.forge-provider-dot.provider-local     { background: var(--color-provider-local); }
 
 .forge-model-label {
 	font-family: 'Fira Code', monospace;
@@ -95,6 +106,16 @@
 	50% { opacity: 0; }
 }
 
+/* ---- Context chips ---- */
+
+.forge-context-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--sp-1, 4px);
+	padding: var(--sp-1, 4px) var(--sp-4, 16px);
+	min-height: 0;
+}
+
 /* ---- Input area ---- */
 
 .forge-chat-input-area {
@@ -123,6 +144,12 @@
 
 .forge-chat-input:focus {
 	border-color: var(--vscode-focusBorder);
+}
+
+.forge-chat-input:disabled {
+	color: var(--color-text-disabled);
+	cursor: default;
+	opacity: 0.6;
 }
 
 .forge-chat-send {

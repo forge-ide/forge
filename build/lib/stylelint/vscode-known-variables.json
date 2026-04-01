@@ -1041,7 +1041,22 @@
 		"--vscode-inline-chat-affordance-height",
 		"--collapse-from-width",
 		"--slide-from-x",
-		"--slide-from-y"
+		"--slide-from-y",
+		"--color-border",
+		"--color-brand",
+		"--color-provider-anthropic",
+		"--color-provider-openai",
+		"--color-provider-local",
+		"--color-provider-custom",
+		"--color-ember-200",
+		"--color-ember-300",
+		"--color-iron-300",
+		"--color-iron-400",
+		"--color-surface-2",
+		"--color-surface-3",
+		"--color-text-primary",
+		"--color-text-secondary",
+		"--color-text-tertiary"
 	],
 	"sizes": [
 		"--vscode-bodyFontSize",

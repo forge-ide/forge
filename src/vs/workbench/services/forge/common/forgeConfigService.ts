@@ -27,6 +27,7 @@ export interface ForgeConfig {
 	model?: string;
 	maxTokens?: number;
 	stream?: boolean;
+	contextBudget?: number;
 	providers?: Record<string, { model?: string; baseURL?: string }>;
 }
 

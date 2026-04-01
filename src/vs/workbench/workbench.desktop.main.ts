@@ -95,6 +95,10 @@ import './services/browserView/electron-browser/playwrightWorkbenchService.js';
 import './services/process/electron-browser/processService.js';
 import './services/power/electron-browser/powerService.js';
 
+// Forge — git diff: the node/ implementation (child_process) cannot run in the
+// sandboxed renderer. A proper fix requires an IPC channel to the main process.
+// For now the browser stub in workbench.common.main.ts provides a no-op fallback.
+
 import { registerSingleton } from '../platform/instantiation/common/extensions.js';
 import { IUserDataInitializationService, UserDataInitializationService } from './services/userData/browser/userDataInit.js';
 import { SyncDescriptor } from '../platform/instantiation/common/descriptors.js';

@@ -8,6 +8,7 @@ import { DisposableStore } from '../../../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../../../base/common/event.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { Registry } from '../../../../../platform/registry/common/platform.js';
+import { ForgeLayout, IForgeLayoutService } from '../../../../services/forge/common/forgeLayoutService.js';
 import {
 	Extensions as ViewExtensions,
 	IViewContainersRegistry,
@@ -18,6 +19,7 @@ import {
 import { FORGE_AI_VIEWLET_ID, FORGE_AI_WORKSPACE_VIEW_ID } from '../../../../contrib/forgeAI/common/forgeAI.js';
 import { ForgeAIWorkspaceView } from '../../../../contrib/forgeAI/browser/forgeAIWorkspaceView.js';
 import { ForgeConfig, IForgeConfigService } from '../../../../services/forge/common/forgeConfigService.js';
+import { IForgeWorkspaceService } from '../../../../services/forge/common/forgeWorkspaceService.js';
 import { IViewletViewOptions } from '../../../../browser/parts/views/viewsViewlet.js';
 import { ICommandService } from '../../../../../platform/commands/common/commands.js';
 
@@ -69,6 +71,12 @@ function createTestView(
 	const commandService = (overrides.commandService ?? noop) as ICommandService;
 	const forgeConfigService = (overrides.forgeConfigService ?? defaultForgeConfigService) as IForgeConfigService;
 
+	const layoutChangeEmitter = disposables.add(new Emitter<ForgeLayout>());
+	const forgeLayoutService: Pick<IForgeLayoutService, 'onDidChangeLayout' | 'activeLayout'> = {
+		onDidChangeLayout: layoutChangeEmitter.event,
+		activeLayout: 'focus',
+	};
+
 	const noopConfigService = {
 		getValue: () => undefined,
 		onDidChangeConfiguration: noopEvent,
@@ -100,10 +108,20 @@ function createTestView(
 		title: 'AI Workspaces',
 	};
 
+	const forgeWorkspaceService: Pick<IForgeWorkspaceService, 'onDidChangeWorkspaces' | 'onDidChangeActiveWorkspace' | 'getWorkspaces' | 'getActiveWorkspace'> = {
+		onDidChangeWorkspaces: noopEvent,
+		onDidChangeActiveWorkspace: noopEvent,
+		getWorkspaces() { return []; },
+		getActiveWorkspace() { return undefined; },
+	};
+
 	return disposables.add(new TestableForgeAIWorkspaceView(
 		options,
 		commandService,
 		forgeConfigService,
+		forgeLayoutService as IForgeLayoutService,
+		forgeWorkspaceService as IForgeWorkspaceService,
+		noop as never, // quickInputService
 		noop as never, // keybindingService
 		noop as never, // contextMenuService
 		noopConfigService as never, // configurationService
