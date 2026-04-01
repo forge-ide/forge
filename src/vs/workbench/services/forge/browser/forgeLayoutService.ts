@@ -79,6 +79,10 @@ export class ForgeLayoutService extends Disposable implements IForgeLayoutServic
 	}
 
 	async openChatPane(position: PanePosition, providerId?: string): Promise<void> {
+		await this._openChatPane(position, providerId);
+	}
+
+	private async _openChatPane(position: PanePosition, providerId?: string): Promise<void> {
 		if (this._activeLayout !== 'quad') {
 			await this.setLayout('quad');
 		}
@@ -106,6 +110,7 @@ export class ForgeLayoutService extends Disposable implements IForgeLayoutServic
 		});
 
 		try {
+			await group.closeAllEditors();
 			await group.openEditor(chatInput);
 		} catch (error) {
 			chatInput.dispose();
@@ -177,6 +182,7 @@ export class ForgeLayoutService extends Disposable implements IForgeLayoutServic
 
 	private async applyFocusLayout(): Promise<void> {
 		this.disposeEnforceOptions();
+		await this.closeAllChatEditors();
 
 		// Move all editors from non-active groups into the active group
 		const activeGroup = this.editorGroupsService.activeGroup;
@@ -199,6 +205,12 @@ export class ForgeLayoutService extends Disposable implements IForgeLayoutServic
 
 	private async applySplitLayout(): Promise<void> {
 		this.disposeEnforceOptions();
+		await this.closeAllChatEditors();
+
+		// Prevent empty groups from being auto-closed when dragging the last tab out
+		this._enforceOptionsDisposable = this.editorGroupsService.mainPart.enforcePartOptions({
+			closeEmptyGroups: false,
+		});
 
 		this.editorGroupsService.mainPart.applyLayout({
 			orientation: GroupOrientation.HORIZONTAL,
@@ -211,10 +223,12 @@ export class ForgeLayoutService extends Disposable implements IForgeLayoutServic
 
 	private async applyQuadLayout(): Promise<void> {
 		this.disposeEnforceOptions();
+		await this.closeAllChatEditors();
 
-		// Prevent empty groups from being auto-closed
+		// Prevent empty groups from being auto-closed; hide tab bar so welcome screens are uncluttered
 		this._enforceOptionsDisposable = this.editorGroupsService.mainPart.enforcePartOptions({
 			closeEmptyGroups: false,
+			showTabs: 'none',
 		});
 
 		this.editorGroupsService.mainPart.applyLayout({
@@ -233,37 +247,16 @@ export class ForgeLayoutService extends Disposable implements IForgeLayoutServic
 		}
 
 		this.mapGroupsToPositions(groups);
-
-		// Open a ForgeChatInput in each pane
-		const config = this.forgeConfigService.getConfig();
-		const providerKeys = config.providers ? Object.keys(config.providers) : [];
-
-		for (let i = 0; i < 4; i++) {
-			const position = PANE_POSITIONS[i];
-			const group = groups[i];
-
-			// Assign different providers if configured, otherwise use default
-			const providerId = providerKeys.length > i ? providerKeys[i] : config.provider;
-			const conversationId = generateUuid();
-			const chatInput = new ForgeChatInput(providerId, conversationId);
-
-			this._paneStateMap.set(position, {
-				position,
-				providerId,
-				conversationId,
-			});
-
-			try {
-				await group.openEditor(chatInput);
-			} catch (error) {
-				chatInput.dispose();
-				throw error;
-			}
-		}
 	}
 
 	private async applyCodeAiLayout(): Promise<void> {
 		this.disposeEnforceOptions();
+		await this.closeAllChatEditors();
+
+		// Prevent empty groups from being auto-closed when dragging the last tab out
+		this._enforceOptionsDisposable = this.editorGroupsService.mainPart.enforcePartOptions({
+			closeEmptyGroups: false,
+		});
 
 		this.editorGroupsService.mainPart.applyLayout({
 			orientation: GroupOrientation.HORIZONTAL,
@@ -299,6 +292,18 @@ export class ForgeLayoutService extends Disposable implements IForgeLayoutServic
 	}
 
 	// --- Private: Helpers ---
+
+	private async closeAllChatEditors(): Promise<void> {
+		const groups = this.editorGroupsService.getGroups(GroupsOrder.CREATION_TIME);
+		for (const group of groups) {
+			const editorsToClose = group.editors.filter(e =>
+				e.typeId === ForgeChatInput.ID && !(e as ForgeChatInput).hasHistory
+			);
+			if (editorsToClose.length > 0) {
+				await group.closeEditors(editorsToClose);
+			}
+		}
+	}
 
 	private mapGroupsToPositions(groups: readonly IEditorGroup[]): void {
 		this._paneGroupMap.clear();

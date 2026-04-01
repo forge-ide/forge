@@ -6,12 +6,17 @@
 import { Emitter } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
+import { URI } from '../../../../base/common/uri.js';
+import { IFileService } from '../../../../platform/files/common/files.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
+import { EditorsOrder } from '../../../common/editor.js';
+import { ForgeChatInput } from '../../../browser/parts/editor/forgeChat/forgeChatInput.js';
+import { ACTIVE_GROUP, IEditorService } from '../../editor/common/editorService.js';
 import { IForgeLayoutService } from '../common/forgeLayoutService.js';
 import { IForgeWorkspaceService } from '../common/forgeWorkspaceService.js';
-import type { ForgeWorkspaceConfig } from '../common/forgeWorkspaceTypes.js';
+import type { ForgeWorkspaceConfig, SerializedEditor } from '../common/forgeWorkspaceTypes.js';
 
 const WORKSPACES_STORAGE_KEY = 'forge.workspaces';
 const ACTIVE_WORKSPACE_STORAGE_KEY = 'forge.activeWorkspaceId';
@@ -32,6 +37,8 @@ export class ForgeWorkspaceService extends Disposable implements IForgeWorkspace
 	constructor(
 		@IStorageService private readonly storageService: IStorageService,
 		@IForgeLayoutService private readonly forgeLayoutService: IForgeLayoutService,
+		@IEditorService private readonly editorService: IEditorService,
+		@IFileService private readonly fileService: IFileService,
 		@ILogService private readonly logService: ILogService,
 	) {
 		super();
@@ -63,6 +70,7 @@ export class ForgeWorkspaceService extends Disposable implements IForgeWorkspace
 			layout: layoutState.layout,
 			panes: layoutState.panes,
 			conversations: [],
+			openEditors: this.collectOpenFileEditors(),
 		};
 
 		this.workspaces.push(workspace);
@@ -92,6 +100,7 @@ export class ForgeWorkspaceService extends Disposable implements IForgeWorkspace
 			...active,
 			layout: layoutState.layout,
 			panes: layoutState.panes,
+			openEditors: this.collectOpenFileEditors(),
 		};
 
 		const index = this.workspaces.findIndex(w => w.id === active.id);
@@ -108,25 +117,64 @@ export class ForgeWorkspaceService extends Disposable implements IForgeWorkspace
 	}
 
 	async switchWorkspace(id: string): Promise<void> {
+		if (this.activeWorkspaceId === id) {
+			return;
+		}
+
 		const workspace = this.workspaces.find(w => w.id === id);
 		if (!workspace) {
 			this.logService.warn(`[ForgeWorkspaceService] Workspace '${id}' not found`);
 			return;
 		}
 
+		// Snapshot editors before saving so dirty editors are captured in outgoing workspace
+		const allEditors = this.editorService.getEditors(EditorsOrder.SEQUENTIAL);
+		const dirtyEditors = allEditors.filter(({ editor }) =>
+			editor.typeId !== ForgeChatInput.ID && editor.isDirty()
+		);
+
+		// Save the current workspace state (layout + open editors)
+		await this.saveActiveWorkspace();
+
 		this.activeWorkspaceId = workspace.id;
 		this.persistActiveWorkspaceId();
 
-		// Restore the layout
+		// Apply the target workspace's layout and chat panes
 		await this.forgeLayoutService.setLayout(workspace.layout);
+		await Promise.all(workspace.panes.map(pane =>
+			this.forgeLayoutService.openChatPane(pane.position, pane.providerId)
+		));
 
-		// Open panes for the workspace
-		for (const pane of workspace.panes) {
-			await this.forgeLayoutService.openChatPane(pane.position, pane.providerId);
+		// Close all clean file editors from the outgoing workspace
+		const editorsToClose = allEditors.filter(({ editor }) =>
+			editor.typeId !== ForgeChatInput.ID && !editor.isDirty()
+		);
+		if (editorsToClose.length > 0) {
+			await this.editorService.closeEditors(editorsToClose);
+		}
+
+		// Restore the target workspace's saved file editors
+		for (const serialized of (workspace.openEditors ?? [])) {
+			const uri = URI.parse(serialized.uri);
+			let exists = false;
+			try {
+				exists = await this.fileService.exists(uri);
+			} catch {
+				// ignore — treat as missing
+			}
+			if (!exists) {
+				this.logService.info(`[ForgeWorkspaceService] Skipping missing editor: ${serialized.uri}`);
+				continue;
+			}
+			await this.editorService.openEditor({ resource: uri }, ACTIVE_GROUP);
+		}
+
+		// Dirty editors follow you into the new workspace
+		for (const { editor } of dirtyEditors) {
+			await this.editorService.openEditor(editor, undefined, ACTIVE_GROUP);
 		}
 
 		this.logService.info(`[ForgeWorkspaceService] Switched to workspace '${workspace.name}' (${workspace.id})`);
-
 		this._onDidChangeActiveWorkspace.fire(workspace);
 	}
 
@@ -177,6 +225,29 @@ export class ForgeWorkspaceService extends Disposable implements IForgeWorkspace
 		}
 	}
 
+	// --- Private: Editor helpers ---
+
+	private collectOpenFileEditors(): SerializedEditor[] {
+		const seen = new Set<string>();
+		const result: SerializedEditor[] = [];
+		for (const { editor } of this.editorService.getEditors(EditorsOrder.SEQUENTIAL)) {
+			if (editor.typeId === ForgeChatInput.ID) {
+				continue;
+			}
+			const resource = editor.resource;
+			if (!resource) {
+				continue;
+			}
+			const key = resource.toString();
+			if (seen.has(key)) {
+				continue;
+			}
+			seen.add(key);
+			result.push({ uri: key });
+		}
+		return result;
+	}
+
 	// --- Private: Persistence ---
 
 	private loadWorkspaces(): void {
@@ -214,6 +285,12 @@ export class ForgeWorkspaceService extends Disposable implements IForgeWorkspace
 	private registerPersistenceHooks(): void {
 		this._register(this.storageService.onWillSaveState(() => {
 			this.persistWorkspaces();
+		}));
+
+		this._register(this.forgeLayoutService.onDidChangeLayout(() => {
+			if (this.activeWorkspaceId) {
+				this.saveActiveWorkspace();
+			}
 		}));
 	}
 }
