@@ -52,7 +52,10 @@ export class ForgeChatEditorPane extends EditorPane {
 		token: CancellationToken,
 	): Promise<void> {
 		await super.setInput(input, options, context, token);
-		this.chatView?.setConversation(input.conversationId, input.providerName);
+		if (this.chatView) {
+			this.chatView.setConversation(input.conversationId, input.providerName);
+			this.chatView.onFirstMessage = () => { input.hasHistory = true; };
+		}
 
 		// Keep tab title in sync when forge.json config loads or changes
 		this._inputListeners.clear();
