@@ -2,6 +2,7 @@ import assert from 'assert';
 import { DisposableStore } from '../../../../../base/common/lifecycle.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
+import { NullLogService } from '../../../../../platform/log/common/log.js';
 import { ForgeConfigResolutionService } from '../../browser/forgeConfigResolution.js';
 
 suite('ForgeConfigResolutionService', () => {
@@ -80,6 +81,7 @@ suite('ForgeConfigResolutionService', () => {
 			createMockFileService(files) as never,
 			createMockConfigService() as never,
 			createMockPathService() as never,
+			new NullLogService(),
 		));
 		const resolved = await service.resolve('/workspace');
 		assert.strictEqual(resolved.mcpServers.length, 1);
@@ -99,6 +101,7 @@ suite('ForgeConfigResolutionService', () => {
 			createMockFileService(files) as never,
 			createMockConfigService() as never,
 			createMockPathService() as never,
+			new NullLogService(),
 		));
 		const resolved = await service.resolve('/workspace');
 		assert.strictEqual(resolved.mcpServers.length, 1);
@@ -118,6 +121,7 @@ suite('ForgeConfigResolutionService', () => {
 			createMockFileService(files) as never,
 			createMockConfigService({ disabled: { mcpServers: ['drop'], agents: [] } }) as never,
 			createMockPathService() as never,
+			new NullLogService(),
 		));
 		const resolved = await service.resolve('/workspace');
 		assert.strictEqual(resolved.mcpServers.length, 1);
@@ -134,6 +138,7 @@ suite('ForgeConfigResolutionService', () => {
 			createMockFileService(files) as never,
 			createMockConfigService({ configPaths: { mcp: ['/shared/team/'] } }) as never,
 			createMockPathService() as never,
+			new NullLogService(),
 		));
 		const resolved = await service.resolve('/workspace');
 		assert.strictEqual(resolved.mcpServers.length, 1);
@@ -145,6 +150,7 @@ suite('ForgeConfigResolutionService', () => {
 			createMockFileService({}) as never,
 			createMockConfigService() as never,
 			createMockPathService() as never,
+			new NullLogService(),
 		));
 		assert.strictEqual(service.getCached(), undefined);
 	});
@@ -159,6 +165,7 @@ suite('ForgeConfigResolutionService', () => {
 			createMockFileService(files) as never,
 			createMockConfigService() as never,
 			createMockPathService() as never,
+			new NullLogService(),
 		));
 		await service.resolve('/workspace');
 		const cached = service.getCached();
