@@ -60,6 +60,7 @@ function makeEditorService(): Partial<IEditorService> {
 	return {
 		activeTextEditorControl: undefined,
 		activeEditor: undefined,
+		editors: [],
 	};
 }
 
@@ -407,7 +408,8 @@ suite('ForgeContextService', () => {
 
 		test('resolveContextPrompt formats file items as <file> XML blocks', async () => {
 			const service = createService();
-			const item = makeFileItem('utils.ts', 'export function add(a: number, b: number) { return a + b; }');
+			// Content must be >= 100 chars to skip resolveChipContent (which replaces with stub)
+			const item = makeFileItem('utils.ts', 'export function add(a: number, b: number) { return a + b; }' + ' '.repeat(50));
 
 			service.addContextChip('tl', item);
 
@@ -460,18 +462,19 @@ suite('ForgeContextService', () => {
 		test('resolveContextPrompt returns correct usedTokens and droppedCount', async () => {
 			const service = createService();
 
-			// Each item is ~25 tokens (100 chars / 4)
+			// Each item is ~25 raw tokens (100 chars / 4) but formatContextItem wraps
+			// in XML tags adding ~26 chars, so actual cost is ~32 tokens per item.
 			service.addContextChip('tl', makeFileItem('a.ts', 'x'.repeat(100)));
 			service.addContextChip('tl', makeFileItem('b.ts', 'y'.repeat(100)));
 			service.addContextChip('tl', makeFileItem('c.ts', 'z'.repeat(100)));
 
-			// Budget allows 2 items (~50 tokens)
-			const budget = await service.resolveContextPrompt('tl', 55);
+			// Budget allows 2 items (~64 tokens) but not 3 (~96 tokens)
+			const budget = await service.resolveContextPrompt('tl', 70);
 
-			assert.strictEqual(budget.maxTokens, 55);
+			assert.strictEqual(budget.maxTokens, 70);
 			assert.strictEqual(budget.items.length, 2);
 			assert.strictEqual(budget.droppedCount, 1);
-			assert.ok(budget.usedTokens <= 55, `usedTokens ${budget.usedTokens} should be <= 55`);
+			assert.ok(budget.usedTokens <= 70, `usedTokens ${budget.usedTokens} should be <= 70`);
 			assert.ok(budget.usedTokens > 0, 'usedTokens should be > 0');
 		});
 

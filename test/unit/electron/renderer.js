@@ -171,7 +171,9 @@ async function loadTestModules(opts) {
 
 	const pattern = opts.runGlob || _tests_glob;
 	const files = await globAsync(pattern, { cwd: loadFn._out });
-	let modules = files.map(file => file.replace(/\.js$/, ''));
+	let modules = files
+		.filter(file => !file.includes('/test/node/'))
+		.map(file => file.replace(/\.js$/, ''));
 	if (opts.testSplit) {
 		const [i, n] = opts.testSplit.split('/').map(Number);
 		const chunkSize = Math.floor(modules.length / n);

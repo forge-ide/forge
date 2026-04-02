@@ -33,6 +33,7 @@ export class ForgeLayoutService extends Disposable implements IForgeLayoutServic
 	private readonly _paneStateMap = new Map<PanePosition, ForgePaneState>();
 
 	private _enforceOptionsDisposable: IDisposable | undefined;
+	private readonly _chatInputs: ForgeChatInput[] = [];
 
 	constructor(
 		@IEditorGroupsService private readonly editorGroupsService: IEditorGroupsService,
@@ -102,6 +103,7 @@ export class ForgeLayoutService extends Disposable implements IForgeLayoutServic
 		const resolvedProvider = providerId ?? this.forgeConfigService.getConfig().defaultProvider;
 		const conversationId = generateUuid();
 		const chatInput = new ForgeChatInput(resolvedProvider, conversationId);
+		this._chatInputs.push(chatInput);
 
 		this._paneStateMap.set(position, {
 			position,
@@ -162,17 +164,21 @@ export class ForgeLayoutService extends Disposable implements IForgeLayoutServic
 		} else if (saved.layout === 'split' && groups.length === 2) {
 			this._activeLayout = 'split';
 			this._paneGroupMap.clear();
+			this._paneStateMap.clear();
 		} else if (saved.layout === 'code+ai' && groups.length === 2) {
 			this._activeLayout = 'code+ai';
 			this._paneGroupMap.clear();
+			this._paneStateMap.clear();
 		} else if (saved.layout === 'focus' && groups.length === 1) {
 			this._activeLayout = 'focus';
 			this._paneGroupMap.clear();
+			this._paneStateMap.clear();
 		} else {
 			// Grid shape diverges from saved state -- fall back to focus
 			this.logService.info('[ForgeLayoutService] Grid shape does not match saved layout, falling back to focus');
 			this._activeLayout = 'focus';
 			this._paneGroupMap.clear();
+			this._paneStateMap.clear();
 		}
 
 		this._onDidChangeLayout.fire(this._activeLayout);
@@ -182,6 +188,7 @@ export class ForgeLayoutService extends Disposable implements IForgeLayoutServic
 
 	private async applyFocusLayout(): Promise<void> {
 		this.disposeEnforceOptions();
+		this.disposeChatInputs();
 		await this.closeAllChatEditors();
 
 		// Move all editors from non-active groups into the active group
@@ -205,6 +212,7 @@ export class ForgeLayoutService extends Disposable implements IForgeLayoutServic
 
 	private async applySplitLayout(): Promise<void> {
 		this.disposeEnforceOptions();
+		this.disposeChatInputs();
 		await this.closeAllChatEditors();
 
 		// Prevent empty groups from being auto-closed when dragging the last tab out
@@ -223,6 +231,7 @@ export class ForgeLayoutService extends Disposable implements IForgeLayoutServic
 
 	private async applyQuadLayout(): Promise<void> {
 		this.disposeEnforceOptions();
+		this.disposeChatInputs();
 		await this.closeAllChatEditors();
 
 		// Prevent empty groups from being auto-closed; hide tab bar so welcome screens are uncluttered
@@ -247,10 +256,33 @@ export class ForgeLayoutService extends Disposable implements IForgeLayoutServic
 		}
 
 		this.mapGroupsToPositions(groups);
+
+		// Initialize pane state entries and open chat inputs for all 4 positions
+		const config = this.forgeConfigService.getConfig();
+		for (let i = 0; i < PANE_POSITIONS.length; i++) {
+			const position = PANE_POSITIONS[i];
+			const conversationId = generateUuid();
+			const chatInput = new ForgeChatInput(config.defaultProvider, conversationId);
+			this._chatInputs.push(chatInput);
+
+			this._paneStateMap.set(position, {
+				position,
+				providerId: config.defaultProvider,
+				conversationId,
+			});
+
+			try {
+				await groups[i].openEditor(chatInput);
+			} catch (error) {
+				chatInput.dispose();
+				throw error;
+			}
+		}
 	}
 
 	private async applyCodeAiLayout(): Promise<void> {
 		this.disposeEnforceOptions();
+		this.disposeChatInputs();
 		await this.closeAllChatEditors();
 
 		// Prevent empty groups from being auto-closed when dragging the last tab out
@@ -274,6 +306,7 @@ export class ForgeLayoutService extends Disposable implements IForgeLayoutServic
 		const config = this.forgeConfigService.getConfig();
 		const conversationId = generateUuid();
 		const chatInput = new ForgeChatInput(config.defaultProvider, conversationId);
+		this._chatInputs.push(chatInput);
 
 		this._paneGroupMap.clear();
 		this._paneStateMap.clear();
@@ -327,6 +360,13 @@ export class ForgeLayoutService extends Disposable implements IForgeLayoutServic
 		}
 	}
 
+	private disposeChatInputs(): void {
+		for (const input of this._chatInputs) {
+			input.dispose();
+		}
+		this._chatInputs.length = 0;
+	}
+
 	private registerGroupLifecycleListeners(): void {
 		this._register(this.editorGroupsService.onDidRemoveGroup(() => {
 			this.validateGridShape();
@@ -372,6 +412,7 @@ export class ForgeLayoutService extends Disposable implements IForgeLayoutServic
 
 	override dispose(): void {
 		this.disposeEnforceOptions();
+		this.disposeChatInputs();
 		super.dispose();
 	}
 }

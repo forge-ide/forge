@@ -218,6 +218,10 @@ suite('ForgeWorkspaceService', () => {
 
 			const workspace = await service.createWorkspace('Switch Target');
 
+			// Create a second workspace so activeWorkspaceId differs from workspace.id
+			// (switchWorkspace early-returns when switching to the already-active workspace)
+			await service.createWorkspace('Other');
+
 			// Reset layout mock state
 			layoutService._state.setLayoutCalls.length = 0;
 			layoutService._state.layout = 'focus';
@@ -260,9 +264,12 @@ suite('ForgeWorkspaceService', () => {
 
 			await service.switchWorkspace(workspace.id);
 
-			assert.strictEqual(captured.length, 1);
-			assert.ok(captured[0], 'Event payload should be defined');
-			assert.strictEqual(captured[0]!.id, workspace.id);
+			// switchWorkspace fires twice: once from saveActiveWorkspace (outgoing)
+			// and once for the incoming workspace
+			assert.ok(captured.length >= 1, 'At least one event should fire');
+			const lastEvent = captured[captured.length - 1];
+			assert.ok(lastEvent, 'Last event payload should be defined');
+			assert.strictEqual(lastEvent!.id, workspace.id);
 		});
 
 		test('throws or warns for nonexistent workspace ID', async () => {

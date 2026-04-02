@@ -119,10 +119,10 @@ suite('ForgePaneHistoryContextProvider', () => {
 
 	function makeQuadGroups(): Partial<IEditorGroup>[] {
 		return [
-			makeMockEditorGroup(1, makeChatInput('anthropic', 'conv-1')),
-			makeMockEditorGroup(2, makeChatInput('openai', 'conv-2')),
-			makeMockEditorGroup(3, makeChatInput('anthropic', 'conv-3')),
-			makeMockEditorGroup(4, makeChatInput('local', 'conv-4')),
+			makeMockEditorGroup(1, disposables.add(makeChatInput('anthropic', 'conv-1'))),
+			makeMockEditorGroup(2, disposables.add(makeChatInput('openai', 'conv-2'))),
+			makeMockEditorGroup(3, disposables.add(makeChatInput('anthropic', 'conv-3'))),
+			makeMockEditorGroup(4, disposables.add(makeChatInput('local', 'conv-4'))),
 		];
 	}
 
@@ -147,7 +147,7 @@ suite('ForgePaneHistoryContextProvider', () => {
 
 		test('returns empty array when only one pane exists', () => {
 			const panes = makePaneStates(['tl'], ['anthropic']);
-			const groups = [makeMockEditorGroup(1, makeChatInput('anthropic', 'conv-1'))];
+			const groups = [makeMockEditorGroup(1, disposables.add(makeChatInput('anthropic', 'conv-1')))];
 
 			const provider = createProvider(panes, groups, 'focus');
 
@@ -160,9 +160,9 @@ suite('ForgePaneHistoryContextProvider', () => {
 		test('returns items for all other active panes', () => {
 			const panes = makePaneStates(['tl', 'tr', 'bl'], ['anthropic', 'openai', 'anthropic']);
 			const groups = [
-				makeMockEditorGroup(1, makeChatInput('anthropic', 'conv-1')),
-				makeMockEditorGroup(2, makeChatInput('openai', 'conv-2')),
-				makeMockEditorGroup(3, makeChatInput('anthropic', 'conv-3')),
+				makeMockEditorGroup(1, disposables.add(makeChatInput('anthropic', 'conv-1'))),
+				makeMockEditorGroup(2, disposables.add(makeChatInput('openai', 'conv-2'))),
+				makeMockEditorGroup(3, disposables.add(makeChatInput('anthropic', 'conv-3'))),
 			];
 
 			const provider = createProvider(panes, groups, 'quad');
@@ -258,9 +258,9 @@ suite('ForgePaneHistoryContextProvider', () => {
 			const panes = makePaneStates(['tl', 'tr', 'bl'], ['anthropic', 'openai', 'anthropic']);
 			// Group at index 1 (tr) has null activeEditor
 			const groups = [
-				makeMockEditorGroup(1, makeChatInput('anthropic', 'conv-1')),
+				makeMockEditorGroup(1, disposables.add(makeChatInput('anthropic', 'conv-1'))),
 				makeMockEditorGroup(2, null),
-				makeMockEditorGroup(3, makeChatInput('anthropic', 'conv-3')),
+				makeMockEditorGroup(3, disposables.add(makeChatInput('anthropic', 'conv-3'))),
 			];
 
 			const provider = createProvider(panes, groups, 'quad');
@@ -278,8 +278,8 @@ suite('ForgePaneHistoryContextProvider', () => {
 			// Panes declare all 4 positions but only 2 groups exist
 			const panes = makeQuadPanes();
 			const groups = [
-				makeMockEditorGroup(1, makeChatInput('anthropic', 'conv-1')),
-				makeMockEditorGroup(2, makeChatInput('openai', 'conv-2')),
+				makeMockEditorGroup(1, disposables.add(makeChatInput('anthropic', 'conv-1'))),
+				makeMockEditorGroup(2, disposables.add(makeChatInput('openai', 'conv-2'))),
 			];
 
 			const provider = createProvider(panes, groups, 'quad');
@@ -312,7 +312,7 @@ suite('ForgePaneHistoryContextProvider', () => {
 
 		test('returns unavailable item for missing pane', () => {
 			const panes = makePaneStates(['tl'], ['anthropic']);
-			const groups = [makeMockEditorGroup(1, makeChatInput('anthropic', 'conv-1'))];
+			const groups = [makeMockEditorGroup(1, disposables.add(makeChatInput('anthropic', 'conv-1')))];
 
 			const provider = createProvider(panes, groups, 'focus');
 
@@ -346,7 +346,7 @@ suite('ForgePaneHistoryContextProvider', () => {
 
 		test('unavailable pane has zero tokenEstimate', () => {
 			const panes = makePaneStates(['tl'], ['anthropic']);
-			const groups = [makeMockEditorGroup(1, makeChatInput('anthropic', 'conv-1'))];
+			const groups = [makeMockEditorGroup(1, disposables.add(makeChatInput('anthropic', 'conv-1')))];
 
 			const provider = createProvider(panes, groups, 'focus');
 

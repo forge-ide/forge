@@ -263,12 +263,15 @@ suite('Forge Phase 3 Integration', () => {
 			logService,
 		));
 
-		// Create a workspace capturing quad layout
+		// Create the quad workspace
 		const workspace = await service.createWorkspace('Quad Session');
 
-		// Simulate switching to a focus layout externally
+		// Create a second workspace so activeWorkspaceId changes
 		layoutService._state.layout = 'focus';
 		layoutService._state.panes = makeFocusPane();
+		await service.createWorkspace('Focus Session');
+
+		// Clear call tracking
 		layoutService._state.setLayoutCalls.length = 0;
 		layoutService._state.openChatPaneCalls.length = 0;
 

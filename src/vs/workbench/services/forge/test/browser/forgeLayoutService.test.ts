@@ -151,7 +151,7 @@ suite('ForgeLayoutService', () => {
 
 	test('IForgeLayoutService decorator token is a valid service identifier', () => {
 		assert.ok(IForgeLayoutService);
-		assert.strictEqual(typeof IForgeLayoutService, 'object');
+		assert.strictEqual(typeof IForgeLayoutService, 'function');
 		assert.strictEqual(IForgeLayoutService.toString(), 'forgeLayoutService');
 	});
 
