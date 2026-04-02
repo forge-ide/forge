@@ -12,7 +12,7 @@ export interface ForgeAgentStep {
 	readonly toolCallId: string;
 	readonly toolName: string;
 	readonly input: Record<string, unknown>;
-	readonly status: 'pending' | 'running' | 'completed' | 'error';
+	status: 'pending' | 'running' | 'completed' | 'error';
 	readonly startedAt: number;
 	result?: string;
 	error?: string;
