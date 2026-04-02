@@ -6,12 +6,15 @@
 import { Disposable, DisposableStore } from '../../../../../base/common/lifecycle.js';
 import { $, append, addDisposableListener, EventType } from '../../../../../base/browser/dom.js';
 import { IAIProviderService } from '../../../../../platform/ai/common/aiProviderService.js';
-import { AIMessage } from '../../../../../platform/ai/common/aiProvider.js';
+import { AIMessage, AIToolUse } from '../../../../../platform/ai/common/aiProvider.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
 import { IForgeConfigService } from '../../../../services/forge/common/forgeConfigService.js';
 import { IForgeContextService } from '../../../../services/forge/common/forgeContextService.js';
 import { ForgeContextChip, ForgeContextType, formatContextItem } from '../../../../services/forge/common/forgeContextTypes.js';
 import type { PanePosition } from '../../../../services/forge/common/forgeLayoutService.js';
+import { IForgeMcpService } from '../../../../services/forge/common/forgeMcpService.js';
+import { renderToolCallCard, updateToolCallCard, renderToolResultInCard } from './forgeChatToolCallRenderer.js';
+import { ForgeChatToolCallPart, ForgeChatToolResultPart } from './forgeChatMessageTypes.js';
 import '../../../../services/forge/browser/media/forgeContext.css';
 
 export class ForgeChatView extends Disposable {
@@ -39,6 +42,7 @@ export class ForgeChatView extends Disposable {
 		@ILogService private readonly logService: ILogService,
 		@IForgeConfigService private readonly forgeConfigService: IForgeConfigService,
 		@IForgeContextService private readonly forgeContextService: IForgeContextService,
+		@IForgeMcpService private readonly forgeMcpService: IForgeMcpService,
 	) {
 		super();
 
@@ -202,29 +206,126 @@ export class ForgeChatView extends Disposable {
 		const budget = await this.forgeContextService.resolveContextPrompt(this.panePosition, contextBudget);
 		const messagesWithContext = this.buildMessagesWithContext(budget.items);
 
-		let fullContent = '';
 		try {
-			for await (const chunk of provider.stream({
-				model: this.model,
-				messages: messagesWithContext,
-			})) {
-				fullContent += chunk.delta;
-				contentEl.textContent = fullContent;
-				this.scrollToBottom();
-				if (chunk.done) {
-					break;
-				}
-			}
+			await this.runAgenticLoop(messagesWithContext, assistantEl, contentEl);
 		} catch (error) {
-			this.logService.error('[ForgeChatView] Stream error', error);
-			contentEl.textContent = fullContent || 'Error: Failed to get response';
+			this.logService.error('[ForgeChatView] Agentic loop error', error);
+			contentEl.textContent = contentEl.textContent || 'Error: Failed to get response';
 			contentEl.classList.add('error');
 		}
 
 		assistantEl.classList.remove('streaming');
 		this.isStreaming = false;
 		this.sendButton.classList.remove('disabled');
-		this.messages.push({ role: 'assistant', content: fullContent });
+	}
+
+	private async runAgenticLoop(
+		messagesWithContext: AIMessage[],
+		assistantEl: HTMLElement,
+		contentEl: HTMLElement
+	): Promise<void> {
+		const MAX_TURNS = 20;
+		let turns = 0;
+		let messages = [...messagesWithContext];
+
+		while (turns < MAX_TURNS) {
+			turns++;
+
+			const mcpTools = await this.forgeMcpService.listTools();
+			const tools = mcpTools.length > 0 ? mcpTools : undefined;
+
+			const provider = this.aiProviderService.getProvider(this.providerName);
+			if (!provider) {
+				contentEl.textContent = 'Error: Provider not available';
+				return;
+			}
+
+			let fullContent = '';
+			let pendingToolUse: AIToolUse | undefined;
+			let pendingCard: HTMLElement | undefined;
+
+			for await (const chunk of provider.stream({ model: this.model, messages, tools })) {
+				if (chunk.toolUse) {
+					pendingToolUse = chunk.toolUse;
+					const toolPart: ForgeChatToolCallPart = {
+						type: 'tool_call',
+						callId: chunk.toolUse.id,
+						toolName: chunk.toolUse.name,
+						input: chunk.toolUse.input,
+						serverName: '',
+						status: 'running'
+					};
+					pendingCard = renderToolCallCard(toolPart);
+					assistantEl.appendChild(pendingCard);
+					this.scrollToBottom();
+				} else {
+					fullContent += chunk.delta;
+					contentEl.textContent = fullContent;
+					this.scrollToBottom();
+				}
+
+				if (chunk.done) {
+					break;
+				}
+			}
+
+			if (!pendingToolUse) {
+				this.messages.push({ role: 'assistant', content: fullContent });
+				break;
+			}
+
+			const card = pendingCard;
+
+			try {
+				const result = await this.forgeMcpService.callTool(
+					pendingToolUse.name,
+					pendingToolUse.input
+				);
+
+				const toolResult: ForgeChatToolResultPart = {
+					type: 'tool_result',
+					callId: pendingToolUse.id,
+					content: result.content,
+					isError: result.isError,
+					durationMs: result.durationMs
+				};
+
+				if (card) {
+					updateToolCallCard(card, result.isError ? 'error' : 'completed');
+					renderToolResultInCard(card, toolResult);
+				}
+
+				messages = [
+					...messages,
+					{ role: 'assistant' as const, content: fullContent },
+					{
+						role: 'tool_result' as const,
+						content: result.content,
+						toolCallId: pendingToolUse.id
+					}
+				];
+
+				const newContent = document.createElement('div');
+				newContent.className = 'forge-message-content';
+				assistantEl.appendChild(newContent);
+				contentEl = newContent;
+
+			} catch (err: unknown) {
+				const errMsg = err instanceof Error ? err.message : String(err);
+				const toolResult: ForgeChatToolResultPart = {
+					type: 'tool_result',
+					callId: pendingToolUse.id,
+					content: errMsg,
+					isError: true
+				};
+				if (card) {
+					updateToolCallCard(card, 'error');
+					renderToolResultInCard(card, toolResult);
+				}
+				this.logService.error('[ForgeChatView] Tool call failed', errMsg);
+				break;
+			}
+		}
 	}
 
 	private appendMessageElement(role: string, content: string): { element: HTMLElement; contentElement: HTMLElement } {
