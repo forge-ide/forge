@@ -99,8 +99,10 @@ function createTestView(
 	};
 
 	const noopInstantiationService = {
-		createInstance: () => ({ dispose() { /* noop */ }, layout() { /* noop */ } }),
+		createInstance: () => ({ dispose() { /* noop */ }, layout() { /* noop */ }, onDidChange: noopEvent, getPrimaryActions: () => [], getSecondaryActions: () => [], menuId: undefined }),
 		invokeFunction: () => undefined,
+		createChild: () => noopInstantiationService,
+		dispose() { /* noop */ },
 	};
 
 	const options: IViewletViewOptions = {
@@ -227,12 +229,12 @@ suite('Forge AI Viewlet', () => {
 			assert.strictEqual(view.canMoveView, true);
 		});
 
-		test('workspace view has an openCommandActionDescriptor with the container id', () => {
-			const viewsRegistry = Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry);
-			const view = viewsRegistry.getView(FORGE_AI_WORKSPACE_VIEW_ID) as IViewDescriptor;
-			assert.ok(view);
-			assert.ok(view.openCommandActionDescriptor, 'Expected openCommandActionDescriptor to be defined');
-			assert.strictEqual(view.openCommandActionDescriptor.id, FORGE_AI_VIEWLET_ID);
+		test('view container has an openCommandActionDescriptor with the container id', () => {
+			const registry = Registry.as<IViewContainersRegistry>(ViewExtensions.ViewContainersRegistry);
+			const container = registry.all.find((vc: { id: string }) => vc.id === FORGE_AI_VIEWLET_ID);
+			assert.ok(container, `Expected to find view container "${FORGE_AI_VIEWLET_ID}"`);
+			assert.ok(container.openCommandActionDescriptor, 'Expected openCommandActionDescriptor to be defined');
+			assert.strictEqual(container.openCommandActionDescriptor.id, FORGE_AI_VIEWLET_ID);
 		});
 	});
 
