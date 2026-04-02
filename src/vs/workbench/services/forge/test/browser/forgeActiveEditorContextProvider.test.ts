@@ -197,7 +197,7 @@ suite('ForgeActiveEditorContextProvider', () => {
 
 		onDidActiveEditorChangeEmitter.fire();
 		// Allow the async updateActiveEditorContext to complete
-		await new Promise<void>(r => queueMicrotask(r));
+		await new Promise<void>(r => setTimeout(r, 0));
 
 		assert.strictEqual(contextService.addContextChipCalls.length, 1);
 		const call = contextService.addContextChipCalls[0];
@@ -218,7 +218,7 @@ suite('ForgeActiveEditorContextProvider', () => {
 		// Switch to file A
 		activeEditor = editorA;
 		onDidActiveEditorChangeEmitter.fire();
-		await new Promise<void>(r => queueMicrotask(r));
+		await new Promise<void>(r => setTimeout(r, 0));
 
 		assert.strictEqual(contextService.addContextChipCalls.length, 1);
 		assert.strictEqual(contextService.addContextChipCalls[0].item.label, 'fileA.ts');
@@ -226,7 +226,7 @@ suite('ForgeActiveEditorContextProvider', () => {
 		// Switch to file B — should remove A first, then add B
 		activeEditor = editorB;
 		onDidActiveEditorChangeEmitter.fire();
-		await new Promise<void>(r => queueMicrotask(r));
+		await new Promise<void>(r => setTimeout(r, 0));
 
 		assert.strictEqual(contextService.removeContextChipCalls.length, 1);
 		assert.strictEqual(contextService.removeContextChipCalls[0].item.label, 'fileA.ts');
@@ -241,7 +241,7 @@ suite('ForgeActiveEditorContextProvider', () => {
 		const { contextService } = createProvider();
 
 		onDidActiveEditorChangeEmitter.fire();
-		await new Promise<void>(r => queueMicrotask(r));
+		await new Promise<void>(r => setTimeout(r, 0));
 
 		assert.strictEqual(contextService.addContextChipCalls.length, 0);
 	});
@@ -253,7 +253,7 @@ suite('ForgeActiveEditorContextProvider', () => {
 		const { contextService } = createProvider();
 
 		onDidActiveEditorChangeEmitter.fire();
-		await new Promise<void>(r => queueMicrotask(r));
+		await new Promise<void>(r => setTimeout(r, 0));
 
 		assert.strictEqual(contextService.addContextChipCalls.length, 0);
 	});
@@ -277,7 +277,7 @@ suite('ForgeActiveEditorContextProvider', () => {
 		const { contextService } = createProvider({ layoutService });
 
 		onDidActiveEditorChangeEmitter.fire();
-		await new Promise<void>(r => queueMicrotask(r));
+		await new Promise<void>(r => setTimeout(r, 0));
 
 		assert.strictEqual(contextService.addContextChipCalls.length, 1);
 		assert.strictEqual(contextService.addContextChipCalls[0].position, 'tr');
@@ -303,7 +303,7 @@ suite('ForgeActiveEditorContextProvider', () => {
 		const { contextService } = createProvider({ layoutService });
 
 		onDidActiveEditorChangeEmitter.fire();
-		await new Promise<void>(r => queueMicrotask(r));
+		await new Promise<void>(r => setTimeout(r, 0));
 
 		assert.strictEqual(contextService.addContextChipCalls.length, 1);
 		assert.strictEqual(contextService.addContextChipCalls[0].position, 'tr');
@@ -328,7 +328,7 @@ suite('ForgeActiveEditorContextProvider', () => {
 		const { contextService } = createProvider({ layoutService });
 
 		onDidActiveEditorChangeEmitter.fire();
-		await new Promise<void>(r => queueMicrotask(r));
+		await new Promise<void>(r => setTimeout(r, 0));
 
 		assert.strictEqual(contextService.addContextChipCalls.length, 1);
 		assert.strictEqual(contextService.addContextChipCalls[0].position, 'br');
@@ -349,7 +349,7 @@ suite('ForgeActiveEditorContextProvider', () => {
 		const { contextService } = createProvider({ layoutService });
 
 		onDidActiveEditorChangeEmitter.fire();
-		await new Promise<void>(r => queueMicrotask(r));
+		await new Promise<void>(r => setTimeout(r, 0));
 
 		assert.strictEqual(contextService.addContextChipCalls.length, 0);
 	});
@@ -372,7 +372,7 @@ suite('ForgeActiveEditorContextProvider', () => {
 		const { contextService } = createProvider({ layoutService });
 
 		onDidActiveEditorChangeEmitter.fire();
-		await new Promise<void>(r => queueMicrotask(r));
+		await new Promise<void>(r => setTimeout(r, 0));
 
 		assert.strictEqual(contextService.addContextChipCalls.length, 0);
 	});
@@ -388,7 +388,7 @@ suite('ForgeActiveEditorContextProvider', () => {
 		const { contextService } = createProvider();
 
 		onDidActiveEditorChangeEmitter.fire();
-		await new Promise<void>(r => queueMicrotask(r));
+		await new Promise<void>(r => setTimeout(r, 0));
 
 		assert.strictEqual(contextService.addContextChipCalls.length, 1);
 		assert.strictEqual(contextService.addContextChipCalls[0].automatic, true);
@@ -425,12 +425,12 @@ suite('ForgeActiveEditorContextProvider', () => {
 		// Fire with file A
 		activeEditor = editorA;
 		onDidActiveEditorChangeEmitter.fire();
-		await new Promise<void>(r => queueMicrotask(r));
+		await new Promise<void>(r => setTimeout(r, 0));
 
 		// Fire with file B
 		activeEditor = editorB;
 		onDidActiveEditorChangeEmitter.fire();
-		await new Promise<void>(r => queueMicrotask(r));
+		await new Promise<void>(r => setTimeout(r, 0));
 
 		// Verify order: add A, remove A, add B
 		assert.strictEqual(operations.length, 3);
@@ -451,14 +451,14 @@ suite('ForgeActiveEditorContextProvider', () => {
 
 		// Add automatic context
 		onDidActiveEditorChangeEmitter.fire();
-		await new Promise<void>(r => queueMicrotask(r));
+		await new Promise<void>(r => setTimeout(r, 0));
 
 		assert.strictEqual(contextService.addContextChipCalls.length, 1);
 
 		// Disable auto-attach
 		autoAttachEnabled = false;
 		onDidChangeConfigurationEmitter.fire(makeConfigChangeEvent('forge.autoAttachActiveEditor'));
-		await new Promise<void>(r => queueMicrotask(r));
+		await new Promise<void>(r => setTimeout(r, 0));
 
 		// Should have removed the previously attached chip
 		assert.strictEqual(contextService.removeContextChipCalls.length, 1);
@@ -473,7 +473,7 @@ suite('ForgeActiveEditorContextProvider', () => {
 		const { contextService } = createProvider();
 
 		onDidActiveEditorChangeEmitter.fire();
-		await new Promise<void>(r => queueMicrotask(r));
+		await new Promise<void>(r => setTimeout(r, 0));
 
 		assert.strictEqual(contextService.addContextChipCalls.length, 0);
 	});
@@ -490,7 +490,7 @@ suite('ForgeActiveEditorContextProvider', () => {
 		const { contextService } = createProvider();
 
 		onDidActiveEditorChangeEmitter.fire();
-		await new Promise<void>(r => queueMicrotask(r));
+		await new Promise<void>(r => setTimeout(r, 0));
 
 		assert.strictEqual(contextService.addContextChipCalls.length, 1);
 		const item = contextService.addContextChipCalls[0].item;
@@ -516,7 +516,7 @@ suite('ForgeActiveEditorContextProvider', () => {
 		disposables.add(provider.onDidChangeActiveContext(item => firedItems.push(item)));
 
 		onDidActiveEditorChangeEmitter.fire();
-		await new Promise<void>(r => queueMicrotask(r));
+		await new Promise<void>(r => setTimeout(r, 0));
 
 		assert.strictEqual(firedItems.length, 1);
 		assert.strictEqual(firedItems[0]?.label, 'event.ts');
@@ -533,12 +533,12 @@ suite('ForgeActiveEditorContextProvider', () => {
 
 		// Add context
 		onDidActiveEditorChangeEmitter.fire();
-		await new Promise<void>(r => queueMicrotask(r));
+		await new Promise<void>(r => setTimeout(r, 0));
 
 		// Clear by switching to no-resource editor
 		activeEditor = disposables.add(new MockEditorInput(undefined));
 		onDidActiveEditorChangeEmitter.fire();
-		await new Promise<void>(r => queueMicrotask(r));
+		await new Promise<void>(r => setTimeout(r, 0));
 
 		assert.strictEqual(firedItems.length, 2);
 		assert.strictEqual(firedItems[0]?.label, 'clear-event.ts');

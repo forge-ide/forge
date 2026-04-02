@@ -101,7 +101,7 @@ registerAction2(class extends Action2 {
 		const editorService = accessor.get(IEditorService);
 		const aiProviderService = accessor.get(IAIProviderService);
 		const forgeConfig = accessor.get(IForgeConfigService);
-		const providerName = aiProviderService.getActiveProvider()?.name ?? forgeConfig.getConfig().provider;
+		const providerName = aiProviderService.getDefaultProviderName() ?? forgeConfig.getConfig().defaultProvider;
 		const input = new ForgeChatInput(providerName, generateUuid());
 		editorService.openEditor(input, { pinned: true });
 	}

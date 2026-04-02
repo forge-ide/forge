@@ -16,6 +16,14 @@ export class ProviderRegistry {
 		this.providers.set(name, provider);
 	}
 
+	unregister(name: string): boolean {
+		return this.providers.delete(name);
+	}
+
+	has(name: string): boolean {
+		return this.providers.has(name);
+	}
+
 	resolve(name: string): IAIProvider | undefined {
 		return this.providers.get(name);
 	}

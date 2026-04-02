@@ -15,11 +15,11 @@ export class AIProviderService extends Disposable implements IAIProviderService 
 
 	declare readonly _serviceBrand: undefined;
 
-	private readonly _onDidChangeProvider = this._register(new Emitter<string>());
-	readonly onDidChangeProvider = this._onDidChangeProvider.event;
+	private readonly _onDidChangeProviders = this._register(new Emitter<string[]>());
+	readonly onDidChangeProviders = this._onDidChangeProviders.event;
 
 	private readonly registry = new ProviderRegistry();
-	private activeProviderName: string | undefined;
+	private defaultProviderName: string | undefined;
 
 	constructor(
 		@ILogService private readonly logService: ILogService,
@@ -30,31 +30,38 @@ export class AIProviderService extends Disposable implements IAIProviderService 
 	registerProvider(name: string, provider: IAIProvider): void {
 		this.registry.register(name, provider);
 		this.logService.info(`[AIProviderService] Registered provider: ${name}`);
+		this._onDidChangeProviders.fire(this.registry.list());
+	}
+
+	unregisterProvider(name: string): void {
+		if (this.registry.unregister(name)) {
+			this.logService.info(`[AIProviderService] Unregistered provider: ${name}`);
+			if (this.defaultProviderName === name) {
+				this.defaultProviderName = undefined;
+			}
+			this._onDidChangeProviders.fire(this.registry.list());
+		}
 	}
 
 	getProvider(name: string): IAIProvider | undefined {
 		return this.registry.resolve(name);
 	}
 
-	getActiveProvider(): IAIProvider | undefined {
-		if (!this.activeProviderName) {
-			return undefined;
-		}
-		return this.registry.resolve(this.activeProviderName);
-	}
-
-	setActiveProvider(name: string): void {
-		if (!this.registry.resolve(name)) {
-			this.logService.warn(`[AIProviderService] Cannot set active provider: '${name}' is not registered`);
-			return;
-		}
-		this.activeProviderName = name;
-		this.logService.info(`[AIProviderService] Active provider set to: ${name}`);
-		this._onDidChangeProvider.fire(name);
+	has(name: string): boolean {
+		return this.registry.has(name);
 	}
 
 	listProviders(): string[] {
 		return this.registry.list();
+	}
+
+	getDefaultProviderName(): string | undefined {
+		return this.defaultProviderName;
+	}
+
+	setDefaultProviderName(name: string): void {
+		this.defaultProviderName = name;
+		this.logService.info(`[AIProviderService] Default provider set to: ${name}`);
 	}
 }
 

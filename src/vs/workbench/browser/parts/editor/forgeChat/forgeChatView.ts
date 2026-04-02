@@ -44,8 +44,8 @@ export class ForgeChatView extends Disposable {
 
 		// Initialize from forge.json config
 		const config = this.forgeConfigService.getConfig();
-		this.providerName = config.provider;
-		this.model = config.model ?? '';
+		this.providerName = config.defaultProvider;
+		this.model = config.defaultModel ?? '';
 
 		// Root
 		const root = $('.forge-chat-pane');
@@ -98,13 +98,16 @@ export class ForgeChatView extends Disposable {
 			this.handleAtTrigger();
 		}));
 
-		this._register(this.aiProviderService.onDidChangeProvider((name: string) => {
-			this.providerName = name;
+		this._register(this.aiProviderService.onDidChangeProviders(() => {
 			this.updateHeader();
 		}));
 
 		this._register(this.forgeConfigService.onDidChange(config => {
-			this.model = config.model ?? this.model;
+			// Update defaults only if this pane hasn't been explicitly configured
+			if (!this.providerName || this.providerName === config.defaultProvider) {
+				this.providerName = config.defaultProvider;
+				this.model = config.defaultModel ?? this.model;
+			}
 			this.updateHeader();
 		}));
 
@@ -179,9 +182,9 @@ export class ForgeChatView extends Disposable {
 		this.messages.push({ role: 'user', content: text });
 		this.appendMessageElement('user', text);
 
-		const provider = this.aiProviderService.getActiveProvider();
+		const provider = this.providerName ? this.aiProviderService.getProvider(this.providerName) : undefined;
 		if (!provider) {
-			this.logService.warn('[ForgeChatView] No active provider');
+			this.logService.warn(`[ForgeChatView] No provider found for '${this.providerName}'`);
 			const errorContent = 'No AI provider configured. Please set up a provider first.';
 			this.messages.push({ role: 'assistant', content: errorContent });
 			this.appendMessageElement('assistant', errorContent);
@@ -194,7 +197,8 @@ export class ForgeChatView extends Disposable {
 		assistantEl.classList.add('streaming');
 
 		// Resolve context and build messages with context prepended
-		const contextBudget = this.forgeConfigService.getConfig().contextBudget ?? 8000;
+		const resolved = this.forgeConfigService.resolveModel(this.providerName, this.model);
+		const contextBudget = resolved?.contextBudget ?? 8000;
 		const budget = await this.forgeContextService.resolveContextPrompt(this.panePosition, contextBudget);
 		const messagesWithContext = this.buildMessagesWithContext(budget.items);
 

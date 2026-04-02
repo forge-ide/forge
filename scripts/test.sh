@@ -29,6 +29,9 @@ if [[ -z "${VSCODE_SKIP_PRELAUNCH}" ]]; then
 	npm run electron
 fi
 
+# Ensure Electron runs as Electron, not as plain Node.js
+unset ELECTRON_RUN_AS_NODE
+
 # Unit Tests
 if [[ "$OSTYPE" == "darwin"* ]]; then
 	cd $ROOT ; ulimit -n 4096 ; \

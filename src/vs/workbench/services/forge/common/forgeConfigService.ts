@@ -15,21 +15,18 @@ import { createDecorator } from '../../../../platform/instantiation/common/insta
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 
+import { type ForgeConfig, type ForgeProviderConfig, resolveModelConfig, type ResolvedModelConfig } from './forgeConfigTypes.js';
+
 const CONFIG_FILENAME = 'forge.json';
 
 const DEFAULT_CONFIG: ForgeConfig = {
-	provider: 'anthropic',
-	model: 'claude-sonnet-4-6',
+	defaultProvider: '',
+	defaultModel: '',
+	stream: true,
+	providers: [],
 };
 
-export interface ForgeConfig {
-	provider: string;
-	model?: string;
-	maxTokens?: number;
-	stream?: boolean;
-	contextBudget?: number;
-	providers?: Record<string, { model?: string; baseURL?: string }>;
-}
+export type { ForgeConfig };
 
 export const IForgeConfigService = createDecorator<IForgeConfigService>('forgeConfigService');
 
@@ -38,6 +35,8 @@ export interface IForgeConfigService {
 	readonly onDidChange: Event<ForgeConfig>;
 	getConfig(): ForgeConfig;
 	updateConfig(partial: Partial<ForgeConfig>): Promise<void>;
+	resolveModel(providerName?: string, modelId?: string): ResolvedModelConfig | undefined;
+	getProviders(): readonly ForgeProviderConfig[];
 }
 
 export class ForgeConfigService extends Disposable implements IForgeConfigService {
@@ -142,6 +141,14 @@ export class ForgeConfigService extends Disposable implements IForgeConfigServic
 
 	getConfig(): ForgeConfig {
 		return { ...this.config };
+	}
+
+	resolveModel(providerName?: string, modelId?: string): ResolvedModelConfig | undefined {
+		return resolveModelConfig(this.config, providerName, modelId);
+	}
+
+	getProviders(): readonly ForgeProviderConfig[] {
+		return this.config.providers;
 	}
 
 	async updateConfig(partial: Partial<ForgeConfig>): Promise<void> {

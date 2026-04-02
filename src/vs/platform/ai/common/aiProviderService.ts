@@ -11,13 +11,17 @@ export const IAIProviderService = createDecorator<IAIProviderService>('aiProvide
 
 export interface IAIProviderService {
 	readonly _serviceBrand: undefined;
-	/** Fires the name of the newly active provider when it changes. */
-	readonly onDidChangeProvider: Event<string>;
+
+	/** Fires the list of registered provider names whenever the set changes. */
+	readonly onDidChangeProviders: Event<string[]>;
 
 	registerProvider(name: string, provider: IAIProvider): void;
+	unregisterProvider(name: string): void;
 	getProvider(name: string): IAIProvider | undefined;
-	/** Returns the active provider, or undefined if none has been set. */
-	getActiveProvider(): IAIProvider | undefined;
-	setActiveProvider(name: string): void;
+	has(name: string): boolean;
 	listProviders(): string[];
+
+	/** Returns the name of the default provider from config, or undefined. */
+	getDefaultProviderName(): string | undefined;
+	setDefaultProviderName(name: string): void;
 }

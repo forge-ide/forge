@@ -65,7 +65,7 @@ function createTestView(
 	const defaultConfigEmitter = disposables.add(new Emitter<ForgeConfig>());
 	const defaultForgeConfigService: Pick<IForgeConfigService, 'onDidChange' | 'getConfig'> = {
 		onDidChange: defaultConfigEmitter.event,
-		getConfig(): ForgeConfig { return { provider: 'anthropic', model: 'claude-sonnet-4-6' }; },
+		getConfig(): ForgeConfig { return { defaultProvider: 'anthropic', defaultModel: 'claude-sonnet-4-6', providers: [{ name: 'anthropic', models: [{ id: 'claude-sonnet-4-6' }] }] }; },
 	};
 
 	const commandService = (overrides.commandService ?? noop) as ICommandService;
@@ -99,8 +99,10 @@ function createTestView(
 	};
 
 	const noopInstantiationService = {
-		createInstance: () => ({ dispose() { /* noop */ }, layout() { /* noop */ } }),
+		createInstance: () => ({ dispose() { /* noop */ }, layout() { /* noop */ }, onDidChange: noopEvent, getPrimaryActions: () => [], getSecondaryActions: () => [], menuId: undefined }),
 		invokeFunction: () => undefined,
+		createChild: () => noopInstantiationService,
+		dispose() { /* noop */ },
 	};
 
 	const options: IViewletViewOptions = {
@@ -115,8 +117,15 @@ function createTestView(
 		getActiveWorkspace() { return undefined; },
 	};
 
+	const aiProviderService = {
+		onDidChangeProviders: noopEvent,
+		listProviders() { return []; },
+		getDefaultProviderName() { return undefined; },
+	};
+
 	return disposables.add(new TestableForgeAIWorkspaceView(
 		options,
+		aiProviderService as never, // aiProviderService
 		commandService,
 		forgeConfigService,
 		forgeLayoutService as IForgeLayoutService,
@@ -220,12 +229,12 @@ suite('Forge AI Viewlet', () => {
 			assert.strictEqual(view.canMoveView, true);
 		});
 
-		test('workspace view has an openCommandActionDescriptor with the container id', () => {
-			const viewsRegistry = Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry);
-			const view = viewsRegistry.getView(FORGE_AI_WORKSPACE_VIEW_ID) as IViewDescriptor;
-			assert.ok(view);
-			assert.ok(view.openCommandActionDescriptor, 'Expected openCommandActionDescriptor to be defined');
-			assert.strictEqual(view.openCommandActionDescriptor.id, FORGE_AI_VIEWLET_ID);
+		test('view container has an openCommandActionDescriptor with the container id', () => {
+			const registry = Registry.as<IViewContainersRegistry>(ViewExtensions.ViewContainersRegistry);
+			const container = registry.all.find((vc: { id: string }) => vc.id === FORGE_AI_VIEWLET_ID);
+			assert.ok(container, `Expected to find view container "${FORGE_AI_VIEWLET_ID}"`);
+			assert.ok(container.openCommandActionDescriptor, 'Expected openCommandActionDescriptor to be defined');
+			assert.strictEqual(container.openCommandActionDescriptor.id, FORGE_AI_VIEWLET_ID);
 		});
 	});
 
@@ -253,7 +262,7 @@ suite('Forge AI Viewlet', () => {
 			const mockForgeConfigService: Pick<IForgeConfigService, 'onDidChange' | 'getConfig'> = {
 				onDidChange: onDidChangeEmitter.event,
 				getConfig(): ForgeConfig {
-					return { provider: 'anthropic', model: 'claude-sonnet-4-6' };
+					return { defaultProvider: 'anthropic', defaultModel: 'claude-sonnet-4-6', providers: [{ name: 'anthropic', models: [{ id: 'claude-sonnet-4-6' }] }] };
 				},
 			};
 
@@ -280,7 +289,7 @@ suite('Forge AI Viewlet', () => {
 			const mockForgeConfigService: Pick<IForgeConfigService, 'onDidChange' | 'getConfig'> = {
 				onDidChange: onDidChangeEmitter.event,
 				getConfig(): ForgeConfig {
-					return { provider: 'openai', model: 'gpt-4o' };
+					return { defaultProvider: 'openai', defaultModel: 'gpt-4o', providers: [{ name: 'openai', models: [{ id: 'gpt-4o' }] }] };
 				},
 			};
 
@@ -299,7 +308,7 @@ suite('Forge AI Viewlet', () => {
 
 		test('updates provider display when config changes', () => {
 			const onDidChangeEmitter = disposables.add(new Emitter<ForgeConfig>());
-			let currentConfig: ForgeConfig = { provider: 'anthropic', model: 'claude-sonnet-4-6' };
+			let currentConfig: ForgeConfig = { defaultProvider: 'anthropic', defaultModel: 'claude-sonnet-4-6', providers: [{ name: 'anthropic', models: [{ id: 'claude-sonnet-4-6' }] }] };
 			const mockForgeConfigService: Pick<IForgeConfigService, 'onDidChange' | 'getConfig'> = {
 				onDidChange: onDidChangeEmitter.event,
 				getConfig(): ForgeConfig {
@@ -320,7 +329,7 @@ suite('Forge AI Viewlet', () => {
 			assert.ok(providerLabel.textContent?.includes('anthropic'));
 
 			// Simulate config change
-			currentConfig = { provider: 'openai', model: 'gpt-4o' };
+			currentConfig = { defaultProvider: 'openai', defaultModel: 'gpt-4o', providers: [{ name: 'openai', models: [{ id: 'gpt-4o' }] }] };
 			onDidChangeEmitter.fire(currentConfig);
 
 			assert.ok(providerLabel.textContent?.includes('openai'), `Expected updated label to include "openai", got "${providerLabel.textContent}"`);

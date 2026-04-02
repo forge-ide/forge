@@ -60,7 +60,7 @@ export class ForgeChatEditorPane extends EditorPane {
 		// Keep tab title in sync when forge.json config loads or changes
 		this._inputListeners.clear();
 		this._inputListeners.add(this.forgeConfigService.onDidChange(config => {
-			input.setProviderName(config.provider);
+			input.setProviderName(config.defaultProvider);
 		}));
 	}
 
