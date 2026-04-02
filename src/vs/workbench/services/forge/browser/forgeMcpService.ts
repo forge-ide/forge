@@ -69,6 +69,9 @@ export class ForgeMcpService extends Disposable implements IForgeMcpService {
 
 		this._register(configResolution.onDidChangeResolved(() => {
 			this._onDidChangeTools.fire();
+			for (const entry of this.getServerStatuses()) {
+				this._onDidChangeServerStatus.fire(entry);
+			}
 		}));
 	}
 
@@ -105,6 +108,11 @@ export class ForgeMcpService extends Disposable implements IForgeMcpService {
 		for (const server of this.mcpService.servers.get()) {
 			const serverName = server.definition.label;
 			if (disabledServers.has(serverName)) {
+				continue;
+			}
+
+			const connectionState = server.connectionState.get();
+			if (connectionState.state !== McpKind.Running) {
 				continue;
 			}
 
