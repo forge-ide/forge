@@ -3,7 +3,7 @@
  * Config types live in forgeConfigResolutionTypes.ts.
  */
 
-export const enum ForgeMcpServerStatus {
+export enum ForgeMcpServerStatus {
 	Disconnected = 'disconnected',
 	Connecting = 'connecting',
 	Connected = 'connected',

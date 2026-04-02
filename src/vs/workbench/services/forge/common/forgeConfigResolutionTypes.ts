@@ -108,7 +108,7 @@ export function parseAgentMarkdown(content: string): AgentDefinition | null {
  * Minimal YAML frontmatter parser. Handles simple key: value pairs,
  * inline arrays [a, b, c], and numeric values. Not a full YAML parser.
  */
-function parseYamlFrontmatter(yaml: string): Record<string, unknown> {
+export function parseYamlFrontmatter(yaml: string): Record<string, unknown> {
 	const result: Record<string, unknown> = {};
 	for (const line of yaml.split('\n')) {
 		const match = line.match(/^(\w+):\s*(.+)$/);

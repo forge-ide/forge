@@ -2,6 +2,7 @@ import { Disposable } from '../../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { URI } from '../../../../base/common/uri.js';
+import { ILogService } from '../../../../platform/log/common/log.js';
 import { IForgeConfigResolutionService } from '../common/forgeConfigResolution.js';
 import { IForgeConfigService } from '../common/forgeConfigService.js';
 import {
@@ -23,6 +24,7 @@ export class ForgeConfigResolutionService extends Disposable implements IForgeCo
 		@IFileService private readonly fileService: IFileService,
 		@IForgeConfigService private readonly configService: IForgeConfigService,
 		@IPathService private readonly pathService: IPathService,
+		@ILogService private readonly logService: ILogService,
 	) {
 		super();
 	}
@@ -153,8 +155,8 @@ export class ForgeConfigResolutionService extends Disposable implements IForgeCo
 					map.set(server.name, server);
 				}
 			}
-		} catch {
-			// File not found or parse error — skip silently
+		} catch (e) {
+			this.logService.debug(`[ForgeConfigResolution] Failed to load ${uri.toString()}: ${e}`);
 		}
 	}
 
@@ -174,12 +176,12 @@ export class ForgeConfigResolutionService extends Disposable implements IForgeCo
 					if (agent) {
 						map.set(agent.name, { ...agent, sourcePath: child.resource.path });
 					}
-				} catch {
-					// Unreadable file — skip
+				} catch (e) {
+					this.logService.debug(`[ForgeConfigResolution] Failed to load agent ${child.resource.toString()}: ${e}`);
 				}
 			}
-		} catch {
-			// Directory doesn't exist — skip
+		} catch (e) {
+			this.logService.debug(`[ForgeConfigResolution] Agents dir not found ${uri.toString()}: ${e}`);
 		}
 	}
 
@@ -199,12 +201,12 @@ export class ForgeConfigResolutionService extends Disposable implements IForgeCo
 					if (skill) {
 						map.set(skill.name, { ...skill, sourcePath: child.resource.path });
 					}
-				} catch {
-					// Unreadable file — skip
+				} catch (e) {
+					this.logService.debug(`[ForgeConfigResolution] Failed to load skill ${child.resource.toString()}: ${e}`);
 				}
 			}
-		} catch {
-			// Directory doesn't exist — skip
+		} catch (e) {
+			this.logService.debug(`[ForgeConfigResolution] Skills dir not found ${uri.toString()}: ${e}`);
 		}
 	}
 
