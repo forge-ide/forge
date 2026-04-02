@@ -1,12 +1,7 @@
-/*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
- *--------------------------------------------------------------------------------------------*/
-
 import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { OpenAIProvider } from '../../node/openaiProvider.js';
-import type { AICompletionRequest } from '../../common/aiProvider.js';
+import type { AICompletionRequest, AIStreamChunk, AIToolDefinition } from '../../common/aiProvider.js';
 
 function makeClient(deltas: string[]): unknown {
 	return {
@@ -95,5 +90,143 @@ suite('OpenAIProvider', () => {
 		const provider = new OpenAIProvider(client as ConstructorParameters<typeof OpenAIProvider>[0]);
 
 		assert.ok(provider.availableModels.includes('gpt-4o'));
+	});
+});
+
+suite('OpenAIProvider tool calling', () => {
+
+	ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('stream() converts AIToolDefinition to OpenAI tools format', async () => {
+		const toolDef: AIToolDefinition = {
+			name: 'read_file',
+			description: 'Read a file',
+			inputSchema: {
+				type: 'object' as const,
+				properties: { path: { type: 'string' } }
+			}
+		};
+
+		let capturedRequest: Record<string, unknown>;
+		const mockClient: unknown = {
+			chat: {
+				completions: {
+					create: (req: Record<string, unknown>) => {
+						capturedRequest = req;
+						return {
+							[Symbol.asyncIterator]: async function* () {
+								yield {
+									choices: [{
+										delta: {
+											tool_calls: [{
+												index: 0,
+												id: 'call_abc',
+												function: { name: 'read_file', arguments: '{"path":"/tmp/t.txt"}' }
+											}]
+										},
+										finish_reason: null
+									}]
+								};
+								yield {
+									choices: [{
+										delta: {},
+										finish_reason: 'tool_calls'
+									}]
+								};
+							}
+						};
+					}
+				}
+			},
+			models: {
+				list: async () => ({ data: [] }),
+			},
+		};
+
+		const provider = new OpenAIProvider(mockClient as ConstructorParameters<typeof OpenAIProvider>[0]);
+
+		const chunks: AIStreamChunk[] = [];
+		for await (const chunk of provider.stream({
+			messages: [{ role: 'user', content: 'Read /tmp/t.txt' }],
+			model: 'gpt-4o',
+			tools: [toolDef]
+		})) {
+			chunks.push(chunk);
+		}
+
+		const tools = capturedRequest!.tools as Array<{ type: string; function: { name: string } }>;
+		assert.ok(tools);
+		assert.strictEqual(tools[0].type, 'function');
+		assert.strictEqual(tools[0].function.name, 'read_file');
+
+		const toolChunk = chunks.find(c => c.toolUse);
+		assert.ok(toolChunk);
+		assert.strictEqual(toolChunk!.toolUse!.name, 'read_file');
+	});
+
+	test('stream() handles tool_result messages as tool role', async () => {
+		let capturedRequest: Record<string, unknown>;
+		const mockClient: unknown = {
+			chat: {
+				completions: {
+					create: (req: Record<string, unknown>) => {
+						capturedRequest = req;
+						return {
+							[Symbol.asyncIterator]: async function* () {
+								yield { choices: [{ delta: { content: 'OK' }, finish_reason: 'stop' }] };
+							}
+						};
+					}
+				}
+			},
+			models: {
+				list: async () => ({ data: [] }),
+			},
+		};
+
+		const provider = new OpenAIProvider(mockClient as ConstructorParameters<typeof OpenAIProvider>[0]);
+
+		for await (const _ of provider.stream({
+			messages: [
+				{ role: 'user', content: 'Read file' },
+				{ role: 'assistant', content: '' },
+				{ role: 'tool_result', content: 'contents', toolCallId: 'call_abc' }
+			],
+			model: 'gpt-4o'
+		})) { /* drain */ }
+
+		const messages = capturedRequest!.messages as Array<{ role: string; tool_call_id?: string }>;
+		const toolMsg = messages.find((m) => m.role === 'tool');
+		assert.ok(toolMsg);
+		assert.strictEqual(toolMsg.tool_call_id, 'call_abc');
+	});
+
+	test('stream() throws on tool_result message without toolCallId', async () => {
+		const mockClient: unknown = {
+			chat: {
+				completions: {
+					create: () => ({
+						[Symbol.asyncIterator]: async function* () {
+							yield { choices: [{ delta: { content: 'x' }, finish_reason: 'stop' }] };
+						}
+					})
+				}
+			},
+			models: {
+				list: async () => ({ data: [] }),
+			},
+		};
+
+		const provider = new OpenAIProvider(mockClient as ConstructorParameters<typeof OpenAIProvider>[0]);
+
+		await assert.rejects(
+			async () => {
+				for await (const _ of provider.stream({
+					messages: [{ role: 'tool_result', content: 'data' }],
+					model: 'gpt-4o'
+				})) { /* drain */ }
+			},
+			/toolCallId/
+		);
 	});
 });
