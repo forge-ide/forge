@@ -38,7 +38,7 @@ suite('ForgeAgentService', () => {
 		};
 	}
 
-	function createMockAIProviderService(provider: ReturnType<typeof createMockProvider>) {
+	function createMockAIProviderService(provider: ReturnType<typeof createMockProvider>, ds: DisposableStore) {
 		return {
 			_serviceBrand: undefined as undefined,
 			getProvider: () => provider,
@@ -48,15 +48,15 @@ suite('ForgeAgentService', () => {
 			unregisterProvider: () => { },
 			getDefaultProviderName: () => 'mock' as string | undefined,
 			setDefaultProviderName: () => { },
-			onDidChangeProviders: new Emitter<string[]>().event
+			onDidChangeProviders: ds.add(new Emitter<string[]>()).event
 		};
 	}
 
-	function createMockMcpService() {
+	function createMockMcpService(ds: DisposableStore) {
 		return {
 			_serviceBrand: undefined as undefined,
-			onDidChangeTools: new Emitter<void>().event,
-			onDidChangeServerStatus: new Emitter<ForgeMcpServerStatusEntry>().event,
+			onDidChangeTools: ds.add(new Emitter<void>()).event,
+			onDidChangeServerStatus: ds.add(new Emitter<ForgeMcpServerStatusEntry>()).event,
 			listTools: async (): Promise<AIToolDefinition[]> => [{
 				name: 'read_file',
 				description: 'Read a file',
@@ -74,10 +74,10 @@ suite('ForgeAgentService', () => {
 		};
 	}
 
-	function createMockConfigResolutionService() {
+	function createMockConfigResolutionService(ds: DisposableStore) {
 		return {
 			_serviceBrand: undefined as undefined,
-			onDidChangeResolved: new Emitter<ResolvedConfig>().event,
+			onDidChangeResolved: ds.add(new Emitter<ResolvedConfig>()).event,
 			resolve: async () => ({ mcpServers: [], agents: [], skills: [], disabled: { mcpServers: [], agents: [] } }),
 			getCached: () => ({ mcpServers: [], agents: [], skills: [], disabled: { mcpServers: [], agents: [] } }),
 			setMcpServerDisabled: async () => { },
@@ -90,9 +90,9 @@ suite('ForgeAgentService', () => {
 			[{ delta: 'Task complete.', done: true }]
 		]);
 		const service = disposables.add(new ForgeAgentService(
-			createMockAIProviderService(provider) as never,
-			createMockMcpService() as never,
-			createMockConfigResolutionService() as never,
+			createMockAIProviderService(provider, disposables) as never,
+			createMockMcpService(disposables) as never,
+			createMockConfigResolutionService(disposables) as never,
 			new NullLogService()
 		));
 
@@ -124,9 +124,9 @@ suite('ForgeAgentService', () => {
 		]);
 
 		const service = disposables.add(new ForgeAgentService(
-			createMockAIProviderService(provider) as never,
-			createMockMcpService() as never,
-			createMockConfigResolutionService() as never,
+			createMockAIProviderService(provider, disposables) as never,
+			createMockMcpService(disposables) as never,
+			createMockConfigResolutionService(disposables) as never,
 			new NullLogService()
 		));
 
@@ -157,9 +157,9 @@ suite('ForgeAgentService', () => {
 		const provider = createMockProvider(infiniteToolCalls);
 
 		const service = disposables.add(new ForgeAgentService(
-			createMockAIProviderService(provider) as never,
-			createMockMcpService() as never,
-			createMockConfigResolutionService() as never,
+			createMockAIProviderService(provider, disposables) as never,
+			createMockMcpService(disposables) as never,
+			createMockConfigResolutionService(disposables) as never,
 			new NullLogService()
 		));
 
@@ -186,9 +186,9 @@ suite('ForgeAgentService', () => {
 		]);
 
 		const service = disposables.add(new ForgeAgentService(
-			createMockAIProviderService(provider) as never,
-			createMockMcpService() as never,
-			createMockConfigResolutionService() as never,
+			createMockAIProviderService(provider, disposables) as never,
+			createMockMcpService(disposables) as never,
+			createMockConfigResolutionService(disposables) as never,
 			new NullLogService()
 		));
 
