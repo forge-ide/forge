@@ -194,12 +194,12 @@ suite('AIProviderService', () => {
 			assert.strictEqual(fired.length, 3, 'onDidChangeProviders should fire 3 times');
 		});
 
-		test('getDefaultProviderName returns the config default', () => {
-			// The default provider name comes from config.default
+		test('getDefaultProviderName returns the value set via setDefaultProviderName', () => {
+			service.setDefaultProviderName('anthropic');
+
 			const defaultName = service.getDefaultProviderName();
 
-			assert.strictEqual(typeof defaultName, 'string');
-			assert.ok(defaultName.length > 0, 'default provider name should not be empty');
+			assert.strictEqual(defaultName, 'anthropic');
 		});
 
 		test('listProviders returns all registered provider names after multiple operations', () => {
@@ -209,6 +209,46 @@ suite('AIProviderService', () => {
 			service.unregisterProvider('openai');
 
 			assert.deepStrictEqual(service.listProviders(), ['anthropic', 'local']);
+		});
+
+		test('unregisterProvider on nonexistent name does not throw', () => {
+			assert.doesNotThrow(() => {
+				service.unregisterProvider('nonexistent');
+			});
+		});
+
+		test('re-register after unregister returns new instance', () => {
+			const first = makeMockProvider('anthropic');
+			const second = makeMockProvider('anthropic');
+
+			service.registerProvider('anthropic', first);
+			service.unregisterProvider('anthropic');
+			service.registerProvider('anthropic', second);
+
+			assert.strictEqual(service.getProvider('anthropic'), second);
+			assert.notStrictEqual(service.getProvider('anthropic'), first);
+		});
+
+		test('unregister non-default provider preserves default', () => {
+			service.registerProvider('anthropic', makeMockProvider('anthropic'));
+			service.registerProvider('openai', makeMockProvider('openai'));
+			service.setDefaultProviderName('anthropic');
+
+			service.unregisterProvider('openai');
+
+			assert.strictEqual(service.getDefaultProviderName(), 'anthropic');
+		});
+
+		test('multiple listeners all receive onDidChangeProviders', () => {
+			const firedA: string[][] = [];
+			const firedB: string[][] = [];
+			disposables.add(service.onDidChangeProviders(names => firedA.push(names)));
+			disposables.add(service.onDidChangeProviders(names => firedB.push(names)));
+
+			service.registerProvider('anthropic', makeMockProvider('anthropic'));
+
+			assert.deepStrictEqual(firedA, [['anthropic']]);
+			assert.deepStrictEqual(firedB, [['anthropic']]);
 		});
 	});
 });

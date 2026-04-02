@@ -31,13 +31,13 @@ Distributed under the MIT license.
 
 ## Getting Started
 
-See `ARCHITECTURE.md` for build and development instructions.
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for build and development instructions.
 
 ## Contributing
 
 Bug reports and feature requests: <https://github.com/forge-ide/forge/issues>
 
-Before contributing code, read `ARCHITECTURE.md` and `.claude/CLAUDE.md`. They describe the layer constraints, service patterns, and design rules that all changes must follow.
+Before contributing code, read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`.claude/CLAUDE.md`](.claude/CLAUDE.md). They describe the layer constraints, service patterns, and design rules that all changes must follow.
 
 ## License
 

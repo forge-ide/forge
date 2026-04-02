@@ -4,18 +4,28 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'assert';
+import { Emitter, Event } from '../../../../../base/common/event.js';
+import { DisposableStore } from '../../../../../base/common/lifecycle.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
+import { NullLogService } from '../../../../../platform/log/common/log.js';
+import type { ISecretStorageService } from '../../../../../platform/secrets/common/secrets.js';
 import { ForgeCredentialService } from '../../electron-browser/forgeCredentialService.js';
 
 /**
  * Mock SecretStorage that stores keys in-memory.
- * Mirrors the subset of ISecretStorageService used by ForgeCredentialService.
+ * Implements the subset of ISecretStorageService used by ForgeCredentialService.
  */
 class MockSecretStorageService {
-	private readonly secrets = new Map<string, string>();
+	readonly _serviceBrand: undefined;
+	readonly type = 'in-memory' as const;
 
-	async store(key: string, value: string): Promise<void> {
+	private readonly secrets = new Map<string, string>();
+	private readonly _onDidChangeSecret = new Emitter<string>();
+	readonly onDidChangeSecret: Event<string> = this._onDidChangeSecret.event;
+
+	async set(key: string, value: string): Promise<void> {
 		this.secrets.set(key, value);
+		this._onDidChangeSecret.fire(key);
 	}
 
 	async get(key: string): Promise<string | undefined> {
@@ -24,141 +34,79 @@ class MockSecretStorageService {
 
 	async delete(key: string): Promise<void> {
 		this.secrets.delete(key);
-	}
-}
-
-/**
- * Mock environment providing controllable env vars.
- * Replaces process.env access in tests.
- */
-class MockEnvironment {
-	private readonly vars = new Map<string, string>();
-
-	set(key: string, value: string): void {
-		this.vars.set(key, value);
+		this._onDidChangeSecret.fire(key);
 	}
 
-	get(key: string): string | undefined {
-		return this.vars.get(key);
+	async keys(): Promise<string[]> {
+		return Array.from(this.secrets.keys());
 	}
 
-	clear(): void {
-		this.vars.clear();
+	dispose(): void {
+		this._onDidChangeSecret.dispose();
 	}
 }
 
 suite('ForgeCredentialService', () => {
 
-	ensureNoDisposablesAreLeakedInTestSuite();
-
+	let disposables: DisposableStore;
 	let secretStorage: MockSecretStorageService;
-	let mockEnv: MockEnvironment;
 	let service: ForgeCredentialService;
 
 	setup(() => {
+		disposables = new DisposableStore();
 		secretStorage = new MockSecretStorageService();
-		mockEnv = new MockEnvironment();
-		// ForgeCredentialService accepts a secret storage service and an env accessor
+		disposables.add({ dispose: () => secretStorage.dispose() });
 		service = new ForgeCredentialService(
-			secretStorage as ConstructorParameters<typeof ForgeCredentialService>[0],
-			mockEnv as ConstructorParameters<typeof ForgeCredentialService>[1],
+			secretStorage as unknown as ISecretStorageService,
+			new NullLogService(),
 		);
+		disposables.add(service);
 	});
 
-	suite('resolveApiKey', () => {
+	teardown(() => {
+		disposables.dispose();
+	});
+
+	ensureNoDisposablesAreLeakedInTestSuite();
+
+	suite('getApiKey', () => {
 
 		test('returns key from SecretStorage when available', async () => {
-			await secretStorage.store('forge.api.key.anthropic', 'sk-secret-123');
+			await secretStorage.set('forge.provider.anthropic', 'sk-secret-123');
 
-			const key = await service.resolveApiKey('anthropic');
+			const key = await service.getApiKey('anthropic', 'ANTHROPIC_API_KEY');
 
 			assert.strictEqual(key, 'sk-secret-123');
 		});
 
-		test('falls back to env var when SecretStorage is empty', async () => {
-			mockEnv.set('ANTHROPIC_API_KEY', 'sk-env-456');
-
-			const key = await service.resolveApiKey('anthropic');
-
-			assert.strictEqual(key, 'sk-env-456');
-		});
-
 		test('returns undefined when both SecretStorage and env var are empty', async () => {
-			const key = await service.resolveApiKey('anthropic');
+			const key = await service.getApiKey('anthropic', 'NONEXISTENT_ENV_VAR_FOR_TEST');
 
 			assert.strictEqual(key, undefined);
 		});
 
 		test('SecretStorage takes precedence over env var', async () => {
-			await secretStorage.store('forge.api.key.openai', 'sk-secret');
-			mockEnv.set('OPENAI_API_KEY', 'sk-env');
+			await secretStorage.set('forge.provider.openai', 'sk-secret');
 
-			const key = await service.resolveApiKey('openai');
+			const key = await service.getApiKey('openai', 'OPENAI_API_KEY');
 
 			assert.strictEqual(key, 'sk-secret');
 		});
-
-		test('Gemini checks GOOGLE_API_KEY env var', async () => {
-			mockEnv.set('GOOGLE_API_KEY', 'google-key-123');
-
-			const key = await service.resolveApiKey('gemini');
-
-			assert.strictEqual(key, 'google-key-123');
-		});
-
-		test('Gemini falls back to GEMINI_API_KEY when GOOGLE_API_KEY is not set', async () => {
-			mockEnv.set('GEMINI_API_KEY', 'gemini-key-456');
-
-			const key = await service.resolveApiKey('gemini');
-
-			assert.strictEqual(key, 'gemini-key-456');
-		});
-
-		test('Gemini prefers GOOGLE_API_KEY over GEMINI_API_KEY', async () => {
-			mockEnv.set('GOOGLE_API_KEY', 'google-key');
-			mockEnv.set('GEMINI_API_KEY', 'gemini-key');
-
-			const key = await service.resolveApiKey('gemini');
-
-			assert.strictEqual(key, 'google-key');
-		});
-
-		test('resolves OpenAI key from env var', async () => {
-			mockEnv.set('OPENAI_API_KEY', 'sk-openai-789');
-
-			const key = await service.resolveApiKey('openai');
-
-			assert.strictEqual(key, 'sk-openai-789');
-		});
-
-		test('resolves Mistral key from env var', async () => {
-			mockEnv.set('MISTRAL_API_KEY', 'mistral-key');
-
-			const key = await service.resolveApiKey('mistral');
-
-			assert.strictEqual(key, 'mistral-key');
-		});
-
-		test('local provider returns undefined (no key needed)', async () => {
-			const key = await service.resolveApiKey('local');
-
-			assert.strictEqual(key, undefined);
-		});
 	});
 
-	suite('storeApiKey', () => {
+	suite('setApiKey', () => {
 
 		test('stores key to SecretStorage', async () => {
-			await service.storeApiKey('anthropic', 'sk-new-key');
+			await service.setApiKey('anthropic', 'sk-new-key');
 
-			const stored = await secretStorage.get('forge.api.key.anthropic');
+			const stored = await secretStorage.get('forge.provider.anthropic');
 			assert.strictEqual(stored, 'sk-new-key');
 		});
 
-		test('stored key is retrievable via resolveApiKey', async () => {
-			await service.storeApiKey('openai', 'sk-stored');
+		test('stored key is retrievable via getApiKey', async () => {
+			await service.setApiKey('openai', 'sk-stored');
 
-			const key = await service.resolveApiKey('openai');
+			const key = await service.getApiKey('openai', 'OPENAI_API_KEY');
 			assert.strictEqual(key, 'sk-stored');
 		});
 	});
@@ -166,62 +114,113 @@ suite('ForgeCredentialService', () => {
 	suite('deleteApiKey', () => {
 
 		test('removes key from SecretStorage', async () => {
-			await secretStorage.store('forge.api.key.anthropic', 'sk-to-delete');
+			await secretStorage.set('forge.provider.anthropic', 'sk-to-delete');
 			await service.deleteApiKey('anthropic');
 
-			const key = await secretStorage.get('forge.api.key.anthropic');
+			const key = await secretStorage.get('forge.provider.anthropic');
 			assert.strictEqual(key, undefined);
 		});
 
-		test('deleted key falls through to env var on next resolve', async () => {
-			await secretStorage.store('forge.api.key.anthropic', 'sk-secret');
-			mockEnv.set('ANTHROPIC_API_KEY', 'sk-env');
-
+		test('deleted key returns undefined on next getApiKey', async () => {
+			await secretStorage.set('forge.provider.anthropic', 'sk-secret');
 			await service.deleteApiKey('anthropic');
 
-			const key = await service.resolveApiKey('anthropic');
-			assert.strictEqual(key, 'sk-env');
+			const key = await service.getApiKey('anthropic', 'NONEXISTENT_ENV_VAR_FOR_TEST');
+			assert.strictEqual(key, undefined);
 		});
 	});
 
-	suite('resolveBaseURL', () => {
+	suite('hasApiKey', () => {
 
-		test('returns env var baseURL for anthropic', () => {
-			mockEnv.set('ANTHROPIC_BASE_URL', 'https://custom.example.com');
+		test('returns true when key exists in SecretStorage', async () => {
+			await secretStorage.set('forge.provider.anthropic', 'sk-123');
 
-			const url = service.resolveBaseURL('anthropic');
-
-			assert.strictEqual(url, 'https://custom.example.com');
+			const has = await service.hasApiKey('anthropic', 'ANTHROPIC_API_KEY');
+			assert.strictEqual(has, true);
 		});
 
-		test('returns undefined when no baseURL is configured', () => {
-			const url = service.resolveBaseURL('anthropic');
+		test('returns false when no key exists', async () => {
+			const has = await service.hasApiKey('anthropic', 'NONEXISTENT_ENV_VAR_FOR_TEST');
+			assert.strictEqual(has, false);
+		});
+	});
 
-			assert.strictEqual(url, undefined);
+	suite('onDidChangeCredential', () => {
+
+		test('fires provider name when secret changes', async () => {
+			const changes: string[] = [];
+			disposables.add(service.onDidChangeCredential(name => changes.push(name)));
+
+			await service.setApiKey('anthropic', 'sk-new');
+
+			assert.deepStrictEqual(changes, ['anthropic']);
 		});
 
-		test('resolves OPENAI_BASE_URL for openai provider', () => {
-			mockEnv.set('OPENAI_BASE_URL', 'https://openai-proxy.example.com');
+		test('fires provider name when key is deleted', async () => {
+			await service.setApiKey('openai', 'sk-to-delete');
 
-			const url = service.resolveBaseURL('openai');
+			const changes: string[] = [];
+			disposables.add(service.onDidChangeCredential(name => changes.push(name)));
 
-			assert.strictEqual(url, 'https://openai-proxy.example.com');
+			await service.deleteApiKey('openai');
+
+			assert.deepStrictEqual(changes, ['openai']);
 		});
 
-		test('resolves OLLAMA_HOST for local provider', () => {
-			mockEnv.set('OLLAMA_HOST', 'http://localhost:11434');
+		test('does not fire for secrets outside the forge.provider. prefix', async () => {
+			const changes: string[] = [];
+			disposables.add(service.onDidChangeCredential(name => changes.push(name)));
 
-			const url = service.resolveBaseURL('local');
+			// Set a secret with a key that doesn't match the forge.provider. prefix
+			await secretStorage.set('unrelated.secret.key', 'some-value');
 
-			assert.strictEqual(url, 'http://localhost:11434');
+			assert.deepStrictEqual(changes, [], 'should not fire for unrelated secrets');
+		});
+	});
+
+	suite('overwrite and edge cases', () => {
+
+		test('overwriting an existing key returns the newer value', async () => {
+			await service.setApiKey('anthropic', 'sk-old');
+			await service.setApiKey('anthropic', 'sk-new');
+
+			const key = await service.getApiKey('anthropic', 'NONEXISTENT_ENV_VAR_FOR_TEST');
+			assert.strictEqual(key, 'sk-new');
+		});
+	});
+
+	suite('env var fallback', () => {
+
+		const TEST_ENV_KEY = '__FORGE_TEST_ENV_KEY_' + Date.now();
+		const CUSTOM_ENV_KEY = '__FORGE_CUSTOM_KEY_' + Date.now();
+
+		teardown(() => {
+			delete process.env[TEST_ENV_KEY];
+			delete process.env[CUSTOM_ENV_KEY];
 		});
 
-		test('resolves MISTRAL_SERVER_URL for mistral provider', () => {
-			mockEnv.set('MISTRAL_SERVER_URL', 'https://mistral-proxy.example.com');
+		test('env var is used as fallback when SecretStorage is empty', async () => {
+			process.env[TEST_ENV_KEY] = 'sk-from-env';
 
-			const url = service.resolveBaseURL('mistral');
+			const key = await service.getApiKey('testprovider', TEST_ENV_KEY);
 
-			assert.strictEqual(url, 'https://mistral-proxy.example.com');
+			assert.strictEqual(key, 'sk-from-env');
+		});
+
+		test('custom envKey env var lookup works', async () => {
+			process.env[CUSTOM_ENV_KEY] = 'sk-custom-env';
+
+			const key = await service.getApiKey('anthropic', CUSTOM_ENV_KEY);
+
+			assert.strictEqual(key, 'sk-custom-env');
+		});
+
+		test('hasApiKey returns true with env var only', async () => {
+			process.env[TEST_ENV_KEY] = 'sk-from-env';
+
+			const has = await service.hasApiKey('testprovider', TEST_ENV_KEY);
+
+			assert.strictEqual(has, true);
 		});
 	});
 });

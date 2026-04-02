@@ -20,6 +20,8 @@ export class ForgeProviderBootstrap extends Disposable {
 
 	static readonly ID = 'workbench.contrib.forgeProviderBootstrap';
 
+	private _bootstrapPromise: Promise<void> | undefined;
+
 	constructor(
 		@IAIProviderService private readonly aiProviderService: IAIProviderService,
 		@IForgeConfigService private readonly forgeConfigService: IForgeConfigService,
@@ -40,7 +42,13 @@ export class ForgeProviderBootstrap extends Disposable {
 	}
 
 	private bootstrap(): void {
-		this.bootstrapAsync().catch(error => {
+		if (this._bootstrapPromise) {
+			return; // already in flight
+		}
+		this._bootstrapPromise = this.bootstrapAsync().finally(() => {
+			this._bootstrapPromise = undefined;
+		});
+		this._bootstrapPromise.catch(error => {
 			this.logService.error('[ForgeProviderBootstrap] Bootstrap failed', error);
 		});
 	}

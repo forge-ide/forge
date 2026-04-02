@@ -15,23 +15,18 @@ import { createDecorator } from '../../../../platform/instantiation/common/insta
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 
-import { ForgeConfig, ForgeProviderConfig, resolveModelConfig, ResolvedModelConfig } from './forgeConfigTypes.js';
+import { type ForgeConfig, type ForgeProviderConfig, resolveModelConfig, type ResolvedModelConfig } from './forgeConfigTypes.js';
 
 const CONFIG_FILENAME = 'forge.json';
 
 const DEFAULT_CONFIG: ForgeConfig = {
-	defaultProvider: 'anthropic',
-	defaultModel: 'claude-sonnet-4-6',
+	defaultProvider: '',
+	defaultModel: '',
 	stream: true,
-	providers: [
-		{
-			name: 'anthropic',
-			models: [{ id: 'claude-sonnet-4-6' }],
-		},
-	],
+	providers: [],
 };
 
-export { ForgeConfig };
+export type { ForgeConfig };
 
 export const IForgeConfigService = createDecorator<IForgeConfigService>('forgeConfigService');
 

@@ -86,20 +86,23 @@ export function resolveModelConfig(
 		return undefined;
 	}
 
-	const resolvedModelId = modelId ?? config.defaultModel ?? provider.models[0]?.id;
+	const resolvedModelId = modelId ?? provider.models[0]?.id ?? config.defaultModel;
 	if (!resolvedModelId) {
 		return undefined;
 	}
 
 	const model = findModel(provider, resolvedModelId);
+	if (!model) {
+		return undefined;
+	}
 
 	return {
 		providerName: resolvedProviderName,
 		modelId: resolvedModelId,
 		baseURL: provider.baseURL,
 		envKey: provider.envKey ?? PROVIDER_ENV_VARS[resolvedProviderName] ?? `${resolvedProviderName.toUpperCase()}_API_KEY`,
-		maxTokens: model?.maxTokens ?? DEFAULT_MAX_TOKENS,
-		contextBudget: model?.contextBudget ?? DEFAULT_CONTEXT_BUDGET,
+		maxTokens: model.maxTokens ?? DEFAULT_MAX_TOKENS,
+		contextBudget: model.contextBudget ?? DEFAULT_CONTEXT_BUDGET,
 		stream: config.stream ?? true,
 	};
 }

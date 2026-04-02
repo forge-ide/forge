@@ -172,7 +172,7 @@ These directories are the target state for v0.1.0. Most do not exist yet — the
 
 - The AI layer common interfaces (`src/vs/platform/ai/common/`) — **exists**
 - The AI layer node implementations (`src/vs/platform/ai/node/`) — **exists** (Anthropic, OpenAI, Gemini, Mistral, Local)
-- The AI layer browser implementation (`src/vs/platform/ai/browser/`) — not yet
+- The AI layer browser implementation (`src/vs/platform/ai/browser/`) — **exists**
 - The MCP integration (`src/vs/workbench/services/forge/mcp/`) — not yet
 - The agent system (`src/vs/workbench/services/forge/agent/`) — not yet
 - The Forge layout service (`src/vs/workbench/services/forge/common/` + `src/vs/workbench/services/forge/browser/`) — **exists**
@@ -303,6 +303,8 @@ forge/
 │               └── forge/                   ← All Forge-specific services
 │                   ├── common/
 │                   │   ├── forgeConfigService.ts      ← IForgeConfigService interface + impl
+│                   │   ├── forgeConfigTypes.ts        ← ForgeConfig, ForgeProviderConfig, ForgeModelConfig, resolveModelConfig()
+│                   │   ├── forgeCredentialService.ts  ← IForgeCredentialService interface
 │                   │   ├── forgeLayoutService.ts      ← IForgeLayoutService interface
 │                   │   ├── forgeContextTypes.ts       ← Context types, priority enum, token budget
 │                   │   ├── forgeContextService.ts     ← IForgeContextService interface
@@ -319,6 +321,9 @@ forge/
 │                   │   │   └── forgePaneHistoryContextProvider.ts   ← Cross-pane conversation history context
 │                   │   └── media/
 │                   │       └── forgeContext.css        ← Context chip styles
+│                   ├── electron-browser/
+│                   │   ├── forgeCredentialService.ts   ← ForgeCredentialService impl (SecretStorage + process.env)
+│                   │   └── forgeProviderBootstrap.ts   ← Workbench contribution: config → credentials → provider registration
 │                   ├── node/
 │                   │   └── contextProviders/           ← Context providers requiring Node.js
 │                   │       └── forgeGitDiffContextProvider.ts  ← Git diff via child_process.execFile
@@ -346,8 +351,10 @@ forge/
 │           └── forge-light.json
 │
 ├── product.json                             ← Identity overrides (name, dirs)
-├── ARCHITECTURE.md                          ← This file
-├── DESIGN.md                                ← Design system reference
+├── docs/
+│   ├── ARCHITECTURE.md                      ← This file
+│   ├── DESIGN.md                            ← Design system reference
+│   └── CONTRIBUTING.md                      ← Contributor guide
 ├── LATER.md                                 ← Deferred platform items (pre-launch blockers)
 └── .github/
     └── workflows/
@@ -370,29 +377,41 @@ All Forge service interfaces are prefixed with `IForge` or `IAI` and live in `co
 export const IAIProviderService = createDecorator<IAIProviderService>('aiProviderService');
 export interface IAIProviderService {
   readonly _serviceBrand: undefined;
-  readonly onDidChangeProvider: Event<string>; // fires the new active provider name
+  readonly onDidChangeProviders: Event<string[]>; // fires registered provider names when the set changes
+
   registerProvider(name: string, provider: IAIProvider): void;
+  unregisterProvider(name: string): void;
   getProvider(name: string): IAIProvider | undefined;
-  getActiveProvider(): IAIProvider | undefined;  // returns undefined if no active provider is set
-  setActiveProvider(name: string): void;
+  has(name: string): boolean;
   listProviders(): string[];
+
+  getDefaultProviderName(): string | undefined;   // from config; used by new panes for initial selection
+  setDefaultProviderName(name: string): void;
 }
 
 // Pattern: implement in browser/ or node/
 class AIProviderService implements IAIProviderService { ... }
 
 // Pattern: register in workbench contributions
-registerSingleton(IAIProviderService, AIProviderService, InstantiationType.Eager);
+registerSingleton(IAIProviderService, AIProviderService, InstantiationType.Delayed);
 ```
+
+> **Note:** There is no global "active provider" concept. Each chat pane tracks its own provider independently. `getDefaultProviderName()` returns the config default used to initialize new panes.
 
 ### Service dependency order
 
 Services initialize in this order. Do not create circular dependencies.
 
 ```text
-IForgeConfigService          ← reads forge.config.ts, no dependencies
+IForgeConfigService          ← reads forge.json, no dependencies. InstantiationType: Eager.
   ↓
-IAIProviderService           ← reads config, initializes providers
+IForgeCredentialService      ← resolves API keys (SecretStorage → env var → undefined). electron-browser layer. InstantiationType: Delayed.
+  ↓
+IAIProviderService           ← provider registry. No active provider — panes choose their own. InstantiationType: Delayed.
+  ↓
+ForgeProviderBootstrap       ← workbench contribution (not a service). WorkbenchPhase.AfterRestored.
+                                Reads config, resolves credentials, sets default provider name.
+                                Re-bootstraps on config change and credential change.
   ↓
 IMCPService                  ← reads config, launches MCP child processes
   ↓
@@ -410,6 +429,20 @@ IForgeAgentService           ← depends on IAIProviderService + IMCPService
   ↓
 IForgePluginService          ← depends on all of the above
 ```
+
+### Credential resolution chain
+
+`IForgeCredentialService` resolves API keys for each provider using a two-level fallback:
+
+```text
+SecretStorage (`forge.provider.${providerName}`)
+       ↓ not found
+Environment variable (determined by provider's envKey, e.g., ANTHROPIC_API_KEY)
+       ↓ not found
+undefined  →  provider skipped during bootstrap
+```
+
+The `envKey` is resolved per-provider: explicit `envKey` field on the provider config, then `PROVIDER_ENV_VARS` lookup by provider name, then `${PROVIDER_NAME}_API_KEY` as a last-resort convention. The credential service fires `onDidChangeCredential` when a SecretStorage key changes, triggering re-bootstrap.
 
 ---
 
@@ -439,14 +472,12 @@ export interface IAIProvider {
 
 ### Adding a new provider
 
-1. Create `src/vs/platform/ai/node/[providerName]Provider.ts`
-2. Implement `IAIProvider`
-3. Register in `providerRegistry.ts`
-4. Add to `forge.config.ts` schema
-5. Add to the provider list in the onboarding flow
-6. Add to `DESIGN.md` with its accent color
+1. Create `src/vs/platform/ai/node/[providerName]Provider.ts` — implement `IAIProvider`
+2. Add the provider's default env var to `PROVIDER_ENV_VARS` in `forgeConfigTypes.ts`
+3. Add to the provider list in the onboarding flow
+4. Add to `DESIGN.md` with its accent color
 
-Do not modify any other file. The registry pattern means new providers are fully self-contained.
+Providers are bootstrapped from `forge.json` config at startup. `ForgeProviderBootstrap` reads the config, resolves credentials via `IForgeCredentialService`, and registers providers. Users declare providers in their `forge.json` `providers` array — no code changes needed beyond the implementation and env var mapping.
 
 ### Streaming architecture
 
@@ -814,41 +845,43 @@ The plugin registry UI, `forge install` CLI command, and remote registry are def
 
 ## 12. Configuration
 
-### forge.config.ts
+### forge.json
 
-The primary configuration surface. Loaded from the workspace root on open. Falls back to global config at `~/.forge/config.ts` if no workspace config is found.
+The primary configuration surface. Loaded from `forge.json` in the workspace root on open. Falls back to global config at `<userRoamingDataHome>/forge/forge.json` if no workspace config is found.
+
+The config is a tree: top-level defaults, a `providers` array, and per-provider `models` arrays. Types are defined in `forgeConfigTypes.ts`.
 
 ```typescript
-// forge.config.ts — full type definition
+// forge.json — full type definition
 interface ForgeConfig {
-  // Primary provider for new panes
-  provider: string;
+  defaultProvider: string;       // required — provider name for new panes
+  defaultModel?: string;         // optional — overrides first model in provider's list
+  stream?: boolean;              // default: true
 
-  // Specific model within the provider
-  model?: string;
+  providers: ForgeProviderConfig[];  // required — at least one
+}
 
-  // Fallback provider when primary is rate-limited or unavailable
-  fallback?: string;
+interface ForgeProviderConfig {
+  name: string;                  // required — provider ID (e.g., "anthropic")
+  baseURL?: string;              // custom endpoint
+  envKey?: string;               // override env var name for API key
+  models: ForgeModelConfig[];    // required — at least one
+}
 
-  // Default canvas layout on workspace open
-  layout?: 'focus' | 'split' | 'quad' | 'code+ai';
-
-  // MCP servers to activate on startup
-  mcp?: MCPServerConfig[];
-
-  // Max tokens per AI request
+interface ForgeModelConfig {
+  id: string;                    // required — model ID (e.g., "claude-sonnet-4-6")
   maxTokens?: number;
-
-  // Enable token streaming
-  stream?: boolean;
-
-  // Max context window to use (fraction of model's limit)
-  contextBudget?: number;  // 0.0–1.0, default 0.6
-
-  // Per-provider overrides
-  providers?: Record<string, ProviderOverride>;
+  contextBudget?: number;
 }
 ```
+
+#### Setting resolution
+
+`resolveModelConfig(config, providerName?, modelId?)` merges the config tree into a flat `ResolvedModelConfig` for runtime use. Resolution order: model-level override, then hardcoded defaults (maxTokens: 4096, contextBudget: 8000, stream: true).
+
+#### Credential resolution per provider
+
+The `envKey` for API key lookup is resolved as: explicit `envKey` on the provider config, then `PROVIDER_ENV_VARS[providerName]`, then `${PROVIDER_NAME}_API_KEY`. See section 6 for the full credential resolution chain.
 
 ### Settings
 

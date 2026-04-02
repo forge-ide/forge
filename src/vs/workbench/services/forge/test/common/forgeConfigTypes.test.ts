@@ -7,15 +7,15 @@ import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { resolveModelConfig, findProvider, findModel, type ForgeConfig, type ForgeProviderConfig, type ForgeModelConfig } from '../../common/forgeConfigTypes.js';
 
-function makeModelConfig(overrides: Partial<ForgeModelConfig> & { name: string }): ForgeModelConfig {
+function makeModelConfig(overrides: Partial<ForgeModelConfig> & { id: string }): ForgeModelConfig {
 	return { ...overrides };
 }
 
-function makeProviderConfig(overrides: Partial<ForgeProviderConfig> & { name: string; default: string; models: ForgeModelConfig[] }): ForgeProviderConfig {
+function makeProviderConfig(overrides: Partial<ForgeProviderConfig> & { name: string; models: ForgeModelConfig[] }): ForgeProviderConfig {
 	return { ...overrides };
 }
 
-function makeConfig(overrides: Partial<ForgeConfig> & { default: string; providers: ForgeProviderConfig[] }): ForgeConfig {
+function makeConfig(overrides: Partial<ForgeConfig> & { defaultProvider: string; providers: ForgeProviderConfig[] }): ForgeConfig {
 	return { ...overrides };
 }
 
@@ -25,94 +25,310 @@ suite('forgeConfigTypes', () => {
 
 	suite('resolveModelConfig', () => {
 
-		test('model-level override takes precedence over provider-level default', () => {
-			const provider = makeProviderConfig({
-				name: 'anthropic',
-				default: 'claude-sonnet-4-6',
-				maxTokens: 4096,
+		test('model-level override takes precedence over hardcoded default', () => {
+			const config = makeConfig({
+				defaultProvider: 'anthropic',
+				defaultModel: 'claude-sonnet-4-6',
 				stream: true,
-				models: [
-					makeModelConfig({ name: 'claude-sonnet-4-6', maxTokens: 8192, stream: false }),
+				providers: [
+					makeProviderConfig({
+						name: 'anthropic',
+						models: [
+							makeModelConfig({ id: 'claude-sonnet-4-6', maxTokens: 8192 }),
+						],
+					}),
 				],
 			});
 
-			const resolved = resolveModelConfig(provider, 'claude-sonnet-4-6');
+			const resolved = resolveModelConfig(config, 'anthropic', 'claude-sonnet-4-6');
 
+			assert.ok(resolved);
 			assert.strictEqual(resolved.maxTokens, 8192);
-			assert.strictEqual(resolved.stream, false);
+			assert.strictEqual(resolved.stream, true);
 		});
 
-		test('provider-level default used when model does not specify', () => {
-			const provider = makeProviderConfig({
-				name: 'anthropic',
-				default: 'claude-sonnet-4-6',
-				maxTokens: 2048,
-				stream: false,
-				contextBudget: 0.5,
-				models: [
-					makeModelConfig({ name: 'claude-sonnet-4-6' }),
+		test('hardcoded fallback when model does not specify maxTokens', () => {
+			const config = makeConfig({
+				defaultProvider: 'anthropic',
+				defaultModel: 'claude-sonnet-4-6',
+				providers: [
+					makeProviderConfig({
+						name: 'anthropic',
+						models: [
+							makeModelConfig({ id: 'claude-sonnet-4-6' }),
+						],
+					}),
 				],
 			});
 
-			const resolved = resolveModelConfig(provider, 'claude-sonnet-4-6');
+			const resolved = resolveModelConfig(config, 'anthropic', 'claude-sonnet-4-6');
 
-			assert.strictEqual(resolved.maxTokens, 2048);
-			assert.strictEqual(resolved.stream, false);
-			assert.strictEqual(resolved.contextBudget, 0.5);
-		});
-
-		test('hardcoded fallback when neither model nor provider specifies', () => {
-			const provider = makeProviderConfig({
-				name: 'anthropic',
-				default: 'claude-sonnet-4-6',
-				models: [
-					makeModelConfig({ name: 'claude-sonnet-4-6' }),
-				],
-			});
-
-			const resolved = resolveModelConfig(provider, 'claude-sonnet-4-6');
-
+			assert.ok(resolved);
 			assert.strictEqual(resolved.maxTokens, 4096);
 			assert.strictEqual(resolved.stream, true);
 		});
 
-		test('all three levels in one resolution — model > provider > hardcoded', () => {
-			const provider = makeProviderConfig({
-				name: 'openai',
-				default: 'o1',
-				maxTokens: 4096,
-				stream: true,
-				models: [
-					makeModelConfig({ name: 'o1', stream: false, maxTokens: 16384 }),
+		test('stream defaults to true when not specified', () => {
+			const config = makeConfig({
+				defaultProvider: 'anthropic',
+				providers: [
+					makeProviderConfig({
+						name: 'anthropic',
+						models: [
+							makeModelConfig({ id: 'claude-sonnet-4-6' }),
+						],
+					}),
 				],
 			});
 
-			const resolved = resolveModelConfig(provider, 'o1');
+			const resolved = resolveModelConfig(config);
 
-			// Model-level overrides
+			assert.ok(resolved);
+			assert.strictEqual(resolved.stream, true);
+		});
+
+		test('config-level stream: false overrides the default', () => {
+			const config = makeConfig({
+				defaultProvider: 'openai',
+				stream: false,
+				providers: [
+					makeProviderConfig({
+						name: 'openai',
+						models: [
+							makeModelConfig({ id: 'o1', maxTokens: 16384 }),
+						],
+					}),
+				],
+			});
+
+			const resolved = resolveModelConfig(config, 'openai', 'o1');
+
+			assert.ok(resolved);
 			assert.strictEqual(resolved.maxTokens, 16384);
 			assert.strictEqual(resolved.stream, false);
-			// No contextBudget at model or provider level — hardcoded fallback should apply
 		});
 
 		test('resolves for a model that exists in a multi-model provider', () => {
-			const provider = makeProviderConfig({
-				name: 'anthropic',
-				default: 'claude-sonnet-4-6',
-				maxTokens: 4096,
+			const config = makeConfig({
+				defaultProvider: 'anthropic',
+				defaultModel: 'claude-sonnet-4-6',
 				stream: true,
-				models: [
-					makeModelConfig({ name: 'claude-sonnet-4-6' }),
-					makeModelConfig({ name: 'claude-opus-4-6', maxTokens: 8192, contextBudget: 0.8 }),
-					makeModelConfig({ name: 'claude-haiku-4-5', maxTokens: 2048 }),
+				providers: [
+					makeProviderConfig({
+						name: 'anthropic',
+						models: [
+							makeModelConfig({ id: 'claude-sonnet-4-6' }),
+							makeModelConfig({ id: 'claude-opus-4-6', maxTokens: 8192, contextBudget: 16000 }),
+							makeModelConfig({ id: 'claude-haiku-4-5', maxTokens: 2048 }),
+						],
+					}),
 				],
 			});
 
-			const resolved = resolveModelConfig(provider, 'claude-opus-4-6');
+			const resolved = resolveModelConfig(config, 'anthropic', 'claude-opus-4-6');
 
+			assert.ok(resolved);
 			assert.strictEqual(resolved.maxTokens, 8192);
-			assert.strictEqual(resolved.contextBudget, 0.8);
-			assert.strictEqual(resolved.stream, true); // falls back to provider default
+			assert.strictEqual(resolved.contextBudget, 16000);
+			assert.strictEqual(resolved.stream, true);
+		});
+
+		test('returns undefined when resolved model not found in provider', () => {
+			const config = makeConfig({
+				defaultProvider: 'anthropic',
+				defaultModel: 'claude-sonnet-4-6',
+				providers: [
+					makeProviderConfig({
+						name: 'openai',
+						models: [makeModelConfig({ id: 'gpt-4o' })],
+					}),
+				],
+			});
+
+			// defaultModel is 'claude-sonnet-4-6' but openai has no such model;
+			// provider.models[0] is 'gpt-4o' so that takes priority
+			const resolved = resolveModelConfig(config, 'openai');
+			assert.ok(resolved);
+			assert.strictEqual(resolved.modelId, 'gpt-4o');
+		});
+
+		test('returns undefined when explicit modelId not in provider', () => {
+			const config = makeConfig({
+				defaultProvider: 'anthropic',
+				providers: [
+					makeProviderConfig({
+						name: 'anthropic',
+						models: [makeModelConfig({ id: 'claude-sonnet-4-6' })],
+					}),
+				],
+			});
+
+			const resolved = resolveModelConfig(config, 'anthropic', 'nonexistent-model');
+			assert.strictEqual(resolved, undefined);
+		});
+
+		test('returns undefined for unknown provider', () => {
+			const config = makeConfig({
+				defaultProvider: 'anthropic',
+				providers: [
+					makeProviderConfig({
+						name: 'anthropic',
+						models: [makeModelConfig({ id: 'claude-sonnet-4-6' })],
+					}),
+				],
+			});
+
+			const resolved = resolveModelConfig(config, 'nonexistent');
+
+			assert.strictEqual(resolved, undefined);
+		});
+
+		test('uses defaultProvider when providerName not specified', () => {
+			const config = makeConfig({
+				defaultProvider: 'anthropic',
+				defaultModel: 'claude-sonnet-4-6',
+				providers: [
+					makeProviderConfig({
+						name: 'anthropic',
+						models: [makeModelConfig({ id: 'claude-sonnet-4-6' })],
+					}),
+				],
+			});
+
+			const resolved = resolveModelConfig(config);
+
+			assert.ok(resolved);
+			assert.strictEqual(resolved.providerName, 'anthropic');
+			assert.strictEqual(resolved.modelId, 'claude-sonnet-4-6');
+		});
+	});
+
+	suite('resolveModelConfig — config expansion', () => {
+
+		test('model-level contextBudget override', () => {
+			const config = makeConfig({
+				defaultProvider: 'anthropic',
+				providers: [
+					makeProviderConfig({
+						name: 'anthropic',
+						models: [
+							makeModelConfig({ id: 'claude-sonnet-4-6', contextBudget: 16000 }),
+						],
+					}),
+				],
+			});
+
+			const resolved = resolveModelConfig(config, 'anthropic', 'claude-sonnet-4-6');
+
+			assert.ok(resolved);
+			assert.strictEqual(resolved.contextBudget, 16000);
+			assert.strictEqual(resolved.maxTokens, 4096); // default preserved
+		});
+
+		test('custom envKey on provider is used in resolved config', () => {
+			const config = makeConfig({
+				defaultProvider: 'anthropic',
+				providers: [
+					makeProviderConfig({
+						name: 'anthropic',
+						envKey: 'MY_CUSTOM_KEY',
+						models: [makeModelConfig({ id: 'claude-sonnet-4-6' })],
+					}),
+				],
+			});
+
+			const resolved = resolveModelConfig(config, 'anthropic', 'claude-sonnet-4-6');
+
+			assert.ok(resolved);
+			assert.strictEqual(resolved.envKey, 'MY_CUSTOM_KEY');
+		});
+
+		test('default envKey from PROVIDER_ENV_VARS when provider has no envKey', () => {
+			const config = makeConfig({
+				defaultProvider: 'anthropic',
+				providers: [
+					makeProviderConfig({
+						name: 'anthropic',
+						models: [makeModelConfig({ id: 'claude-sonnet-4-6' })],
+					}),
+				],
+			});
+
+			const resolved = resolveModelConfig(config, 'anthropic', 'claude-sonnet-4-6');
+
+			assert.ok(resolved);
+			assert.strictEqual(resolved.envKey, 'ANTHROPIC_API_KEY');
+		});
+
+		test('custom baseURL on provider is passed through to resolved config', () => {
+			const config = makeConfig({
+				defaultProvider: 'openai',
+				providers: [
+					makeProviderConfig({
+						name: 'openai',
+						baseURL: 'https://proxy.example.com',
+						models: [makeModelConfig({ id: 'gpt-4o' })],
+					}),
+				],
+			});
+
+			const resolved = resolveModelConfig(config, 'openai', 'gpt-4o');
+
+			assert.ok(resolved);
+			assert.strictEqual(resolved.baseURL, 'https://proxy.example.com');
+		});
+
+		test('unknown provider with no PROVIDER_ENV_VARS entry generates fallback envKey', () => {
+			const config = makeConfig({
+				defaultProvider: 'custom-llm',
+				providers: [
+					makeProviderConfig({
+						name: 'custom-llm',
+						models: [makeModelConfig({ id: 'custom-model' })],
+					}),
+				],
+			});
+
+			const resolved = resolveModelConfig(config, 'custom-llm', 'custom-model');
+
+			assert.ok(resolved);
+			assert.strictEqual(resolved.envKey, 'CUSTOM-LLM_API_KEY');
+		});
+
+		test('multi-provider config resolves each provider independently', () => {
+			const config = makeConfig({
+				defaultProvider: 'anthropic',
+				providers: [
+					makeProviderConfig({
+						name: 'anthropic',
+						models: [makeModelConfig({ id: 'claude-sonnet-4-6', maxTokens: 8192 })],
+					}),
+					makeProviderConfig({
+						name: 'openai',
+						baseURL: 'https://api.openai.com',
+						models: [makeModelConfig({ id: 'gpt-4o', maxTokens: 16384 })],
+					}),
+					makeProviderConfig({
+						name: 'local',
+						models: [makeModelConfig({ id: 'llama-3' })],
+					}),
+				],
+			});
+
+			const anthropic = resolveModelConfig(config, 'anthropic', 'claude-sonnet-4-6');
+			const openai = resolveModelConfig(config, 'openai', 'gpt-4o');
+			const local = resolveModelConfig(config, 'local', 'llama-3');
+
+			assert.ok(anthropic);
+			assert.strictEqual(anthropic.maxTokens, 8192);
+			assert.strictEqual(anthropic.envKey, 'ANTHROPIC_API_KEY');
+
+			assert.ok(openai);
+			assert.strictEqual(openai.maxTokens, 16384);
+			assert.strictEqual(openai.baseURL, 'https://api.openai.com');
+
+			assert.ok(local);
+			assert.strictEqual(local.maxTokens, 4096); // default
 		});
 	});
 
@@ -120,10 +336,10 @@ suite('forgeConfigTypes', () => {
 
 		test('finds provider by name', () => {
 			const config = makeConfig({
-				default: 'anthropic',
+				defaultProvider: 'anthropic',
 				providers: [
-					makeProviderConfig({ name: 'anthropic', default: 'claude-sonnet-4-6', models: [makeModelConfig({ name: 'claude-sonnet-4-6' })] }),
-					makeProviderConfig({ name: 'openai', default: 'gpt-4o', models: [makeModelConfig({ name: 'gpt-4o' })] }),
+					makeProviderConfig({ name: 'anthropic', models: [makeModelConfig({ id: 'claude-sonnet-4-6' })] }),
+					makeProviderConfig({ name: 'openai', models: [makeModelConfig({ id: 'gpt-4o' })] }),
 				],
 			});
 
@@ -135,9 +351,9 @@ suite('forgeConfigTypes', () => {
 
 		test('returns undefined for missing provider', () => {
 			const config = makeConfig({
-				default: 'anthropic',
+				defaultProvider: 'anthropic',
 				providers: [
-					makeProviderConfig({ name: 'anthropic', default: 'claude-sonnet-4-6', models: [makeModelConfig({ name: 'claude-sonnet-4-6' })] }),
+					makeProviderConfig({ name: 'anthropic', models: [makeModelConfig({ id: 'claude-sonnet-4-6' })] }),
 				],
 			});
 
@@ -147,9 +363,8 @@ suite('forgeConfigTypes', () => {
 		});
 
 		test('returns undefined for empty providers array', () => {
-			// Edge case — config with no providers (invalid, but findProvider should not throw)
 			const config = makeConfig({
-				default: 'anthropic',
+				defaultProvider: 'anthropic',
 				providers: [],
 			});
 
@@ -157,33 +372,43 @@ suite('forgeConfigTypes', () => {
 
 			assert.strictEqual(provider, undefined);
 		});
+
+		test('lookup is case-sensitive', () => {
+			const config = makeConfig({
+				defaultProvider: 'anthropic',
+				providers: [
+					makeProviderConfig({ name: 'anthropic', models: [makeModelConfig({ id: 'claude-sonnet-4-6' })] }),
+				],
+			});
+
+			assert.strictEqual(findProvider(config, 'Anthropic'), undefined);
+			assert.strictEqual(findProvider(config, 'ANTHROPIC'), undefined);
+		});
 	});
 
 	suite('findModel', () => {
 
-		test('finds model by name within provider', () => {
+		test('finds model by id within provider', () => {
 			const provider = makeProviderConfig({
 				name: 'anthropic',
-				default: 'claude-sonnet-4-6',
 				models: [
-					makeModelConfig({ name: 'claude-sonnet-4-6' }),
-					makeModelConfig({ name: 'claude-opus-4-6', maxTokens: 8192 }),
+					makeModelConfig({ id: 'claude-sonnet-4-6' }),
+					makeModelConfig({ id: 'claude-opus-4-6', maxTokens: 8192 }),
 				],
 			});
 
 			const model = findModel(provider, 'claude-opus-4-6');
 
 			assert.ok(model);
-			assert.strictEqual(model.name, 'claude-opus-4-6');
+			assert.strictEqual(model.id, 'claude-opus-4-6');
 			assert.strictEqual(model.maxTokens, 8192);
 		});
 
 		test('returns undefined for missing model', () => {
 			const provider = makeProviderConfig({
 				name: 'anthropic',
-				default: 'claude-sonnet-4-6',
 				models: [
-					makeModelConfig({ name: 'claude-sonnet-4-6' }),
+					makeModelConfig({ id: 'claude-sonnet-4-6' }),
 				],
 			});
 
@@ -195,7 +420,6 @@ suite('forgeConfigTypes', () => {
 		test('returns undefined for empty models array', () => {
 			const provider = makeProviderConfig({
 				name: 'anthropic',
-				default: 'claude-sonnet-4-6',
 				models: [],
 			});
 

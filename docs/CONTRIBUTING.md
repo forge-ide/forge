@@ -72,7 +72,7 @@ scripts\code.bat    # Windows
 
 ### Before You Write Code
 
-Read [AGENT.md](.claude/CLAUDE.md) — it explains the layered architecture, DI system, and what is safe to change. It also lists areas that require extra care and things that must not be changed. Reading it fully will save you time.
+Read [AGENT.md](../.claude/CLAUDE.md) — it explains the layered architecture, DI system, and what is safe to change. It also lists areas that require extra care and things that must not be changed. Reading it fully will save you time.
 
 ### Code Style
 
@@ -86,7 +86,7 @@ Read [AGENT.md](.claude/CLAUDE.md) — it explains the layered architecture, DI 
 
 ### Design Rules
 
-All UI changes must follow [DESIGN.md](DESIGN.md):
+All UI changes must follow [DESIGN.md](DESIGN.md) (in this same folder):
 
 - Colors: `var(--color-*)` tokens only — no raw hex values
 - Fonts: Barlow Condensed (headings), Barlow (body), Fira Code (code/identifiers) — no others

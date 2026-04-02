@@ -85,8 +85,10 @@ suite('ForgeConfigService', () => {
 
 		const config = service.getConfig();
 
-		assert.strictEqual(config.defaultProvider, 'anthropic');
-		assert.strictEqual(config.defaultModel, 'claude-sonnet-4-6');
+		assert.strictEqual(config.defaultProvider, '');
+		assert.strictEqual(config.defaultModel, '');
+		assert.strictEqual(config.stream, true);
+		assert.deepStrictEqual(config.providers, []);
 	});
 
 	test('getConfig returns parsed config from forge.json', async () => {
@@ -125,7 +127,7 @@ suite('ForgeConfigService', () => {
 		const config = service.getConfig();
 
 		// Should gracefully fall back to defaults, not throw
-		assert.strictEqual(config.defaultProvider, 'anthropic');
+		assert.strictEqual(config.defaultProvider, '');
 	});
 
 	test('updateConfig merges partial config and fires onDidChange', async () => {
@@ -139,23 +141,86 @@ suite('ForgeConfigService', () => {
 		assert.ok(changes.length >= 1, 'onDidChange should fire');
 		const lastConfig = changes[changes.length - 1];
 		assert.strictEqual(lastConfig.defaultModel, 'gpt-4o-mini');
-		assert.strictEqual(lastConfig.defaultProvider, 'anthropic'); // default preserved
+		assert.strictEqual(lastConfig.defaultProvider, ''); // default preserved
+	});
+
+	// --- File watcher and debounce ---
+
+	test('file watcher triggers reload on external edit', async () => {
+		// Write initial config
+		const configUri = URI.joinPath(workspaceUri, 'forge.json');
+		const initialConfig: ForgeConfig = {
+			defaultProvider: 'anthropic',
+			providers: [{ name: 'anthropic', models: [{ id: 'claude-sonnet-4-6' }] }],
+		};
+		await fileService.writeFile(configUri, VSBuffer.fromString(JSON.stringify(initialConfig)));
+
+		const service = createService();
+		await Event.toPromise(service.onDidChange);
+
+		assert.strictEqual(service.getConfig().defaultProvider, 'anthropic');
+
+		// Simulate external edit — change defaultProvider
+		const updatedConfig: ForgeConfig = {
+			defaultProvider: 'openai',
+			providers: [{ name: 'openai', models: [{ id: 'gpt-4o' }] }],
+		};
+		await fileService.writeFile(configUri, VSBuffer.fromString(JSON.stringify(updatedConfig)));
+
+		// Wait for the debounced file watcher to pick up the change
+		await Event.toPromise(service.onDidChange);
+
+		assert.strictEqual(service.getConfig().defaultProvider, 'openai');
+		assert.strictEqual(service.getConfig().providers[0].name, 'openai');
+	});
+
+	test('rapid config changes debounce to single reload', async () => {
+		const configUri = URI.joinPath(workspaceUri, 'forge.json');
+		const initialConfig: ForgeConfig = {
+			defaultProvider: 'v0',
+			providers: [],
+		};
+		await fileService.writeFile(configUri, VSBuffer.fromString(JSON.stringify(initialConfig)));
+
+		const service = createService();
+		await Event.toPromise(service.onDidChange);
+
+		const changeEvents: ForgeConfig[] = [];
+		disposables.add(service.onDidChange(config => changeEvents.push(config)));
+
+		// Write 5 times in rapid succession (within 100ms debounce window)
+		for (let i = 1; i <= 5; i++) {
+			await fileService.writeFile(configUri, VSBuffer.fromString(JSON.stringify({
+				defaultProvider: `v${i}`,
+				providers: [],
+			})));
+		}
+
+		// Wait for debounce to settle (100ms debounce + margin)
+		await new Promise<void>(resolve => setTimeout(resolve, 250));
+
+		// Should have debounced — fewer events than writes
+		assert.ok(changeEvents.length < 5, `expected fewer than 5 change events due to debounce, got ${changeEvents.length}`);
+		assert.ok(changeEvents.length >= 1, 'should have at least 1 change event');
+
+		// Final state should reflect the last write
+		assert.strictEqual(service.getConfig().defaultProvider, 'v5');
 	});
 
 	// --- Phase 3.5: New config shape tests ---
 
 	suite('Phase 3.5 — multi-provider config shape', () => {
 
-		test('new config with default + providers array parses correctly', async () => {
-			const newConfig = {
-				default: 'anthropic',
+		test('new config with defaultProvider + providers array parses correctly', async () => {
+			const newConfig: ForgeConfig = {
+				defaultProvider: 'anthropic',
+				defaultModel: 'claude-sonnet-4-6',
+				stream: true,
 				providers: [
 					{
 						name: 'anthropic',
-						default: 'claude-sonnet-4-6',
-						stream: true,
 						models: [
-							{ name: 'claude-sonnet-4-6', maxTokens: 4096 },
+							{ id: 'claude-sonnet-4-6', maxTokens: 4096 },
 						],
 					},
 				],
@@ -168,26 +233,23 @@ suite('ForgeConfigService', () => {
 
 			const config = service.getConfig();
 
-			assert.strictEqual(config.default, 'anthropic');
+			assert.strictEqual(config.defaultProvider, 'anthropic');
 			assert.ok(Array.isArray(config.providers), 'providers should be an array');
-			assert.strictEqual(config.providers!.length, 1);
-			assert.strictEqual(config.providers![0].name, 'anthropic');
+			assert.strictEqual(config.providers.length, 1);
+			assert.strictEqual(config.providers[0].name, 'anthropic');
 		});
 
-		test('enabled: false provider is preserved in config', async () => {
-			const newConfig = {
-				default: 'openai',
+		test('multiple providers are preserved in config', async () => {
+			const newConfig: ForgeConfig = {
+				defaultProvider: 'openai',
 				providers: [
 					{
 						name: 'openai',
-						default: 'gpt-4o',
-						models: [{ name: 'gpt-4o' }],
+						models: [{ id: 'gpt-4o' }],
 					},
 					{
-						name: 'gemini',
-						default: 'gemini-2.0-flash',
-						enabled: false,
-						models: [{ name: 'gemini-2.0-flash' }],
+						name: 'anthropic',
+						models: [{ id: 'claude-sonnet-4-6' }],
 					},
 				],
 			};
@@ -199,181 +261,174 @@ suite('ForgeConfigService', () => {
 
 			const config = service.getConfig();
 
-			assert.strictEqual(config.providers!.length, 2);
-			const gemini = config.providers!.find(p => p.name === 'gemini');
-			assert.ok(gemini);
-			assert.strictEqual(gemini.enabled, false);
+			assert.strictEqual(config.providers.length, 2);
+			const anthropic = config.providers.find(p => p.name === 'anthropic');
+			assert.ok(anthropic);
 		});
 
-		test('validation: config.default must match a provider name', async () => {
-			const invalidConfig = {
-				default: 'nonexistent',
+		test('config with nonexistent defaultProvider is preserved as-is (no validation)', async () => {
+			const configWithBadDefault = {
+				defaultProvider: 'nonexistent',
 				providers: [
 					{
 						name: 'anthropic',
-						default: 'claude-sonnet-4-6',
-						models: [{ name: 'claude-sonnet-4-6' }],
+						models: [{ id: 'claude-sonnet-4-6' }],
 					},
 				],
 			};
 			const configUri = URI.joinPath(workspaceUri, 'forge.json');
-			await fileService.writeFile(configUri, VSBuffer.fromString(JSON.stringify(invalidConfig)));
+			await fileService.writeFile(configUri, VSBuffer.fromString(JSON.stringify(configWithBadDefault)));
 
 			const service = createService();
-
-			// Invalid config should fall back to defaults or report validation error
-			await new Promise<void>(resolve => setTimeout(resolve, 150));
+			await Event.toPromise(service.onDidChange);
 
 			const config = service.getConfig();
-			// The service should reject or fall back — default should not be 'nonexistent'
-			// (exact behavior depends on implementation: fallback to defaults or throw)
-			assert.ok(
-				config.default !== 'nonexistent' || config.provider === 'anthropic',
-				'Invalid default should be rejected or fall back'
-			);
+			// Config service does not validate — nonexistent default passes through
+			assert.strictEqual(config.defaultProvider, 'nonexistent');
 		});
 
-		test('validation: provider.default must match a model name', async () => {
-			const invalidConfig = {
-				default: 'anthropic',
+		test('duplicate provider names are preserved as-is (no validation)', async () => {
+			const configWithDupes = {
+				defaultProvider: 'anthropic',
 				providers: [
 					{
 						name: 'anthropic',
-						default: 'nonexistent-model',
-						models: [{ name: 'claude-sonnet-4-6' }],
+						models: [{ id: 'claude-sonnet-4-6' }],
+					},
+					{
+						name: 'anthropic',
+						models: [{ id: 'claude-opus-4-6' }],
 					},
 				],
 			};
 			const configUri = URI.joinPath(workspaceUri, 'forge.json');
-			await fileService.writeFile(configUri, VSBuffer.fromString(JSON.stringify(invalidConfig)));
+			await fileService.writeFile(configUri, VSBuffer.fromString(JSON.stringify(configWithDupes)));
 
 			const service = createService();
-
-			await new Promise<void>(resolve => setTimeout(resolve, 150));
+			await Event.toPromise(service.onDidChange);
 
 			const config = service.getConfig();
-			// Provider default 'nonexistent-model' does not match any model name
-			// Implementation should reject or fall back
-			if (config.providers && config.providers.length > 0) {
-				const provider = config.providers[0];
-				assert.ok(
-					provider.default !== 'nonexistent-model' || config.provider === 'anthropic',
-					'Invalid provider default should be rejected or fall back'
-				);
-			}
+			// Config service does not validate — duplicates pass through
+			assert.strictEqual(config.providers.length, 2);
 		});
 
-		test('validation: no duplicate provider names', async () => {
-			const invalidConfig = {
-				default: 'anthropic',
+		test('duplicate model ids within a provider are preserved as-is (no validation)', async () => {
+			const configWithDupes = {
+				defaultProvider: 'anthropic',
 				providers: [
 					{
 						name: 'anthropic',
-						default: 'claude-sonnet-4-6',
-						models: [{ name: 'claude-sonnet-4-6' }],
-					},
-					{
-						name: 'anthropic',
-						default: 'claude-opus-4-6',
-						models: [{ name: 'claude-opus-4-6' }],
-					},
-				],
-			};
-			const configUri = URI.joinPath(workspaceUri, 'forge.json');
-			await fileService.writeFile(configUri, VSBuffer.fromString(JSON.stringify(invalidConfig)));
-
-			const service = createService();
-
-			await new Promise<void>(resolve => setTimeout(resolve, 150));
-
-			const config = service.getConfig();
-			// Duplicate provider names should be rejected
-			if (config.providers) {
-				const names = config.providers.map(p => p.name);
-				const uniqueNames = new Set(names);
-				assert.strictEqual(names.length, uniqueNames.size, 'Duplicate provider names should be rejected');
-			}
-		});
-
-		test('validation: no duplicate model names within a provider', async () => {
-			const invalidConfig = {
-				default: 'anthropic',
-				providers: [
-					{
-						name: 'anthropic',
-						default: 'claude-sonnet-4-6',
 						models: [
-							{ name: 'claude-sonnet-4-6' },
-							{ name: 'claude-sonnet-4-6' },
+							{ id: 'claude-sonnet-4-6' },
+							{ id: 'claude-sonnet-4-6' },
 						],
 					},
 				],
 			};
 			const configUri = URI.joinPath(workspaceUri, 'forge.json');
-			await fileService.writeFile(configUri, VSBuffer.fromString(JSON.stringify(invalidConfig)));
+			await fileService.writeFile(configUri, VSBuffer.fromString(JSON.stringify(configWithDupes)));
 
 			const service = createService();
-
-			await new Promise<void>(resolve => setTimeout(resolve, 150));
+			await Event.toPromise(service.onDidChange);
 
 			const config = service.getConfig();
-			// Duplicate model names should be rejected
-			if (config.providers && config.providers.length > 0) {
-				const models = config.providers[0].models;
-				if (models) {
-					const names = models.map(m => m.name);
-					const uniqueNames = new Set(names);
-					assert.strictEqual(names.length, uniqueNames.size, 'Duplicate model names should be rejected');
-				}
-			}
+			// Config service does not validate — duplicates pass through
+			assert.strictEqual(config.providers[0].models.length, 2);
 		});
 
-		test('validation: at least one provider required', async () => {
-			const invalidConfig = {
-				default: 'anthropic',
+		test('empty providers array is preserved as-is (no validation)', async () => {
+			const emptyConfig = {
+				defaultProvider: 'anthropic',
 				providers: [],
 			};
 			const configUri = URI.joinPath(workspaceUri, 'forge.json');
-			await fileService.writeFile(configUri, VSBuffer.fromString(JSON.stringify(invalidConfig)));
+			await fileService.writeFile(configUri, VSBuffer.fromString(JSON.stringify(emptyConfig)));
 
 			const service = createService();
-
-			await new Promise<void>(resolve => setTimeout(resolve, 150));
+			await Event.toPromise(service.onDidChange);
 
 			const config = service.getConfig();
-			// Empty providers array should be rejected — should fall back to defaults
-			assert.ok(
-				!config.providers || config.providers.length > 0 || config.provider === 'anthropic',
-				'Empty providers array should be rejected or fall back to defaults'
-			);
+			// Config service does not validate — empty providers passes through
+			assert.strictEqual(config.defaultProvider, 'anthropic');
+			assert.deepStrictEqual(config.providers, []);
 		});
 
-		test('validation: at least one model per provider required', async () => {
-			const invalidConfig = {
-				default: 'anthropic',
+		test('config with all optional fields set preserves them', async () => {
+			const fullConfig: ForgeConfig = {
+				defaultProvider: 'anthropic',
+				defaultModel: 'claude-opus-4-6',
+				stream: false,
 				providers: [
 					{
 						name: 'anthropic',
-						default: 'claude-sonnet-4-6',
+						baseURL: 'https://proxy.internal',
+						envKey: 'MY_ANTHROPIC_KEY',
+						models: [
+							{ id: 'claude-sonnet-4-6', maxTokens: 8192, contextBudget: 16000 },
+							{ id: 'claude-opus-4-6' },
+						],
+					},
+				],
+			};
+			const configUri = URI.joinPath(workspaceUri, 'forge.json');
+			await fileService.writeFile(configUri, VSBuffer.fromString(JSON.stringify(fullConfig)));
+
+			const service = createService();
+			await Event.toPromise(service.onDidChange);
+
+			const config = service.getConfig();
+
+			assert.strictEqual(config.stream, false);
+			assert.strictEqual(config.defaultModel, 'claude-opus-4-6');
+			assert.strictEqual(config.providers[0].baseURL, 'https://proxy.internal');
+			assert.strictEqual(config.providers[0].envKey, 'MY_ANTHROPIC_KEY');
+			assert.strictEqual(config.providers[0].models[0].maxTokens, 8192);
+			assert.strictEqual(config.providers[0].models[0].contextBudget, 16000);
+		});
+
+		test('minimal model with only id field parses successfully', async () => {
+			const minimalConfig: ForgeConfig = {
+				defaultProvider: 'openai',
+				providers: [
+					{
+						name: 'openai',
+						models: [{ id: 'gpt-4o' }],
+					},
+				],
+			};
+			const configUri = URI.joinPath(workspaceUri, 'forge.json');
+			await fileService.writeFile(configUri, VSBuffer.fromString(JSON.stringify(minimalConfig)));
+
+			const service = createService();
+			await Event.toPromise(service.onDidChange);
+
+			const config = service.getConfig();
+
+			assert.strictEqual(config.providers[0].models[0].id, 'gpt-4o');
+			assert.strictEqual(config.providers[0].models[0].maxTokens, undefined);
+			assert.strictEqual(config.providers[0].models[0].contextBudget, undefined);
+		});
+
+		test('provider with empty models array is preserved as-is (no validation)', async () => {
+			const configWithEmptyModels = {
+				defaultProvider: 'anthropic',
+				providers: [
+					{
+						name: 'anthropic',
 						models: [],
 					},
 				],
 			};
 			const configUri = URI.joinPath(workspaceUri, 'forge.json');
-			await fileService.writeFile(configUri, VSBuffer.fromString(JSON.stringify(invalidConfig)));
+			await fileService.writeFile(configUri, VSBuffer.fromString(JSON.stringify(configWithEmptyModels)));
 
 			const service = createService();
-
-			await new Promise<void>(resolve => setTimeout(resolve, 150));
+			await Event.toPromise(service.onDidChange);
 
 			const config = service.getConfig();
-			// Provider with empty models should be rejected
-			if (config.providers && config.providers.length > 0) {
-				assert.ok(
-					config.providers[0].models === undefined || config.providers[0].models.length > 0,
-					'Provider with no models should be rejected or removed'
-				);
-			}
+			// Config service does not validate — empty models passes through
+			assert.strictEqual(config.providers.length, 1);
+			assert.deepStrictEqual(config.providers[0].models, []);
 		});
 	});
 });
