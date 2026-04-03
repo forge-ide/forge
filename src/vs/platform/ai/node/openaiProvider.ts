@@ -1,10 +1,5 @@
-/*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
- *--------------------------------------------------------------------------------------------*/
-
 import OpenAI from 'openai';
-import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions.js';
+import type { ChatCompletionMessageParam, ChatCompletionTool } from 'openai/resources/chat/completions/completions.js';
 import type { AICompletionRequest, AICompletionResponse, AIStreamChunk, AIValidationResult, IAIProvider } from '../common/aiProvider.js';
 
 export class OpenAIProvider implements IAIProvider {
@@ -36,17 +31,71 @@ export class OpenAIProvider implements IAIProvider {
 	async *stream(request: AICompletionRequest): AsyncIterable<AIStreamChunk> {
 		const messages = this._buildMessages(request);
 
+		const tools: ChatCompletionTool[] | undefined = request.tools?.map(t => ({
+			type: 'function' as const,
+			function: {
+				name: t.name,
+				description: t.description,
+				parameters: t.inputSchema as Record<string, unknown>,
+			},
+		}));
+
 		const stream = await this.client.chat.completions.create({
 			model: request.model,
 			max_tokens: request.maxTokens,
 			messages,
 			stream: true,
+			...(tools && tools.length > 0 ? { tools } : {}),
 		});
 
+		const pendingToolCalls = new Map<number, { id: string; name: string; args: string }>();
+
 		for await (const chunk of stream) {
-			const delta = chunk.choices[0]?.delta?.content;
-			if (delta) {
-				yield { delta, done: false };
+			const choice = chunk.choices[0];
+			if (!choice) {
+				continue;
+			}
+
+			const delta = choice.delta;
+
+			if (delta.content) {
+				yield { delta: delta.content, done: false };
+			}
+
+			if (delta.tool_calls) {
+				for (const tc of delta.tool_calls) {
+					const existing = pendingToolCalls.get(tc.index);
+					if (existing) {
+						existing.args += tc.function?.arguments ?? '';
+					} else {
+						pendingToolCalls.set(tc.index, {
+							id: tc.id ?? '',
+							name: tc.function?.name ?? '',
+							args: tc.function?.arguments ?? '',
+						});
+					}
+				}
+			}
+
+			if (choice.finish_reason === 'tool_calls') {
+				for (const [, tc] of pendingToolCalls) {
+					let input: Record<string, unknown>;
+					try {
+						input = JSON.parse(tc.args || '{}') as Record<string, unknown>;
+					} catch (e) {
+						throw new Error(`Failed to parse tool arguments JSON for tool '${tc.name}': ${(e as Error).message}`);
+					}
+					yield {
+						delta: '',
+						done: false,
+						toolUse: {
+							id: tc.id,
+							name: tc.name,
+							input,
+						},
+					};
+				}
+				pendingToolCalls.clear();
 			}
 		}
 
@@ -75,6 +124,15 @@ export class OpenAIProvider implements IAIProvider {
 			}
 			if (m.role === 'user') {
 				messages.push({ role: 'user' as const, content: m.content });
+			} else if (m.role === 'tool_result') {
+				if (!m.toolCallId) {
+					throw new Error('tool_result message requires toolCallId');
+				}
+				messages.push({
+					role: 'tool' as const,
+					tool_call_id: m.toolCallId,
+					content: m.content,
+				});
 			} else {
 				messages.push({ role: 'assistant' as const, content: m.content });
 			}

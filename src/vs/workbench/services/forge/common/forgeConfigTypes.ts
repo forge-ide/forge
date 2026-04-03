@@ -3,6 +3,8 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { ConfigPaths, DisabledConfig } from './forgeConfigResolutionTypes.js';
+
 /**
  * Per-model configuration within a provider block.
  */
@@ -30,6 +32,8 @@ export interface ForgeConfig {
 	readonly defaultModel?: string;
 	readonly stream?: boolean;
 	readonly providers: ForgeProviderConfig[];
+	readonly configPaths?: ConfigPaths;
+	readonly disabled?: DisabledConfig;
 }
 
 /**

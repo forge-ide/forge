@@ -16,11 +16,12 @@
 8. [The Canvas System](#8-the-canvas-system)
 9. [MCP Integration](#9-mcp-integration)
 10. [Agent System](#10-agent-system)
-11. [Plugin System](#11-plugin-system)
-12. [Configuration](#12-configuration)
-13. [Data & State](#13-data--state)
-14. [Build & Distribution](#14-build--distribution)
-15. [Decision Log](#15-decision-log)
+11. [Skills](#11-skills)
+12. [Plugin System](#12-plugin-system)
+13. [Configuration](#13-configuration)
+14. [Data & State](#14-data--state)
+15. [Build & Distribution](#15-build--distribution)
+16. [Decision Log](#16-decision-log)
 
 ---
 
@@ -425,7 +426,11 @@ IForgeGitDiffService         ← depends on ILogService. Node-only, registered i
   ↓
 ForgeActiveEditorContextProvider ← workbench contribution (not a service). Registered via registerWorkbenchContribution2, WorkbenchPhase.AfterRestored. Depends on IEditorService, IForgeLayoutService, IForgeContextService, IFileService, IConfigurationService, ILogService.
   ↓
-IForgeAgentService           ← depends on IAIProviderService + IMCPService
+IForgeConfigResolutionService ← resolves .mcp.json, .agents/, .skills/ from global/configPaths/project dirs. Depends on IForgeConfigService.
+  ↓
+IForgeMcpService             ← bridge to VS Code's IMcpService. Lists tools, calls tools, tracks server status. Depends on IForgeConfigResolutionService.
+  ↓
+IForgeAgentService           ← agentic loop. Spawns tasks from definitions, emits step events for UI. Depends on IForgeMcpService.
   ↓
 IForgePluginService          ← depends on all of the above
 ```
@@ -712,26 +717,7 @@ async function toolLoop(provider, mcpService, request) {
 
 ### MCP server configuration
 
-Servers are configured in `forge.config.ts` and loaded at startup. Each server entry specifies the transport (stdio or http) and launch command.
-
-```typescript
-// forge.config.ts
-mcp: [
-  {
-    name: 'filesystem',
-    transport: 'stdio',
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-filesystem', '~/'],
-  },
-  {
-    name: 'github',
-    transport: 'stdio',
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-github'],
-    env: { GITHUB_TOKEN: process.env.GITHUB_TOKEN },
-  },
-]
-```
+Forge delegates MCP server lifecycle to VS Code's native `IMcpService` via `IForgeMcpService`. MCP server definitions come from `.mcp.json` files discovered by `IForgeConfigResolutionService` — not from VS Code settings or `forge.json`. `IForgeMcpBridgeHost` provides the layer boundary abstraction.
 
 ---
 
@@ -804,9 +790,21 @@ Agents are spawned by the orchestrating model via a special `forge_spawn_agent` 
 
 This means the orchestrating model does not need special prompting to use agents — it uses them the same way it uses any other tool.
 
+### Agent definitions
+
+Agent definitions come from `.agents/` directories (markdown files with YAML frontmatter). `IForgeAgentService.spawnAgentFromDefinition` bridges config-sourced definitions to runtime `ForgeAgentTask` instances via `createAgentTaskFromDefinition`. Enable/disable state persists to `forge.json` `disabled.agents` and takes effect on next spawn.
+
 ---
 
-## 11. Plugin System
+## 11. Skills
+
+Skills are the primary extensibility mechanism for prompt-based behavior. Skill definitions live in `.skills/` directories using the same markdown/YAML format as agent definitions. `parseSkillMarkdown` extracts `name`, `description`, and `content` fields. The `configPaths.skills` key in `forge.json` adds extra search directories.
+
+Skills replace the plugin system's `agentBehaviours` concept for prompt-level customization.
+
+---
+
+## 12. Plugin System
 
 ### Beta scope
 
@@ -843,7 +841,28 @@ The plugin registry UI, `forge install` CLI command, and remote registry are def
 
 ---
 
-## 12. Configuration
+## 13. Configuration
+
+### Portable Configuration
+
+Forge reads configuration from portable files shared across AI tools:
+
+| Config | Global | Project | Format |
+|--------|--------|---------|--------|
+| MCP servers | `~/.mcp.json` | `.mcp.json` | `mcpServers` object (Claude Code / Cursor / Windsurf standard) |
+| Agents | `~/.agents/*.md` | `.agents/*.md` | YAML frontmatter + markdown body |
+| Skills | `~/.skills/*.md` | `.skills/*.md` | YAML frontmatter + markdown body |
+
+Additional search directories and runtime disable lists are configured in `forge.json`:
+
+```json
+{
+  "configPaths": { "mcp": [...], "agents": [...], "skills": [...] },
+  "disabled": { "mcpServers": [...], "agents": [...] }
+}
+```
+
+**Resolution order:** Global → `configPaths` entries (in order) → Project. Later wins on name conflict. `disabled` lists filter the final result.
 
 ### forge.json
 
@@ -898,7 +917,7 @@ Standard VS Code settings are used for user preferences that don't belong in the
 
 ---
 
-## 13. Data & State
+## 14. Data & State
 
 ### What is persisted
 
@@ -926,7 +945,7 @@ Forge has no telemetry. VS Code's telemetry is disabled in `product.json`. No da
 
 ---
 
-## 14. Build & Distribution
+## 15. Build & Distribution
 
 ### Development build
 
@@ -1057,7 +1076,7 @@ Releases run the full package pipeline for all platforms via matrix strategy (`f
 
 ---
 
-## 15. Decision Log
+## 16. Decision Log
 
 A record of significant architectural decisions, why they were made, and what alternatives were considered. Add to this whenever a non-obvious decision is made.
 

@@ -192,6 +192,80 @@ Providers without valid credentials are skipped during startup — they don't ca
 
 ---
 
+## MCP Servers (.mcp.json)
+
+MCP servers are configured in `.mcp.json` files using the ecosystem-standard format shared by Claude Code, Cursor, Windsurf, and Junie.
+
+**Locations (later wins on name conflict):**
+- `~/.mcp.json` — global personal servers
+- Directories listed in `forge.json` `configPaths.mcp`
+- `.mcp.json` in the project root — project-specific servers
+
+**Format:**
+```json
+{
+  "mcpServers": {
+    "server-name": {
+      "command": "npx",
+      "args": ["-y", "package-name"],
+      "env": { "KEY": "${env:KEY}" }
+    }
+  }
+}
+```
+
+---
+
+## Agent Definitions (.agents/)
+
+Agent definitions are markdown files with YAML frontmatter.
+
+**Locations (later wins on name conflict):** `~/.agents/`, `configPaths.agents` entries, `.agents/`
+
+**Format:**
+```markdown
+---
+name: agent-name
+description: What this agent does
+tools: [filesystem, github]
+maxTurns: 10
+provider: anthropic
+model: claude-sonnet-4-6
+---
+
+System prompt for the agent goes here.
+```
+
+---
+
+## Skill Definitions (.skills/)
+
+Skill definitions follow the same format as agent definitions.
+
+**Locations (later wins on name conflict):** `~/.skills/`, `configPaths.skills` entries, `.skills/`
+
+---
+
+## Additional Config Paths (forge.json)
+
+`configPaths` adds extra search directories for MCP servers, agents, and skills. `disabled` filters entries from the resolved set.
+
+```json
+{
+  "configPaths": {
+    "mcp": ["~/shared/mcp-configs/"],
+    "agents": ["~/my-agents/"],
+    "skills": ["~/my-skills/"]
+  },
+  "disabled": {
+    "mcpServers": ["server-to-disable"],
+    "agents": ["agent-to-disable"]
+  }
+}
+```
+
+---
+
 ## How Settings Resolve
 
 Model settings follow a fallback chain:
