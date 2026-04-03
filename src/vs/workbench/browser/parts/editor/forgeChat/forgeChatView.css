@@ -440,7 +440,7 @@
 	font-family: var(--font-body);
 	background: var(--color-surface-2);
 	color: var(--color-iron-300);
-	border: 1px solid rgba(255,255,255,0.1);
+	border: 1px solid var(--vscode-widget-border);
 	border-radius: var(--r-sm);
 	cursor: pointer;
 	white-space: nowrap;
