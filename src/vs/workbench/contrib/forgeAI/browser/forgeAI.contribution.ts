@@ -16,6 +16,7 @@ import { FORGE_AI_VIEWLET_ID, FORGE_AI_WORKSPACE_VIEW_ID } from '../common/forge
 import { ForgeAIViewPaneContainer, forgeAIViewIcon } from './forgeAIViewlet.js';
 import { ForgeAIWorkspaceView } from './forgeAIWorkspaceView.js';
 import { ForgeMcpStatusView, FORGE_MCP_STATUS_VIEW_ID } from './forgeMcpStatusView.js';
+import { ForgeAgentMonitorView, FORGE_AGENT_MONITOR_VIEW_ID } from './forgeAgentMonitorView.js';
 
 // --- View Container Registration ---
 
@@ -57,7 +58,18 @@ const mcpStatusViewDescriptor: IViewDescriptor = {
 	weight: 30,
 };
 
-Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViews([viewDescriptor, mcpStatusViewDescriptor], viewContainer);
+const agentMonitorViewDescriptor: IViewDescriptor = {
+	id: FORGE_AGENT_MONITOR_VIEW_ID,
+	containerIcon: forgeAIViewIcon,
+	name: nls.localize2('forgeAI.agents', "Agents"),
+	ctorDescriptor: new SyncDescriptor(ForgeAgentMonitorView),
+	order: 3,
+	canToggleVisibility: true,
+	canMoveView: false,
+	weight: 30,
+};
+
+Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViews([viewDescriptor, mcpStatusViewDescriptor, agentMonitorViewDescriptor], viewContainer);
 
 // --- Workspace Commands ---
 
