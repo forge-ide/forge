@@ -277,3 +277,78 @@
 	color: var(--color-text-secondary);
 	font-size: 11px;
 }
+
+/* Agent Banners */
+.forge-agent-banner {
+	border-left: 3px solid var(--color-ember-300);
+	border-radius: var(--r-md);
+	padding: var(--sp-2) var(--sp-3);
+	margin: var(--sp-2) 0;
+	background: var(--color-surface-2);
+}
+
+.forge-agent-banner-header {
+	display: flex;
+	align-items: center;
+	gap: var(--sp-2);
+}
+
+.forge-agent-status {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	display: inline-block;
+}
+
+.forge-agent-status.queued {
+	background: var(--color-iron-400);
+}
+
+.forge-agent-status.running {
+	background: var(--vscode-editorWarning-foreground);
+	box-shadow: 0 0 4px var(--vscode-editorWarning-foreground);
+}
+
+.forge-agent-status.completed {
+	background: var(--vscode-testing-iconPassed);
+}
+
+.forge-agent-status.error,
+.forge-agent-status.max_turns_reached {
+	background: var(--color-ember-300);
+}
+
+.forge-agent-name {
+	font-weight: 600;
+	color: var(--color-text-primary);
+	font-family: var(--font-body);
+}
+
+.forge-agent-turns {
+	color: var(--color-iron-400);
+	font-size: 11px;
+	font-family: var(--font-mono);
+}
+
+.forge-agent-steps.collapsed .forge-agent-step {
+	display: none;
+}
+
+.forge-agent-steps-toggle {
+	background: none;
+	border: none;
+	color: var(--color-iron-300);
+	cursor: pointer;
+	font-size: 11px;
+	padding: var(--sp-1) 0;
+}
+
+.forge-agent-step {
+	display: flex;
+	align-items: center;
+	gap: var(--sp-2);
+	padding: var(--sp-1) 0;
+	font-family: var(--font-mono);
+	font-size: 11px;
+	color: var(--color-iron-300);
+}
