@@ -352,3 +352,101 @@
 	font-size: 11px;
 	color: var(--color-iron-300);
 }
+
+/* MCP Status View */
+.forge-mcp-status-view {
+	height: 100%;
+	overflow-y: auto;
+}
+
+.forge-mcp-server-list {
+	padding: var(--sp-2) 0;
+}
+
+.forge-mcp-empty {
+	padding: var(--sp-3) var(--sp-4);
+	font-size: 11px;
+	font-family: var(--font-body);
+	color: var(--color-iron-400);
+}
+
+.forge-mcp-server-row {
+	display: flex;
+	align-items: center;
+	padding: var(--sp-2) var(--sp-3);
+	gap: var(--sp-2);
+}
+
+.forge-mcp-server-row.disabled {
+	opacity: 0.5;
+}
+
+.forge-mcp-server-dot {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	flex-shrink: 0;
+	background: var(--color-iron-400);
+}
+
+.forge-mcp-server-dot.connected {
+	background: var(--vscode-testing-iconPassed);
+}
+
+.forge-mcp-server-dot.connecting {
+	background: var(--vscode-editorWarning-foreground);
+	box-shadow: 0 0 4px var(--vscode-editorWarning-foreground);
+}
+
+.forge-mcp-server-dot.error {
+	background: var(--vscode-errorForeground);
+}
+
+.forge-mcp-server-dot.disconnected {
+	background: var(--color-iron-400);
+}
+
+.forge-mcp-server-dot.disabled {
+	background: var(--color-iron-400);
+	box-shadow: none;
+}
+
+.forge-mcp-server-name {
+	flex: 1;
+	font-size: 12px;
+	font-family: var(--font-body);
+	color: var(--color-text-primary);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.forge-mcp-server-name.disabled {
+	text-decoration: line-through;
+	color: var(--color-iron-400);
+}
+
+.forge-mcp-tool-count {
+	font-size: 11px;
+	font-family: var(--font-mono);
+	color: var(--color-iron-300);
+	white-space: nowrap;
+}
+
+.forge-mcp-server-toggle {
+	margin-left: var(--sp-1);
+	padding: var(--sp-1) var(--sp-2);
+	font-size: 11px;
+	font-family: var(--font-body);
+	background: var(--color-surface-2);
+	color: var(--color-iron-300);
+	border: 1px solid rgba(255,255,255,0.1);
+	border-radius: var(--r-sm);
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.forge-mcp-server-toggle:hover {
+	background: var(--color-surface-3);
+	color: var(--color-text-primary);
+}
