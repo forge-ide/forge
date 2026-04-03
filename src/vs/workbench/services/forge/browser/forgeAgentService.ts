@@ -152,6 +152,11 @@ export class ForgeAgentService extends Disposable implements IForgeAgentService 
 				return;
 			}
 
+			// Check if cancelled during stream
+			if (task.status !== ForgeAgentStatus.Running) {
+				return;
+			}
+
 			if (!toolUse) {
 				task.status = ForgeAgentStatus.Completed;
 				task.result = fullContent;
@@ -167,6 +172,12 @@ export class ForgeAgentService extends Disposable implements IForgeAgentService 
 
 			try {
 				const result = await this.forgeMcpService.callTool(toolUse.name, toolUse.input);
+
+				// Check if cancelled during tool call
+				if (task.status !== ForgeAgentStatus.Running) {
+					return;
+				}
+
 				step.status = 'completed';
 				step.result = result.content;
 				step.completedAt = Date.now();
