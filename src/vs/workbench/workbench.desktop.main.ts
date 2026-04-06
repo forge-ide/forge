@@ -105,6 +105,9 @@ import './services/forge/electron-browser/forgeCredentialService.js';
 // Forge — provider bootstrap (reads config, resolves credentials, sets default provider)
 import './services/forge/electron-browser/forgeProviderBootstrap.js';
 
+// Forge — onboarding service (environment detection, first-run state)
+import './services/forge/electron-browser/forgeOnboardingService.js';
+
 import { registerSingleton } from '../platform/instantiation/common/extensions.js';
 import { IUserDataInitializationService, UserDataInitializationService } from './services/userData/browser/userDataInit.js';
 import { SyncDescriptor } from '../platform/instantiation/common/descriptors.js';

@@ -142,7 +142,6 @@ import './services/forge/browser/forgeLayoutService.js';
 import './services/forge/browser/forgeGitDiffService.js';
 import './services/forge/browser/forgeContextService.js';
 import './services/forge/browser/forgeWorkspaceService.js';
-import './services/forge/browser/forgeOnboardingService.js';
 import './services/forge/browser/forgeVSCodeImportService.js';
 
 // Forge contributions
