@@ -1,10 +1,5 @@
-/*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
- *--------------------------------------------------------------------------------------------*/
-
 import Anthropic from '@anthropic-ai/sdk';
-import type { MessageParam } from '@anthropic-ai/sdk/resources/messages.js';
+import type { MessageParam, MessageStreamParams, RawContentBlockDeltaEvent, RawContentBlockStartEvent, RawMessageStreamEvent, Tool } from '@anthropic-ai/sdk/resources/messages/messages.js';
 import type { AICompletionRequest, AICompletionResponse, AIStreamChunk, AIValidationResult, IAIProvider } from '../common/aiProvider.js';
 
 export class AnthropicProvider implements IAIProvider {
@@ -41,23 +36,73 @@ export class AnthropicProvider implements IAIProvider {
 	async *stream(request: AICompletionRequest): AsyncIterable<AIStreamChunk> {
 		const { systemPrompt, messages, model, maxTokens } = this._prepareRequest(request);
 
-		const stream = this.client.messages.stream({
+		const tools: Tool[] | undefined = request.tools?.map(t => ({
+			name: t.name,
+			description: t.description,
+			input_schema: t.inputSchema as Tool['input_schema'],
+		}));
+
+		const streamParams: MessageStreamParams = {
 			model,
 			max_tokens: maxTokens ?? 4096,
 			system: systemPrompt,
 			messages,
-		});
+			...(tools && tools.length > 0 ? { tools } : {}),
+		};
 
-		for await (const event of stream) {
-			if (
-				event.type === 'content_block_delta' &&
-				event.delta.type === 'text_delta'
-			) {
-				yield { delta: event.delta.text, done: false };
+		const stream = this.client.messages.stream(streamParams);
+
+		let activeToolBlock: { id: string; name: string; inputJson: string } | undefined;
+		let inputTokens = 0;
+		let outputTokens = 0;
+
+		for await (const event of stream as AsyncIterable<RawMessageStreamEvent>) {
+			if (event.type === 'message_start') {
+				const e = event as unknown as { message: { usage: { input_tokens: number; output_tokens: number } } };
+				inputTokens = e.message.usage.input_tokens;
+				outputTokens = e.message.usage.output_tokens;
+			} else if (event.type === 'message_delta') {
+				const e = event as unknown as { usage: { output_tokens: number } };
+				outputTokens = e.usage.output_tokens;
+			} else if (event.type === 'content_block_start') {
+				const startEvent = event as RawContentBlockStartEvent;
+				if (startEvent.content_block.type === 'tool_use') {
+					activeToolBlock = {
+						id: startEvent.content_block.id,
+						name: startEvent.content_block.name,
+						inputJson: '',
+					};
+				}
+			} else if (event.type === 'content_block_delta') {
+				const deltaEvent = event as RawContentBlockDeltaEvent;
+				if (deltaEvent.delta.type === 'text_delta') {
+					yield { delta: deltaEvent.delta.text, done: false };
+				} else if (deltaEvent.delta.type === 'input_json_delta' && activeToolBlock) {
+					activeToolBlock.inputJson += deltaEvent.delta.partial_json;
+				}
+			} else if (event.type === 'content_block_stop') {
+				if (activeToolBlock) {
+					let input: Record<string, unknown>;
+					try {
+						input = JSON.parse(activeToolBlock.inputJson || '{}') as Record<string, unknown>;
+					} catch (e) {
+						throw new Error(`Failed to parse tool input JSON for tool '${activeToolBlock.name}': ${(e as Error).message}`);
+					}
+					yield {
+						delta: '',
+						done: false,
+						toolUse: {
+							id: activeToolBlock.id,
+							name: activeToolBlock.name,
+							input,
+						},
+					};
+					activeToolBlock = undefined;
+				}
 			}
 		}
 
-		yield { delta: '', done: true };
+		yield { delta: '', done: true, usage: { inputTokens, outputTokens } };
 	}
 
 	async validateCredentials(): Promise<AIValidationResult> {
@@ -89,10 +134,27 @@ export class AnthropicProvider implements IAIProvider {
 
 		const systemPrompt = systemParts.length > 0 ? systemParts.join('\n\n') : undefined;
 
-		const messages: MessageParam[] = nonSystemMessages.map(m => ({
-			role: m.role as 'user' | 'assistant',
-			content: m.content,
-		}));
+		const messages: MessageParam[] = nonSystemMessages.map(m => {
+			if (m.role === 'tool_result') {
+				if (!m.toolCallId) {
+					throw new Error('tool_result message requires toolCallId');
+				}
+				return {
+					role: 'user',
+					content: [
+						{
+							type: 'tool_result' as const,
+							tool_use_id: m.toolCallId,
+							content: m.content,
+						},
+					],
+				};
+			}
+			return {
+				role: m.role as 'user' | 'assistant',
+				content: m.content,
+			};
+		});
 
 		return { systemPrompt, messages, model: request.model, maxTokens: request.maxTokens };
 	}

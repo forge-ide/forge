@@ -23,6 +23,20 @@ import { ForgeChatEditorPane } from './forgeChatEditor.js';
 import { ForgeChatInput } from './forgeChatInput.js';
 import './forgeChatView.css';
 
+// --- Service Registrations ---
+import { registerSingleton, InstantiationType } from '../../../../../platform/instantiation/common/extensions.js';
+import { IForgeConfigResolutionService } from '../../../../services/forge/common/forgeConfigResolution.js';
+import { ForgeConfigResolutionService } from '../../../../services/forge/browser/forgeConfigResolution.js';
+import { IForgeMcpService } from '../../../../services/forge/common/forgeMcpService.js';
+import { ForgeMcpService } from '../../../../services/forge/browser/forgeMcpService.js';
+import { IForgeAgentService } from '../../../../services/forge/common/forgeAgentService.js';
+import { ForgeAgentService } from '../../../../services/forge/browser/forgeAgentService.js';
+
+// Config resolution must register before MCP and Agent services (they depend on it)
+registerSingleton(IForgeConfigResolutionService, ForgeConfigResolutionService, InstantiationType.Delayed);
+registerSingleton(IForgeMcpService, ForgeMcpService, InstantiationType.Delayed);
+registerSingleton(IForgeAgentService, ForgeAgentService, InstantiationType.Delayed);
+
 // --- Context Providers ---
 import '../../../../services/forge/browser/contextProviders/forgeActiveEditorContextProvider.js';
 

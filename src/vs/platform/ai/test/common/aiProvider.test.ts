@@ -12,6 +12,7 @@ import type {
 	AIStreamChunk,
 	AICompletionResponse,
 	AIValidationResult,
+	AIToolDefinition,
 } from '../../common/aiProvider.js';
 
 /**
@@ -136,5 +137,81 @@ suite('AIProvider interface contract', () => {
 
 		assert.ok(chunks.length > 0);
 		assert.strictEqual(chunks[chunks.length - 1].done, true);
+	});
+});
+
+suite('AIToolDefinition', () => {
+	ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('tool definition has required fields', () => {
+		const tool: AIToolDefinition = {
+			name: 'read_file',
+			description: 'Read a file from the filesystem',
+			inputSchema: {
+				type: 'object',
+				properties: {
+					path: { type: 'string', description: 'Absolute file path' }
+				},
+				required: ['path']
+			}
+		};
+		assert.strictEqual(tool.name, 'read_file');
+		assert.ok(tool.inputSchema);
+	});
+});
+
+suite('AICompletionRequest with tools', () => {
+	ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('request accepts optional tools array', () => {
+		const request: AICompletionRequest = {
+			messages: [{ role: 'user', content: 'Read my file' }],
+			model: 'claude-sonnet-4-6',
+			tools: [{
+				name: 'read_file',
+				description: 'Read a file',
+				inputSchema: { type: 'object', properties: {} }
+			}]
+		};
+		assert.strictEqual(request.tools?.length, 1);
+	});
+
+	test('request works without tools', () => {
+		const request: AICompletionRequest = {
+			messages: [{ role: 'user', content: 'Hello' }],
+			model: 'claude-sonnet-4-6'
+		};
+		assert.strictEqual(request.tools, undefined);
+	});
+});
+
+suite('AIStreamChunk with tool use', () => {
+	ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('chunk can carry tool_use data', () => {
+		const chunk: AIStreamChunk = {
+			delta: '',
+			done: false,
+			toolUse: {
+				id: 'call_123',
+				name: 'read_file',
+				input: { path: '/tmp/test.txt' }
+			}
+		};
+		assert.strictEqual(chunk.toolUse?.name, 'read_file');
+	});
+});
+
+suite('AIMessage tool_result role', () => {
+	ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('chunk can carry tool_result role', () => {
+		const msg: AIMessage = {
+			role: 'tool_result',
+			content: 'file contents here',
+			toolCallId: 'call_123'
+		};
+		assert.strictEqual(msg.role, 'tool_result');
+		assert.strictEqual(msg.toolCallId, 'call_123');
 	});
 });

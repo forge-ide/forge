@@ -4,20 +4,36 @@
  *--------------------------------------------------------------------------------------------*/
 
 export interface AIMessage {
-	role: 'user' | 'assistant' | 'system';
-	content: string;
+	readonly role: 'user' | 'assistant' | 'system' | 'tool_result';
+	readonly content: string;
+	readonly toolCallId?: string;
+}
+
+export interface AIToolDefinition {
+	readonly name: string;
+	readonly description: string;
+	readonly inputSchema: Record<string, unknown>;
+}
+
+export interface AIToolUse {
+	readonly id: string;
+	readonly name: string;
+	readonly input: Record<string, unknown>;
 }
 
 export interface AICompletionRequest {
-	messages: AIMessage[];
-	model: string;
-	maxTokens?: number;
-	systemPrompt?: string;
+	readonly messages: AIMessage[];
+	readonly model: string;
+	readonly maxTokens?: number;
+	readonly systemPrompt?: string;
+	readonly tools?: AIToolDefinition[];
 }
 
 export interface AIStreamChunk {
-	delta: string;
-	done: boolean;
+	readonly delta: string;
+	readonly done: boolean;
+	readonly toolUse?: AIToolUse;
+	readonly usage?: { readonly inputTokens: number; readonly outputTokens: number };
 }
 
 export interface AICompletionResponse {
