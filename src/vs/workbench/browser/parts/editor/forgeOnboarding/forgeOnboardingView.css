@@ -1,0 +1,286 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Forge IDE. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.forge-onboarding-root {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	height: 100%;
+	background: var(--color-surface-1);
+	color: var(--color-text-primary);
+	font-family: Barlow, sans-serif;
+}
+
+.forge-onboarding-wizard {
+	width: 100%;
+	max-width: 640px;
+	padding: 48px 32px;
+}
+
+.forge-onboarding-progress {
+	display: flex;
+	gap: 8px;
+	justify-content: center;
+	margin-bottom: 40px;
+}
+
+.forge-onboarding-dot {
+	width: 10px;
+	height: 10px;
+	border-radius: 50%;
+	background: var(--color-iron-600);
+	transition: background 0.2s;
+}
+
+.forge-onboarding-dot.active {
+	background: var(--color-ember-400);
+}
+
+.forge-onboarding-title {
+	font-family: 'Barlow Condensed', sans-serif;
+	font-size: 32px;
+	font-weight: 600;
+	margin-bottom: 8px;
+	margin-top: 0;
+}
+
+.forge-onboarding-subtitle {
+	font-size: 16px;
+	color: var(--color-text-secondary, var(--color-iron-400));
+	margin-bottom: 32px;
+	margin-top: 0;
+}
+
+.forge-onboarding-content {
+	min-height: 240px;
+}
+
+.forge-onboarding-footer {
+	display: flex;
+	justify-content: flex-end;
+	gap: 12px;
+	margin-top: 40px;
+}
+
+.forge-onboarding-btn-primary {
+	background: var(--color-ember-400);
+	color: white;
+	border: none;
+	border-radius: 4px;
+	padding: 10px 24px;
+	font-family: Barlow, sans-serif;
+	font-size: 14px;
+	cursor: pointer;
+}
+
+.forge-onboarding-btn-primary:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+
+.forge-onboarding-btn-secondary {
+	background: transparent;
+	color: var(--color-text-primary);
+	border: 1px solid var(--color-iron-600);
+	border-radius: 4px;
+	padding: 10px 24px;
+	font-family: Barlow, sans-serif;
+	font-size: 14px;
+	cursor: pointer;
+}
+
+.forge-onboarding-btn-secondary:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+
+.forge-onboarding-loading {
+	color: var(--color-text-secondary, var(--color-iron-400));
+	font-size: 14px;
+}
+
+.forge-onboarding-error {
+	color: var(--color-ember-400);
+	font-size: 13px;
+	margin-top: 8px;
+}
+
+/* Step shared styles */
+.forge-onboarding-body {
+	font-size: 14px;
+	line-height: 1.6;
+	margin-bottom: 24px;
+}
+
+.forge-onboarding-env-badges {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 16px;
+}
+
+.forge-onboarding-badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 10px;
+	border-radius: 12px;
+	background: var(--color-surface-2, var(--color-iron-800));
+	border: 1px solid var(--color-iron-600);
+	font-size: 12px;
+}
+
+.forge-onboarding-badge-dot {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--color-ember-400);
+	flex-shrink: 0;
+}
+
+/* Step 2 import styles */
+.forge-onboarding-config-path {
+	font-family: 'Fira Code', monospace;
+	font-size: 12px;
+	padding: 8px 12px;
+	background: var(--color-surface-2, var(--color-iron-800));
+	border-radius: 4px;
+	margin-bottom: 20px;
+	word-break: break-all;
+}
+
+.forge-onboarding-checkbox-list {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.forge-onboarding-checkbox-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	font-size: 14px;
+	cursor: pointer;
+}
+
+.forge-onboarding-checkbox-row input[type='checkbox'] {
+	accent-color: var(--color-ember-400);
+	width: 16px;
+	height: 16px;
+	flex-shrink: 0;
+}
+
+.forge-onboarding-no-config {
+	font-size: 14px;
+	color: var(--color-text-secondary, var(--color-iron-400));
+}
+
+/* Step 3 provider styles */
+.forge-onboarding-provider-list {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	margin-bottom: 24px;
+}
+
+.forge-onboarding-provider-option {
+	border: 1px solid var(--color-iron-600);
+	border-radius: 6px;
+	transition: border-color 0.15s;
+}
+
+.forge-onboarding-provider-option:hover {
+	border-color: var(--color-iron-400);
+}
+
+.forge-onboarding-provider-option.checked {
+	border-color: var(--color-ember-400);
+}
+
+.forge-onboarding-provider-header {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 12px 16px;
+	cursor: pointer;
+}
+
+.forge-onboarding-provider-checkbox {
+	width: 16px;
+	height: 16px;
+	accent-color: var(--color-ember-400);
+	flex-shrink: 0;
+}
+
+.forge-onboarding-provider-label {
+	flex: 1;
+	font-size: 14px;
+}
+
+.forge-onboarding-provider-detected {
+	font-size: 11px;
+	color: var(--color-ember-400);
+}
+
+.forge-onboarding-api-key-section {
+	padding: 0 16px 12px;
+}
+
+.forge-onboarding-api-key-input {
+	width: 100%;
+	box-sizing: border-box;
+	padding: 8px 12px;
+	background: var(--color-surface-2, var(--color-iron-800));
+	border: 1px solid var(--color-iron-600);
+	border-radius: 4px;
+	color: var(--color-text-primary);
+	font-family: 'Fira Code', monospace;
+	font-size: 13px;
+}
+
+.forge-onboarding-api-key-input:focus {
+	outline: none;
+	border-color: var(--color-ember-400);
+}
+
+/* Step 4 ready styles */
+.forge-onboarding-summary {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin-bottom: 32px;
+	padding: 16px;
+	background: var(--color-surface-2, var(--color-iron-800));
+	border-radius: 6px;
+}
+
+.forge-onboarding-summary-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 13px;
+}
+
+.forge-onboarding-summary-check {
+	color: var(--color-ember-400);
+	flex-shrink: 0;
+}
+
+.forge-onboarding-links {
+	display: flex;
+	gap: 20px;
+	flex-wrap: wrap;
+}
+
+.forge-onboarding-link {
+	color: var(--color-ember-400);
+	text-decoration: none;
+	font-size: 13px;
+}
+
+.forge-onboarding-link:hover {
+	text-decoration: underline;
+}

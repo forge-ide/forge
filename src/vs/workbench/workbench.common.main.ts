@@ -142,10 +142,12 @@ import './services/forge/browser/forgeLayoutService.js';
 import './services/forge/browser/forgeGitDiffService.js';
 import './services/forge/browser/forgeContextService.js';
 import './services/forge/browser/forgeWorkspaceService.js';
+import './services/forge/browser/forgeVSCodeImportService.js';
 
 // Forge contributions
 import './browser/parts/editor/forgeChat/forgeChat.contribution.js';
 import './contrib/forgeAI/browser/forgeAI.contribution.js';
+import './browser/parts/editor/forgeOnboarding/forgeOnboarding.contribution.js';
 
 import { InstantiationType, registerSingleton } from '../platform/instantiation/common/extensions.js';
 import { GlobalExtensionEnablementService } from '../platform/extensionManagement/common/extensionEnablementService.js';

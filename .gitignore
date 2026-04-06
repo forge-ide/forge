@@ -49,3 +49,4 @@ dist
 .claude/skills/.local/
 .claude/worktrees/
 .github/skills/.local/
+.worktrees/

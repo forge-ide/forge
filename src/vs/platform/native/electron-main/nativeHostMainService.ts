@@ -877,6 +877,19 @@ export class NativeHostMainService extends Disposable implements INativeHostMain
 		process.kill(pid, code);
 	}
 
+	async probeLocalPort(windowId: number | undefined, port: number): Promise<boolean> {
+		const http = await import('http');
+		return new Promise(resolve => {
+			const req = http.request(
+				{ hostname: 'localhost', port, method: 'HEAD', timeout: 500 },
+				() => { req.destroy(); resolve(true); }
+			);
+			req.on('error', () => resolve(false));
+			req.on('timeout', () => { req.destroy(); resolve(false); });
+			req.end();
+		});
+	}
+
 	//#endregion
 
 
