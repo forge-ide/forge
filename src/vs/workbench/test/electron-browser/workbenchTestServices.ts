@@ -142,6 +142,7 @@ export class TestNativeHostService implements INativeHostService {
 	async hasWSLFeatureInstalled(): Promise<boolean> { return false; }
 	async getProcessId(): Promise<number> { throw new Error('Method not implemented.'); }
 	async killProcess(): Promise<void> { }
+	async probeLocalPort(): Promise<boolean> { return false; }
 	async setDocumentEdited(edited: boolean): Promise<void> { }
 	async openExternal(url: string, defaultApplication?: string): Promise<boolean> { return false; }
 	async updateTouchBar(): Promise<void> { }

@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { clearNode } from '../../../../../base/browser/dom.js';
 import { Disposable } from '../../../../../base/common/lifecycle.js';
 import { IForgeOnboardingService, IEnvironmentDetectionResult } from '../../../../services/forge/common/forgeOnboardingService.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
@@ -113,7 +114,7 @@ export class ForgeOnboardingView extends Disposable {
 	}
 
 	private async _detect(): Promise<void> {
-		this._contentEl.innerHTML = '';
+		clearNode(this._contentEl);
 		const loading = document.createElement('p');
 		loading.className = 'forge-onboarding-loading';
 		loading.textContent = 'Detecting your environment\u2026';
@@ -158,7 +159,7 @@ export class ForgeOnboardingView extends Disposable {
 				break;
 			case 4: {
 				const options: IStep4ReadyOptions = {
-					selectedProvider: this._step3?.selectedProvider,
+					configuredProviders: this._step3?.configuredProviders ?? [],
 					importedConfig: !!(this._step2?.importSettings || this._step2?.importKeybindings || this._step2?.importExtensions),
 				};
 				stepInstance = new Step4Ready(options);
@@ -169,7 +170,7 @@ export class ForgeOnboardingView extends Disposable {
 		this._currentStep = stepInstance;
 
 		// Render into content
-		this._contentEl.innerHTML = '';
+		clearNode(this._contentEl);
 
 		const titleEl = document.createElement('h1');
 		titleEl.className = 'forge-onboarding-title';
@@ -205,7 +206,7 @@ export class ForgeOnboardingView extends Disposable {
 		if (nextStep > TOTAL_STEPS) {
 			this.onboardingService.markComplete();
 			this._setState('complete');
-			this._contentEl.innerHTML = '';
+			clearNode(this._contentEl);
 			return;
 		}
 

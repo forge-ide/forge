@@ -187,13 +187,8 @@
 }
 
 .forge-onboarding-provider-option {
-	display: flex;
-	align-items: center;
-	gap: 12px;
-	padding: 12px 16px;
 	border: 1px solid var(--color-iron-600);
 	border-radius: 6px;
-	cursor: pointer;
 	transition: border-color 0.15s;
 }
 
@@ -201,11 +196,19 @@
 	border-color: var(--color-iron-400);
 }
 
-.forge-onboarding-provider-option.selected {
+.forge-onboarding-provider-option.checked {
 	border-color: var(--color-ember-400);
 }
 
-.forge-onboarding-provider-radio {
+.forge-onboarding-provider-header {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 12px 16px;
+	cursor: pointer;
+}
+
+.forge-onboarding-provider-checkbox {
 	width: 16px;
 	height: 16px;
 	accent-color: var(--color-ember-400);
@@ -223,13 +226,7 @@
 }
 
 .forge-onboarding-api-key-section {
-	margin-top: 16px;
-}
-
-.forge-onboarding-api-key-label {
-	font-size: 13px;
-	margin-bottom: 6px;
-	display: block;
+	padding: 0 16px 12px;
 }
 
 .forge-onboarding-api-key-input {

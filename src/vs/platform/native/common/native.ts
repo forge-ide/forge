@@ -200,6 +200,9 @@ export interface ICommonNativeHostService {
 	getProcessId(): Promise<number | undefined>;
 	killProcess(pid: number, code: string): Promise<void>;
 
+	// Network
+	probeLocalPort(port: number): Promise<boolean>;
+
 	// Clipboard
 	triggerPaste(options?: INativeHostOptions): Promise<void>;
 	readClipboardText(type?: 'selection' | 'clipboard'): Promise<string>;

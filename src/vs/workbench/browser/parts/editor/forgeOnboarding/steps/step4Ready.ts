@@ -7,7 +7,7 @@ import { IEnvironmentDetectionResult } from '../../../../../services/forge/commo
 import { IOnboardingStep } from '../forgeOnboardingView.js';
 
 export interface IStep4ReadyOptions {
-	selectedProvider: string | undefined;
+	configuredProviders: string[];
 	importedConfig: boolean;
 }
 
@@ -22,8 +22,9 @@ export class Step4Ready implements IOnboardingStep {
 		const summary = document.createElement('div');
 		summary.className = 'forge-onboarding-summary';
 
-		if (this.options.selectedProvider) {
-			summary.appendChild(this._summaryRow(`AI provider configured: ${this._providerLabel(this.options.selectedProvider)}`));
+		if (this.options.configuredProviders.length > 0) {
+			const labels = this.options.configuredProviders.map(id => this._providerLabel(id)).join(', ');
+			summary.appendChild(this._summaryRow(`AI providers configured: ${labels}`));
 		}
 
 		if (this.options.importedConfig) {

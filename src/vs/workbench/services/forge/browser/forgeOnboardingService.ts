@@ -1,8 +1,11 @@
+import { env } from '../../../../base/common/process.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
+import { joinPath } from '../../../../base/common/resources.js';
 import { URI } from '../../../../base/common/uri.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
+import { INativeHostService } from '../../../../platform/native/common/native.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IEnvironmentDetectionResult, IForgeOnboardingService } from '../common/forgeOnboardingService.js';
 
@@ -15,6 +18,7 @@ export class ForgeOnboardingServiceImpl extends Disposable implements IForgeOnbo
 		@IStorageService private readonly _storageService: IStorageService,
 		@IFileService private readonly _fileService: IFileService,
 		@ILogService private readonly _logService: ILogService,
+		@INativeHostService private readonly _nativeHostService: INativeHostService,
 	) {
 		super();
 	}
@@ -54,15 +58,14 @@ export class ForgeOnboardingServiceImpl extends Disposable implements IForgeOnbo
 	}
 
 	private async _detectVSCodeConfig(): Promise<{ found: boolean; path: string | undefined }> {
-		const home = process.env['HOME'];
+		const home = env['HOME'];
 		if (!home) {
 			return { found: false, path: undefined };
 		}
-
-		const configPath = `${home}/.config/Code/User`;
+		const configUri = joinPath(URI.file(home), '.config', 'Code', 'User');
 		try {
-			const exists = await this._fileService.exists(URI.file(configPath));
-			return { found: exists, path: exists ? configPath : undefined };
+			const exists = await this._fileService.exists(configUri);
+			return { found: exists, path: exists ? configUri.fsPath : undefined };
 		} catch {
 			return { found: false, path: undefined };
 		}
@@ -77,7 +80,7 @@ export class ForgeOnboardingServiceImpl extends Disposable implements IForgeOnbo
 
 		const result: Record<string, string> = {};
 		for (const { envVar, providerId } of candidates) {
-			const value = process.env[envVar];
+			const value = env[envVar];
 			if (value && value.length > 0) {
 				result[providerId] = value;
 			}
@@ -86,28 +89,15 @@ export class ForgeOnboardingServiceImpl extends Disposable implements IForgeOnbo
 	}
 
 	private async _probeLocalModels(): Promise<{ ollama: boolean; lmStudio: boolean }> {
-		const probe = async (url: string): Promise<boolean> => {
-			const controller = new AbortController();
-			const timer = setTimeout(() => controller.abort(), 500);
-			try {
-				await fetch(url, { signal: controller.signal, method: 'HEAD' });
-				return true;
-			} catch {
-				return false;
-			} finally {
-				clearTimeout(timer);
-			}
-		};
-
 		const [ollama, lmStudio] = await Promise.all([
-			probe('http://localhost:11434'),
-			probe('http://localhost:1234'),
+			this._nativeHostService.probeLocalPort(11434),
+			this._nativeHostService.probeLocalPort(1234),
 		]);
 		return { ollama, lmStudio };
 	}
 
 	private async _checkNpx(): Promise<boolean> {
-		const pathEnv = process.env['PATH'];
+		const pathEnv = env['PATH'];
 		if (!pathEnv) {
 			return false;
 		}
