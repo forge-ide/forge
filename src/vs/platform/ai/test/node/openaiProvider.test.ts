@@ -73,6 +73,35 @@ suite('OpenAIProvider', () => {
 		assert.strictEqual(last.done, true);
 	});
 
+	test('stream done chunk carries usage when stream_options include_usage', async () => {
+		const mockClient: unknown = {
+			chat: {
+				completions: {
+					create: () => ({
+						[Symbol.asyncIterator]: async function* () {
+							yield { choices: [{ delta: { content: 'Hi' }, finish_reason: null }], usage: null };
+							yield { choices: [{ delta: {}, finish_reason: 'stop' }], usage: null };
+							yield { choices: [], usage: { prompt_tokens: 8, completion_tokens: 4 } };
+						}
+					})
+				}
+			},
+			models: { list: async () => ({ data: [] }) },
+		};
+		const provider = new OpenAIProvider(mockClient as ConstructorParameters<typeof OpenAIProvider>[0]);
+
+		const chunks: AIStreamChunk[] = [];
+		for await (const chunk of provider.stream(makeRequest())) {
+			chunks.push(chunk);
+		}
+
+		const done = chunks[chunks.length - 1];
+		assert.strictEqual(done.done, true);
+		assert.ok(done.usage);
+		assert.strictEqual(done.usage!.inputTokens, 8);
+		assert.strictEqual(done.usage!.outputTokens, 4);
+	});
+
 	test('complete returns AICompletionResponse', async () => {
 		const client = makeClient([]);
 		const provider = new OpenAIProvider(client as ConstructorParameters<typeof OpenAIProvider>[0]);
@@ -228,5 +257,73 @@ suite('OpenAIProvider tool calling', () => {
 			},
 			/toolCallId/
 		);
+	});
+
+	test('stream() text-only response has no toolUse in chunks', async () => {
+		const mockClient: unknown = {
+			chat: {
+				completions: {
+					create: () => ({
+						[Symbol.asyncIterator]: async function* () {
+							yield { choices: [{ delta: { content: 'Hello' }, finish_reason: null }] };
+							yield { choices: [{ delta: {}, finish_reason: 'stop' }] };
+						}
+					})
+				}
+			},
+			models: { list: async () => ({ data: [] }) },
+		};
+
+		const provider = new OpenAIProvider(mockClient as ConstructorParameters<typeof OpenAIProvider>[0]);
+		const chunks: AIStreamChunk[] = [];
+		for await (const chunk of provider.stream({ messages: [{ role: 'user', content: 'hi' }], model: 'gpt-4o' })) {
+			chunks.push(chunk);
+		}
+
+		assert.ok(chunks.length > 0);
+		assert.ok(chunks.every(c => c.toolUse === undefined));
+	});
+
+	test('stream() toolUse chunk includes id and parsed input', async () => {
+		const mockClient: unknown = {
+			chat: {
+				completions: {
+					create: () => ({
+						[Symbol.asyncIterator]: async function* () {
+							yield {
+								choices: [{
+									delta: {
+										tool_calls: [{
+											index: 0,
+											id: 'call_xyz',
+											function: { name: 'write_file', arguments: '{"path":"/tmp/out.txt","content":"hello"}' }
+										}]
+									},
+									finish_reason: null
+								}]
+							};
+							yield { choices: [{ delta: {}, finish_reason: 'tool_calls' }] };
+						}
+					})
+				}
+			},
+			models: { list: async () => ({ data: [] }) },
+		};
+
+		const provider = new OpenAIProvider(mockClient as ConstructorParameters<typeof OpenAIProvider>[0]);
+		const chunks: AIStreamChunk[] = [];
+		for await (const chunk of provider.stream({
+			messages: [{ role: 'user', content: 'write it' }],
+			model: 'gpt-4o',
+			tools: [{ name: 'write_file', description: 'Write a file', inputSchema: {} }]
+		})) {
+			chunks.push(chunk);
+		}
+
+		const toolChunk = chunks.find(c => c.toolUse);
+		assert.ok(toolChunk);
+		assert.strictEqual(toolChunk!.toolUse!.id, 'call_xyz');
+		assert.strictEqual(toolChunk!.toolUse!.name, 'write_file');
+		assert.deepStrictEqual(toolChunk!.toolUse!.input, { path: '/tmp/out.txt', content: 'hello' });
 	});
 });

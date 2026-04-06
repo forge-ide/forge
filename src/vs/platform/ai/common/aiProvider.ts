@@ -33,6 +33,7 @@ export interface AIStreamChunk {
 	readonly delta: string;
 	readonly done: boolean;
 	readonly toolUse?: AIToolUse;
+	readonly usage?: { readonly inputTokens: number; readonly outputTokens: number };
 }
 
 export interface AICompletionResponse {

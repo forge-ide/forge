@@ -145,6 +145,148 @@ suite('ForgeConfigResolutionTypes', () => {
 		});
 	});
 
+	suite('parseYamlFrontmatter', () => {
+		// parseYamlFrontmatter is not exported but exercised through parseAgentMarkdown.
+		// These tests drive it via that public surface.
+
+		test('inline array [a, b, c] is parsed as string[]', () => {
+			const content = [
+				'---',
+				'name: agent',
+				'tools: [read_file, write_file, search]',
+				'---',
+				'prompt',
+			].join('\n');
+			const result = parseAgentMarkdown(content);
+			assert.ok(result);
+			assert.deepStrictEqual(result.tools, ['read_file', 'write_file', 'search']);
+		});
+
+		test('numeric value is parsed as number (maxTurns)', () => {
+			const content = [
+				'---',
+				'name: agent',
+				'maxTurns: 42',
+				'---',
+				'prompt',
+			].join('\n');
+			const result = parseAgentMarkdown(content);
+			assert.ok(result);
+			assert.strictEqual(result.maxTurns, 42);
+		});
+
+		test('unknown frontmatter keys are silently ignored', () => {
+			const content = [
+				'---',
+				'name: agent',
+				'unknownKey: someValue',
+				'anotherKey: 999',
+				'---',
+				'prompt',
+			].join('\n');
+			const result = parseAgentMarkdown(content);
+			assert.ok(result);
+			assert.strictEqual(result.name, 'agent');
+		});
+
+		test('string values have surrounding quotes stripped', () => {
+			const content = [
+				'---',
+				'name: "quoted-agent"',
+				'description: \'single-quoted\'',
+				'---',
+				'prompt',
+			].join('\n');
+			const result = parseAgentMarkdown(content);
+			assert.ok(result);
+			assert.strictEqual(result.name, 'quoted-agent');
+			assert.strictEqual(result.description, 'single-quoted');
+		});
+	});
+
+	suite('parseAgentMarkdown edge cases', () => {
+		test('frontmatter only with empty body yields empty systemPrompt', () => {
+			const content = [
+				'---',
+				'name: minimal',
+				'---',
+			].join('\n');
+			const result = parseAgentMarkdown(content);
+			assert.ok(result);
+			assert.strictEqual(result.systemPrompt, '');
+		});
+
+		test('provider and model fields are parsed when present', () => {
+			const content = [
+				'---',
+				'name: specific-agent',
+				'provider: anthropic',
+				'model: claude-sonnet-4-6',
+				'---',
+				'System prompt.',
+			].join('\n');
+			const result = parseAgentMarkdown(content);
+			assert.ok(result);
+			assert.strictEqual(result.provider, 'anthropic');
+			assert.strictEqual(result.model, 'claude-sonnet-4-6');
+		});
+
+		test('missing provider and model fields are undefined', () => {
+			const content = [
+				'---',
+				'name: no-provider',
+				'---',
+				'prompt',
+			].join('\n');
+			const result = parseAgentMarkdown(content);
+			assert.ok(result);
+			assert.strictEqual(result.provider, undefined);
+			assert.strictEqual(result.model, undefined);
+		});
+
+		test('tools field absent leaves tools undefined', () => {
+			const content = [
+				'---',
+				'name: no-tools',
+				'---',
+				'prompt',
+			].join('\n');
+			const result = parseAgentMarkdown(content);
+			assert.ok(result);
+			assert.strictEqual(result.tools, undefined);
+		});
+	});
+
+	suite('parseMcpJson additional cases', () => {
+		test('null input returns invalid', () => {
+			const result = parseMcpJson(null);
+			assert.ok(!result.valid);
+		});
+
+		test('array input returns invalid', () => {
+			const result = parseMcpJson([]);
+			assert.ok(!result.valid);
+		});
+
+		test('mixed stdio and HTTP servers both parsed', () => {
+			const raw = {
+				mcpServers: {
+					local: { command: 'npx', args: ['-y', 'server'] },
+					remote: { url: 'https://mcp.example.com', headers: { Authorization: 'Bearer x' } },
+				}
+			};
+			const result = parseMcpJson(raw);
+			assert.ok(result.valid);
+			assert.strictEqual(result.servers.length, 2);
+			const local = result.servers.find(s => s.name === 'local');
+			const remote = result.servers.find(s => s.name === 'remote');
+			assert.ok(local);
+			assert.ok(remote);
+			assert.strictEqual(local.command, 'npx');
+			assert.strictEqual(remote.url, 'https://mcp.example.com');
+		});
+	});
+
 	// Suppress unused import warnings — these types are tested via shape assertions
 	const _typecheck: [McpJsonConfig, McpServerEntry, AgentDefinition, SkillDefinition, ResolvedConfig] = undefined!;
 	void _typecheck;

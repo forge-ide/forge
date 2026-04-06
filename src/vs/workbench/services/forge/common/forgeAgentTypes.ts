@@ -1,5 +1,7 @@
 import { AgentDefinition } from './forgeConfigResolutionTypes.js';
 
+export const MAX_TURNS = 20;
+
 export enum ForgeAgentStatus {
 	Queued = 'queued',
 	Running = 'running',
@@ -58,7 +60,7 @@ export function createAgentTask(options: ForgeAgentTaskOptions): ForgeAgentTask 
 		taskDescription: options.taskDescription,
 		providerName: options.providerName,
 		model: options.model,
-		maxTurns: options.maxTurns ?? 20,
+		maxTurns: Math.min(options.maxTurns ?? MAX_TURNS, MAX_TURNS),
 		allowedTools: options.allowedTools,
 		status: ForgeAgentStatus.Queued,
 		currentTurn: 0,
@@ -76,7 +78,7 @@ export function createAgentTaskFromDefinition(
 		taskDescription,
 		providerName: definition.provider ?? '',
 		model: definition.model ?? '',
-		maxTurns: definition.maxTurns ?? 20,
+		maxTurns: definition.maxTurns,
 		allowedTools: definition.tools,
 	});
 }

@@ -289,6 +289,199 @@ suite('ForgeMcpService', () => {
 		assert.strictEqual(fired, true);
 	});
 
+	test('listTools skips servers in Connecting (Starting) state', async () => {
+		const server = createMockMcpServer('starting-server', McpConnectionState.Starting, [
+			{ name: 'some_tool', description: 'A tool', inputSchema: {} },
+		]);
+		const mcpService = createMockMcpService([server]);
+		const configResolution = createMockConfigResolution();
+		const service = disposables.add(new ForgeMcpService(
+			mcpService as never,
+			configResolution as never,
+			new NullLogService(),
+		));
+
+		const tools = await service.listTools();
+		assert.strictEqual(tools.length, 0);
+	});
+
+	test('listTools returns tools from multiple enabled running servers', async () => {
+		const serverA = createMockMcpServer('server-a', McpConnectionState.Running, [
+			{ name: 'tool_a', description: 'Tool A', inputSchema: {} },
+		]);
+		const serverB = createMockMcpServer('server-b', McpConnectionState.Running, [
+			{ name: 'tool_b', description: 'Tool B', inputSchema: {} },
+			{ name: 'tool_c', description: 'Tool C', inputSchema: {} },
+		]);
+		const mcpService = createMockMcpService([serverA, serverB]);
+		const configResolution = createMockConfigResolution();
+		const service = disposables.add(new ForgeMcpService(
+			mcpService as never,
+			configResolution as never,
+			new NullLogService(),
+		));
+
+		const tools = await service.listTools();
+		assert.strictEqual(tools.length, 3);
+	});
+
+	test('callTool result preserves isError: true from server', async () => {
+		// Build the server directly so we can control the tool's call() return value.
+		const errorTools = [{
+			id: 'read_file', referenceName: 'read_file', icons: {}, visibility: 3,
+			definition: { name: 'read_file', description: 'Read a file', inputSchema: {} },
+			call: async (_input: Record<string, unknown>) => ({
+				content: [{ type: 'text' as const, text: 'Permission denied' }],
+				isError: true,
+			}),
+			callWithProgress: async () => ({ content: [], isError: false }),
+		}];
+		const baseServer = createMockMcpServer('fs-server', McpConnectionState.Running, []);
+		const server = { ...baseServer, tools: { get: () => errorTools, read: () => errorTools } as never };
+
+		const mcpService = createMockMcpService([server]);
+		const configResolution = createMockConfigResolution();
+		const service = disposables.add(new ForgeMcpService(
+			mcpService as never,
+			configResolution as never,
+			new NullLogService(),
+		));
+
+		const result = await service.callTool('read_file', { path: '/etc/shadow' });
+		assert.strictEqual(result.isError, true);
+		assert.ok(result.content.includes('Permission denied'));
+	});
+
+	test('callTool joins multi-part content array into single string', async () => {
+		const multiPartTools = [{
+			id: 'read_file', referenceName: 'read_file', icons: {}, visibility: 3,
+			definition: { name: 'read_file', description: 'Read a file', inputSchema: {} },
+			call: async (_input: Record<string, unknown>) => ({
+				content: [
+					{ type: 'text' as const, text: 'Line 1' },
+					{ type: 'text' as const, text: 'Line 2' },
+					{ type: 'text' as const, text: 'Line 3' },
+				],
+				isError: false,
+			}),
+			callWithProgress: async () => ({ content: [], isError: false }),
+		}];
+		const baseServer = createMockMcpServer('fs-server', McpConnectionState.Running, []);
+		const server = { ...baseServer, tools: { get: () => multiPartTools, read: () => multiPartTools } as never };
+
+		const mcpService = createMockMcpService([server]);
+		const configResolution = createMockConfigResolution();
+		const service = disposables.add(new ForgeMcpService(
+			mcpService as never,
+			configResolution as never,
+			new NullLogService(),
+		));
+
+		const result = await service.callTool('read_file', {});
+		assert.ok(result.content.includes('Line 1'));
+		assert.ok(result.content.includes('Line 2'));
+		assert.ok(result.content.includes('Line 3'));
+	});
+
+	test('callTool on disabled server skips it and throws tool not found', async () => {
+		const server = createMockMcpServer('disabled-server', McpConnectionState.Running, [
+			{ name: 'secret_tool', description: 'A secret tool', inputSchema: {} },
+		]);
+		const mcpService = createMockMcpService([server]);
+		const configResolution = createMockConfigResolution(['disabled-server']);
+		const service = disposables.add(new ForgeMcpService(
+			mcpService as never,
+			configResolution as never,
+			new NullLogService(),
+		));
+
+		await assert.rejects(
+			() => service.callTool('secret_tool', {}),
+			/Tool "secret_tool" not found/,
+		);
+	});
+
+	test('getServerStatuses maps Starting to Connecting', () => {
+		const server = createMockMcpServer('starting-server', McpConnectionState.Starting, []);
+		const mcpService = createMockMcpService([server]);
+		const configResolution = createMockConfigResolution();
+		const service = disposables.add(new ForgeMcpService(
+			mcpService as never,
+			configResolution as never,
+			new NullLogService(),
+		));
+
+		const statuses = service.getServerStatuses();
+		assert.strictEqual(statuses.length, 1);
+		assert.strictEqual(statuses[0].status, ForgeMcpServerStatus.Connecting);
+	});
+
+	test('getServerStatuses marks disabled server correctly', () => {
+		const server = createMockMcpServer('noisy-server', McpConnectionState.Running, [
+			{ name: 'tool', description: '', inputSchema: {} },
+		]);
+		const mcpService = createMockMcpService([server]);
+		const configResolution = createMockConfigResolution(['noisy-server']);
+		const service = disposables.add(new ForgeMcpService(
+			mcpService as never,
+			configResolution as never,
+			new NullLogService(),
+		));
+
+		const statuses = service.getServerStatuses();
+		assert.strictEqual(statuses.length, 1);
+		assert.strictEqual(statuses[0].disabled, true);
+	});
+
+	test('toggleServerDisabled with disabled:false delegates re-enable', async () => {
+		const mcpService = createMockMcpService([]);
+		let calledWith: { name: string; disabled: boolean } | undefined;
+		const _onDidChangeResolved = disposables.add(new Emitter<ResolvedConfig>());
+		const configResolution = {
+			_serviceBrand: undefined,
+			onDidChangeResolved: _onDidChangeResolved.event,
+			resolve: async () => ({ mcpServers: [], agents: [], skills: [], disabled: { mcpServers: [], agents: [] } }),
+			getCached: () => undefined,
+			setMcpServerDisabled: async (name: string, disabled: boolean) => { calledWith = { name, disabled }; },
+			setAgentDisabled: async () => undefined,
+		};
+		const service = disposables.add(new ForgeMcpService(
+			mcpService as never,
+			configResolution as never,
+			new NullLogService(),
+		));
+
+		await service.toggleServerDisabled('my-server', false);
+		assert.deepStrictEqual(calledWith, { name: 'my-server', disabled: false });
+	});
+
+	test('onDidChangeServerStatus fires when config resolution changes', async () => {
+		const server = createMockMcpServer('srv', McpConnectionState.Running, []);
+		const mcpService = createMockMcpService([server]);
+		const _onDidChangeResolved = disposables.add(new Emitter<ResolvedConfig>());
+		const configResolution = {
+			_serviceBrand: undefined,
+			onDidChangeResolved: _onDidChangeResolved.event,
+			resolve: async () => ({ mcpServers: [], agents: [], skills: [], disabled: { mcpServers: [], agents: [] } }),
+			getCached: () => ({ mcpServers: [], agents: [], skills: [], disabled: { mcpServers: [], agents: [] } }),
+			setMcpServerDisabled: async () => undefined,
+			setAgentDisabled: async () => undefined,
+		};
+		const service = disposables.add(new ForgeMcpService(
+			mcpService as never,
+			configResolution as never,
+			new NullLogService(),
+		));
+
+		const firedEntries: string[] = [];
+		disposables.add(service.onDidChangeServerStatus(entry => { firedEntries.push(entry.name); }));
+
+		const dummyConfig: ResolvedConfig = { mcpServers: [], agents: [], skills: [], disabled: { mcpServers: [], agents: [] } };
+		_onDidChangeResolved.fire(dummyConfig);
+
+		assert.ok(firedEntries.includes('srv'));
+	});
+
 	test('toggleServerDisabled delegates to configResolution', async () => {
 		const mcpService = createMockMcpService([]);
 		let calledWith: { name: string; disabled: boolean } | undefined;
@@ -309,5 +502,88 @@ suite('ForgeMcpService', () => {
 
 		await service.toggleServerDisabled('my-server', true);
 		assert.deepStrictEqual(calledWith, { name: 'my-server', disabled: true });
+	});
+
+	test('listTools returns both entries when two servers have tools with the same name', async () => {
+		const serverA = createMockMcpServer('server-a', McpConnectionState.Running, [
+			{ name: 'read_file', description: 'Read from A', inputSchema: {} },
+		]);
+		const serverB = createMockMcpServer('server-b', McpConnectionState.Running, [
+			{ name: 'read_file', description: 'Read from B', inputSchema: {} },
+		]);
+		const mcpService = createMockMcpService([serverA, serverB]);
+		const configResolution = createMockConfigResolution();
+		const service = disposables.add(new ForgeMcpService(
+			mcpService as never,
+			configResolution as never,
+			new NullLogService(),
+		));
+
+		const tools = await service.listTools();
+		// No deduplication — both entries appear
+		assert.strictEqual(tools.length, 2);
+		assert.ok(tools.every(t => t.name === 'read_file'));
+	});
+
+	test('disposed onDidChangeTools listener is not called after disposal', () => {
+		const mcpService = createMockMcpService([]);
+		const _onDidChangeResolved = disposables.add(new Emitter<ResolvedConfig>());
+		const configResolution = {
+			_serviceBrand: undefined,
+			onDidChangeResolved: _onDidChangeResolved.event,
+			resolve: async () => ({ mcpServers: [], agents: [], skills: [], disabled: { mcpServers: [], agents: [] } }),
+			getCached: () => undefined,
+			setMcpServerDisabled: async () => undefined,
+			setAgentDisabled: async () => undefined,
+		};
+		const service = disposables.add(new ForgeMcpService(
+			mcpService as never,
+			configResolution as never,
+			new NullLogService(),
+		));
+
+		let callCount = 0;
+		const sub = service.onDidChangeTools(() => { callCount++; });
+		sub.dispose();
+
+		const dummyConfig: ResolvedConfig = { mcpServers: [], agents: [], skills: [], disabled: { mcpServers: [], agents: [] } };
+		_onDidChangeResolved.fire(dummyConfig);
+
+		assert.strictEqual(callCount, 0);
+	});
+
+	test('listTools returns new tool after config resolution fires with new server', async () => {
+		let currentServers: ReturnType<typeof createMockMcpServer>[] = [];
+		const dynamicMcpService = {
+			...createMockMcpService([]),
+			servers: { get: () => currentServers, read: () => currentServers } as never,
+		};
+
+		const _onDidChangeResolved = disposables.add(new Emitter<ResolvedConfig>());
+		const configResolution = {
+			_serviceBrand: undefined,
+			onDidChangeResolved: _onDidChangeResolved.event,
+			resolve: async () => ({ mcpServers: [], agents: [], skills: [], disabled: { mcpServers: [], agents: [] } }),
+			getCached: () => undefined,
+			setMcpServerDisabled: async () => undefined,
+			setAgentDisabled: async () => undefined,
+		};
+
+		const service = disposables.add(new ForgeMcpService(
+			dynamicMcpService as never,
+			configResolution as never,
+			new NullLogService(),
+		));
+
+		assert.strictEqual((await service.listTools()).length, 0);
+
+		currentServers = [createMockMcpServer('new-server', McpConnectionState.Running, [
+			{ name: 'grep_file', description: 'Grep a file', inputSchema: {} },
+		])];
+		_onDidChangeResolved.fire({ mcpServers: [], agents: [], skills: [], disabled: { mcpServers: [], agents: [] } });
+
+		const tools = await service.listTools();
+		assert.strictEqual(tools.length, 1);
+		assert.strictEqual(tools[0].name, 'grep_file');
 	});
 });

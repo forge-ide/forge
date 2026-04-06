@@ -53,9 +53,18 @@ export class AnthropicProvider implements IAIProvider {
 		const stream = this.client.messages.stream(streamParams);
 
 		let activeToolBlock: { id: string; name: string; inputJson: string } | undefined;
+		let inputTokens = 0;
+		let outputTokens = 0;
 
 		for await (const event of stream as AsyncIterable<RawMessageStreamEvent>) {
-			if (event.type === 'content_block_start') {
+			if (event.type === 'message_start') {
+				const e = event as unknown as { message: { usage: { input_tokens: number; output_tokens: number } } };
+				inputTokens = e.message.usage.input_tokens;
+				outputTokens = e.message.usage.output_tokens;
+			} else if (event.type === 'message_delta') {
+				const e = event as unknown as { usage: { output_tokens: number } };
+				outputTokens = e.usage.output_tokens;
+			} else if (event.type === 'content_block_start') {
 				const startEvent = event as RawContentBlockStartEvent;
 				if (startEvent.content_block.type === 'tool_use') {
 					activeToolBlock = {
@@ -93,7 +102,7 @@ export class AnthropicProvider implements IAIProvider {
 			}
 		}
 
-		yield { delta: '', done: true };
+		yield { delta: '', done: true, usage: { inputTokens, outputTokens } };
 	}
 
 	async validateCredentials(): Promise<AIValidationResult> {

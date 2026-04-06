@@ -7,16 +7,25 @@ import { KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
 import * as nls from '../../../../nls.js';
 import { Action2, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
+import { registerSingleton, InstantiationType } from '../../../../platform/instantiation/common/extensions.js';
 import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { IQuickInputService, IQuickPickItem } from '../../../../platform/quickinput/common/quickInput.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { Extensions as ViewExtensions, IViewContainersRegistry, IViewDescriptor, IViewsRegistry, ViewContainerLocation } from '../../../common/views.js';
 import { IForgeWorkspaceService } from '../../../services/forge/common/forgeWorkspaceService.js';
+import { IForgeMcpBridgeHost } from '../../../services/forge/browser/forgeMcpService.js';
 import { FORGE_AI_VIEWLET_ID, FORGE_AI_WORKSPACE_VIEW_ID } from '../common/forgeAI.js';
 import { ForgeAIViewPaneContainer, forgeAIViewIcon } from './forgeAIViewlet.js';
 import { ForgeAIWorkspaceView } from './forgeAIWorkspaceView.js';
 import { ForgeMcpStatusView, FORGE_MCP_STATUS_VIEW_ID } from './forgeMcpStatusView.js';
 import { ForgeAgentMonitorView, FORGE_AGENT_MONITOR_VIEW_ID } from './forgeAgentMonitorView.js';
+import { ForgeMcpBridgeHost } from './forgeMcpBridgeHost.js';
+
+// --- Service Registrations ---
+
+// Bridge between VS Code's IMcpService (contrib/mcp) and ForgeMcpService (services/forge).
+// Registered here because this is the one contrib file that can see both.
+registerSingleton(IForgeMcpBridgeHost, ForgeMcpBridgeHost, InstantiationType.Delayed);
 
 // --- View Container Registration ---
 

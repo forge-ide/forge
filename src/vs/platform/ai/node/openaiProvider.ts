@@ -45,12 +45,20 @@ export class OpenAIProvider implements IAIProvider {
 			max_tokens: request.maxTokens,
 			messages,
 			stream: true,
+			stream_options: { include_usage: true },
 			...(tools && tools.length > 0 ? { tools } : {}),
 		});
 
 		const pendingToolCalls = new Map<number, { id: string; name: string; args: string }>();
+		let inputTokens = 0;
+		let outputTokens = 0;
 
 		for await (const chunk of stream) {
+			if (chunk.usage) {
+				inputTokens = chunk.usage.prompt_tokens ?? 0;
+				outputTokens = chunk.usage.completion_tokens ?? 0;
+			}
+
 			const choice = chunk.choices[0];
 			if (!choice) {
 				continue;
@@ -99,7 +107,7 @@ export class OpenAIProvider implements IAIProvider {
 			}
 		}
 
-		yield { delta: '', done: true };
+		yield { delta: '', done: true, usage: { inputTokens, outputTokens } };
 	}
 
 	async validateCredentials(): Promise<AIValidationResult> {

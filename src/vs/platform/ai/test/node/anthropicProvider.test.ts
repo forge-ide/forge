@@ -65,6 +65,33 @@ suite('AnthropicProvider', () => {
 		assert.strictEqual(last.done, true);
 	});
 
+	test('stream done chunk carries usage from message_start and message_delta', async () => {
+		const mockClient: unknown = {
+			messages: {
+				stream: () => ({
+					[Symbol.asyncIterator]: async function* () {
+						yield { type: 'message_start', message: { usage: { input_tokens: 12, output_tokens: 0 } } };
+						yield { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Hello' } };
+						yield { type: 'message_delta', usage: { output_tokens: 7 } };
+					}
+				}),
+				create: async () => ({ content: [], model: 'claude-sonnet-4-6', usage: { input_tokens: 0, output_tokens: 0 } }),
+			},
+		};
+		const provider = new AnthropicProvider(mockClient as ConstructorParameters<typeof AnthropicProvider>[0]);
+
+		const chunks: AIStreamChunk[] = [];
+		for await (const chunk of provider.stream(makeRequest())) {
+			chunks.push(chunk);
+		}
+
+		const done = chunks[chunks.length - 1];
+		assert.strictEqual(done.done, true);
+		assert.ok(done.usage);
+		assert.strictEqual(done.usage!.inputTokens, 12);
+		assert.strictEqual(done.usage!.outputTokens, 7);
+	});
+
 	test('complete returns AICompletionResponse with correct fields', async () => {
 		const client = makeClient([]);
 		const provider = new AnthropicProvider(client as ConstructorParameters<typeof AnthropicProvider>[0]);
@@ -204,5 +231,55 @@ suite('AnthropicProvider tool calling', () => {
 		const block = (toolResultMsg['content'] as Array<Record<string, unknown>>)[0];
 		assert.strictEqual(block['tool_use_id'], 'call_1');
 		assert.strictEqual(block['content'], 'file contents');
+	});
+
+	test('stream() toolUse chunk includes parsed input', async () => {
+		const mockClient = {
+			messages: {
+				stream: () => ({
+					[Symbol.asyncIterator]: async function* () {
+						yield { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'call_x', name: 'read_file', input: {} } };
+						yield { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"path":"/etc/hosts"}' } };
+						yield { type: 'content_block_stop', index: 0 };
+						yield { type: 'message_stop' };
+					}
+				})
+			}
+		};
+
+		const provider = new AnthropicProvider(mockClient as unknown as ConstructorParameters<typeof AnthropicProvider>[0]);
+		const chunks: AIStreamChunk[] = [];
+		for await (const chunk of provider.stream({ messages: [{ role: 'user', content: 'go' }], model: 'claude-sonnet-4-6', tools: [{ name: 'read_file', description: 'Read', inputSchema: {} }] })) {
+			chunks.push(chunk);
+		}
+
+		const toolChunk = chunks.find(c => c.toolUse);
+		assert.ok(toolChunk);
+		assert.strictEqual(toolChunk!.toolUse!.id, 'call_x');
+		assert.strictEqual(toolChunk!.toolUse!.name, 'read_file');
+		assert.deepStrictEqual(toolChunk!.toolUse!.input, { path: '/etc/hosts' });
+	});
+
+	test('stream() omits tools from API call when none in request', async () => {
+		let capturedRequest: unknown;
+		const mockClient = {
+			messages: {
+				stream: (req: unknown) => {
+					capturedRequest = req;
+					return {
+						[Symbol.asyncIterator]: async function* () {
+							yield { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hi' } };
+							yield { type: 'message_stop' };
+						}
+					};
+				}
+			}
+		};
+
+		const provider = new AnthropicProvider(mockClient as unknown as ConstructorParameters<typeof AnthropicProvider>[0]);
+		for await (const _ of provider.stream({ messages: [{ role: 'user', content: 'hello' }], model: 'claude-sonnet-4-6' })) { /* drain */ }
+
+		const req = capturedRequest as Record<string, unknown>;
+		assert.strictEqual(req['tools'], undefined);
 	});
 });

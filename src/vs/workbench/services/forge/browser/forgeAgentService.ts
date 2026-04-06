@@ -38,6 +38,9 @@ export class ForgeAgentService extends Disposable implements IForgeAgentService 
 	}
 
 	async spawnAgent(options: ForgeAgentTaskOptions): Promise<ForgeAgentTask> {
+		if (this.isAgentDisabled(options.name)) {
+			throw new Error(`Agent "${options.name}" is disabled`);
+		}
 		const task = createAgentTask(options);
 		this.agents.set(task.id, task);
 		this._onDidChangeAgent.fire(task);
@@ -91,7 +94,7 @@ export class ForgeAgentService extends Disposable implements IForgeAgentService 
 	}
 
 	getAvailableDefinitions(): AgentDefinition[] {
-		return this.configResolutionService.getCached()?.agents ?? [];
+		return (this.configResolutionService.getCached()?.agents ?? []).filter(a => !this.isAgentDisabled(a.name));
 	}
 
 	isAgentDisabled(agentName: string): boolean {
@@ -116,7 +119,10 @@ export class ForgeAgentService extends Disposable implements IForgeAgentService 
 			return;
 		}
 
-		const mcpTools = await this.forgeMcpService.listTools();
+		const allMcpTools = await this.forgeMcpService.listTools();
+		const mcpTools = task.allowedTools ? allMcpTools.filter(t => task.allowedTools!.includes(t.name)) : allMcpTools;
+		let totalInputTokens = 0;
+		let totalOutputTokens = 0;
 		const messages: AIMessage[] = [
 			{ role: 'system', content: task.systemPrompt },
 			{ role: 'user', content: task.taskDescription }
@@ -140,6 +146,10 @@ export class ForgeAgentService extends Disposable implements IForgeAgentService 
 						fullContent += chunk.delta;
 					}
 					if (chunk.done) {
+						if (chunk.usage) {
+							totalInputTokens += chunk.usage.inputTokens;
+							totalOutputTokens += chunk.usage.outputTokens;
+						}
 						break;
 					}
 				}
@@ -161,6 +171,9 @@ export class ForgeAgentService extends Disposable implements IForgeAgentService 
 				task.status = ForgeAgentStatus.Completed;
 				task.result = fullContent;
 				task.completedAt = Date.now();
+				if (totalInputTokens > 0 || totalOutputTokens > 0) {
+					task.tokenCount = { input: totalInputTokens, output: totalOutputTokens };
+				}
 				this._onDidChangeAgent.fire(task);
 				return;
 			}
@@ -209,6 +222,9 @@ export class ForgeAgentService extends Disposable implements IForgeAgentService 
 		if (task.status === ForgeAgentStatus.Running) {
 			task.status = ForgeAgentStatus.MaxTurnsReached;
 			task.completedAt = Date.now();
+			if (totalInputTokens > 0 || totalOutputTokens > 0) {
+				task.tokenCount = { input: totalInputTokens, output: totalOutputTokens };
+			}
 			this._onDidChangeAgent.fire(task);
 		}
 	}

@@ -2,6 +2,7 @@ import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import {
 	ForgeAgentStatus,
+	MAX_TURNS,
 	createAgentTask,
 	createAgentStep,
 	createAgentTaskFromDefinition
@@ -67,6 +68,22 @@ suite('ForgeAgentTypes', () => {
 		assert.strictEqual(step.toolName, 'read_file');
 		assert.strictEqual(step.status, 'pending');
 		assert.ok(step.startedAt > 0);
+	});
+
+	test('createAgentTask clamps maxTurns to MAX_TURNS', () => {
+		const task = createAgentTask({
+			name: 'agent', systemPrompt: 'p', taskDescription: 't',
+			providerName: 'p', model: 'm', maxTurns: 9999
+		});
+		assert.strictEqual(task.maxTurns, MAX_TURNS);
+	});
+
+	test('createAgentTask default maxTurns equals MAX_TURNS', () => {
+		const task = createAgentTask({
+			name: 'agent', systemPrompt: 'p', taskDescription: 't',
+			providerName: 'p', model: 'm'
+		});
+		assert.strictEqual(task.maxTurns, MAX_TURNS);
 	});
 
 	test('ForgeAgentStatus enum values', () => {
