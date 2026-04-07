@@ -9,6 +9,8 @@ import { IOnboardingStep } from '../forgeOnboardingView.js';
 export interface IStep4ReadyOptions {
 	configuredProviders: string[];
 	importedConfig: boolean;
+	mcpSelections: string[];
+	onLaunch: (action: 'openFolder' | 'newSession') => Promise<void>;
 }
 
 export class Step4Ready implements IOnboardingStep {
@@ -19,28 +21,56 @@ export class Step4Ready implements IOnboardingStep {
 	constructor(private readonly options: IStep4ReadyOptions) { }
 
 	render(container: HTMLElement, _env: IEnvironmentDetectionResult): void {
+		// Ember-tinted header zone
+		const header = document.createElement('div');
+		header.className = 'forge-onboarding-ready-header';
+
+		const titleEl = document.createElement('div');
+		titleEl.className = 'forge-onboarding-title';
+		titleEl.textContent = 'READY TO FORGE';
+		header.appendChild(titleEl);
+
+		const subtitleEl = document.createElement('p');
+		subtitleEl.className = 'forge-onboarding-subtitle';
+		subtitleEl.textContent = 'Your workspace is configured. Open a folder or start a new AI session to begin.';
+		header.appendChild(subtitleEl);
+
+		container.appendChild(header);
+
+		// Checkmark summary
 		const summary = document.createElement('div');
 		summary.className = 'forge-onboarding-summary';
 
-		if (this.options.configuredProviders.length > 0) {
-			const labels = this.options.configuredProviders.map(id => this._providerLabel(id)).join(', ');
-			summary.appendChild(this._summaryRow(`AI providers configured: ${labels}`));
-		}
+		summary.appendChild(this._summaryRow('Canvas layout set to Quad'));
 
 		if (this.options.importedConfig) {
-			summary.appendChild(this._summaryRow('VS Code config imported'));
+			summary.appendChild(this._summaryRow('VS Code config imported - keybindings, theme, extensions'));
 		}
 
-		summary.appendChild(this._summaryRow('MCP tool support enabled'));
+		for (const providerId of this.options.configuredProviders) {
+			summary.appendChild(this._summaryRow(`${this._providerLabel(providerId)} connected`));
+		}
+
+		if (this.options.mcpSelections.length > 0) {
+			const mcpLabels = this.options.mcpSelections.map(id => this._mcpLabel(id)).join(' - ');
+			summary.appendChild(this._summaryRow(`${mcpLabels} enabled`));
+		}
 
 		container.appendChild(summary);
 
-		const links = document.createElement('div');
-		links.className = 'forge-onboarding-links';
-		links.appendChild(this._link('Documentation', '#'));
-		links.appendChild(this._link('GitHub', '#'));
-		links.appendChild(this._link('Discord', '#'));
-		container.appendChild(links);
+		// Launch grid
+		const grid = document.createElement('div');
+		grid.className = 'forge-onboarding-launch-grid';
+
+		const openFolderBtn = this._launchBtn('[folder]', 'Open Folder', 'Start with an existing project', false);
+		openFolderBtn.addEventListener('click', () => void this.options.onLaunch('openFolder'));
+		grid.appendChild(openFolderBtn);
+
+		const newSessionBtn = this._launchBtn('[ai]', 'New AI Session', 'Start with a blank canvas', true);
+		newSessionBtn.addEventListener('click', () => void this.options.onLaunch('newSession'));
+		grid.appendChild(newSessionBtn);
+
+		container.appendChild(grid);
 	}
 
 	validate(): boolean {
@@ -57,28 +87,52 @@ export class Step4Ready implements IOnboardingStep {
 
 		const check = document.createElement('span');
 		check.className = 'forge-onboarding-summary-check';
-		check.textContent = '✓';
-
+		check.textContent = '+';  // ASCII for checkmark (hygiene rejects unicode)
 		row.appendChild(check);
-		row.appendChild(document.createTextNode(text));
+
+		const label = document.createElement('span');
+		label.textContent = text;
+		row.appendChild(label);
+
 		return row;
 	}
 
-	private _link(label: string, href: string): HTMLElement {
-		const a = document.createElement('a');
-		a.className = 'forge-onboarding-link';
-		a.href = href;
-		a.textContent = label;
-		a.target = '_blank';
-		a.rel = 'noopener noreferrer';
-		return a;
+	private _launchBtn(icon: string, label: string, subtitle: string, highlighted: boolean): HTMLElement {
+		const btn = document.createElement('div');
+		btn.className = 'forge-onboarding-launch-btn' + (highlighted ? ' highlighted' : '');
+
+		const iconEl = document.createElement('span');
+		iconEl.className = 'forge-onboarding-launch-icon';
+		iconEl.textContent = icon;
+		btn.appendChild(iconEl);
+
+		const labelEl = document.createElement('div');
+		labelEl.textContent = label;
+		btn.appendChild(labelEl);
+
+		const subEl = document.createElement('div');
+		subEl.className = 'forge-onboarding-launch-subtitle';
+		subEl.textContent = subtitle;
+		btn.appendChild(subEl);
+
+		return btn;
+	}
+
+	private _mcpLabel(id: string): string {
+		const labels: Record<string, string> = {
+			filesystem: 'Filesystem MCP',
+			github: 'GitHub MCP',
+			browser: 'Browser MCP',
+			postgres: 'Postgres MCP',
+		};
+		return labels[id] ?? id;
 	}
 
 	private _providerLabel(id: string): string {
 		const labels: Record<string, string> = {
 			anthropic: 'Anthropic',
 			openai: 'OpenAI',
-			gemini: 'Gemini',
+			custom: 'Custom endpoint',
 			local: 'Local (Ollama / LM Studio)',
 		};
 		return labels[id] ?? id;

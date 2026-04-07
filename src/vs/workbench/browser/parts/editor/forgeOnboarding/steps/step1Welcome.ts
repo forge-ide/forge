@@ -8,8 +8,8 @@ import { IOnboardingStep } from '../forgeOnboardingView.js';
 
 export class Step1Welcome implements IOnboardingStep {
 	readonly stepId = 'welcome';
-	readonly title = 'Welcome to Forge';
-	readonly subtitle = 'Your AI-native development environment';
+	readonly title = 'FORGE IDE';
+	readonly subtitle = 'You\'re running a VSCode fork built around one idea: the AI backing your IDE should be your choice.';
 
 	render(container: HTMLElement, env: IEnvironmentDetectionResult): void {
 		const body = document.createElement('p');
@@ -40,12 +40,15 @@ export class Step1Welcome implements IOnboardingStep {
 		const badges: HTMLElement[] = [];
 
 		if (env.hasVSCodeConfig) {
-			badges.push(this._badge('VS Code config detected'));
+			badges.push(this._badge('VS Code config found'));
 		}
 
 		const keyCount = Object.keys(env.detectedApiKeys).length;
 		if (keyCount > 0) {
-			badges.push(this._badge(`${keyCount} API key${keyCount > 1 ? 's' : ''} detected`));
+			const label = keyCount === 1
+				? `${Object.keys(env.detectedApiKeys)[0]} API key detected`
+				: `${keyCount} API keys detected`;
+			badges.push(this._badge(label));
 		}
 
 		if (env.ollamaRunning) {
@@ -57,7 +60,7 @@ export class Step1Welcome implements IOnboardingStep {
 		}
 
 		if (env.npxAvailable) {
-			badges.push(this._badge('npx available (MCP servers supported)'));
+			badges.push(this._badge('npx available'));
 		}
 
 		return badges;

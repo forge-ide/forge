@@ -10,14 +10,15 @@ import { IOnboardingStep } from '../forgeOnboardingView.js';
 interface ProviderDefinition {
 	id: string;
 	label: string;
+	description: string;
 	isLocal: boolean;
 }
 
 const PROVIDERS: ProviderDefinition[] = [
-	{ id: 'anthropic', label: 'Anthropic', isLocal: false },
-	{ id: 'openai', label: 'OpenAI', isLocal: false },
-	{ id: 'gemini', label: 'Gemini', isLocal: false },
-	{ id: 'local', label: 'Local (Ollama / LM Studio)', isLocal: true },
+	{ id: 'anthropic', label: 'Anthropic', description: 'Claude 3.5 Sonnet, Claude 3 Haiku and more', isLocal: false },
+	{ id: 'openai', label: 'OpenAI', description: 'GPT-4o, GPT-4 Turbo, o1 and more', isLocal: false },
+	{ id: 'custom', label: 'Custom endpoint', description: 'Any OpenAI-compatible API - Azure, Together, Groq, your own', isLocal: false },
+	{ id: 'local', label: 'Local - Ollama / LM Studio', description: 'No local server detected - install Ollama to use local models', isLocal: true },
 ];
 
 export class Step3Provider implements IOnboardingStep {
@@ -37,10 +38,20 @@ export class Step3Provider implements IOnboardingStep {
 	}
 
 	constructor(
-		@ISecretStorageService private readonly secretStorageService: ISecretStorageService,
+		@ISecretStorageService private readonly _secretStorageService: ISecretStorageService,
 	) { }
 
 	render(container: HTMLElement, env: IEnvironmentDetectionResult): void {
+		// Detection banner
+		const detectedProvider = Object.keys(env.detectedApiKeys)[0];
+		if (detectedProvider) {
+			const banner = document.createElement('div');
+			banner.className = 'forge-onboarding-detection-banner';
+			const providerLabel = PROVIDERS.find(p => p.id === detectedProvider)?.label ?? detectedProvider;
+			banner.textContent = `${providerLabel} API key detected`;
+			container.appendChild(banner);
+		}
+
 		const list = document.createElement('div');
 		list.className = 'forge-onboarding-provider-list';
 
@@ -49,15 +60,6 @@ export class Step3Provider implements IOnboardingStep {
 		}
 
 		container.appendChild(list);
-
-		// Auto-check providers with detected keys or running local servers
-		for (const provider of PROVIDERS) {
-			if (!provider.isLocal && env.detectedApiKeys[provider.id]) {
-				this._setChecked(provider.id, true, env.detectedApiKeys[provider.id]);
-			} else if (provider.isLocal && (env.ollamaRunning || env.lmStudioRunning)) {
-				this._setChecked(provider.id, true, '');
-			}
-		}
 	}
 
 	validate(): boolean {
@@ -71,89 +73,99 @@ export class Step3Provider implements IOnboardingStep {
 	}
 
 	async onNext(): Promise<void> {
-		for (const [providerId, key] of this._apiKeys) {
-			if (key) {
-				await this.secretStorageService.set(`forge.apikey.${providerId}`, key);
+		for (const [providerId, key] of this._apiKeys.entries()) {
+			if (key && this._checkboxes.get(providerId)?.checked) {
+				await this._secretStorageService.set(`forge.provider.apiKey.${providerId}`, key);
 			}
 		}
 	}
 
 	private _buildProviderOption(provider: ProviderDefinition, env: IEnvironmentDetectionResult): HTMLElement {
-		const wrapper = document.createElement('div');
-		wrapper.className = 'forge-onboarding-provider-option';
-		this._optionEls.set(provider.id, wrapper);
+		const isDetectedLocal = provider.isLocal && (env.ollamaRunning || env.lmStudioRunning);
+		const isDimmed = provider.isLocal && !env.ollamaRunning && !env.lmStudioRunning;
 
-		// Header row
+		const option = document.createElement('div');
+		option.className = 'forge-onboarding-provider-option' + (isDimmed ? ' dim' : '');
+
 		const header = document.createElement('div');
 		header.className = 'forge-onboarding-provider-header';
 
 		const checkbox = document.createElement('input');
 		checkbox.type = 'checkbox';
 		checkbox.className = 'forge-onboarding-provider-checkbox';
-		checkbox.value = provider.id;
-		this._checkboxes.set(provider.id, checkbox);
+		checkbox.id = `provider-${provider.id}`;
+
+		const hex = document.createElement('div');
+		hex.className = 'forge-onboarding-provider-hex';
+
+		const labelWrap = document.createElement('div');
+		labelWrap.className = 'forge-onboarding-provider-label';
 
 		const labelEl = document.createElement('span');
-		labelEl.className = 'forge-onboarding-provider-label';
 		labelEl.textContent = provider.label;
+		labelWrap.appendChild(labelEl);
+
+		const descEl = document.createElement('div');
+		descEl.className = 'forge-onboarding-provider-detected';
+		descEl.textContent = provider.description;
+		labelWrap.appendChild(descEl);
+
+		const typeBadge = document.createElement('span');
+		typeBadge.className = 'forge-onboarding-provider-type-badge';
+		typeBadge.textContent = provider.isLocal ? 'local' : 'cloud';
 
 		header.appendChild(checkbox);
-		header.appendChild(labelEl);
+		header.appendChild(hex);
+		header.appendChild(labelWrap);
+		header.appendChild(typeBadge);
+		option.appendChild(header);
 
-		// Detected badge
-		if (!provider.isLocal && env.detectedApiKeys[provider.id]) {
-			const badge = document.createElement('span');
-			badge.className = 'forge-onboarding-provider-detected';
-			badge.textContent = 'Key detected';
-			header.appendChild(badge);
-		} else if (provider.isLocal && (env.ollamaRunning || env.lmStudioRunning)) {
-			const parts: string[] = [];
-			if (env.ollamaRunning) { parts.push('Ollama'); }
-			if (env.lmStudioRunning) { parts.push('LM Studio'); }
-			const badge = document.createElement('span');
-			badge.className = 'forge-onboarding-provider-detected';
-			badge.textContent = `${parts.join(', ')} running`;
-			header.appendChild(badge);
+		// Auto-detect pre-selection
+		const detectedKey = env.detectedApiKeys[provider.id] ?? '';
+		if (detectedKey || isDetectedLocal) {
+			this._setChecked(provider.id, true, detectedKey);
+			checkbox.checked = true;
+			option.classList.add('checked');
 		}
 
-		wrapper.appendChild(header);
+		this._checkboxes.set(provider.id, checkbox);
+		this._optionEls.set(provider.id, option);
 
-		// API key section (cloud providers only)
+		checkbox.addEventListener('change', () => {
+			this._setChecked(provider.id, checkbox.checked, this._apiKeys.get(provider.id) ?? '');
+			option.classList.toggle('checked', checkbox.checked);
+		});
+
+		// API key section (for non-local providers)
 		if (!provider.isLocal) {
 			const keySection = document.createElement('div');
 			keySection.className = 'forge-onboarding-api-key-section';
-			keySection.style.display = 'none';
+			keySection.style.display = checkbox.checked ? '' : 'none';
 
 			const keyInput = document.createElement('input');
 			keyInput.type = 'password';
 			keyInput.className = 'forge-onboarding-api-key-input';
-			keyInput.placeholder = 'Paste your API key\u2026';
+			keyInput.placeholder = `Enter ${provider.label} API key`;
+			if (detectedKey) {
+				keyInput.value = detectedKey;
+			}
+
 			keyInput.addEventListener('input', () => {
-				if (this._apiKeys.has(provider.id)) {
-					this._apiKeys.set(provider.id, keyInput.value);
-				}
+				this._apiKeys.set(provider.id, keyInput.value);
 			});
 
 			keySection.appendChild(keyInput);
-			wrapper.appendChild(keySection);
+			option.appendChild(keySection);
 
 			this._keyInputs.set(provider.id, keyInput);
 			this._keySections.set(provider.id, keySection);
+
+			checkbox.addEventListener('change', () => {
+				keySection.style.display = checkbox.checked ? '' : 'none';
+			});
 		}
 
-		// Clicking the header (outside the checkbox) toggles the checkbox
-		header.addEventListener('click', (e) => {
-			if (e.target !== checkbox) {
-				checkbox.checked = !checkbox.checked;
-				this._setChecked(provider.id, checkbox.checked, env.detectedApiKeys[provider.id] ?? '');
-			}
-		});
-
-		checkbox.addEventListener('change', () => {
-			this._setChecked(provider.id, checkbox.checked, env.detectedApiKeys[provider.id] ?? '');
-		});
-
-		return wrapper;
+		return option;
 	}
 
 	private _setChecked(providerId: string, checked: boolean, prefillKey: string): void {

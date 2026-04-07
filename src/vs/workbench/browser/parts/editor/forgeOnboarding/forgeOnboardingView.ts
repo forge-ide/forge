@@ -7,6 +7,7 @@ import { clearNode } from '../../../../../base/browser/dom.js';
 import { Disposable } from '../../../../../base/common/lifecycle.js';
 import { IForgeOnboardingService, IEnvironmentDetectionResult } from '../../../../services/forge/common/forgeOnboardingService.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
+import { ICommandService } from '../../../../../platform/commands/common/commands.js';
 import { Step1Welcome } from './steps/step1Welcome.js';
 import { Step2Import } from './steps/step2Import.js';
 import { Step3Provider } from './steps/step3Provider.js';
@@ -50,6 +51,7 @@ export class ForgeOnboardingView extends Disposable {
 		container: HTMLElement,
 		@IForgeOnboardingService private readonly onboardingService: IForgeOnboardingService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
+		@ICommandService private readonly commandService: ICommandService,
 	) {
 		super();
 
@@ -160,7 +162,14 @@ export class ForgeOnboardingView extends Disposable {
 			case 4: {
 				const options: IStep4ReadyOptions = {
 					configuredProviders: this._step3?.configuredProviders ?? [],
-					importedConfig: !!(this._step2?.importSettings || this._step2?.importKeybindings || this._step2?.importExtensions),
+					importedConfig: !!(this._step2?.importTheme || this._step2?.importKeybindings || this._step2?.importExtensions || this._step2?.importGit),
+					mcpSelections: [],
+					onLaunch: async (action) => {
+						this.onboardingService.markComplete();
+						if (action === 'openFolder') {
+							await this.commandService.executeCommand('workbench.action.files.openFolder');
+						}
+					},
 				};
 				stepInstance = new Step4Ready(options);
 				break;
