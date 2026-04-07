@@ -42,6 +42,9 @@ jobs:
   nightly:
     name: Trigger Nightly Build
     needs: release
+    permissions:
+      contents: read
+      packages: write
     uses: ./.github/workflows/forge-nightly.yml
     with:
       sha: ${{ github.sha }}
