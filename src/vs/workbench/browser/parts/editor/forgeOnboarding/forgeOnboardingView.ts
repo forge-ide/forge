@@ -3,7 +3,6 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { clearNode } from '../../../../../base/browser/dom.js';
 import { Disposable } from '../../../../../base/common/lifecycle.js';
 import { IForgeOnboardingService, IEnvironmentDetectionResult } from '../../../../services/forge/common/forgeOnboardingService.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
@@ -30,15 +29,20 @@ export interface IOnboardingStep {
 
 export class ForgeOnboardingView extends Disposable {
 	private readonly _rootEl: HTMLElement;
-	private readonly _wizardEl: HTMLElement;
-	private readonly _progressEl: HTMLElement;
-	private readonly _contentEl: HTMLElement;
-	private readonly _footerEl: HTMLElement;
+	private readonly _shellEl: HTMLElement;
+	private readonly _railEl: HTMLElement;
+	private readonly _railFillEl: HTMLElement;
+	private readonly _shellCounterEl: HTMLElement;
+	private readonly _loadingEl: HTMLElement;
+	private readonly _cardEl: HTMLElement;
+	private readonly _cardHdrEl: HTMLElement;
+	private readonly _eyebrowEl: HTMLElement;
+	private readonly _titleEl: HTMLElement;
+	private readonly _subtitleEl: HTMLElement;
+	private readonly _cardBodyEl: HTMLElement;
+	private readonly _cardFooterEl: HTMLElement;
 	private readonly _prevBtn: HTMLButtonElement;
 	private readonly _nextBtn: HTMLButtonElement;
-
-	private _progressFillEl!: HTMLElement;
-	private _stepCounterEl!: HTMLElement;
 
 	private _env: IEnvironmentDetectionResult | undefined;
 	private _state: WizardState = 'detecting';
@@ -49,6 +53,7 @@ export class ForgeOnboardingView extends Disposable {
 	private _step3: Step3Provider | undefined;
 	private _stepCanvas: StepCanvasExplainer | undefined;
 	private _stepMCP: StepMCP | undefined;
+	private _step4Ready: Step4Ready | undefined;
 
 	private _validationErrorEl: HTMLElement | undefined;
 
@@ -68,41 +73,73 @@ export class ForgeOnboardingView extends Disposable {
 		this._rootEl.className = 'forge-onboarding-root';
 		container.appendChild(this._rootEl);
 
-		// Wizard card
-		this._wizardEl = document.createElement('div');
-		this._wizardEl.className = 'forge-onboarding-wizard';
-		this._rootEl.appendChild(this._wizardEl);
+		// Shell — relative container, centered
+		this._shellEl = document.createElement('div');
+		this._shellEl.className = 'forge-onboarding-shell';
+		this._rootEl.appendChild(this._shellEl);
 
-		// Progress bar
-		this._progressEl = document.createElement('div');
-		this._progressEl.className = 'forge-onboarding-progress';
+		// Vertical progress rail (left edge)
+		this._railEl = document.createElement('div');
+		this._railEl.className = 'forge-onboarding-progress-rail';
 
-		const progressWrap = document.createElement('div');
-		progressWrap.className = 'forge-onboarding-progress-wrap';
+		this._railFillEl = document.createElement('div');
+		this._railFillEl.className = 'forge-onboarding-progress-fill';
+		this._railFillEl.style.height = '0%';
+		this._railEl.appendChild(this._railFillEl);
+		this._shellEl.appendChild(this._railEl);
 
-		this._stepCounterEl = document.createElement('div');
-		this._stepCounterEl.className = 'forge-onboarding-step-counter';
-		progressWrap.appendChild(this._stepCounterEl);
+		// Step counter — absolute top-right
+		this._shellCounterEl = document.createElement('div');
+		this._shellCounterEl.className = 'forge-onboarding-step-counter';
+		this._shellEl.appendChild(this._shellCounterEl);
 
-		const track = document.createElement('div');
-		track.className = 'forge-onboarding-progress-track';
+		// Loading indicator — shown only during detecting
+		this._loadingEl = document.createElement('p');
+		this._loadingEl.className = 'forge-onboarding-loading';
+		this._loadingEl.textContent = 'Detecting your environment...';
+		this._shellEl.appendChild(this._loadingEl);
 
-		this._progressFillEl = document.createElement('div');
-		this._progressFillEl.className = 'forge-onboarding-progress-fill';
-		track.appendChild(this._progressFillEl);
-		progressWrap.appendChild(track);
+		// Card
+		this._cardEl = document.createElement('div');
+		this._cardEl.className = 'forge-onboarding-card';
+		this._shellEl.appendChild(this._cardEl);
 
-		this._progressEl.appendChild(progressWrap);
-		this._wizardEl.appendChild(this._progressEl);
+		// Card header
+		this._cardHdrEl = document.createElement('div');
+		this._cardHdrEl.className = 'forge-onboarding-card-hdr';
 
-		// Content area
-		this._contentEl = document.createElement('div');
-		this._contentEl.className = 'forge-onboarding-content';
-		this._wizardEl.appendChild(this._contentEl);
+		// Persistent Forge mark + wordmark above the eyebrow
+		const markEl = document.createElement('div');
+		markEl.className = 'forge-onboarding-card-hdr-mark';
+		markEl.appendChild(buildForgeMarkSvg());
+		const markText = document.createElement('span');
+		markText.className = 'forge-onboarding-card-hdr-mark-text';
+		markText.textContent = 'FORGE IDE';
+		markEl.appendChild(markText);
+		this._cardHdrEl.appendChild(markEl);
 
-		// Footer
-		this._footerEl = document.createElement('div');
-		this._footerEl.className = 'forge-onboarding-footer';
+		this._eyebrowEl = document.createElement('div');
+		this._eyebrowEl.className = 'forge-onboarding-eyebrow';
+		this._cardHdrEl.appendChild(this._eyebrowEl);
+
+		this._titleEl = document.createElement('div');
+		this._titleEl.className = 'forge-onboarding-title';
+		this._cardHdrEl.appendChild(this._titleEl);
+
+		this._subtitleEl = document.createElement('p');
+		this._subtitleEl.className = 'forge-onboarding-subtitle';
+		this._cardHdrEl.appendChild(this._subtitleEl);
+
+		this._cardEl.appendChild(this._cardHdrEl);
+
+		// Card body
+		this._cardBodyEl = document.createElement('div');
+		this._cardBodyEl.className = 'forge-onboarding-card-body';
+		this._cardEl.appendChild(this._cardBodyEl);
+
+		// Card footer
+		this._cardFooterEl = document.createElement('div');
+		this._cardFooterEl.className = 'forge-onboarding-card-footer';
 
 		this._prevBtn = document.createElement('button');
 		this._prevBtn.className = 'forge-onboarding-btn-secondary';
@@ -111,11 +148,12 @@ export class ForgeOnboardingView extends Disposable {
 		this._nextBtn = document.createElement('button');
 		this._nextBtn.className = 'forge-onboarding-btn-primary';
 		this._nextBtn.textContent = 'Next';
-		this._nextBtn.addEventListener('click', () => this._onNext());
+		// Click handler is assigned per-state in _updateFooter
+		// (advances on most states, launches on complete).
 
-		this._footerEl.appendChild(this._prevBtn);
-		this._footerEl.appendChild(this._nextBtn);
-		this._wizardEl.appendChild(this._footerEl);
+		this._cardFooterEl.appendChild(this._prevBtn);
+		this._cardFooterEl.appendChild(this._nextBtn);
+		this._cardEl.appendChild(this._cardFooterEl);
 
 		// Start in detecting state
 		this._setState('detecting');
@@ -130,44 +168,59 @@ export class ForgeOnboardingView extends Disposable {
 	private _setState(state: WizardState): void {
 		this._state = state;
 		const isDetecting = state === 'detecting';
-		this._progressEl.style.display = isDetecting ? 'none' : 'flex';
-		this._footerEl.style.display = isDetecting ? 'none' : 'flex';
+		this._loadingEl.style.display = isDetecting ? '' : 'none';
+		this._cardEl.style.display = isDetecting ? 'none' : '';
+		this._shellCounterEl.style.display = isDetecting ? 'none' : '';
 		this._updateProgress(state);
 	}
 
 	private _updateProgress(state: WizardState): void {
-		if (state === 'detecting' || state === 'complete') {
-			this._stepCounterEl.textContent = '';
-			this._progressFillEl.style.width = state === 'complete' ? '100%' : '0%';
+		if (state === 'detecting') {
+			this._railFillEl.style.height = '0%';
+			this._eyebrowEl.textContent = '';
+			this._shellCounterEl.textContent = '';
+			return;
+		}
+		if (state === 'complete') {
+			this._railFillEl.style.height = '100%';
+			this._eyebrowEl.textContent = '';
+			this._shellCounterEl.textContent = '';
 			return;
 		}
 		const hasImport = this._env?.hasVSCodeConfig ?? false;
 		const step = getStepNumber(state, hasImport);
 		const total = getTotalSteps(hasImport);
-		this._stepCounterEl.textContent = `Step ${step} of ${total}`;
-		this._progressFillEl.style.width = `${(step / total) * 100}%`;
+		this._railFillEl.style.height = `${(step / total) * 100}%`;
+		this._eyebrowEl.textContent = `STEP ${step} OF ${total}`;
+		this._shellCounterEl.textContent = `STEP ${step} OF ${total}`;
 	}
 
 	private async _detect(): Promise<void> {
-		clearNode(this._contentEl);
-		const loading = document.createElement('p');
-		loading.className = 'forge-onboarding-loading';
-		loading.textContent = 'Detecting your environment\u2026';
-		this._contentEl.appendChild(loading);
-
 		this._env = await this.onboardingService.detectEnvironment();
 		this._setState('welcome');
 		this._renderCurrentStep();
 	}
 
 	private _renderCurrentStep(): void {
-		const el = this._contentEl;
+		const el = this._cardBodyEl;
 		while (el.firstChild) { el.removeChild(el.firstChild); }
+		this._clearValidationError();
 
-		switch (this._state) {
+		const state = this._state;
+
+		// Ember tint on card header for complete state
+		if (state === 'complete') {
+			this._cardHdrEl.classList.add('ember-tint');
+		} else {
+			this._cardHdrEl.classList.remove('ember-tint');
+		}
+
+		switch (state) {
 			case 'welcome': {
 				const step = new Step1Welcome();
-				step.render(this._contentEl, this._env!);
+				this._titleEl.textContent = step.title.toUpperCase();
+				this._subtitleEl.textContent = step.subtitle;
+				step.render(this._cardBodyEl, this._env!);
 				this._currentStep = step;
 				this._updateFooter('welcome');
 				break;
@@ -176,7 +229,9 @@ export class ForgeOnboardingView extends Disposable {
 				if (!this._stepCanvas) {
 					this._stepCanvas = new StepCanvasExplainer();
 				}
-				this._stepCanvas.render(this._contentEl, this._env!);
+				this._titleEl.textContent = this._stepCanvas.title.toUpperCase();
+				this._subtitleEl.textContent = this._stepCanvas.subtitle;
+				this._stepCanvas.render(this._cardBodyEl, this._env!);
 				this._currentStep = this._stepCanvas;
 				this._updateFooter('canvas');
 				break;
@@ -185,7 +240,9 @@ export class ForgeOnboardingView extends Disposable {
 				if (!this._step2) {
 					this._step2 = new Step2Import();
 				}
-				this._step2.render(this._contentEl, this._env!);
+				this._titleEl.textContent = this._step2.title.toUpperCase();
+				this._subtitleEl.textContent = this._step2.subtitle;
+				this._step2.render(this._cardBodyEl, this._env!);
 				this._currentStep = this._step2;
 				this._updateFooter('import');
 				break;
@@ -194,7 +251,9 @@ export class ForgeOnboardingView extends Disposable {
 				if (!this._step3) {
 					this._step3 = this.instantiationService.createInstance(Step3Provider);
 				}
-				this._step3.render(this._contentEl, this._env!);
+				this._titleEl.textContent = this._step3.title.toUpperCase();
+				this._subtitleEl.textContent = this._step3.subtitle;
+				this._step3.render(this._cardBodyEl, this._env!);
 				this._currentStep = this._step3;
 				this._updateFooter('provider');
 				break;
@@ -203,21 +262,25 @@ export class ForgeOnboardingView extends Disposable {
 				if (!this._stepMCP) {
 					this._stepMCP = new StepMCP(this.onboardingService);
 				}
-				this._stepMCP.render(this._contentEl, this._env!);
+				this._titleEl.textContent = this._stepMCP.title.toUpperCase();
+				this._subtitleEl.textContent = this._stepMCP.subtitle;
+				this._stepMCP.render(this._cardBodyEl, this._env!);
 				this._currentStep = this._stepMCP;
 				this._updateFooter('mcp');
 				break;
 			}
 			case 'complete': {
 				const options: IStep4ReadyOptions = {
+					canvasLayout: this._stepCanvas?.selectedLayout ?? 'quad',
 					configuredProviders: this._step3?.configuredProviders ?? [],
 					importedConfig: !!(this._step2?.importTheme || this._step2?.importKeybindings || this._step2?.importExtensions || this._step2?.importGit),
 					mcpSelections: this._stepMCP?.selectedServers ?? [],
-					onLaunch: (action) => this._handleLaunch(action),
 				};
-				const step = new Step4Ready(options);
-				step.render(this._contentEl, this._env!);
-				this._currentStep = step;
+				this._step4Ready = new Step4Ready(options);
+				this._titleEl.textContent = this._step4Ready.title.toUpperCase();
+				this._subtitleEl.textContent = this._step4Ready.subtitle;
+				this._step4Ready.render(this._cardBodyEl, this._env!);
+				this._currentStep = this._step4Ready;
 				this._updateFooter('complete');
 				break;
 			}
@@ -271,12 +334,14 @@ export class ForgeOnboardingView extends Disposable {
 			mcp: 'Enable selected',
 			complete: 'Enter Forge',
 		};
-		if (state === 'complete') {
-			this._nextBtn.style.display = 'none';
-		} else {
-			this._nextBtn.style.display = '';
-			this._nextBtn.textContent = nextLabels[state] ?? 'Next';
-		}
+		this._nextBtn.style.display = '';
+		this._nextBtn.textContent = nextLabels[state] ?? 'Next';
+		// On the complete step, the primary footer button launches whichever
+		// action the user selected in the launch grid (defaults to New AI Session).
+		// On all other steps it advances the wizard.
+		this._nextBtn.onclick = state === 'complete'
+			? () => void this._handleLaunch(this._step4Ready?.selectedAction ?? 'newSession')
+			: () => void this._onNext();
 	}
 
 	private async _onNext(): Promise<void> {
@@ -310,7 +375,7 @@ export class ForgeOnboardingView extends Disposable {
 		err.className = 'forge-onboarding-error';
 		err.textContent = message;
 		this._validationErrorEl = err;
-		this._footerEl.insertAdjacentElement('beforebegin', err);
+		this._cardFooterEl.insertAdjacentElement('beforebegin', err);
 	}
 
 	private _clearValidationError(): void {
@@ -346,6 +411,58 @@ export class ForgeOnboardingView extends Disposable {
 			this._logService.error('ForgeOnboardingView: launch command failed', err);
 		}
 	}
+}
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+/**
+ * Builds a minimal Forge mark SVG (5-spoke hub-and-spoke from DESIGN.md section 2)
+ * for the persistent card header element. Uses canonical brand hex values.
+ */
+function buildForgeMarkSvg(): SVGElement {
+	const svg = document.createElementNS(SVG_NS, 'svg');
+	svg.setAttribute('viewBox', '0 0 200 200');
+	svg.setAttribute('aria-label', 'Forge IDE mark');
+
+	const spokes: Array<[number, number, string]> = [
+		[100, 20, '#ffd166'],
+		[24, 75, '#ff4a12'],
+		[176, 75, '#ff4a12'],
+		[53, 165, '#ff7a30'],
+		[147, 165, '#ff7a30'],
+	];
+
+	for (const [x, y, color] of spokes) {
+		const line = document.createElementNS(SVG_NS, 'line');
+		line.setAttribute('x1', '100');
+		line.setAttribute('y1', '100');
+		line.setAttribute('x2', String(x));
+		line.setAttribute('y2', String(y));
+		line.setAttribute('stroke', color);
+		line.setAttribute('stroke-width', '8');
+		line.setAttribute('stroke-linecap', 'round');
+		svg.appendChild(line);
+
+		const node = document.createElementNS(SVG_NS, 'circle');
+		node.setAttribute('cx', String(x));
+		node.setAttribute('cy', String(y));
+		node.setAttribute('r', '11');
+		node.setAttribute('fill', '#0c1018');
+		node.setAttribute('stroke', color);
+		node.setAttribute('stroke-width', '4');
+		svg.appendChild(node);
+	}
+
+	const hub = document.createElementNS(SVG_NS, 'circle');
+	hub.setAttribute('cx', '100');
+	hub.setAttribute('cy', '100');
+	hub.setAttribute('r', '24');
+	hub.setAttribute('fill', '#0c1018');
+	hub.setAttribute('stroke', '#1e2838');
+	hub.setAttribute('stroke-width', '3');
+	svg.appendChild(hub);
+
+	return svg;
 }
 
 export type WizardState = 'detecting' | 'welcome' | 'canvas' | 'import' | 'provider' | 'mcp' | 'complete';
@@ -387,3 +504,4 @@ export function getPrevState(state: WizardState, hasVSCodeConfig: boolean): Wiza
 		default: return null;
 	}
 }
+

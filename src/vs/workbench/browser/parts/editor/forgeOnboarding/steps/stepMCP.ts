@@ -48,8 +48,13 @@ export class StepMCP implements IOnboardingStep {
 
 		if (env.npxAvailable) {
 			const banner = document.createElement('div');
-			banner.className = 'forge-onboarding-detection-banner';
-			banner.textContent = 'npx available - filesystem and github MCP can be launched automatically';
+			banner.className = 'forge-onboarding-detect found';
+
+			const dot = document.createElement('div');
+			dot.className = 'forge-onboarding-detect-dot';
+			banner.appendChild(dot);
+
+			banner.appendChild(document.createTextNode('npx available - MCP servers can be launched automatically'));
 			body.appendChild(banner);
 		}
 
@@ -102,10 +107,10 @@ export class StepMCP implements IOnboardingStep {
 			option.appendChild(badge);
 		}
 
-		// Create check element upfront; show/hide via display
+		// Create check element upfront; show/hide via display.
+		// Glyph is rendered via CSS ::before to keep source ASCII-only.
 		const checkEl = document.createElement('span');
 		checkEl.className = 'forge-onboarding-mcp-check';
-		checkEl.textContent = '+';
 		checkEl.style.display = this._selected.has(server.id) ? '' : 'none';
 		option.appendChild(checkEl);
 

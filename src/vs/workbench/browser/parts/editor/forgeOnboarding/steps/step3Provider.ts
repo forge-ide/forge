@@ -23,8 +23,8 @@ const PROVIDERS: ProviderDefinition[] = [
 
 export class Step3Provider implements IOnboardingStep {
 	readonly stepId = 'provider';
-	readonly title = 'Configure AI Providers';
-	readonly subtitle = 'Enable one or more providers to power Forge';
+	readonly title = 'CONNECT A PROVIDER';
+	readonly subtitle = 'Choose how Forge talks to AI. Connect multiple providers and switch between them per pane.';
 
 	// providerId -> api key (empty string for local/keyless providers)
 	private readonly _apiKeys = new Map<string, string>();
@@ -32,6 +32,7 @@ export class Step3Provider implements IOnboardingStep {
 	private readonly _keyInputs = new Map<string, HTMLInputElement>();
 	private readonly _keySections = new Map<string, HTMLElement>();
 	private readonly _optionEls = new Map<string, HTMLElement>();
+	private readonly _keyConfirms = new Map<string, HTMLElement>();
 
 	get configuredProviders(): string[] {
 		return Array.from(this._apiKeys.keys());
@@ -46,9 +47,14 @@ export class Step3Provider implements IOnboardingStep {
 		const detectedProvider = Object.keys(env.detectedApiKeys)[0];
 		if (detectedProvider) {
 			const banner = document.createElement('div');
-			banner.className = 'forge-onboarding-detection-banner';
+			banner.className = 'forge-onboarding-detect found';
+
+			const dot = document.createElement('div');
+			dot.className = 'forge-onboarding-detect-dot';
+			banner.appendChild(dot);
+
 			const providerLabel = PROVIDERS.find(p => p.id === detectedProvider)?.label ?? detectedProvider;
-			banner.textContent = `${providerLabel} API key detected`;
+			banner.appendChild(document.createTextNode(`${providerLabel} API key detected`));
 			container.appendChild(banner);
 		}
 
@@ -150,18 +156,52 @@ export class Step3Provider implements IOnboardingStep {
 				keyInput.value = detectedKey;
 			}
 
+			const confirm = document.createElement('div');
+			confirm.className = 'forge-onboarding-api-key-confirm';
+			confirm.style.display = 'none';
+			this._keyConfirms.set(provider.id, confirm);
+
 			keyInput.addEventListener('input', () => {
 				this._apiKeys.set(provider.id, keyInput.value);
+				this._updateKeyConfirm(provider.id, !!detectedKey);
 			});
 
 			keySection.appendChild(keyInput);
+			keySection.appendChild(confirm);
 			option.appendChild(keySection);
 
 			this._keyInputs.set(provider.id, keyInput);
 			this._keySections.set(provider.id, keySection);
+
+			// Show confirmation immediately if a key was pre-filled
+			this._updateKeyConfirm(provider.id, !!detectedKey);
 		}
 
 		return option;
+	}
+
+	private _updateKeyConfirm(providerId: string, fromEnvironment: boolean): void {
+		const confirm = this._keyConfirms.get(providerId);
+		const keyInput = this._keyInputs.get(providerId);
+		if (!confirm || !keyInput) {
+			return;
+		}
+		if (keyInput.value.length > 0) {
+			const masked = this._maskKey(keyInput.value);
+			confirm.textContent = fromEnvironment
+				? `Key found in environment - ${masked}`
+				: `Key set - ${masked}`;
+			confirm.style.display = '';
+		} else {
+			confirm.style.display = 'none';
+		}
+	}
+
+	private _maskKey(key: string): string {
+		if (key.length <= 8) {
+			return '*'.repeat(key.length);
+		}
+		return `${key.slice(0, 6)}${'*'.repeat(Math.max(8, key.length - 10))}${key.slice(-4)}`;
 	}
 
 	private _setChecked(providerId: string, checked: boolean, prefillKey: string): void {

@@ -20,7 +20,9 @@ export class Step1Welcome implements IOnboardingStep {
 		const badges = this._buildEnvBadges(env);
 		if (badges.length > 0) {
 			const badgeRow = document.createElement('div');
-			badgeRow.className = 'forge-onboarding-env-badges';
+			badgeRow.style.display = 'flex';
+			badgeRow.style.flexDirection = 'column';
+			badgeRow.style.gap = '8px';
 			for (const badge of badges) {
 				badgeRow.appendChild(badge);
 			}
@@ -67,11 +69,11 @@ export class Step1Welcome implements IOnboardingStep {
 	}
 
 	private _badge(text: string): HTMLElement {
-		const el = document.createElement('span');
-		el.className = 'forge-onboarding-badge';
+		const el = document.createElement('div');
+		el.className = 'forge-onboarding-detect found';
 
-		const dot = document.createElement('span');
-		dot.className = 'forge-onboarding-badge-dot';
+		const dot = document.createElement('div');
+		dot.className = 'forge-onboarding-detect-dot';
 		el.appendChild(dot);
 
 		el.appendChild(document.createTextNode(text));

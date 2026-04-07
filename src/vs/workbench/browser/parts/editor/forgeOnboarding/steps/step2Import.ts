@@ -6,10 +6,59 @@
 import { IEnvironmentDetectionResult } from '../../../../../services/forge/common/forgeOnboardingService.js';
 import { IOnboardingStep } from '../forgeOnboardingView.js';
 
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+// Stroke-only line icons rendered at 18px in the import toggle rows. Dots use the
+// `v.01` trick — a near-zero line with round linecap renders as a 1.5px round dot.
+const ICON_PATHS: Record<string, string[]> = {
+	keyboard: [
+		'M3 6h18v12H3z',
+		'M6 10v.01M9 10v.01M12 10v.01M15 10v.01M18 10v.01',
+		'M6 13v.01M9 13v.01M12 13v.01M15 13v.01M18 13v.01',
+		'M8 16h8',
+	],
+	window: [
+		'M3 5h18v14H3z',
+		'M3 9h18',
+		'M8 9v10',
+	],
+	grid: [
+		'M4 4h7v7H4z',
+		'M13 4h7v7h-7z',
+		'M4 13h7v7H4z',
+		'M13 13h7v7h-7z',
+	],
+	branch: [
+		'M6 3v18',
+		'M18 9v12',
+		'M6 12c0-3 6-3 12-3',
+	],
+	cpu: [
+		'M6 6h12v12H6z',
+		'M9 9h6v6H9z',
+		'M2 9h2', 'M2 14h2', 'M20 9h2', 'M20 14h2',
+		'M9 2v2', 'M14 2v2', 'M9 20v2', 'M14 20v2',
+	],
+};
+
+function createSvgIcon(paths: string[]): SVGElement {
+	const svg = document.createElementNS(SVG_NS, 'svg');
+	svg.setAttribute('viewBox', '0 0 24 24');
+	svg.setAttribute('stroke-width', '1.5');
+	svg.setAttribute('stroke-linecap', 'round');
+	svg.setAttribute('stroke-linejoin', 'round');
+	for (const d of paths) {
+		const path = document.createElementNS(SVG_NS, 'path');
+		path.setAttribute('d', d);
+		svg.appendChild(path);
+	}
+	return svg;
+}
+
 export class Step2Import implements IOnboardingStep {
 	readonly stepId = 'import';
-	readonly title = 'Import VS Code Config';
-	readonly subtitle = 'Carry your settings over to Forge';
+	readonly title = 'IMPORT YOUR CONFIG';
+	readonly subtitle = 'We found an existing VS Code setup. Choose what to bring across.';
 
 	importKeybindings = true;
 	importTheme = true;
@@ -30,17 +79,12 @@ export class Step2Import implements IOnboardingStep {
 			return;
 		}
 
-		const subtitle = document.createElement('p');
-		subtitle.className = 'forge-onboarding-subtitle';
-		subtitle.textContent = 'We found an existing VS Code setup. Choose what to bring across...';
-		body.appendChild(subtitle);
-
 		const toggleDefs: Array<{ icon: string; label: string; meta: string; field: keyof Step2Import; defaultOn: boolean }> = [
-			{ icon: '[key]', label: 'Keybindings', meta: 'Custom keybindings.json detected', field: 'importKeybindings', defaultOn: true },
-			{ icon: '[ui]', label: 'Theme & UI Settings', meta: 'Font size, line height, minimap, sidebar position', field: 'importTheme', defaultOn: true },
-			{ icon: '[ext]', label: 'Extensions', meta: 'Compatible extensions will be installed', field: 'importExtensions', defaultOn: true },
-			{ icon: '[git]', label: 'Git settings', meta: 'user.name, user.email, default branch', field: 'importGit', defaultOn: true },
-			{ icon: '[ai]', label: 'Copilot / AI extension config', meta: 'Will be replaced by Forge\'s native AI system', field: 'importCopilotConfig', defaultOn: false },
+			{ icon: 'keyboard', label: 'Keybindings', meta: 'Custom keybindings.json detected', field: 'importKeybindings', defaultOn: true },
+			{ icon: 'window', label: 'Theme & UI Settings', meta: 'Font size, line height, minimap, sidebar position', field: 'importTheme', defaultOn: true },
+			{ icon: 'grid', label: 'Extensions', meta: 'Compatible extensions will be installed', field: 'importExtensions', defaultOn: true },
+			{ icon: 'branch', label: 'Git settings', meta: 'user.name, user.email, default branch', field: 'importGit', defaultOn: true },
+			{ icon: 'cpu', label: 'Copilot / AI extension config', meta: 'Will be replaced by Forge\'s native AI system', field: 'importCopilotConfig', defaultOn: false },
 		];
 
 		const list = document.createElement('div');
@@ -65,7 +109,7 @@ export class Step2Import implements IOnboardingStep {
 		// import happens in ForgeOnboardingView after step completes
 	}
 
-	private _toggleRow(icon: string, label: string, meta: string, initialOn: boolean, onChange: (on: boolean) => void): HTMLElement {
+	private _toggleRow(iconKey: string, label: string, meta: string, initialOn: boolean, onChange: (on: boolean) => void): HTMLElement {
 		let state = initialOn;
 
 		const row = document.createElement('div');
@@ -73,7 +117,7 @@ export class Step2Import implements IOnboardingStep {
 
 		const iconEl = document.createElement('span');
 		iconEl.className = 'forge-onboarding-toggle-icon';
-		iconEl.textContent = icon;
+		iconEl.appendChild(createSvgIcon(ICON_PATHS[iconKey] ?? []));
 		row.appendChild(iconEl);
 
 		const text = document.createElement('div');
