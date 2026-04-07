@@ -95,11 +95,11 @@ jobs:
           node-version-file: .nvmrc
       - name: Install root dependencies
         run: |
-          for ($i=1; $i -le 5; $i++) { npm ci; if ($LASTEXITCODE -eq 0) { break } }
+          for ($i=1; $i -le 5; $i++) { npm ci; if ($LASTEXITCODE -eq 0) { break }; if ($i -eq 5) { exit 1 }; Write-Host "Retry $i..." }
       - name: Install build dependencies
         working-directory: build
         run: |
-          for ($i=1; $i -le 5; $i++) { npm ci; if ($LASTEXITCODE -eq 0) { break } }
+          for ($i=1; $i -le 5; $i++) { npm ci; if ($LASTEXITCODE -eq 0) { break }; if ($i -eq 5) { exit 1 }; Write-Host "Retry $i..." }
       - name: Restore builtin extensions cache
         id: cache-builtin-extensions
         uses: actions/cache@v4

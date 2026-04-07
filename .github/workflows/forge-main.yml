@@ -5,6 +5,10 @@ on:
     branches:
       - main
 
+concurrency:
+  group: main-release
+  cancel-in-progress: false
+
 jobs:
   release:
     name: semantic-release
@@ -30,13 +34,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GIT_AUTHOR_NAME: github-actions[bot]
-          GIT_AUTHOR_EMAIL: github-actions[bot]@users.noreply.github.com
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
           GIT_COMMITTER_NAME: github-actions[bot]
-          GIT_COMMITTER_EMAIL: github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
         run: npx semantic-release
 
   nightly:
     name: Trigger Nightly Build
+    needs: release
     uses: ./.github/workflows/forge-nightly.yml
     with:
       sha: ${{ github.sha }}

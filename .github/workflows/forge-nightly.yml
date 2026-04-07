@@ -113,9 +113,9 @@ jobs:
           CUTOFF=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)
           gh api \
             -H "Accept: application/vnd.github+json" \
-            "/user/packages/container/forge-nightly/versions" \
+            "/orgs/forge-ide/packages/container/forge-nightly/versions" \
             --paginate \
             --jq ".[] | select(.created_at < \"${CUTOFF}\") | .id" \
           | xargs -I{} gh api --method DELETE \
-            "/user/packages/container/forge-nightly/versions/{}" \
+            "/orgs/forge-ide/packages/container/forge-nightly/versions/{}" \
             2>/dev/null || true
