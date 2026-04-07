@@ -14,6 +14,9 @@ jobs:
     name: Build (Linux x64)
     runs-on: ubuntu-22.04
     timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: write
     env:
       npm_config_arch: x64
       VSCODE_ARCH: x64
@@ -93,6 +96,9 @@ jobs:
     name: Build (Linux arm64)
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: write
     env:
       npm_config_arch: arm64
       VSCODE_ARCH: arm64
@@ -164,6 +170,9 @@ jobs:
     runs-on: ubuntu-22.04
     needs: build-linux-x64
     timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: write
     env:
       npm_config_arch: x64
       VSCODE_ARCH: x64
@@ -223,6 +232,9 @@ jobs:
     runs-on: ubuntu-22.04
     needs: build-linux-x64
     timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: write
     env:
       npm_config_arch: x64
       VSCODE_ARCH: x64
@@ -282,6 +294,9 @@ jobs:
     runs-on: ubuntu-22.04
     needs: build-linux-x64
     timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: write
     env:
       npm_config_arch: x64
       VSCODE_ARCH: x64
@@ -340,6 +355,9 @@ jobs:
     runs-on: ubuntu-22.04-arm
     needs: build-linux-arm64
     timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: write
     env:
       npm_config_arch: arm64
       VSCODE_ARCH: arm64
@@ -397,6 +415,9 @@ jobs:
     runs-on: ubuntu-22.04-arm
     needs: build-linux-arm64
     timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: write
     env:
       npm_config_arch: arm64
       VSCODE_ARCH: arm64
@@ -454,6 +475,9 @@ jobs:
     runs-on: ubuntu-22.04-arm
     needs: build-linux-arm64
     timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: write
     env:
       npm_config_arch: arm64
       VSCODE_ARCH: arm64
@@ -519,6 +543,7 @@ jobs:
       - package-linux-arm64-snap
     permissions:
       contents: write
+      actions: read
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
