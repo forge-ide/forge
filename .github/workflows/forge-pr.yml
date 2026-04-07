@@ -40,6 +40,9 @@ jobs:
             .vscode/extensions/**/node_modules
           key: node_modules-linux-x64-${{ hashFiles('package-lock.json', 'build/package-lock.json', 'extensions/**/package-lock.json', '.vscode/extensions/**/package-lock.json', '.npmrc', 'build/.npmrc', 'build/.cachesalt') }}
           restore-keys: node_modules-linux-x64-
+      - name: Install system dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: bash build/github/install-system-deps.sh ci
       - name: Install root dependencies
         if: steps.cache-node-modules.outputs.cache-hit != 'true'
         run: |
