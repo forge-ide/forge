@@ -8,10 +8,15 @@ import { Disposable } from '../../../../../base/common/lifecycle.js';
 import { IForgeOnboardingService, IEnvironmentDetectionResult } from '../../../../services/forge/common/forgeOnboardingService.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
 import { ICommandService } from '../../../../../platform/commands/common/commands.js';
+import { ILogService } from '../../../../../platform/log/common/log.js';
+import { IEditorService } from '../../../../services/editor/common/editorService.js';
+import { IEditorGroupsService } from '../../../../services/editor/common/editorGroupsService.js';
 import { Step1Welcome } from './steps/step1Welcome.js';
 import { Step2Import } from './steps/step2Import.js';
 import { Step3Provider } from './steps/step3Provider.js';
 import { Step4Ready, IStep4ReadyOptions } from './steps/step4Ready.js';
+import { StepCanvasExplainer } from './steps/stepCanvasExplainer.js';
+import { StepMCP } from './steps/stepMCP.js';
 import './forgeOnboardingView.css';
 
 export interface IOnboardingStep {
@@ -23,10 +28,6 @@ export interface IOnboardingStep {
 	onNext(): Promise<void>;
 }
 
-type WizardState = 'detecting' | 'step1' | 'step2' | 'step3' | 'step4' | 'complete';
-
-const TOTAL_STEPS = 4;
-
 export class ForgeOnboardingView extends Disposable {
 	private readonly _rootEl: HTMLElement;
 	private readonly _wizardEl: HTMLElement;
@@ -35,15 +36,19 @@ export class ForgeOnboardingView extends Disposable {
 	private readonly _footerEl: HTMLElement;
 	private readonly _prevBtn: HTMLButtonElement;
 	private readonly _nextBtn: HTMLButtonElement;
-	private readonly _dots: HTMLElement[] = [];
+
+	private _progressFillEl!: HTMLElement;
+	private _stepCounterEl!: HTMLElement;
 
 	private _env: IEnvironmentDetectionResult | undefined;
-	private _currentStepIndex = 0; // 0-based, maps to steps 1-4
+	private _state: WizardState = 'detecting';
 	private _currentStep: IOnboardingStep | undefined;
 
-	// Keep step instances alive so import selections survive navigation
+	// Keep step instances alive so selections survive navigation
 	private _step2: Step2Import | undefined;
 	private _step3: Step3Provider | undefined;
+	private _stepCanvas: StepCanvasExplainer | undefined;
+	private _stepMCP: StepMCP | undefined;
 
 	private _validationErrorEl: HTMLElement | undefined;
 
@@ -51,7 +56,10 @@ export class ForgeOnboardingView extends Disposable {
 		container: HTMLElement,
 		@IForgeOnboardingService private readonly onboardingService: IForgeOnboardingService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
-		@ICommandService private readonly commandService: ICommandService,
+		@ICommandService private readonly _commandService: ICommandService,
+		@ILogService private readonly _logService: ILogService,
+		@IEditorService private readonly _editorService: IEditorService,
+		@IEditorGroupsService private readonly _editorGroupsService: IEditorGroupsService,
 	) {
 		super();
 
@@ -65,15 +73,26 @@ export class ForgeOnboardingView extends Disposable {
 		this._wizardEl.className = 'forge-onboarding-wizard';
 		this._rootEl.appendChild(this._wizardEl);
 
-		// Progress dots
+		// Progress bar
 		this._progressEl = document.createElement('div');
 		this._progressEl.className = 'forge-onboarding-progress';
-		for (let i = 0; i < TOTAL_STEPS; i++) {
-			const dot = document.createElement('div');
-			dot.className = 'forge-onboarding-dot';
-			this._dots.push(dot);
-			this._progressEl.appendChild(dot);
-		}
+
+		const progressWrap = document.createElement('div');
+		progressWrap.className = 'forge-onboarding-progress-wrap';
+
+		this._stepCounterEl = document.createElement('div');
+		this._stepCounterEl.className = 'forge-onboarding-step-counter';
+		progressWrap.appendChild(this._stepCounterEl);
+
+		const track = document.createElement('div');
+		track.className = 'forge-onboarding-progress-track';
+
+		this._progressFillEl = document.createElement('div');
+		this._progressFillEl.className = 'forge-onboarding-progress-fill';
+		track.appendChild(this._progressFillEl);
+		progressWrap.appendChild(track);
+
+		this._progressEl.appendChild(progressWrap);
 		this._wizardEl.appendChild(this._progressEl);
 
 		// Content area
@@ -88,7 +107,6 @@ export class ForgeOnboardingView extends Disposable {
 		this._prevBtn = document.createElement('button');
 		this._prevBtn.className = 'forge-onboarding-btn-secondary';
 		this._prevBtn.textContent = 'Back';
-		this._prevBtn.addEventListener('click', () => this._onPrev());
 
 		this._nextBtn = document.createElement('button');
 		this._nextBtn.className = 'forge-onboarding-btn-primary';
@@ -110,9 +128,24 @@ export class ForgeOnboardingView extends Disposable {
 	}
 
 	private _setState(state: WizardState): void {
+		this._state = state;
 		const isDetecting = state === 'detecting';
 		this._progressEl.style.display = isDetecting ? 'none' : 'flex';
 		this._footerEl.style.display = isDetecting ? 'none' : 'flex';
+		this._updateProgress(state);
+	}
+
+	private _updateProgress(state: WizardState): void {
+		if (state === 'detecting' || state === 'complete') {
+			this._stepCounterEl.textContent = '';
+			this._progressFillEl.style.width = state === 'complete' ? '100%' : '0%';
+			return;
+		}
+		const hasImport = this._env?.hasVSCodeConfig ?? false;
+		const step = getStepNumber(state, hasImport);
+		const total = getTotalSteps(hasImport);
+		this._stepCounterEl.textContent = `Step ${step} of ${total}`;
+		this._progressFillEl.style.width = `${(step / total) * 100}%`;
 	}
 
 	private async _detect(): Promise<void> {
@@ -123,112 +156,152 @@ export class ForgeOnboardingView extends Disposable {
 		this._contentEl.appendChild(loading);
 
 		this._env = await this.onboardingService.detectEnvironment();
-		this._renderStep(1);
+		this._setState('welcome');
+		this._renderCurrentStep();
 	}
 
-	private _renderStep(step: 1 | 2 | 3 | 4): void {
-		this._currentStepIndex = step - 1;
-		this._setState(`step${step}` as WizardState);
+	private _renderCurrentStep(): void {
+		const el = this._contentEl;
+		while (el.firstChild) { el.removeChild(el.firstChild); }
 
-		// Update dots
-		for (let i = 0; i < TOTAL_STEPS; i++) {
-			this._dots[i].classList.toggle('active', i === this._currentStepIndex);
-		}
-
-		// Nav button states
-		this._prevBtn.disabled = step === 1;
-		this._nextBtn.textContent = step === TOTAL_STEPS ? 'Open Forge' : 'Next';
-
-		// Build step instance
-		const env = this._env!;
-		let stepInstance: IOnboardingStep;
-
-		switch (step) {
-			case 1:
-				stepInstance = new Step1Welcome();
+		switch (this._state) {
+			case 'welcome': {
+				const step = new Step1Welcome();
+				step.render(this._contentEl, this._env!);
+				this._currentStep = step;
+				this._updateFooter('welcome');
 				break;
-			case 2:
+			}
+			case 'canvas': {
+				if (!this._stepCanvas) {
+					this._stepCanvas = new StepCanvasExplainer();
+				}
+				this._stepCanvas.render(this._contentEl, this._env!);
+				this._currentStep = this._stepCanvas;
+				this._updateFooter('canvas');
+				break;
+			}
+			case 'import': {
 				if (!this._step2) {
 					this._step2 = new Step2Import();
 				}
-				stepInstance = this._step2;
+				this._step2.render(this._contentEl, this._env!);
+				this._currentStep = this._step2;
+				this._updateFooter('import');
 				break;
-			case 3:
+			}
+			case 'provider': {
 				if (!this._step3) {
 					this._step3 = this.instantiationService.createInstance(Step3Provider);
 				}
-				stepInstance = this._step3;
+				this._step3.render(this._contentEl, this._env!);
+				this._currentStep = this._step3;
+				this._updateFooter('provider');
 				break;
-			case 4: {
+			}
+			case 'mcp': {
+				if (!this._stepMCP) {
+					this._stepMCP = new StepMCP(this.onboardingService);
+				}
+				this._stepMCP.render(this._contentEl, this._env!);
+				this._currentStep = this._stepMCP;
+				this._updateFooter('mcp');
+				break;
+			}
+			case 'complete': {
 				const options: IStep4ReadyOptions = {
 					configuredProviders: this._step3?.configuredProviders ?? [],
 					importedConfig: !!(this._step2?.importTheme || this._step2?.importKeybindings || this._step2?.importExtensions || this._step2?.importGit),
-					mcpSelections: [],
-					onLaunch: async (action) => {
-						this.onboardingService.markComplete();
-						if (action === 'openFolder') {
-							await this.commandService.executeCommand('workbench.action.files.openFolder');
-						}
-					},
+					mcpSelections: this._stepMCP?.selectedServers ?? [],
+					onLaunch: (action) => this._handleLaunch(action),
 				};
-				stepInstance = new Step4Ready(options);
+				const step = new Step4Ready(options);
+				step.render(this._contentEl, this._env!);
+				this._currentStep = step;
+				this._updateFooter('complete');
 				break;
 			}
 		}
+	}
 
-		this._currentStep = stepInstance;
+	private _updateFooter(state: WizardState): void {
+		// Left button (skip/back)
+		switch (state) {
+			case 'welcome':
+				this._prevBtn.textContent = 'Skip setup';
+				this._prevBtn.style.display = '';
+				this._prevBtn.className = 'forge-onboarding-btn-secondary';
+				this._prevBtn.onclick = () => this._skipAll();
+				break;
+			case 'canvas':
+				this._prevBtn.textContent = 'Back';
+				this._prevBtn.style.display = '';
+				this._prevBtn.className = 'forge-onboarding-btn-secondary';
+				this._prevBtn.onclick = () => this._onPrev();
+				break;
+			case 'import':
+				this._prevBtn.textContent = 'Skip import';
+				this._prevBtn.style.display = '';
+				this._prevBtn.className = 'forge-onboarding-btn-secondary';
+				this._prevBtn.onclick = () => { this._step2 = undefined; this._setState('provider'); this._renderCurrentStep(); };
+				break;
+			case 'provider':
+				this._prevBtn.textContent = 'Skip for now';
+				this._prevBtn.style.display = '';
+				this._prevBtn.className = 'forge-onboarding-btn-secondary';
+				this._prevBtn.onclick = () => { this._setState('mcp'); this._renderCurrentStep(); };
+				break;
+			case 'mcp':
+				this._prevBtn.textContent = 'Skip';
+				this._prevBtn.style.display = '';
+				this._prevBtn.className = 'forge-onboarding-btn-secondary';
+				this._prevBtn.onclick = () => { this._stepMCP = undefined; this._setState('complete'); this._renderCurrentStep(); };
+				break;
+			case 'complete':
+				this._prevBtn.style.display = 'none';
+				break;
+		}
 
-		// Render into content
-		clearNode(this._contentEl);
-
-		const titleEl = document.createElement('h1');
-		titleEl.className = 'forge-onboarding-title';
-		titleEl.textContent = stepInstance.title;
-
-		const subtitleEl = document.createElement('p');
-		subtitleEl.className = 'forge-onboarding-subtitle';
-		subtitleEl.textContent = stepInstance.subtitle;
-
-		const bodyEl = document.createElement('div');
-		stepInstance.render(bodyEl, env);
-
-		this._contentEl.appendChild(titleEl);
-		this._contentEl.appendChild(subtitleEl);
-		this._contentEl.appendChild(bodyEl);
+		// Right button (next/primary action)
+		const nextLabels: Partial<Record<WizardState, string>> = {
+			welcome: 'Get started',
+			canvas: 'Got it',
+			import: 'Import selected',
+			provider: 'Connect',
+			mcp: 'Enable selected',
+			complete: 'Enter Forge',
+		};
+		if (state === 'complete') {
+			this._nextBtn.style.display = 'none';
+		} else {
+			this._nextBtn.style.display = '';
+			this._nextBtn.textContent = nextLabels[state] ?? 'Next';
+		}
 	}
 
 	private async _onNext(): Promise<void> {
-		if (!this._currentStep) {
-			return;
-		}
-
-		if (!this._currentStep.validate()) {
+		this._clearValidationError();
+		if (this._currentStep && !this._currentStep.validate()) {
 			this._showValidationError('Please complete this step before continuing.');
 			return;
 		}
-
-		this._clearValidationError();
-		await this._currentStep.onNext();
-
-		const nextStep = this._currentStepIndex + 2; // +1 for next, +1 for 1-based
-
-		if (nextStep > TOTAL_STEPS) {
-			this.onboardingService.markComplete();
-			this._setState('complete');
-			clearNode(this._contentEl);
-			return;
+		if (this._currentStep) {
+			await this._currentStep.onNext();
 		}
-
-		this._renderStep(nextStep as 1 | 2 | 3 | 4);
+		const hasImport = this._env?.hasVSCodeConfig ?? false;
+		const next = getNextState(this._state as WizardState, hasImport);
+		this._setState(next);
+		this._renderCurrentStep();
 	}
 
 	private _onPrev(): void {
-		const prevStep = this._currentStepIndex; // already 0-based, so index == prevStep number
-		if (prevStep < 1) {
-			return;
-		}
 		this._clearValidationError();
-		this._renderStep(prevStep as 1 | 2 | 3 | 4);
+		const hasImport = this._env?.hasVSCodeConfig ?? false;
+		const prev = getPrevState(this._state as WizardState, hasImport);
+		if (prev) {
+			this._setState(prev);
+			this._renderCurrentStep();
+		}
 	}
 
 	private _showValidationError(message: string): void {
@@ -243,5 +316,74 @@ export class ForgeOnboardingView extends Disposable {
 	private _clearValidationError(): void {
 		this._validationErrorEl?.remove();
 		this._validationErrorEl = undefined;
+	}
+
+	private async _closeOnboarding(): Promise<void> {
+		const input = this._editorService.activeEditor;
+		if (input) {
+			await this._editorService.closeEditor({
+				editor: input,
+				groupId: this._editorGroupsService.activeGroup.id,
+			});
+		}
+	}
+
+	private _skipAll(): void {
+		this.onboardingService.markComplete();
+		void this._closeOnboarding();
+	}
+
+	private async _handleLaunch(action: 'openFolder' | 'newSession'): Promise<void> {
+		this.onboardingService.markComplete();
+		await this._closeOnboarding();
+		try {
+			if (action === 'openFolder') {
+				await this._commandService.executeCommand('workbench.action.files.openFolder');
+			} else {
+				await this._commandService.executeCommand('forge.workspace.create');
+			}
+		} catch (err) {
+			this._logService.error('ForgeOnboardingView: launch command failed', err);
+		}
+	}
+}
+
+export type WizardState = 'detecting' | 'welcome' | 'canvas' | 'import' | 'provider' | 'mcp' | 'complete';
+
+export function getTotalSteps(hasVSCodeConfig: boolean): number {
+	return hasVSCodeConfig ? 5 : 4;
+}
+
+export function getStepNumber(state: WizardState, hasVSCodeConfig: boolean): number {
+	switch (state) {
+		case 'welcome': return 1;
+		case 'canvas': return 2;
+		case 'import': return 3;
+		case 'provider': return hasVSCodeConfig ? 4 : 3;
+		case 'mcp': return hasVSCodeConfig ? 5 : 4;
+		case 'complete': return getTotalSteps(hasVSCodeConfig);
+		case 'detecting': return 0;
+		default: return 0;
+	}
+}
+
+export function getNextState(state: WizardState, hasVSCodeConfig: boolean): WizardState {
+	switch (state) {
+		case 'welcome': return 'canvas';
+		case 'canvas': return hasVSCodeConfig ? 'import' : 'provider';
+		case 'import': return 'provider';
+		case 'provider': return 'mcp';
+		case 'mcp': return 'complete';
+		default: return 'complete';
+	}
+}
+
+export function getPrevState(state: WizardState, hasVSCodeConfig: boolean): WizardState | null {
+	switch (state) {
+		case 'canvas': return 'welcome';
+		case 'import': return 'canvas';
+		case 'provider': return hasVSCodeConfig ? 'import' : 'canvas';
+		case 'mcp': return 'provider';
+		default: return null;
 	}
 }

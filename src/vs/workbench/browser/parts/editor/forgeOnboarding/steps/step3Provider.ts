@@ -159,10 +159,6 @@ export class Step3Provider implements IOnboardingStep {
 
 			this._keyInputs.set(provider.id, keyInput);
 			this._keySections.set(provider.id, keySection);
-
-			checkbox.addEventListener('change', () => {
-				keySection.style.display = checkbox.checked ? '' : 'none';
-			});
 		}
 
 		return option;
