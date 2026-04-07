@@ -1,0 +1,135 @@
+name: Forge Platform Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform to build'
+        required: true
+        type: choice
+        options:
+          - macos
+          - windows
+      arch:
+        description: 'Architecture'
+        required: true
+        type: choice
+        options:
+          - x64
+          - arm64
+
+concurrency:
+  group: platform-build-${{ github.event.inputs.platform }}-${{ github.event.inputs.arch }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-macos:
+    name: Build (macOS ${{ github.event.inputs.arch }})
+    if: github.event.inputs.platform == 'macos'
+    runs-on: macos-latest
+    timeout-minutes: 90
+    env:
+      npm_config_arch: ${{ github.event.inputs.arch }}
+      VSCODE_ARCH: ${{ github.event.inputs.arch }}
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      NODE_OPTIONS: --max-old-space-size=8192
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install root dependencies
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Install build dependencies
+        working-directory: build
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Install extensions dependencies
+        run: |
+          find extensions .vscode/extensions -name "package-lock.json" \
+            -not -path "*/node_modules/*" -execdir pwd \; \
+            | xargs -P 4 -I{} npm ci --prefix {}
+      - name: Restore builtin extensions cache
+        id: cache-builtin-extensions
+        uses: actions/cache@v4
+        with:
+          path: .build/builtInExtensions
+          key: builtin-extensions-${{ hashFiles('product.json') }}
+      - name: Download builtin extensions
+        if: steps.cache-builtin-extensions.outputs.cache-hit != 'true'
+        run: npm run download-builtin-extensions
+      - name: Compile build scripts
+        run: npm run compile-build
+      - name: Compile extensions build
+        run: npm run compile-extensions-build
+      - name: Bundle and minify
+        run: npm run gulp core-ci
+      - name: Assemble Forge macOS # TODO: verify vscode-darwin-{arch}-min-ci gulp task exists
+        run: npm run gulp vscode-darwin-${{ github.event.inputs.arch }}-min-ci
+      - name: Build dmg package # TODO: verify vscode-darwin-{arch}-build-dmg gulp task exists
+        run: npm run gulp vscode-darwin-${{ github.event.inputs.arch }}-build-dmg
+      - name: Upload dmg artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-macos-${{ github.event.inputs.arch }}-dmg
+          path: .build/darwin/**/*.dmg
+          retention-days: 7
+
+  build-windows:
+    name: Build (Windows ${{ github.event.inputs.arch }})
+    if: github.event.inputs.platform == 'windows'
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      npm_config_arch: ${{ github.event.inputs.arch }}
+      VSCODE_ARCH: ${{ github.event.inputs.arch }}
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      NODE_OPTIONS: --max-old-space-size=8192
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install root dependencies
+        run: |
+          for ($i=1; $i -le 5; $i++) { npm ci; if ($LASTEXITCODE -eq 0) { break }; if ($i -eq 5) { exit 1 }; Write-Host "Retry $i..." }
+      - name: Install build dependencies
+        working-directory: build
+        run: |
+          for ($i=1; $i -le 5; $i++) { npm ci; if ($LASTEXITCODE -eq 0) { break }; if ($i -eq 5) { exit 1 }; Write-Host "Retry $i..." }
+      - name: Restore builtin extensions cache
+        id: cache-builtin-extensions
+        uses: actions/cache@v4
+        with:
+          path: .build/builtInExtensions
+          key: builtin-extensions-${{ hashFiles('product.json') }}
+      - name: Download builtin extensions
+        if: steps.cache-builtin-extensions.outputs.cache-hit != 'true'
+        run: npm run download-builtin-extensions
+      - name: Compile build scripts
+        run: npm run compile-build
+      - name: Compile extensions build
+        run: npm run compile-extensions-build
+      - name: Bundle and minify
+        run: npm run gulp core-ci
+      - name: Assemble Forge Windows # TODO: verify vscode-win32-{arch}-min-ci gulp task exists
+        run: npm run gulp vscode-win32-${{ github.event.inputs.arch }}-min-ci
+      - name: Build NSIS installer # TODO: verify vscode-win32-{arch}-setup gulp task exists
+        run: npm run gulp vscode-win32-${{ github.event.inputs.arch }}-setup
+      - name: Build MSI installer # TODO: verify vscode-win32-{arch}-msi gulp task exists
+        run: npm run gulp vscode-win32-${{ github.event.inputs.arch }}-msi
+      - name: Upload exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-windows-${{ github.event.inputs.arch }}-setup
+          path: .build/win32-${{ github.event.inputs.arch }}/setup/**/*.exe
+          retention-days: 7
+      - name: Upload msi artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-windows-${{ github.event.inputs.arch }}-msi
+          path: .build/win32-${{ github.event.inputs.arch }}/msi/**/*.msi
+          retention-days: 7

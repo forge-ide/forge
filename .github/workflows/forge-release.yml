@@ -2,43 +2,544 @@ name: Forge Release
 
 on:
   push:
-    tags: ['v[0-9]*']
-  workflow_dispatch:
+    tags:
+      - 'v[0-9]*'
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build
-    uses: ./.github/workflows/forge-build.yml
-    secrets: inherit
-
-  create-github-release:
-    name: Create GitHub Release
+  build-linux-x64:
+    name: Build (Linux x64)
     runs-on: ubuntu-22.04
-    needs: build
+    timeout-minutes: 90
+    env:
+      npm_config_arch: x64
+      VSCODE_ARCH: x64
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      NODE_OPTIONS: --max-old-space-size=4096
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install system dependencies
+        run: bash build/github/install-system-deps.sh ci
+      - name: Restore node_modules cache
+        id: cache-node-modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            build/node_modules
+            extensions/node_modules
+            extensions/**/node_modules
+            .vscode/extensions/**/node_modules
+          key: node_modules-linux-x64-${{ hashFiles('package-lock.json', 'build/package-lock.json', 'extensions/**/package-lock.json', '.vscode/extensions/**/package-lock.json', '.npmrc', 'build/.npmrc', 'build/.cachesalt') }}
+          restore-keys: node_modules-linux-x64-
+      - name: Install root dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Install build dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        working-directory: build
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Install extensions dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: |
+          find extensions .vscode/extensions -name "package-lock.json" \
+            -not -path "*/node_modules/*" -execdir pwd \; \
+            | xargs -P 4 -I{} npm ci --prefix {}
+      - name: Restore sysroot cache
+        id: cache-sysroots
+        uses: actions/cache@v4
+        with:
+          path: .build/sysroots
+          key: sysroots-linux-x64-${{ hashFiles('.nvmrc') }}
+          restore-keys: sysroots-linux-x64-
+      - name: Setup sysroot
+        run: bash build/github/setup-sysroot.sh x64
+      - name: Restore builtin extensions cache
+        id: cache-builtin-extensions
+        uses: actions/cache@v4
+        with:
+          path: .build/builtInExtensions
+          key: builtin-extensions-${{ hashFiles('product.json') }}
+      - name: Download builtin extensions
+        if: steps.cache-builtin-extensions.outputs.cache-hit != 'true'
+        run: npm run download-builtin-extensions
+      - name: Compile build scripts
+        run: npm run compile-build
+      - name: Compile extensions build
+        run: npm run compile-extensions-build
+      - name: Bundle and minify
+        run: npm run gulp core-ci
+      - name: Assemble Forge Linux x64
+        run: npm run gulp vscode-linux-x64-min-ci
+      - name: Create archive
+        run: tar -czf .build/forge-linux-x64.tar.gz -C .. Forge-linux-x64
+      - name: Upload assembled binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-linux-x64-binary
+          path: .build/forge-linux-x64.tar.gz
+          retention-days: 1
+
+  build-linux-arm64:
+    name: Build (Linux arm64)
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 120
+    env:
+      npm_config_arch: arm64
+      VSCODE_ARCH: arm64
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      NODE_OPTIONS: --max-old-space-size=4096
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install system dependencies
+        run: bash build/github/install-system-deps.sh ci
+      - name: Restore node_modules cache
+        id: cache-node-modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            build/node_modules
+            extensions/node_modules
+            extensions/**/node_modules
+            .vscode/extensions/**/node_modules
+          key: node_modules-linux-arm64-${{ hashFiles('package-lock.json', 'build/package-lock.json', 'extensions/**/package-lock.json', '.vscode/extensions/**/package-lock.json', '.npmrc', 'build/.npmrc', 'build/.cachesalt') }}
+          restore-keys: node_modules-linux-arm64-
+      - name: Install root dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Install build dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        working-directory: build
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Install extensions dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: |
+          find extensions .vscode/extensions -name "package-lock.json" \
+            -not -path "*/node_modules/*" -execdir pwd \; \
+            | xargs -P 4 -I{} npm ci --prefix {}
+      - name: Restore builtin extensions cache
+        id: cache-builtin-extensions
+        uses: actions/cache@v4
+        with:
+          path: .build/builtInExtensions
+          key: builtin-extensions-${{ hashFiles('product.json') }}
+      - name: Download builtin extensions
+        if: steps.cache-builtin-extensions.outputs.cache-hit != 'true'
+        run: npm run download-builtin-extensions
+      - name: Compile build scripts
+        run: npm run compile-build
+      - name: Compile extensions build
+        run: npm run compile-extensions-build
+      - name: Bundle and minify
+        run: npm run gulp core-ci
+      - name: Assemble Forge Linux arm64
+        run: npm run gulp vscode-linux-arm64-min-ci
+      - name: Create archive
+        run: tar -czf .build/forge-linux-arm64.tar.gz -C .. Forge-linux-arm64
+      - name: Upload assembled binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-linux-arm64-binary
+          path: .build/forge-linux-arm64.tar.gz
+          retention-days: 1
+
+  package-linux-x64-deb:
+    name: Package (Linux x64 deb)
+    runs-on: ubuntu-22.04
+    needs: build-linux-x64
+    timeout-minutes: 20
+    env:
+      npm_config_arch: x64
+      VSCODE_ARCH: x64
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install system dependencies (package mode)
+        run: bash build/github/install-system-deps.sh package
+      - name: Restore node_modules cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            build/node_modules
+            extensions/node_modules
+            extensions/**/node_modules
+            .vscode/extensions/**/node_modules
+          key: node_modules-linux-x64-${{ hashFiles('package-lock.json', 'build/package-lock.json', 'extensions/**/package-lock.json', '.vscode/extensions/**/package-lock.json', '.npmrc', 'build/.npmrc', 'build/.cachesalt') }}
+          restore-keys: node_modules-linux-x64-
+      - name: Install root dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Install build dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        working-directory: build
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Download assembled binary
+        uses: actions/download-artifact@v4
+        with:
+          name: forge-linux-x64-binary
+          path: .build/
+      - name: Extract binary
+        run: tar -xzf .build/forge-linux-x64.tar.gz -C ..
+      - name: Setup sysroot
+        run: bash build/github/setup-sysroot.sh x64
+      - name: Compile build scripts
+        run: npm run compile-build
+      - name: Build deb package
+        run: |
+          npm run gulp vscode-linux-x64-prepare-deb
+          npm run gulp vscode-linux-x64-build-deb
+      - name: Upload deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-linux-x64-deb
+          path: .build/linux/deb/**/*.deb
+          retention-days: 7
+
+  package-linux-x64-rpm:
+    name: Package (Linux x64 rpm)
+    runs-on: ubuntu-22.04
+    needs: build-linux-x64
+    timeout-minutes: 20
+    env:
+      npm_config_arch: x64
+      VSCODE_ARCH: x64
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install system dependencies (package mode)
+        run: bash build/github/install-system-deps.sh package
+      - name: Restore node_modules cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            build/node_modules
+            extensions/node_modules
+            extensions/**/node_modules
+            .vscode/extensions/**/node_modules
+          key: node_modules-linux-x64-${{ hashFiles('package-lock.json', 'build/package-lock.json', 'extensions/**/package-lock.json', '.vscode/extensions/**/package-lock.json', '.npmrc', 'build/.npmrc', 'build/.cachesalt') }}
+          restore-keys: node_modules-linux-x64-
+      - name: Install root dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Install build dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        working-directory: build
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Download assembled binary
+        uses: actions/download-artifact@v4
+        with:
+          name: forge-linux-x64-binary
+          path: .build/
+      - name: Extract binary
+        run: tar -xzf .build/forge-linux-x64.tar.gz -C ..
+      - name: Setup sysroot
+        run: bash build/github/setup-sysroot.sh x64
+      - name: Compile build scripts
+        run: npm run compile-build
+      - name: Build rpm package
+        run: |
+          npm run gulp vscode-linux-x64-prepare-rpm
+          npm run gulp vscode-linux-x64-build-rpm
+      - name: Upload rpm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-linux-x64-rpm
+          path: .build/linux/rpm/**/*.rpm
+          retention-days: 7
+
+  package-linux-x64-snap:
+    name: Package (Linux x64 snap)
+    runs-on: ubuntu-22.04
+    needs: build-linux-x64
+    timeout-minutes: 30
+    env:
+      npm_config_arch: x64
+      VSCODE_ARCH: x64
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SNAPCRAFT_BUILD_ENVIRONMENT: host
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install system dependencies (package mode)
+        run: bash build/github/install-system-deps.sh package
+      - name: Restore node_modules cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            build/node_modules
+            extensions/node_modules
+            extensions/**/node_modules
+            .vscode/extensions/**/node_modules
+          key: node_modules-linux-x64-${{ hashFiles('package-lock.json', 'build/package-lock.json', 'extensions/**/package-lock.json', '.vscode/extensions/**/package-lock.json', '.npmrc', 'build/.npmrc', 'build/.cachesalt') }}
+          restore-keys: node_modules-linux-x64-
+      - name: Install root dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Install build dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        working-directory: build
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Download assembled binary
+        uses: actions/download-artifact@v4
+        with:
+          name: forge-linux-x64-binary
+          path: .build/
+      - name: Extract binary
+        run: tar -xzf .build/forge-linux-x64.tar.gz -C ..
+      - name: Compile build scripts
+        run: npm run compile-build
+      - name: Build snap package
+        run: |
+          npm run gulp vscode-linux-x64-prepare-snap
+          npm run gulp vscode-linux-x64-build-snap
+      - name: Upload snap artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-linux-x64-snap
+          path: .build/linux/snap/**/*.snap
+          retention-days: 7
+
+  package-linux-arm64-deb:
+    name: Package (Linux arm64 deb)
+    runs-on: ubuntu-22.04-arm
+    needs: build-linux-arm64
+    timeout-minutes: 20
+    env:
+      npm_config_arch: arm64
+      VSCODE_ARCH: arm64
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install system dependencies (package mode)
+        run: bash build/github/install-system-deps.sh package
+      - name: Restore node_modules cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            build/node_modules
+            extensions/node_modules
+            extensions/**/node_modules
+            .vscode/extensions/**/node_modules
+          key: node_modules-linux-arm64-${{ hashFiles('package-lock.json', 'build/package-lock.json', 'extensions/**/package-lock.json', '.vscode/extensions/**/package-lock.json', '.npmrc', 'build/.npmrc', 'build/.cachesalt') }}
+          restore-keys: node_modules-linux-arm64-
+      - name: Install root dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Install build dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        working-directory: build
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Download assembled binary
+        uses: actions/download-artifact@v4
+        with:
+          name: forge-linux-arm64-binary
+          path: .build/
+      - name: Extract binary
+        run: tar -xzf .build/forge-linux-arm64.tar.gz -C ..
+      - name: Compile build scripts
+        run: npm run compile-build
+      - name: Build deb package
+        run: |
+          npm run gulp vscode-linux-arm64-prepare-deb
+          npm run gulp vscode-linux-arm64-build-deb
+      - name: Upload deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-linux-arm64-deb
+          path: .build/linux/deb/**/*.deb
+          retention-days: 7
+
+  package-linux-arm64-rpm:
+    name: Package (Linux arm64 rpm)
+    runs-on: ubuntu-22.04-arm
+    needs: build-linux-arm64
+    timeout-minutes: 20
+    env:
+      npm_config_arch: arm64
+      VSCODE_ARCH: arm64
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install system dependencies (package mode)
+        run: bash build/github/install-system-deps.sh package
+      - name: Restore node_modules cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            build/node_modules
+            extensions/node_modules
+            extensions/**/node_modules
+            .vscode/extensions/**/node_modules
+          key: node_modules-linux-arm64-${{ hashFiles('package-lock.json', 'build/package-lock.json', 'extensions/**/package-lock.json', '.vscode/extensions/**/package-lock.json', '.npmrc', 'build/.npmrc', 'build/.cachesalt') }}
+          restore-keys: node_modules-linux-arm64-
+      - name: Install root dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Install build dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        working-directory: build
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Download assembled binary
+        uses: actions/download-artifact@v4
+        with:
+          name: forge-linux-arm64-binary
+          path: .build/
+      - name: Extract binary
+        run: tar -xzf .build/forge-linux-arm64.tar.gz -C ..
+      - name: Compile build scripts
+        run: npm run compile-build
+      - name: Build rpm package
+        run: |
+          npm run gulp vscode-linux-arm64-prepare-rpm
+          npm run gulp vscode-linux-arm64-build-rpm
+      - name: Upload rpm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-linux-arm64-rpm
+          path: .build/linux/rpm/**/*.rpm
+          retention-days: 7
+
+  package-linux-arm64-snap:
+    name: Package (Linux arm64 snap)
+    runs-on: ubuntu-22.04-arm
+    needs: build-linux-arm64
+    timeout-minutes: 30
+    env:
+      npm_config_arch: arm64
+      VSCODE_ARCH: arm64
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SNAPCRAFT_BUILD_ENVIRONMENT: host
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install system dependencies (package mode)
+        run: bash build/github/install-system-deps.sh package
+      - name: Restore node_modules cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            build/node_modules
+            extensions/node_modules
+            extensions/**/node_modules
+            .vscode/extensions/**/node_modules
+          key: node_modules-linux-arm64-${{ hashFiles('package-lock.json', 'build/package-lock.json', 'extensions/**/package-lock.json', '.vscode/extensions/**/package-lock.json', '.npmrc', 'build/.npmrc', 'build/.cachesalt') }}
+          restore-keys: node_modules-linux-arm64-
+      - name: Install root dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Install build dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        working-directory: build
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Download assembled binary
+        uses: actions/download-artifact@v4
+        with:
+          name: forge-linux-arm64-binary
+          path: .build/
+      - name: Extract binary
+        run: tar -xzf .build/forge-linux-arm64.tar.gz -C ..
+      - name: Compile build scripts
+        run: npm run compile-build
+      - name: Build snap package
+        run: |
+          npm run gulp vscode-linux-arm64-prepare-snap
+          npm run gulp vscode-linux-arm64-build-snap
+      - name: Upload snap artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-linux-arm64-snap
+          path: .build/linux/snap/**/*.snap
+          retention-days: 7
+
+  publish-release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-22.04
+    needs:
+      - package-linux-x64-deb
+      - package-linux-x64-rpm
+      - package-linux-x64-snap
+      - package-linux-arm64-deb
+      - package-linux-arm64-rpm
+      - package-linux-arm64-snap
     permissions:
       contents: write
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download all artifacts
+      - name: Download all package artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: forge-linux-*-(deb|rpm|snap)
           path: dist/
-
-      - name: Flatten artifact directories
-        run: find dist/ -mindepth 2 -type f -exec mv {} dist/ \;
-
-      - name: Create draft GitHub Release
+          merge-multiple: true
+      - name: Extract changelog entry for this version
+        id: changelog
         run: |
-          VERSION=$(node -p "require('./package.json').version")
-          gh release create "v${VERSION}" \
-            --title "Forge IDE v${VERSION}" \
-            --generate-notes \
-            --draft \
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk "/^## \[?${VERSION}/ { found=1; next } found && /^## / { exit } found { print }" CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "No changelog entry found for ${VERSION}" > release-notes.md
+          fi
+      - name: Create GitHub Release
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "Forge IDE ${GITHUB_REF_NAME}" \
+            --notes-file release-notes.md \
             dist/*

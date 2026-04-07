@@ -1,0 +1,327 @@
+name: Forge PR
+
+on:
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  setup:
+    name: Setup Cache
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      CI: true
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+      npm_config_arch: x64
+      VSCODE_ARCH: x64
+      NODE_OPTIONS: --max-old-space-size=4096
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Restore node_modules cache
+        id: cache-node-modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            build/node_modules
+            extensions/node_modules
+            extensions/**/node_modules
+            .vscode/extensions/**/node_modules
+          key: node_modules-linux-x64-${{ hashFiles('package-lock.json', 'build/package-lock.json', 'extensions/**/package-lock.json', '.vscode/extensions/**/package-lock.json', '.npmrc', 'build/.npmrc', 'build/.cachesalt') }}
+          restore-keys: node_modules-linux-x64-
+      - name: Install system dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: bash build/github/install-system-deps.sh ci
+      - name: Install root dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Install build dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        working-directory: build
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Install extensions dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: |
+          find extensions .vscode/extensions -name "package-lock.json" \
+            -not -path "*/node_modules/*" -execdir pwd \; \
+            | xargs -P 4 -I{} npm ci --prefix {}
+      - name: Restore Playwright cache
+        id: cache-playwright
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ hashFiles('package-lock.json') }}
+          restore-keys: playwright-chromium-
+      - name: Install Playwright browsers
+        if: steps.cache-playwright.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+  fast-checks:
+    name: Fast Checks
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    needs: setup
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      CI: true
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+      npm_config_arch: x64
+      VSCODE_ARCH: x64
+      NODE_OPTIONS: --max-old-space-size=4096
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install system dependencies
+        run: bash build/github/install-system-deps.sh ci
+      - name: Restore node_modules cache
+        id: cache-node-modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            build/node_modules
+            extensions/node_modules
+            extensions/**/node_modules
+            .vscode/extensions/**/node_modules
+          key: node_modules-linux-x64-${{ hashFiles('package-lock.json', 'build/package-lock.json', 'extensions/**/package-lock.json', '.vscode/extensions/**/package-lock.json', '.npmrc', 'build/.npmrc', 'build/.cachesalt') }}
+          restore-keys: node_modules-linux-x64-
+      - name: Install root dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Install build dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        working-directory: build
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Install extensions dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: |
+          find extensions .vscode/extensions -name "package-lock.json" \
+            -not -path "*/node_modules/*" -execdir pwd \; \
+            | xargs -P 4 -I{} npm ci --prefix {}
+      - name: Lint PR title (commitlint)
+        run: echo "${{ github.event.pull_request.title }}" | npx commitlint --config build/github/commitlint.config.js
+      - name: TypeScript compile
+        run: npm run compile
+      - name: ESLint
+        run: npm run eslint
+      - name: Stylelint
+        run: npm run stylelint
+      - name: Hygiene checks
+        run: npm run hygiene
+      - name: Layer validation
+        run: npm run valid-layers-check
+
+  test-node:
+    name: Tests (Node.js)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    needs: fast-checks
+    permissions:
+      contents: read
+    env:
+      CI: true
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+      npm_config_arch: x64
+      VSCODE_ARCH: x64
+      NODE_OPTIONS: --max-old-space-size=4096
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install system dependencies
+        run: bash build/github/install-system-deps.sh ci
+      - name: Restore node_modules cache
+        id: cache-node-modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            build/node_modules
+            extensions/node_modules
+            extensions/**/node_modules
+            .vscode/extensions/**/node_modules
+          key: node_modules-linux-x64-${{ hashFiles('package-lock.json', 'build/package-lock.json', 'extensions/**/package-lock.json', '.vscode/extensions/**/package-lock.json', '.npmrc', 'build/.npmrc', 'build/.cachesalt') }}
+          restore-keys: node_modules-linux-x64-
+      - name: Install root dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Install build dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        working-directory: build
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Install extensions dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: |
+          find extensions .vscode/extensions -name "package-lock.json" \
+            -not -path "*/node_modules/*" -execdir pwd \; \
+            | xargs -P 4 -I{} npm ci --prefix {}
+      - name: Compile
+        run: npm run compile
+      - name: Run Node.js unit tests
+        run: npm run test-node
+        timeout-minutes: 15
+
+  test-browser:
+    name: Tests (Browser)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    needs: fast-checks
+    permissions:
+      contents: read
+    env:
+      CI: true
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+      npm_config_arch: x64
+      VSCODE_ARCH: x64
+      NODE_OPTIONS: --max-old-space-size=4096
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install system dependencies
+        run: bash build/github/install-system-deps.sh ci
+      - name: Restore node_modules cache
+        id: cache-node-modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            build/node_modules
+            extensions/node_modules
+            extensions/**/node_modules
+            .vscode/extensions/**/node_modules
+          key: node_modules-linux-x64-${{ hashFiles('package-lock.json', 'build/package-lock.json', 'extensions/**/package-lock.json', '.vscode/extensions/**/package-lock.json', '.npmrc', 'build/.npmrc', 'build/.cachesalt') }}
+          restore-keys: node_modules-linux-x64-
+      - name: Install root dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Install build dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        working-directory: build
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Install extensions dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: |
+          find extensions .vscode/extensions -name "package-lock.json" \
+            -not -path "*/node_modules/*" -execdir pwd \; \
+            | xargs -P 4 -I{} npm ci --prefix {}
+      - name: Restore Playwright cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ hashFiles('package-lock.json') }}
+          restore-keys: playwright-chromium-
+      - name: Install Playwright browsers (cache miss fallback)
+        run: npx playwright install --with-deps chromium
+      - name: Compile
+        run: npm run compile
+      - name: Run browser unit tests
+        run: npm run test-browser-no-install -- --browser chromium
+        timeout-minutes: 15
+
+  build-check:
+    name: Build Check (Linux x64)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    needs: [test-node, test-browser]
+    permissions:
+      contents: read
+    env:
+      CI: true
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+      npm_config_arch: x64
+      VSCODE_ARCH: x64
+      NODE_OPTIONS: --max-old-space-size=4096
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install system dependencies
+        run: bash build/github/install-system-deps.sh ci
+      - name: Restore node_modules cache
+        id: cache-node-modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            build/node_modules
+            extensions/node_modules
+            extensions/**/node_modules
+            .vscode/extensions/**/node_modules
+          key: node_modules-linux-x64-${{ hashFiles('package-lock.json', 'build/package-lock.json', 'extensions/**/package-lock.json', '.vscode/extensions/**/package-lock.json', '.npmrc', 'build/.npmrc', 'build/.cachesalt') }}
+          restore-keys: node_modules-linux-x64-
+      - name: Install root dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Install build dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        working-directory: build
+        run: |
+          for i in {1..5}; do npm ci && break; [ $i -eq 5 ] && exit 1; echo "Retry $i..."; done
+      - name: Install extensions dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: |
+          find extensions .vscode/extensions -name "package-lock.json" \
+            -not -path "*/node_modules/*" -execdir pwd \; \
+            | xargs -P 4 -I{} npm ci --prefix {}
+      - name: Restore sysroot cache
+        id: cache-sysroots
+        uses: actions/cache@v4
+        with:
+          path: .build/sysroots
+          key: sysroots-linux-x64-${{ hashFiles('.nvmrc') }}
+          restore-keys: sysroots-linux-x64-
+      - name: Setup sysroot
+        run: bash build/github/setup-sysroot.sh x64
+      - name: Restore builtin extensions cache
+        id: cache-builtin-extensions
+        uses: actions/cache@v4
+        with:
+          path: .build/builtInExtensions
+          key: builtin-extensions-${{ hashFiles('product.json') }}
+      - name: Download builtin extensions
+        if: steps.cache-builtin-extensions.outputs.cache-hit != 'true'
+        run: npm run download-builtin-extensions
+      - name: Compile build scripts
+        run: npm run compile-build
+      - name: Compile extensions build
+        run: npm run compile-extensions-build
+      - name: Bundle and minify
+        run: npm run gulp core-ci
+      - name: Assemble Linux x64
+        run: npm run gulp vscode-linux-x64-min-ci
