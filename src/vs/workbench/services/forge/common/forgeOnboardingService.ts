@@ -17,4 +17,6 @@ export interface IForgeOnboardingService {
 	detectEnvironment(): Promise<IEnvironmentDetectionResult>;
 	markComplete(): void;
 	reset(): void;
+	saveMCPSelections(servers: string[]): Promise<void>;
+	getMCPSelections(): Promise<string[]>;
 }

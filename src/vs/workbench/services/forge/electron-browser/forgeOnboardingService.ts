@@ -10,6 +10,7 @@ import { IStorageService, StorageScope, StorageTarget } from '../../../../platfo
 import { IEnvironmentDetectionResult, IForgeOnboardingService } from '../common/forgeOnboardingService.js';
 
 const ONBOARDING_COMPLETE_KEY = 'forge.onboarding.complete';
+const MCP_SELECTIONS_KEY = 'forge.onboarding.mcpSelections';
 
 export class ForgeOnboardingServiceImpl extends Disposable implements IForgeOnboardingService {
 	declare readonly _serviceBrand: undefined;
@@ -55,6 +56,20 @@ export class ForgeOnboardingServiceImpl extends Disposable implements IForgeOnbo
 	reset(): void {
 		this._storageService.remove(ONBOARDING_COMPLETE_KEY, StorageScope.APPLICATION);
 		this._logService.info('[ForgeOnboardingService] Onboarding reset');
+	}
+
+	async saveMCPSelections(servers: string[]): Promise<void> {
+		this._storageService.store(MCP_SELECTIONS_KEY, JSON.stringify(servers), StorageScope.APPLICATION, StorageTarget.USER);
+	}
+
+	async getMCPSelections(): Promise<string[]> {
+		const raw = this._storageService.get(MCP_SELECTIONS_KEY, StorageScope.APPLICATION);
+		if (!raw) { return []; }
+		try {
+			return JSON.parse(raw) as string[];
+		} catch {
+			return [];
+		}
 	}
 
 	private async _detectVSCodeConfig(): Promise<{ found: boolean; path: string | undefined }> {
