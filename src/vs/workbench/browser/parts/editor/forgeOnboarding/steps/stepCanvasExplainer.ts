@@ -109,6 +109,11 @@ export class StepCanvasExplainer implements IOnboardingStep {
 
 		body.appendChild(grid);
 
+		const requiredTag = document.createElement('div');
+		requiredTag.className = 'forge-onboarding-required-tag';
+		requiredTag.textContent = 'Cannot be skipped';
+		body.appendChild(requiredTag);
+
 		container.appendChild(body);
 	}
 
