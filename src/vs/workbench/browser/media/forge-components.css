@@ -1,0 +1,1289 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Forge IDE. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/*
+ * Forge component primitives.
+ *
+ * BEM-style classes prefixed with `forge-` to avoid colliding with VS Code utility classes.
+ * Source of truth: docs/ui-mocks/forge-component-library.html.
+ * All values reference tokens in forge-tokens.css.
+ *
+ * Components in this file:
+ *   01 Buttons (forge-btn, forge-btn-icon)
+ *   02 Inputs / Form controls (forge-input, forge-textarea, forge-select)
+ *   03 Toggles, checkboxes, radios
+ *   04 Toasts
+ *   05 Badges and chips
+ *   06 Tooltips
+ *   07 Dropdowns / menus
+ *   08 Tabs (line, pill)
+ *   09 Progress / skeletons / spinners
+ *   10 Cards
+ *   11 Code block
+ *   12 Modal / dialog
+ *   13 Provider card
+ *   14 Command palette item
+ */
+
+/* =========================================================================
+ * 01. Buttons
+ * ========================================================================= */
+
+.forge-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: var(--sp-2, 8px);
+	cursor: pointer;
+	border: none;
+	outline: none;
+	font-family: var(--font-display);
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.1em;
+	border-radius: var(--r-sm);
+	white-space: nowrap;
+	text-decoration: none;
+	transition:
+		background var(--ease),
+		border-color var(--ease),
+		color var(--ease),
+		opacity var(--ease),
+		transform var(--dur-fast) ease;
+}
+
+.forge-btn:active {
+	transform: translateY(1px);
+}
+
+/* Sizes */
+.forge-btn--sm { padding: var(--sp-1) var(--sp-3);   font-size: var(--text-body-sm); }
+.forge-btn--md { padding: var(--sp-2) var(--sp-5);   font-size: var(--text-body-md); }
+.forge-btn--lg { padding: var(--sp-3) var(--sp-6);   font-size: var(--text-body-lg); }
+.forge-btn--xl { padding: var(--sp-3-5) var(--sp-8); font-size: 18px; }
+
+/* Primary */
+.forge-btn--primary {
+	background: var(--color-ember-400);
+	color: var(--color-text-on-ember);
+}
+.forge-btn--primary:hover  { background: var(--color-ember-hover); }
+.forge-btn--primary:active { background: var(--color-ember-500); }
+.forge-btn--primary:disabled,
+.forge-btn--primary.is-disabled {
+	background: var(--color-border-2);
+	color: var(--color-iron-500);
+	cursor: not-allowed;
+	transform: none;
+}
+
+/* Secondary — ember outline */
+.forge-btn--secondary {
+	background: none;
+	border: 1px solid var(--color-ember-400);
+	color: var(--color-ember-400);
+}
+.forge-btn--secondary:hover  { background: var(--color-ember-tint-10); }
+.forge-btn--secondary:active { background: var(--color-ember-tint-20); }
+.forge-btn--secondary:disabled,
+.forge-btn--secondary.is-disabled {
+	border-color: var(--color-border-2);
+	color: var(--color-iron-500);
+	cursor: not-allowed;
+	transform: none;
+}
+
+/* Ghost — neutral outline */
+.forge-btn--ghost {
+	background: none;
+	border: 1px solid var(--color-border-2);
+	color: var(--color-text-secondary);
+}
+.forge-btn--ghost:hover {
+	border-color: var(--color-iron-300);
+	color: var(--color-text-primary);
+	background: var(--color-surface-3);
+}
+.forge-btn--ghost:active { background: var(--color-surface-2); }
+.forge-btn--ghost:disabled,
+.forge-btn--ghost.is-disabled {
+	color: var(--color-iron-500);
+	border-color: var(--color-border-1);
+	cursor: not-allowed;
+	transform: none;
+}
+
+/* Danger — ember outline reserved for destructive actions */
+.forge-btn--danger {
+	background: none;
+	border: 1px solid var(--color-error);
+	color: var(--color-error);
+}
+.forge-btn--danger:hover  { background: var(--color-ember-tint-10); }
+.forge-btn--danger:active { background: var(--color-ember-tint-20); }
+
+/* Loading state — spinner overlay */
+.forge-btn--loading {
+	position: relative;
+	color: transparent !important;
+}
+.forge-btn--loading::after {
+	content: '';
+	position: absolute;
+	top: 50%;
+	left: 50%;
+	width: 12px;
+	height: 12px;
+	margin: -6px 0 0 -6px;
+	border: 2px solid rgba(255, 255, 255, 0.3);
+	border-top-color: var(--color-text-on-ember);
+	border-radius: 50%;
+	animation: forge-spin 0.7s linear infinite;
+}
+
+.monaco-workbench.vs .forge-btn--loading::after {
+	border-color: rgba(0, 0, 0, 0.2);
+}
+
+@keyframes forge-spin {
+	to { transform: rotate(360deg); }
+}
+
+/* Icon button — square, no label */
+.forge-btn-icon {
+	width: 32px;
+	height: 32px;
+	padding: 0;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: var(--r-sm);
+	border: 1px solid var(--color-border-2);
+	background: none;
+	color: var(--color-iron-300);
+	cursor: pointer;
+	transition: all var(--ease);
+	font-size: var(--text-body-md);
+}
+.forge-btn-icon:hover {
+	border-color: var(--color-iron-300);
+	color: var(--color-text-primary);
+	background: var(--color-surface-3);
+}
+.forge-btn-icon.is-active {
+	border-color: var(--color-ember-400);
+	color: var(--color-ember-400);
+	background: var(--color-ember-tint-8);
+}
+
+.forge-btn-icon--sm { width: 24px; height: 24px; font-size: var(--text-mono-sm); }
+.forge-btn-icon--lg { width: 40px; height: 40px; font-size: var(--text-body-lg); }
+
+/* =========================================================================
+ * 02. Inputs and form controls
+ * ========================================================================= */
+
+.forge-input-wrap {
+	display: flex;
+	flex-direction: column;
+	gap: var(--sp-1);
+	width: 100%;
+}
+
+.forge-input-label {
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-xs);
+	letter-spacing: 0.2em;
+	color: var(--color-iron-300);
+	text-transform: uppercase;
+}
+
+.forge-input-hint {
+	font-family: var(--font-body);
+	font-size: var(--text-mono-sm);
+	color: var(--color-iron-500);
+}
+
+.forge-input-error-msg {
+	display: flex;
+	align-items: center;
+	gap: var(--sp-1);
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-10);
+	color: var(--color-ember-400);
+}
+
+.forge-input {
+	width: 100%;
+	background: var(--color-surface-2);
+	border: 1px solid var(--color-border-2);
+	border-radius: var(--r-sm);
+	padding: var(--sp-2) var(--sp-3);
+	font-family: var(--font-body);
+	font-size: var(--text-mono-md);
+	color: var(--color-text-primary);
+	outline: none;
+	appearance: none;
+	transition:
+		border-color var(--ease),
+		background var(--ease);
+}
+.forge-input::placeholder { color: var(--color-iron-500); }
+.forge-input:hover:not(:disabled):not(.is-error) { border-color: var(--color-iron-300); }
+.forge-input:focus {
+	border-color: var(--color-ember-400);
+	background: var(--color-surface-3);
+}
+.forge-input:disabled {
+	color: var(--color-iron-500);
+	background: var(--color-surface-2);
+	cursor: not-allowed;
+}
+.forge-input.is-error   { border-color: var(--color-ember-400); }
+.forge-input.is-success { border-color: var(--color-success); }
+
+/* Input group — prefix / suffix icons */
+.forge-input-group { position: relative; width: 100%; }
+.forge-input-group .forge-input              { padding-left: var(--sp-8); }
+.forge-input-group .forge-input--has-suffix  { padding-right: var(--sp-8); }
+
+.forge-input-prefix,
+.forge-input-icon-right {
+	position: absolute;
+	top: 50%;
+	transform: translateY(-50%);
+	font-family: var(--font-mono);
+	font-size: var(--text-body-sm);
+	color: var(--color-iron-400);
+	pointer-events: none;
+}
+.forge-input-prefix     { left: var(--sp-3); }
+.forge-input-icon-right { right: var(--sp-3); }
+
+/* Textarea */
+.forge-textarea {
+	width: 100%;
+	background: var(--color-surface-2);
+	border: 1px solid var(--color-border-2);
+	border-radius: var(--r-sm);
+	padding: var(--sp-2-5) var(--sp-3);
+	font-family: var(--font-body);
+	font-size: var(--text-mono-md);
+	color: var(--color-text-primary);
+	outline: none;
+	resize: vertical;
+	min-height: 80px;
+	line-height: 1.6;
+	transition: border-color var(--ease);
+}
+.forge-textarea::placeholder { color: var(--color-iron-500); }
+.forge-textarea:focus        { border-color: var(--color-ember-400); }
+
+/* Select */
+.forge-select {
+	width: 100%;
+	background-color: var(--color-surface-2);
+	border: 1px solid var(--color-border-2);
+	border-radius: var(--r-sm);
+	padding: var(--sp-2) var(--sp-8) var(--sp-2) var(--sp-3);
+	font-family: var(--font-body);
+	font-size: var(--text-mono-md);
+	color: var(--color-text-primary);
+	outline: none;
+	cursor: pointer;
+	appearance: none;
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236a7e98' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+	background-repeat: no-repeat;
+	background-position: right var(--sp-3) center;
+	transition: border-color var(--ease);
+}
+.forge-select:hover { border-color: var(--color-iron-300); }
+.forge-select:focus { border-color: var(--color-ember-400); }
+
+/* =========================================================================
+ * 03. Toggles, checkboxes, radios
+ * ========================================================================= */
+
+.forge-toggle-wrap {
+	display: flex;
+	align-items: center;
+	gap: var(--sp-2-5);
+	cursor: pointer;
+}
+
+.forge-toggle {
+	position: relative;
+	width: 36px;
+	height: 20px;
+	border-radius: 10px;
+	cursor: pointer;
+	flex-shrink: 0;
+	transition: background var(--ease);
+}
+.forge-toggle--off { background: var(--color-border-2); }
+.forge-toggle--on  { background: var(--color-ember-400); }
+.forge-toggle::after {
+	content: '';
+	position: absolute;
+	top: 3px;
+	width: 14px;
+	height: 14px;
+	border-radius: 50%;
+	background: var(--color-text-on-ember);
+	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+	transition: left var(--ease);
+}
+.forge-toggle--off::after { left: 3px; }
+.forge-toggle--on::after  { left: 19px; }
+
+.forge-toggle-label {
+	font-size: var(--text-mono-md);
+	color: var(--color-text-primary);
+	user-select: none;
+}
+.forge-toggle-label__sub {
+	display: block;
+	font-size: var(--text-mono-sm);
+	color: var(--color-iron-300);
+}
+
+/* Checkbox */
+.forge-checkbox-wrap {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--sp-2);
+	cursor: pointer;
+}
+
+.forge-checkbox {
+	width: 16px;
+	height: 16px;
+	border-radius: var(--r-sm);
+	border: 1.5px solid var(--color-border-2);
+	background: var(--color-surface-2);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+	margin-top: 1px;
+	font-size: var(--text-mono-xs);
+	cursor: pointer;
+	transition: all var(--ease);
+}
+.forge-checkbox.is-checked {
+	background: var(--color-ember-400);
+	border-color: var(--color-ember-400);
+	color: var(--color-text-on-ember);
+}
+.forge-checkbox.is-indeterminate {
+	background: var(--color-border-2);
+	border-color: var(--color-iron-400);
+	color: var(--color-iron-200);
+}
+.forge-checkbox:hover { border-color: var(--color-ember-400); }
+
+.forge-checkbox-label {
+	font-size: var(--text-mono-md);
+	color: var(--color-text-primary);
+	line-height: 1.4;
+}
+.forge-checkbox-label__sub {
+	display: block;
+	margin-top: 2px;
+	font-size: var(--text-mono-sm);
+	color: var(--color-iron-300);
+}
+
+/* Radio */
+.forge-radio-wrap {
+	display: flex;
+	align-items: center;
+	gap: var(--sp-2);
+	cursor: pointer;
+}
+
+.forge-radio {
+	width: 16px;
+	height: 16px;
+	border-radius: 50%;
+	border: 1.5px solid var(--color-border-2);
+	background: var(--color-surface-2);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+	cursor: pointer;
+	transition: all var(--ease);
+}
+.forge-radio:hover         { border-color: var(--color-ember-400); }
+.forge-radio.is-selected   { border-color: var(--color-ember-400); }
+.forge-radio.is-selected::after {
+	content: '';
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: var(--color-ember-400);
+}
+
+.forge-radio-label {
+	font-size: var(--text-mono-md);
+	color: var(--color-text-primary);
+}
+
+/* =========================================================================
+ * 04. Toasts
+ * ========================================================================= */
+
+.forge-toast {
+	position: relative;
+	display: flex;
+	align-items: flex-start;
+	gap: var(--sp-3);
+	padding: var(--sp-3-5) var(--sp-4);
+	border-radius: var(--r-md);
+	border: 1px solid;
+	max-width: 400px;
+	width: 100%;
+	overflow: hidden;
+}
+.forge-toast::before {
+	content: '';
+	position: absolute;
+	left: 0;
+	top: 0;
+	bottom: 0;
+	width: 3px;
+}
+
+.forge-toast--success         { background: var(--color-success-bg); border-color: var(--color-success-border); }
+.forge-toast--success::before { background: var(--color-success); }
+
+.forge-toast--warning         { background: var(--color-warning-bg); border-color: var(--color-warning-border); }
+.forge-toast--warning::before { background: var(--color-warning); }
+
+.forge-toast--error           { background: var(--color-error-bg); border-color: var(--color-error-border); }
+.forge-toast--error::before   { background: var(--color-error); }
+
+.forge-toast--info            { background: var(--color-info-bg); border-color: var(--color-info-border); }
+.forge-toast--info::before    { background: var(--color-info); }
+
+.forge-toast__icon {
+	width: 20px;
+	height: 20px;
+	border-radius: var(--r-sm);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: var(--text-mono-sm);
+	flex-shrink: 0;
+	margin-top: 1px;
+}
+.forge-toast--success .forge-toast__icon { background: var(--color-success-tint-15); color: var(--color-success); }
+.forge-toast--warning .forge-toast__icon { background: var(--color-warning-tint-15); color: var(--color-warning); }
+.forge-toast--error   .forge-toast__icon { background: var(--color-ember-tint-15);   color: var(--color-error); }
+.forge-toast--info    .forge-toast__icon { background: var(--color-info-tint-15);    color: var(--color-info); }
+
+.forge-toast__body { flex: 1; min-width: 0; }
+
+.forge-toast__title {
+	font-family: var(--font-body);
+	font-weight: 600;
+	font-size: var(--text-mono-md);
+	margin-bottom: 3px;
+	line-height: 1.3;
+}
+.forge-toast--success .forge-toast__title { color: var(--color-success); }
+.forge-toast--warning .forge-toast__title { color: var(--color-warning); }
+.forge-toast--error   .forge-toast__title { color: var(--color-error); }
+.forge-toast--info    .forge-toast__title { color: var(--color-info); }
+
+.forge-toast__msg {
+	font-size: var(--text-body-sm);
+	color: var(--color-text-secondary);
+	line-height: 1.55;
+}
+.forge-toast__code {
+	display: block;
+	margin-top: 4px;
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-10);
+	color: var(--color-iron-500);
+}
+
+.forge-toast__actions {
+	display: flex;
+	gap: var(--sp-2);
+	margin-top: var(--sp-2);
+}
+.forge-toast__action {
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-10);
+	cursor: pointer;
+	text-decoration: underline;
+	background: none;
+	border: none;
+	padding: 0;
+}
+.forge-toast--success .forge-toast__action { color: var(--color-success); }
+.forge-toast--warning .forge-toast__action { color: var(--color-warning); }
+.forge-toast--error   .forge-toast__action { color: var(--color-error); }
+.forge-toast--info    .forge-toast__action { color: var(--color-info); }
+
+.forge-toast__close {
+	width: 18px;
+	height: 18px;
+	border-radius: var(--r-sm);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: var(--text-mono-10);
+	color: var(--color-iron-500);
+	cursor: pointer;
+	flex-shrink: 0;
+	margin-top: 1px;
+	background: none;
+	border: none;
+}
+.forge-toast__close:hover {
+	background: var(--color-surface-3);
+	color: var(--color-text-primary);
+}
+
+/* Compact variant — shrink padding and icon */
+.forge-toast--compact { padding: var(--sp-2) var(--sp-3); }
+.forge-toast--compact .forge-toast__icon { width: 16px; height: 16px; font-size: var(--text-mono-xs); }
+.forge-toast--compact .forge-toast__title { font-size: var(--text-body-sm); margin: 0; }
+
+/* =========================================================================
+ * 05. Badges and chips
+ * ========================================================================= */
+
+.forge-badge {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--sp-1);
+	padding: 3px var(--sp-2);
+	border-radius: 10px;
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-xs);
+	letter-spacing: 0.06em;
+	border: 1px solid;
+	white-space: nowrap;
+}
+.forge-badge__dot {
+	width: 5px;
+	height: 5px;
+	border-radius: 50%;
+	flex-shrink: 0;
+}
+
+.forge-badge--ember {
+	border-color: var(--color-ember-400);
+	color: var(--color-ember-400);
+	background: var(--color-ember-tint-8);
+}
+.forge-badge--success {
+	border-color: var(--color-success);
+	color: var(--color-success);
+	background: var(--color-success-tint-8);
+}
+.forge-badge--warning {
+	border-color: var(--color-warning);
+	color: var(--color-warning);
+	background: var(--color-warning-tint-8);
+}
+.forge-badge--info {
+	border-color: var(--color-info);
+	color: var(--color-info);
+	background: var(--color-info-tint-8);
+}
+.forge-badge--neutral {
+	border-color: var(--color-border-2);
+	color: var(--color-iron-300);
+	background: none;
+}
+.forge-badge--solid {
+	border-color: var(--color-ember-400);
+	color: var(--color-text-on-ember);
+	background: var(--color-ember-400);
+}
+
+/* Chip — dismissible token, used in chat context strip and command palette */
+.forge-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--sp-1);
+	padding: var(--sp-1) var(--sp-2-5);
+	border-radius: var(--r-sm);
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-10);
+	border: 1px solid;
+	cursor: default;
+}
+.forge-chip--file    { border-color: var(--color-info);     color: var(--color-info);     background: var(--color-info-tint-8); }
+.forge-chip--model   { border-color: var(--color-warning);  color: var(--color-warning);  background: var(--color-warning-tint-8); }
+.forge-chip--context { border-color: var(--color-border-2); color: var(--color-iron-300); background: none; }
+.forge-chip--mcp     { border-color: var(--color-ember-400); color: var(--color-ember-400); background: var(--color-ember-tint-8); }
+
+.forge-chip__dismiss {
+	font-size: var(--text-mono-xs);
+	color: inherit;
+	opacity: 0.5;
+	cursor: pointer;
+	background: none;
+	border: none;
+	padding: 0;
+}
+.forge-chip__dismiss:hover { opacity: 1; }
+
+/* =========================================================================
+ * 06. Tooltips
+ * ========================================================================= */
+
+.forge-tooltip-wrap {
+	position: relative;
+	display: inline-flex;
+}
+
+.forge-tooltip {
+	position: absolute;
+	bottom: calc(100% + 8px);
+	left: 50%;
+	transform: translateX(-50%);
+	background: var(--color-surface-2);
+	border: 1px solid var(--color-border-2);
+	border-radius: var(--r-sm);
+	padding: var(--sp-1) var(--sp-2-5);
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-10);
+	color: var(--color-text-primary);
+	white-space: nowrap;
+	pointer-events: none;
+	z-index: 100;
+	box-shadow: var(--shadow-sm);
+}
+.forge-tooltip::after {
+	content: '';
+	position: absolute;
+	top: 100%;
+	left: 50%;
+	transform: translateX(-50%);
+	border: 5px solid transparent;
+	border-top-color: var(--color-border-2);
+}
+.forge-tooltip__kbd {
+	margin-left: var(--sp-2);
+	padding: 1px 5px;
+	border-radius: 2px;
+	background: var(--color-surface-3);
+	border: 1px solid var(--color-border-2);
+	font-size: var(--text-mono-xs);
+	color: var(--color-iron-300);
+}
+
+/* =========================================================================
+ * 07. Dropdowns / menus
+ * ========================================================================= */
+
+.forge-dropdown {
+	background: var(--color-surface-2);
+	border: 1px solid var(--color-border-2);
+	border-radius: var(--r-md);
+	overflow: hidden;
+	box-shadow: var(--shadow-md);
+	min-width: 200px;
+}
+
+.forge-dropdown__section {
+	padding: var(--sp-2-5) var(--sp-3-5) var(--sp-1);
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-xs);
+	letter-spacing: 0.3em;
+	color: var(--color-iron-500);
+	text-transform: uppercase;
+}
+
+.forge-dropdown__item {
+	display: flex;
+	align-items: center;
+	gap: var(--sp-2-5);
+	padding: var(--sp-2) var(--sp-3-5);
+	font-size: var(--text-mono-md);
+	color: var(--color-text-primary);
+	cursor: pointer;
+	transition: background var(--ease);
+}
+.forge-dropdown__item:hover {
+	background: var(--color-surface-3);
+}
+.forge-dropdown__item.is-active {
+	background: var(--color-ember-tint-8);
+	color: var(--color-ember-400);
+}
+.forge-dropdown__item.is-danger {
+	color: var(--color-ember-400);
+}
+.forge-dropdown__item.is-danger:hover {
+	background: var(--color-ember-tint-10);
+}
+.forge-dropdown__item.is-disabled {
+	color: var(--color-iron-500);
+	cursor: not-allowed;
+}
+
+.forge-dropdown__icon {
+	width: 16px;
+	font-size: var(--text-mono-md);
+	flex-shrink: 0;
+	text-align: center;
+}
+.forge-dropdown__label    { flex: 1; }
+.forge-dropdown__shortcut {
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-10);
+	color: var(--color-iron-500);
+}
+.forge-dropdown__check {
+	margin-left: auto;
+	font-size: var(--text-mono-10);
+	color: var(--color-ember-400);
+}
+.forge-dropdown__sep {
+	height: 1px;
+	background: var(--color-border-1);
+	margin: var(--sp-1) 0;
+}
+
+/* =========================================================================
+ * 08. Tabs — line and pill variants
+ * ========================================================================= */
+
+/* Line tabs — underlined active state */
+.forge-tabs-line {
+	display: flex;
+	gap: 0;
+	border-bottom: 1px solid var(--color-border-1);
+}
+.forge-tab-line {
+	display: flex;
+	align-items: center;
+	gap: var(--sp-2);
+	padding: var(--sp-2) var(--sp-5);
+	margin-bottom: -1px;
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-sm);
+	color: var(--color-iron-400);
+	cursor: pointer;
+	border-bottom: 2px solid transparent;
+	transition: all var(--ease);
+}
+.forge-tab-line:hover     { color: var(--color-text-primary); }
+.forge-tab-line.is-active {
+	color: var(--color-text-primary);
+	border-bottom-color: var(--color-ember-400);
+}
+.forge-tab-line__dot {
+	width: 5px;
+	height: 5px;
+	border-radius: 50%;
+	flex-shrink: 0;
+}
+
+/* Pill tabs — segmented control */
+.forge-tabs-pill {
+	display: flex;
+	gap: var(--sp-1);
+	padding: var(--sp-1);
+	background: var(--color-surface-2);
+	border: 1px solid var(--color-border-1);
+	border-radius: var(--r-md);
+	width: fit-content;
+}
+.forge-tab-pill {
+	padding: var(--sp-1) var(--sp-4);
+	border-radius: var(--r-sm);
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-sm);
+	color: var(--color-iron-300);
+	cursor: pointer;
+	transition: all var(--ease);
+	border: 1px solid transparent;
+	background: none;
+}
+.forge-tab-pill:hover { color: var(--color-text-primary); }
+.forge-tab-pill.is-active {
+	background: var(--color-surface-3);
+	color: var(--color-text-primary);
+	border-color: var(--color-border-2);
+}
+
+/* =========================================================================
+ * 09. Progress / skeletons / spinners
+ * ========================================================================= */
+
+.forge-progress {
+	width: 100%;
+	display: flex;
+	flex-direction: column;
+	gap: var(--sp-1);
+}
+.forge-progress__row {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+}
+.forge-progress__label {
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-10);
+	color: var(--color-text-secondary);
+}
+.forge-progress__pct {
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-10);
+	color: var(--color-iron-300);
+}
+
+.forge-progress__track {
+	width: 100%;
+	height: 4px;
+	border-radius: 2px;
+	background: var(--color-border-2);
+	overflow: hidden;
+}
+.forge-progress__fill {
+	height: 100%;
+	border-radius: 2px;
+	transition: width 0.3s ease;
+}
+.forge-progress__fill--ember   { background: var(--color-ember-400); }
+.forge-progress__fill--success { background: var(--color-success); }
+.forge-progress__fill--warning { background: var(--color-warning); }
+.forge-progress__fill--stripe {
+	background: repeating-linear-gradient(
+		45deg,
+		var(--color-ember-400),
+		var(--color-ember-400) 6px,
+		var(--color-ember-300) 6px,
+		var(--color-ember-300) 12px
+	);
+	animation: forge-stripe-move 0.6s linear infinite;
+}
+
+@keyframes forge-stripe-move {
+	to { background-position: 12px 0; }
+}
+
+/* Skeleton — shimmering placeholder */
+.forge-skeleton {
+	border-radius: var(--r-sm);
+	background: linear-gradient(
+		90deg,
+		var(--color-surface-2) 25%,
+		var(--color-surface-3) 50%,
+		var(--color-surface-2) 75%
+	);
+	background-size: 400px 100%;
+	animation: forge-shimmer 1.4s ease infinite;
+}
+
+@keyframes forge-shimmer {
+	0%   { background-position: -400px 0; }
+	100% { background-position:  400px 0; }
+}
+
+/* Spinner */
+.forge-spinner {
+	border-radius: 50%;
+	border: 2px solid var(--color-border-2);
+	border-top-color: var(--color-ember-400);
+	animation: forge-spin 0.7s linear infinite;
+	flex-shrink: 0;
+}
+.forge-spinner--sm { width: 14px; height: 14px; }
+.forge-spinner--md { width: 20px; height: 20px; }
+.forge-spinner--lg { width: 28px; height: 28px; border-width: 3px; }
+
+/* =========================================================================
+ * 10. Cards
+ * ========================================================================= */
+
+.forge-card {
+	background: var(--color-surface-1);
+	border: 1px solid var(--color-border-1);
+	border-radius: var(--r-lg);
+	padding: var(--sp-5);
+	transition:
+		border-color var(--ease),
+		box-shadow var(--ease);
+}
+.forge-card:hover { border-color: var(--color-border-2); }
+
+.forge-card--ember { border-left: 3px solid var(--color-ember-400); }
+
+.forge-card--interactive { cursor: pointer; }
+.forge-card--interactive:hover {
+	border-color: var(--color-ember-400);
+	box-shadow: 0 0 0 1px var(--color-ember-tint-10);
+}
+
+.forge-card__title {
+	margin-bottom: var(--sp-1);
+	font-family: var(--font-display);
+	font-weight: 700;
+	font-size: 17px;
+	letter-spacing: 0.06em;
+	color: var(--color-text-primary);
+	text-transform: uppercase;
+}
+.forge-card__body {
+	font-size: var(--text-body-sm);
+	color: var(--color-text-secondary);
+	line-height: 1.6;
+}
+.forge-card__footer {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin-top: var(--sp-3-5);
+	padding-top: var(--sp-3);
+	border-top: 1px solid var(--color-border-1);
+}
+
+/* =========================================================================
+ * 11. Code block
+ * ========================================================================= */
+
+.forge-code-block {
+	background: var(--color-code-bg);
+	border: 1px solid var(--color-border-1);
+	border-radius: var(--r-md);
+	overflow: hidden;
+}
+
+.forge-code-block__hdr {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: var(--sp-2) var(--sp-3-5);
+	background: var(--color-surface-2);
+	border-bottom: 1px solid var(--color-border-1);
+}
+
+.forge-code-block__lang {
+	display: flex;
+	align-items: center;
+	gap: var(--sp-2);
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-xs);
+	letter-spacing: 0.15em;
+	color: var(--color-iron-400);
+	text-transform: uppercase;
+}
+.forge-code-block__lang-dot {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+}
+
+.forge-code-block__actions {
+	display: flex;
+	gap: var(--sp-1);
+}
+.forge-code-block__action {
+	padding: 2px var(--sp-1);
+	border-radius: 2px;
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-xs);
+	color: var(--color-iron-500);
+	cursor: pointer;
+	background: none;
+	border: none;
+}
+.forge-code-block__action:hover {
+	color: var(--color-text-primary);
+	background: var(--color-surface-3);
+}
+
+.forge-code-block__body {
+	padding: var(--sp-3-5) var(--sp-4);
+	font-family: var(--font-mono);
+	font-size: var(--text-body-sm);
+	line-height: 1.75;
+	overflow-x: auto;
+}
+
+.forge-code-block .tok-kw      { color: var(--color-syntax-kw); }
+.forge-code-block .tok-fn      { color: var(--color-syntax-fn); }
+.forge-code-block .tok-str     { color: var(--color-syntax-str); }
+.forge-code-block .tok-comment { color: var(--color-syntax-comment); font-style: italic; }
+.forge-code-block .tok-type    { color: var(--color-syntax-type); }
+.forge-code-block .tok-num     { color: var(--color-syntax-num); }
+
+.forge-code-block__line-hl {
+	display: block;
+	margin: 0 calc(var(--sp-4) * -1);
+	padding: 0 var(--sp-3-5);
+	background: var(--color-ember-tint-8);
+	border-left: 2px solid var(--color-ember-400);
+}
+
+/* =========================================================================
+ * 12. Modal / dialog
+ * ========================================================================= */
+
+.forge-modal-backdrop {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: var(--sp-6);
+	background: var(--color-backdrop);
+}
+
+.forge-modal {
+	background: var(--color-surface-1);
+	border: 1px solid var(--color-border-2);
+	border-radius: var(--r-lg);
+	overflow: hidden;
+	box-shadow: var(--shadow-lg);
+	width: 100%;
+	max-width: 480px;
+}
+
+.forge-modal__hdr {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	padding: var(--sp-4) var(--sp-5) var(--sp-3-5);
+	border-bottom: 1px solid var(--color-border-1);
+}
+
+.forge-modal__title {
+	font-family: var(--font-display);
+	font-weight: 800;
+	font-size: 20px;
+	letter-spacing: 0.08em;
+	color: var(--color-text-primary);
+	text-transform: uppercase;
+}
+.forge-modal__subtitle {
+	margin-top: 3px;
+	font-size: var(--text-body-sm);
+	color: var(--color-iron-300);
+}
+
+.forge-modal__close {
+	width: 24px;
+	height: 24px;
+	border-radius: var(--r-sm);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: var(--text-body-md);
+	color: var(--color-iron-400);
+	cursor: pointer;
+	flex-shrink: 0;
+	background: none;
+	border: none;
+}
+.forge-modal__close:hover {
+	background: var(--color-surface-3);
+	color: var(--color-text-primary);
+}
+
+.forge-modal__body {
+	padding: var(--sp-5);
+}
+.forge-modal__footer {
+	display: flex;
+	gap: var(--sp-2);
+	justify-content: flex-end;
+	padding: var(--sp-3-5) var(--sp-5);
+	background: var(--color-surface-2);
+	border-top: 1px solid var(--color-border-1);
+}
+
+/* =========================================================================
+ * 13. Provider card — Forge-specific selector cards for the picker
+ * ========================================================================= */
+
+.forge-provider-card {
+	display: flex;
+	align-items: center;
+	gap: var(--sp-3);
+	padding: var(--sp-3-5) var(--sp-4);
+	background: var(--color-surface-1);
+	border: 1px solid var(--color-border-1);
+	border-radius: var(--r-md);
+	cursor: pointer;
+	transition: all var(--ease);
+}
+.forge-provider-card:hover {
+	background: var(--color-surface-2);
+	border-color: var(--color-border-2);
+}
+.forge-provider-card.is-selected {
+	background: var(--color-ember-tint-5);
+	border-color: var(--color-ember-400);
+}
+
+.forge-provider-card__status {
+	width: 9px;
+	height: 9px;
+	border-radius: 50%;
+	flex-shrink: 0;
+}
+.forge-provider-card__status--connected {
+	background: var(--color-success);
+	box-shadow: 0 0 6px var(--color-success-tint-50);
+}
+.forge-provider-card__status--idle       { background: var(--color-iron-500); }
+.forge-provider-card__status--error      { background: var(--color-ember-400); }
+.forge-provider-card__status--connecting { background: var(--color-warning); }
+
+.forge-provider-card__info { flex: 1; min-width: 0; }
+.forge-provider-card__name {
+	font-family: var(--font-mono);
+	font-size: var(--text-body-sm);
+	color: var(--color-text-primary);
+	margin-bottom: 2px;
+}
+.forge-provider-card__model {
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-10);
+	color: var(--color-iron-400);
+}
+.forge-provider-card__meta {
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-xs);
+	color: var(--color-iron-500);
+	text-align: right;
+}
+.forge-provider-card__check {
+	font-size: var(--text-body-md);
+	color: var(--color-ember-400);
+}
+
+/* =========================================================================
+ * 14. Command palette item — Forge-specific row for cmd palette / quickopen
+ * ========================================================================= */
+
+.forge-cmd-item {
+	display: flex;
+	align-items: center;
+	gap: var(--sp-2-5);
+	padding: var(--sp-2) var(--sp-3-5);
+	cursor: pointer;
+	border-left: 2px solid transparent;
+	transition: background var(--ease);
+}
+.forge-cmd-item:hover,
+.forge-cmd-item.is-focused {
+	background: var(--color-surface-3);
+	border-left-color: var(--color-ember-400);
+}
+
+.forge-cmd-item__icon {
+	width: 22px;
+	height: 22px;
+	border-radius: var(--r-sm);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: var(--text-mono-sm);
+	background: var(--color-surface-3);
+	color: var(--color-iron-300);
+	flex-shrink: 0;
+}
+.forge-cmd-item.is-focused .forge-cmd-item__icon {
+	background: var(--color-ember-tint-15);
+	color: var(--color-ember-400);
+}
+
+.forge-cmd-item__label {
+	flex: 1;
+	font-size: var(--text-mono-md);
+	color: var(--color-text-primary);
+}
+.forge-cmd-item__category {
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-xs);
+	color: var(--color-iron-500);
+	margin-right: var(--sp-1);
+}
+.forge-cmd-item__shortcut {
+	display: flex;
+	gap: 3px;
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-10);
+	color: var(--color-iron-500);
+}
+.forge-cmd-item__key {
+	padding: 1px 5px;
+	border-radius: 2px;
+	background: var(--color-surface-2);
+	border: 1px solid var(--color-border-2);
+	font-size: var(--text-mono-xs);
+}
+
+/* -----------------------------------------------------------------------------
+ * 15. Shell overrides — workbench parts
+ *
+ * Surgical adjustments to VS Code's built-in parts (titlebar, activitybar,
+ * sidebar, editor tabs) to match forge-ui-shell.html. Colors are driven by
+ * forge-dark.json via --vscode-* vars; these rules tune typography and
+ * geometry only. Keep selectors tight — never rewrite part CSS.
+ * ----------------------------------------------------------------------------- */
+
+/* Titlebar — mono label with wide tracking */
+.monaco-workbench .part.titlebar .window-title {
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-sm);
+	letter-spacing: 0.02em;
+}
+
+/* Activity bar — 44px rail with inset ember indicator */
+.monaco-workbench .activitybar {
+	--activity-bar-width: 44px;
+	--activity-bar-icon-size: 20px;
+	padding: var(--sp-2-5) 0;
+}
+
+.monaco-workbench .activitybar .monaco-action-bar .action-item .active-item-indicator:before {
+	top: var(--sp-2);
+	bottom: var(--sp-2);
+	border-radius: 1px;
+}
+
+/* Side bar — mono headers and tree rows */
+.monaco-workbench .part.sidebar .title-label h2 {
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-xs);
+	letter-spacing: 0.3em;
+	text-transform: uppercase;
+}
+
+.monaco-workbench .part.sidebar .pane-header {
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-10);
+	letter-spacing: 0.3em;
+	text-transform: uppercase;
+}
+
+.monaco-workbench .part.sidebar .monaco-list-row {
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-sm);
+	padding: 3px 14px;
+}
+
+/* Editor tabs — mono labels, rounded top corners */
+.monaco-workbench .part.editor .tab {
+	border-top-left-radius: var(--r-sm);
+	border-top-right-radius: var(--r-sm);
+}
+
+.monaco-workbench .part.editor .tab .tab-label {
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-sm);
+}

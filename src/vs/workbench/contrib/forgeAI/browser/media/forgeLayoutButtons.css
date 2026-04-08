@@ -35,7 +35,7 @@
 
 .forge-layout-btn.active {
 	background: var(--color-surface-2, var(--vscode-list-activeSelectionBackground));
-	border-bottom: 2px solid var(--color-brand, var(--vscode-statusBar-background));
+	border-bottom: 2px solid var(--color-ember-400);
 }
 
 .forge-layout-btn svg {
@@ -109,7 +109,7 @@
 
 .forge-workspace-item.active {
 	background: var(--color-surface-2, var(--vscode-list-activeSelectionBackground));
-	border-left: 2px solid var(--color-brand, var(--vscode-statusBar-background));
+	border-left: 2px solid var(--color-ember-400);
 	color: var(--color-text-primary, var(--vscode-foreground));
 }
 

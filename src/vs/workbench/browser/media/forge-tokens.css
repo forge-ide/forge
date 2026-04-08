@@ -1,0 +1,253 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Forge IDE. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/*
+ * Forge design tokens — single source of truth.
+ * Sourced from docs/DESIGN.md section 10 + docs/ui-mocks/forge-color-tokens.html.
+ *
+ * Dark mode is the default (`:root`). Light mode applies via `.monaco-workbench.vs`,
+ * matching VS Code's built-in theme class. Status bar stays ember in all themes
+ * (handled separately in extensions/forge-theme/themes/).
+ */
+
+:root {
+	/* ---------------------------------------------
+	 * Ember scale — brand
+	 * --------------------------------------------- */
+	--color-ember-900: #2a0800;
+	--color-ember-500: #cc3a00;
+	--color-ember-400: #ff4a12;
+	--color-ember-300: #ff7a30;
+	--color-ember-200: #ffaa33;
+	--color-ember-100: #ffd166;
+
+	/* ---------------------------------------------
+	 * Iron scale — surfaces, borders, text
+	 * --------------------------------------------- */
+	--color-iron-900: #07080a;
+	--color-iron-850: #0d0f13;
+	--color-iron-800: #13161d;
+	--color-iron-750: #181c26;
+	--color-iron-700: #1c2230;
+	--color-iron-600: #252f3e;
+	--color-iron-500: #3a4558;
+	--color-iron-400: #4e5f78;
+	--color-iron-300: #6a7e98;
+	--color-iron-200: #8a9aac;
+	--color-iron-100: #b8c8d8;
+
+	/* ---------------------------------------------
+	 * Steel scale — accent (info, links, local provider)
+	 * --------------------------------------------- */
+	--color-steel-400: #4a7fff;
+	--color-steel-300: #7aaaff;
+	--color-steel-200: #aaccff;
+
+	/* ---------------------------------------------
+	 * Surface and border aliases
+	 * --------------------------------------------- */
+	--color-bg:        #07080a;
+	--color-surface-1: #0d0f13;
+	--color-surface-2: #13161d;
+	--color-surface-3: #181c26;
+	--color-border-1:  #1c2230;
+	--color-border-2:  #252f3e;
+
+	/* ---------------------------------------------
+	 * Text
+	 * --------------------------------------------- */
+	--color-text-primary:   #eae6de;
+	--color-text-secondary: #8a9aac;
+	--color-text-tertiary:  #3a4558;
+	--color-text-disabled:  #252f3e;
+	--color-text-ember:     #ff4a12;
+	--color-text-link:      #7aaaff;
+
+	/* ---------------------------------------------
+	 * Semantic
+	 * --------------------------------------------- */
+	--color-success: #3ddc84;
+	--color-warning: #ffaa33;
+	--color-error:   #ff4a12;
+	--color-info:    #7aaaff;
+
+	--color-success-bg: rgba(61, 220, 132, 0.07);
+	--color-warning-bg: rgba(255, 170, 51, 0.07);
+	--color-error-bg:   rgba(255, 74, 18, 0.07);
+	--color-info-bg:    rgba(122, 170, 255, 0.07);
+
+	--color-success-border: rgba(61, 220, 132, 0.22);
+	--color-warning-border: rgba(255, 170, 51, 0.22);
+	--color-error-border:   rgba(255, 74, 18, 0.22);
+	--color-info-border:    rgba(122, 170, 255, 0.22);
+
+	/* ---------------------------------------------
+	 * Alpha tints — ember interaction states
+	 * Used by buttons, badges, dropdowns, cards, code highlights
+	 * --------------------------------------------- */
+	--color-ember-tint-5:  rgba(255, 74, 18, 0.05);
+	--color-ember-tint-8:  rgba(255, 74, 18, 0.08);
+	--color-ember-tint-10: rgba(255, 74, 18, 0.10);
+	--color-ember-tint-15: rgba(255, 74, 18, 0.15);
+	--color-ember-tint-20: rgba(255, 74, 18, 0.20);
+
+	/* Alpha tints — semantic icon backgrounds and glows */
+	--color-success-tint-8:  rgba(61, 220, 132, 0.08);
+	--color-success-tint-15: rgba(61, 220, 132, 0.15);
+	--color-success-tint-50: rgba(61, 220, 132, 0.50);
+	--color-warning-tint-8:  rgba(255, 170, 51, 0.08);
+	--color-warning-tint-15: rgba(255, 170, 51, 0.15);
+	--color-info-tint-8:     rgba(122, 170, 255, 0.08);
+	--color-info-tint-15:    rgba(122, 170, 255, 0.15);
+
+	/* ---------------------------------------------
+	 * Specialized surfaces
+	 * --------------------------------------------- */
+	--color-ember-hover:   #ff6a32;
+	--color-text-on-ember: #ffffff;
+	--color-code-bg:       #050709;
+	--color-backdrop:      rgba(3, 4, 6, 0.75);
+
+	/* ---------------------------------------------
+	 * Syntax highlighting
+	 * --------------------------------------------- */
+	--color-syntax-kw:      #ff7a30;
+	--color-syntax-fn:      #ffd166;
+	--color-syntax-str:     #3ddc84;
+	--color-syntax-type:    #7a9fff;
+	--color-syntax-num:     #ff9966;
+	--color-syntax-comment: #3a4558;
+
+	/* ---------------------------------------------
+	 * Provider accents
+	 * --------------------------------------------- */
+	--color-provider-anthropic: #ff4a12;
+	--color-provider-openai:    #ffaa33;
+	--color-provider-local:     #7aaaff;
+	--color-provider-custom:    #8a9aac;
+
+	/* ---------------------------------------------
+	 * Spacing — base-4 scale, deliberate gaps
+	 * Half-steps (2-5, 3-5) reserved for primitive component tuning only.
+	 * --------------------------------------------- */
+	--sp-1:   4px;
+	--sp-2:   8px;
+	--sp-2-5: 10px;
+	--sp-3:   12px;
+	--sp-3-5: 14px;
+	--sp-4:   16px;
+	--sp-5:   20px;
+	--sp-6:   24px;
+	--sp-8:   32px;
+	--sp-10:  40px;
+	--sp-12:  48px;
+
+	/* ---------------------------------------------
+	 * Border radius — never exceed 8px
+	 * --------------------------------------------- */
+	--r-sm: 3px;
+	--r-md: 5px;
+	--r-lg: 8px;
+
+	/* ---------------------------------------------
+	 * Type — families
+	 * --------------------------------------------- */
+	--font-display: 'Barlow Condensed', sans-serif;
+	--font-body:    'Barlow', sans-serif;
+	--font-mono:    'Fira Code', monospace;
+
+	/* ---------------------------------------------
+	 * Type — display scale (Barlow Condensed)
+	 * --------------------------------------------- */
+	--display-2xl: 72px;
+	--display-xl:  48px;
+	--display-lg:  32px;
+	--display-md:  22px;
+
+	/* ---------------------------------------------
+	 * Type — body scale (Barlow)
+	 * --------------------------------------------- */
+	--text-body-lg: 16px;
+	--text-body-md: 14px;
+	--text-body-sm: 12px;
+
+	/* ---------------------------------------------
+	 * Type — mono scale (Fira Code)
+	 * `--text-mono-10` slots between sm (11) and xs (9) for fine-print labels.
+	 * --------------------------------------------- */
+	--text-mono-md: 13px;
+	--text-mono-sm: 11px;
+	--text-mono-10: 10px;
+	--text-mono-xs: 9px;
+
+	/* ---------------------------------------------
+	 * Elevation — shadows
+	 * sm: tooltips, md: dropdowns/menus, lg: modals
+	 * --------------------------------------------- */
+	--shadow-sm: 0 4px 16px  rgba(0, 0, 0, 0.4);
+	--shadow-md: 0 8px 32px  rgba(0, 0, 0, 0.5);
+	--shadow-lg: 0 24px 64px rgba(0, 0, 0, 0.6);
+
+	/* ---------------------------------------------
+	 * Motion
+	 * --------------------------------------------- */
+	--ease:      0.15s ease;
+	--dur-fast:  0.08s;
+}
+
+/*
+ * Light mode overrides — apply when VS Code is using a light theme.
+ * VS Code adds the `vs` class to `.monaco-workbench` for light themes.
+ * Values aligned with extensions/forge-theme/themes/forge-light.json so
+ * Forge UI tokens match the bundled Forge Light theme. Ember stays unchanged
+ * so the status bar and brand accents remain consistent across themes.
+ */
+.monaco-workbench.vs {
+	/* Surfaces — warm paper, matching forge-light.json */
+	--color-bg:        #f0ede8;
+	--color-surface-1: #e8e4de;
+	--color-surface-2: #ddd8d0;
+	--color-surface-3: #ccc5bb;
+	--color-border-1:  #ddd8d0;
+	--color-border-2:  #ccc5bb;
+
+	/* Text — dark on warm paper */
+	--color-text-primary:   #1a1614;
+	--color-text-secondary: #4a403a;
+	--color-text-tertiary:  #7a6e65;
+	--color-text-disabled:  #a89f93;
+
+	/* Semantic — darkened bases for AA contrast on light surfaces */
+	--color-success: #1a6e3d;
+	--color-warning: #8a4400;
+	--color-info:    #1a50a0;
+
+	--color-success-bg: rgba(26, 110, 61, 0.08);
+	--color-warning-bg: rgba(138, 68, 0, 0.08);
+	--color-error-bg:   rgba(255, 74, 18, 0.08);
+	--color-info-bg:    rgba(26, 80, 160, 0.08);
+
+	--color-success-border: rgba(26, 110, 61, 0.25);
+	--color-warning-border: rgba(138, 68, 0, 0.25);
+	--color-error-border:   rgba(255, 74, 18, 0.25);
+	--color-info-border:    rgba(26, 80, 160, 0.25);
+
+	/* Syntax — darkened for light bg, matching forge-light.json semantic colors */
+	--color-syntax-kw:      #c93a00;
+	--color-syntax-fn:      #7a5200;
+	--color-syntax-str:     #1a6e3d;
+	--color-syntax-type:    #1a50a0;
+	--color-syntax-num:     #c04400;
+	--color-syntax-comment: #a89f93;
+
+	/* Specialized surfaces — code blocks slightly darker than bg, soft backdrop */
+	--color-code-bg:  #e8e4de;
+	--color-backdrop: rgba(15, 12, 10, 0.55);
+
+	/* Elevation — softer shadows on warm paper */
+	--shadow-sm: 0 4px 16px  rgba(20, 16, 14, 0.15);
+	--shadow-md: 0 8px 32px  rgba(20, 16, 14, 0.20);
+	--shadow-lg: 0 24px 64px rgba(20, 16, 14, 0.25);
+}

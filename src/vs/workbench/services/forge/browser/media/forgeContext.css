@@ -32,7 +32,7 @@
 }
 
 .forge-context-chip .remove:hover {
-	color: var(--color-brand, var(--vscode-statusBar-background));
+	color: var(--color-ember-400);
 }
 
 .forge-context-chip.automatic {

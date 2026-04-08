@@ -3,13 +3,6 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-:root {
-	--color-provider-anthropic: #ff4a12;
-	--color-provider-openai:    #ffaa33;
-	--color-provider-local:     #7aaaff;
-	--color-provider-custom:    #8a9aac;
-}
-
 .forge-chat-pane {
 	display: flex;
 	flex-direction: column;
@@ -23,19 +16,16 @@
 .forge-chat-header {
 	display: flex;
 	align-items: center;
-	gap: var(--sp-2, 8px);
-	padding: var(--sp-2, 8px) var(--sp-4, 16px);
-	font-family: 'Barlow Condensed', sans-serif;
-	text-transform: uppercase;
-	letter-spacing: 0.05em;
-	font-size: 12px;
-	color: var(--vscode-descriptionForeground);
-	border-bottom: 1px solid var(--vscode-panel-border);
+	gap: var(--sp-2-5, 10px);
+	padding: var(--sp-2, 8px) var(--sp-3-5, 14px);
+	background: var(--color-surface-1);
+	border-bottom: 1px solid var(--color-border-1);
+	flex-shrink: 0;
 }
 
 .forge-provider-dot {
-	width: 8px;
-	height: 8px;
+	width: 5px;
+	height: 5px;
 	border-radius: 50%;
 	background: var(--color-provider-custom, var(--vscode-statusBar-background));
 	flex-shrink: 0;
@@ -46,10 +36,12 @@
 .forge-provider-dot.provider-local     { background: var(--color-provider-local); }
 
 .forge-model-label {
-	font-family: 'Fira Code', monospace;
-	font-size: 11px;
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-xs, 9px);
+	color: var(--color-text-secondary);
 	letter-spacing: normal;
 	text-transform: none;
+	flex: 1;
 }
 
 /* ---- Messages ---- */
@@ -57,45 +49,60 @@
 .forge-chat-messages {
 	flex: 1;
 	overflow-y: auto;
-	padding: var(--sp-4, 16px);
+	display: flex;
+	flex-direction: column;
+	gap: var(--sp-3-5, 14px);
+	padding: var(--sp-4, 16px) var(--sp-4, 16px) var(--sp-2, 8px);
 }
 
 .forge-message {
-	margin-bottom: var(--sp-4, 16px);
-	padding: var(--sp-2, 8px) var(--sp-3, 12px);
-	border-radius: var(--r-md, 6px);
+	padding: var(--sp-2-5, 10px) var(--sp-3, 12px);
+	border-radius: var(--r-md, 5px);
+	font-family: var(--font-body);
+	font-size: var(--text-body-sm, 12px);
+	line-height: 1.6;
+	color: var(--color-text-primary);
 }
 
 .forge-message.user {
-	background: var(--vscode-input-background);
+	background: var(--color-surface-2);
+	border: 1px solid var(--color-border-1);
 }
 
 .forge-message.assistant {
-	background: transparent;
+	background: var(--color-ember-tint-5);
+	border: 1px solid var(--color-ember-tint-15);
 }
 
 .forge-message-content {
-	font-family: 'Barlow', sans-serif;
-	font-size: 13px;
-	line-height: 1.5;
 	white-space: pre-wrap;
 	word-break: break-word;
 }
 
 .forge-message-content.error {
-	color: var(--vscode-errorForeground);
+	color: var(--color-error);
+}
+
+.forge-message-content code {
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-10, 10px);
+	background: var(--color-surface-3);
+	color: var(--color-ember-300);
+	padding: 1px 5px;
+	border-radius: var(--r-sm, 3px);
 }
 
 /* ---- Streaming cursor ---- */
 
 .forge-streaming-cursor {
 	display: inline-block;
-	width: 5px;
-	height: 1em;
-	background: var(--vscode-statusBar-background);
-	animation: forge-blink 1s step-end infinite;
-	vertical-align: text-bottom;
-	margin-left: var(--sp-1, 4px);
+	width: 6px;
+	height: 12px;
+	background: var(--color-ember-400);
+	border-radius: 1px;
+	animation: forge-blink 1s infinite;
+	vertical-align: middle;
+	margin-left: 2px;
 }
 
 .forge-message:not(.streaming) .forge-streaming-cursor {
@@ -103,7 +110,8 @@
 }
 
 @keyframes forge-blink {
-	50% { opacity: 0; }
+	0%, 100% { opacity: 1; }
+	50%      { opacity: 0; }
 }
 
 /* ---- Context chips ---- */
@@ -112,65 +120,129 @@
 	display: flex;
 	flex-wrap: wrap;
 	gap: var(--sp-1, 4px);
-	padding: var(--sp-1, 4px) var(--sp-4, 16px);
+	padding: var(--sp-1, 4px) var(--sp-3-5, 14px);
 	min-height: 0;
+}
+
+.forge-context-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--sp-1, 4px);
+	padding: 3px var(--sp-2-5, 10px);
+	border-radius: 10px;
+	border: 1px solid var(--color-border-2);
+	background: transparent;
+	font-family: var(--font-mono);
+	font-size: var(--text-mono-xs, 9px);
+	color: var(--color-text-secondary);
+	line-height: 1;
+}
+
+.forge-context-chip[data-type="File"],
+.forge-context-chip[data-type="ActiveEditor"],
+.forge-context-chip[data-type="Selection"] {
+	border-color: var(--color-provider-local);
+	color: var(--color-provider-local);
+}
+
+.forge-context-chip[data-type="GitDiff"] {
+	border-color: var(--color-provider-openai);
+	color: var(--color-provider-openai);
+}
+
+.forge-context-chip.automatic {
+	opacity: 0.7;
+	border-style: dashed;
+}
+
+.forge-context-chip-type {
+	font-size: 10px;
+	line-height: 1;
+}
+
+.forge-context-chip .label {
+	letter-spacing: 0.02em;
+}
+
+.forge-context-chip .remove {
+	background: none;
+	border: none;
+	padding: 0;
+	margin-left: var(--sp-1, 4px);
+	font-family: var(--font-mono);
+	font-size: 11px;
+	line-height: 1;
+	color: var(--color-text-tertiary);
+	cursor: pointer;
+}
+
+.forge-context-chip .remove:hover {
+	color: var(--color-ember-400);
 }
 
 /* ---- Input area ---- */
 
 .forge-chat-input-area {
 	display: flex;
-	padding: var(--sp-2, 8px) var(--sp-4, 16px) var(--sp-4, 16px);
-	gap: var(--sp-2, 8px);
-	border-top: 1px solid var(--vscode-panel-border);
 	align-items: flex-end;
+	gap: var(--sp-2, 8px);
+	margin: var(--sp-2, 8px) var(--sp-3-5, 14px) var(--sp-3-5, 14px);
+	padding: var(--sp-2, 8px) var(--sp-2-5, 10px);
+	background: var(--color-surface-2);
+	border: 1px solid var(--color-border-2);
+	border-radius: var(--r-md, 5px);
+	transition: border-color var(--ease, 0.15s ease);
+}
+
+.forge-chat-input-area:focus-within {
+	border-color: var(--color-ember-400);
 }
 
 .forge-chat-input {
 	flex: 1;
 	resize: none;
-	min-height: 36px;
-	max-height: 120px;
-	padding: var(--sp-2, 8px);
-	font-family: 'Barlow', sans-serif;
-	font-size: 13px;
+	min-height: 20px;
+	max-height: 80px;
+	padding: 0;
+	font-family: var(--font-body);
+	font-size: var(--text-body-sm, 12px);
 	line-height: 1.5;
-	background: var(--vscode-input-background);
-	color: var(--vscode-input-foreground);
-	border: 1px solid var(--vscode-input-border);
-	border-radius: var(--r-sm, 3px);
+	background: none;
+	color: var(--color-text-primary);
+	border: none;
 	outline: none;
 }
 
-.forge-chat-input:focus {
-	border-color: var(--vscode-focusBorder);
+.forge-chat-input::placeholder {
+	color: var(--color-text-tertiary);
 }
 
 .forge-chat-input:disabled {
 	color: var(--color-text-disabled);
 	cursor: default;
-	opacity: 0.6;
 }
 
 .forge-chat-send {
-	padding: var(--sp-2, 8px) var(--sp-4, 16px);
-	font-family: 'Barlow Condensed', sans-serif;
-	text-transform: uppercase;
-	font-size: 12px;
-	letter-spacing: 0.05em;
-	background: var(--vscode-button-background);
-	color: var(--vscode-button-foreground);
+	flex-shrink: 0;
+	padding: var(--sp-1, 4px) var(--sp-3, 12px);
+	font-family: var(--font-body);
+	font-size: var(--text-body-sm, 12px);
+	font-weight: 500;
+	background: var(--color-ember-400);
+	color: var(--color-text-on-ember);
 	border: none;
 	border-radius: var(--r-sm, 3px);
 	cursor: pointer;
 	white-space: nowrap;
+	transition: background var(--ease, 0.15s ease);
 }
 
 .forge-chat-send:hover {
-	background: var(--vscode-button-hoverBackground);
+	background: var(--color-ember-hover);
 }
 
 .forge-chat-send.disabled {
+	background: var(--color-border-2);
 	color: var(--color-text-disabled);
 	cursor: default;
 	pointer-events: none;
@@ -201,7 +273,7 @@
 }
 
 .forge-tool-call-status.pending {
-	background: var(--color-iron-400);
+	background: var(--color-text-disabled);
 }
 
 .forge-tool-call-status.running {
@@ -301,7 +373,7 @@
 }
 
 .forge-agent-status.queued {
-	background: var(--color-iron-400);
+	background: var(--color-text-disabled);
 }
 
 .forge-agent-status.running {
@@ -325,7 +397,7 @@
 }
 
 .forge-agent-turns {
-	color: var(--color-iron-400);
+	color: var(--color-text-tertiary);
 	font-size: 11px;
 	font-family: var(--font-mono);
 }
@@ -337,7 +409,7 @@
 .forge-agent-steps-toggle {
 	background: none;
 	border: none;
-	color: var(--color-iron-300);
+	color: var(--color-text-secondary);
 	cursor: pointer;
 	font-size: 11px;
 	padding: var(--sp-1) 0;
@@ -350,7 +422,7 @@
 	padding: var(--sp-1) 0;
 	font-family: var(--font-mono);
 	font-size: 11px;
-	color: var(--color-iron-300);
+	color: var(--color-text-secondary);
 }
 
 /* MCP Status View */
@@ -367,7 +439,7 @@
 	padding: var(--sp-3) var(--sp-4);
 	font-size: 11px;
 	font-family: var(--font-body);
-	color: var(--color-iron-400);
+	color: var(--color-text-tertiary);
 }
 
 .forge-mcp-server-row {
@@ -386,7 +458,7 @@
 	height: 7px;
 	border-radius: 50%;
 	flex-shrink: 0;
-	background: var(--color-iron-400);
+	background: var(--color-text-disabled);
 }
 
 .forge-mcp-server-dot.connected {
@@ -403,11 +475,11 @@
 }
 
 .forge-mcp-server-dot.disconnected {
-	background: var(--color-iron-400);
+	background: var(--color-text-disabled);
 }
 
 .forge-mcp-server-dot.disabled {
-	background: var(--color-iron-400);
+	background: var(--color-text-disabled);
 	box-shadow: none;
 }
 
@@ -423,13 +495,13 @@
 
 .forge-mcp-server-name.disabled {
 	text-decoration: line-through;
-	color: var(--color-iron-400);
+	color: var(--color-text-disabled);
 }
 
 .forge-mcp-tool-count {
 	font-size: 11px;
 	font-family: var(--font-mono);
-	color: var(--color-iron-300);
+	color: var(--color-text-secondary);
 	white-space: nowrap;
 }
 
@@ -439,7 +511,7 @@
 	font-size: 11px;
 	font-family: var(--font-body);
 	background: var(--color-surface-2);
-	color: var(--color-iron-300);
+	color: var(--color-text-secondary);
 	border: 1px solid var(--vscode-widget-border);
 	border-radius: var(--r-sm);
 	cursor: pointer;
