@@ -157,6 +157,7 @@ export class Step4Ready implements IOnboardingStep {
 		const labels: Record<string, string> = {
 			anthropic: 'Anthropic',
 			openai: 'OpenAI',
+			vertex: 'Google Vertex AI',
 			custom: 'Custom endpoint',
 			local: 'Local (Ollama / LM Studio)',
 		};

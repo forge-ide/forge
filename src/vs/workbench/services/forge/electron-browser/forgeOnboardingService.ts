@@ -91,6 +91,7 @@ export class ForgeOnboardingServiceImpl extends Disposable implements IForgeOnbo
 			{ envVar: 'ANTHROPIC_API_KEY', providerId: 'anthropic' },
 			{ envVar: 'OPENAI_API_KEY', providerId: 'openai' },
 			{ envVar: 'GEMINI_API_KEY', providerId: 'gemini' },
+			{ envVar: 'GOOGLE_APPLICATION_CREDENTIALS', providerId: 'vertex' },
 		];
 
 		const result: Record<string, string> = {};

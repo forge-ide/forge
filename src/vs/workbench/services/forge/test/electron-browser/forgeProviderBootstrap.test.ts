@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Copyright (c) Forge IDE Contributors. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
@@ -181,6 +181,16 @@ async function bootstrapProviders(
 		// Local provider doesn't need credentials
 		if (providerConfig.name === 'local') {
 			aiProviderService.registerProvider(providerConfig.name, providerFactory(providerConfig.name));
+			continue;
+		}
+
+		// Vertex provider uses projectId/location instead of an API key
+		if (providerConfig.name === 'vertex') {
+			const projectId = providerConfig.projectId ?? process.env['GOOGLE_CLOUD_PROJECT'];
+			const location = providerConfig.location ?? process.env['GOOGLE_CLOUD_LOCATION'];
+			if (projectId && location) {
+				aiProviderService.registerProvider(providerConfig.name, providerFactory(providerConfig.name));
+			}
 			continue;
 		}
 
@@ -573,6 +583,93 @@ suite('ForgeProviderBootstrap', () => {
 
 		assert.ok(!didThrow, 'bootstrap should not throw when config has missing providers');
 		assert.deepStrictEqual(aiProviderService.listProviders(), [], 'no providers should be registered from malformed config');
+	});
+
+	suite('vertex provider', () => {
+
+		test('registers vertex when projectId and location are in config', async () => {
+			configService = new MockForgeConfigService({
+				defaultProvider: 'vertex',
+				providers: [{
+					name: 'vertex',
+					projectId: 'my-project',
+					location: 'us-central1',
+					models: [{ id: 'gemini-2.0-flash-001' }],
+				}],
+			});
+			disposables.add({ dispose: () => configService.dispose() });
+
+			await bootstrapProviders(configService, credentialService, aiProviderService, makeMockProvider);
+
+			assert.ok(aiProviderService.has('vertex'), 'vertex should be registered when projectId and location are in config');
+		});
+
+		test('registers vertex when projectId and location come from env vars', async () => {
+			configService = new MockForgeConfigService({
+				defaultProvider: 'vertex',
+				providers: [{
+					name: 'vertex',
+					models: [{ id: 'gemini-2.0-flash-001' }],
+				}],
+			});
+			disposables.add({ dispose: () => configService.dispose() });
+
+			const prevProject = process.env['GOOGLE_CLOUD_PROJECT'];
+			const prevLocation = process.env['GOOGLE_CLOUD_LOCATION'];
+			try {
+				process.env['GOOGLE_CLOUD_PROJECT'] = 'env-project';
+				process.env['GOOGLE_CLOUD_LOCATION'] = 'us-east1';
+				await bootstrapProviders(configService, credentialService, aiProviderService, makeMockProvider);
+			} finally {
+				if (prevProject === undefined) { delete process.env['GOOGLE_CLOUD_PROJECT']; } else { process.env['GOOGLE_CLOUD_PROJECT'] = prevProject; }
+				if (prevLocation === undefined) { delete process.env['GOOGLE_CLOUD_LOCATION']; } else { process.env['GOOGLE_CLOUD_LOCATION'] = prevLocation; }
+			}
+
+			assert.ok(aiProviderService.has('vertex'), 'vertex should be registered when projectId/location come from env vars');
+		});
+
+		test('skips vertex when projectId cannot be resolved', async () => {
+			configService = new MockForgeConfigService({
+				defaultProvider: 'vertex',
+				providers: [{
+					name: 'vertex',
+					location: 'us-central1',
+					models: [{ id: 'gemini-2.0-flash-001' }],
+				}],
+			});
+			disposables.add({ dispose: () => configService.dispose() });
+
+			const prevProject = process.env['GOOGLE_CLOUD_PROJECT'];
+			try {
+				delete process.env['GOOGLE_CLOUD_PROJECT'];
+				await bootstrapProviders(configService, credentialService, aiProviderService, makeMockProvider);
+			} finally {
+				if (prevProject !== undefined) { process.env['GOOGLE_CLOUD_PROJECT'] = prevProject; }
+			}
+
+			assert.ok(!aiProviderService.has('vertex'), 'vertex should be skipped when projectId cannot be resolved');
+		});
+
+		test('registers vertex when service account JSON is in SecretStorage', async () => {
+			const serviceAccountJson = JSON.stringify({ type: 'service_account', project_id: 'my-project' });
+			credentialService.setKey('vertex', serviceAccountJson);
+
+			configService = new MockForgeConfigService({
+				defaultProvider: 'vertex',
+				providers: [{
+					name: 'vertex',
+					projectId: 'my-project',
+					location: 'us-central1',
+					models: [{ id: 'gemini-2.0-flash-001' }],
+				}],
+			});
+			disposables.add({ dispose: () => configService.dispose() });
+
+			await bootstrapProviders(configService, credentialService, aiProviderService, makeMockProvider);
+
+			assert.ok(aiProviderService.has('vertex'), 'vertex should be registered when service account JSON is in SecretStorage');
+		});
+
 	});
 
 	test('error in provider factory for one provider does not block others', async () => {
