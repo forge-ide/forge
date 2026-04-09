@@ -130,6 +130,10 @@
 	gap: 8px;
 }
 
+.forge-split-right--hidden {
+	display: none;
+}
+
 .forge-detail-empty {
 	font-size: 11px;
 	color: var(--color-text-tertiary, var(--vscode-descriptionForeground));

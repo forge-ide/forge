@@ -25,6 +25,10 @@
 	gap: 8px;
 }
 
+.forge-split-right--hidden {
+	display: none;
+}
+
 .forge-section-label {
 	padding: 6px 10px 3px;
 	font-size: 9px;

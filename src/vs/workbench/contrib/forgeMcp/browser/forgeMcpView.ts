@@ -53,7 +53,7 @@ export class ForgeMcpView extends ViewPane {
 		container.appendChild(this.splitLeft);
 
 		this.splitRight = document.createElement('div');
-		this.splitRight.className = 'forge-split-right';
+		this.splitRight.className = 'forge-split-right forge-split-right--hidden';
 		container.appendChild(this.splitRight);
 
 		this._register(this.mcpService.onDidChangeServerStatus(() => this._renderList()));
@@ -99,13 +99,11 @@ export class ForgeMcpView extends ViewPane {
 
 	private _renderEmptyDetail(): void {
 		reset(this.splitRight);
-		const empty = document.createElement('div');
-		empty.className = 'forge-detail-empty';
-		empty.textContent = 'Select an MCP server to view details.';
-		this.splitRight.appendChild(empty);
+		this.splitRight.classList.add('forge-split-right--hidden');
 	}
 
 	private _renderServerDetail(server: ForgeMcpServerStatusEntry): void {
+		this.splitRight.classList.remove('forge-split-right--hidden');
 		reset(this.splitRight);
 
 		const header = document.createElement('div');

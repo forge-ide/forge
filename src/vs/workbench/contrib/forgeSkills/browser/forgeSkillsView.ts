@@ -53,7 +53,7 @@ export class ForgeSkillsView extends ViewPane {
 		container.appendChild(this._leftPane);
 
 		this._rightPane = document.createElement('div');
-		this._rightPane.className = 'forge-split-right';
+		this._rightPane.className = 'forge-split-right forge-split-right--hidden';
 		container.appendChild(this._rightPane);
 
 		this._register(this._skillService.onDidChangeSkills(() => this._renderList()));
@@ -93,13 +93,11 @@ export class ForgeSkillsView extends ViewPane {
 
 	private _renderEmptyDetail(): void {
 		reset(this._rightPane);
-		const empty = document.createElement('div');
-		empty.className = 'forge-detail-empty';
-		empty.textContent = localize('forgeSkills.selectSkill', 'Select a skill to preview its content.');
-		this._rightPane.appendChild(empty);
+		this._rightPane.classList.add('forge-split-right--hidden');
 	}
 
 	private _renderSkillDetail(skill: SkillDefinition): void {
+		this._rightPane.classList.remove('forge-split-right--hidden');
 		reset(this._rightPane);
 
 		const title = document.createElement('div');
