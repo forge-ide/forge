@@ -11,12 +11,6 @@ import { IForgeCredentialService } from '../common/forgeCredentialService.js';
 import { resolveModelConfig, type ForgeProviderConfig } from '../common/forgeConfigTypes.js';
 import { WorkbenchPhase, registerWorkbenchContribution2 } from '../../../common/contributions.js';
 
-/** Minimal shape of @google/genai `ai.models` needed to construct VertexProvider. */
-interface IGeminiModelsShape {
-	generateContentStream(params: unknown): Promise<AsyncIterable<unknown>>;
-	generateContent(params: unknown): Promise<unknown>;
-}
-
 /** Minimal shape of AnthropicVertex client needed to construct VertexProvider. */
 interface IAnthropicVertexClientShape {
 	messages: {
@@ -133,25 +127,24 @@ export class ForgeProviderBootstrap extends Disposable {
 
 		const ai = new GoogleGenAI({ vertexai: true, project: projectId, location, ...authOptions });
 
-		// AnthropicVertex is not available in the installed SDK version.
-		// Claude-on-Vertex support requires @anthropic-ai/sdk with AnthropicVertex.
-		// For now, provide a stub that surfaces a clear error if Claude models are used.
-		this.logService.warn('[ForgeProviderBootstrap] AnthropicVertex not available in SDK — Claude-on-Vertex disabled. Upgrade @anthropic-ai/sdk to enable.');
-		const anthropicVertexStub = {
-			messages: {
-				stream: (_params: unknown): AsyncIterable<Record<string, unknown>> => {
-					throw new Error('[VertexProvider] Claude-on-Vertex requires AnthropicVertex. Upgrade @anthropic-ai/sdk.');
-				},
-				create: (_params: unknown): Promise<never> => {
-					throw new Error('[VertexProvider] Claude-on-Vertex requires AnthropicVertex. Upgrade @anthropic-ai/sdk.');
-				},
-			},
-		};
+		const { AnthropicVertex } = await import('@anthropic-ai/vertex-sdk');
+
+		let anthropicClient: IAnthropicVertexClientShape;
+		if (parsedCredentials) {
+			const { GoogleAuth } = await import('google-auth-library');
+			const googleAuth = new GoogleAuth({
+				credentials: parsedCredentials as Record<string, unknown>,
+				scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+			}) as unknown as ConstructorParameters<typeof AnthropicVertex>[0] extends { googleAuth?: infer G } ? NonNullable<G> : never;
+			anthropicClient = new AnthropicVertex({ projectId, region: location, googleAuth }) as unknown as IAnthropicVertexClientShape;
+		} else {
+			anthropicClient = new AnthropicVertex({ projectId, region: location }) as unknown as IAnthropicVertexClientShape;
+		}
 
 		const { VertexProvider } = await import('../../../../platform/ai/node/vertexProvider.js');
 		const provider = new VertexProvider(
-			ai.models as IGeminiModelsShape,
-			anthropicVertexStub as IAnthropicVertexClientShape,
+			ai.models as unknown as ConstructorParameters<typeof VertexProvider>[0],
+			anthropicClient as unknown as ConstructorParameters<typeof VertexProvider>[1],
 			models.length ? models : undefined,
 		);
 
