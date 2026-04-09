@@ -1,0 +1,84 @@
+<h2>Agents Tab — Two-Pane Design</h2>
+<p class="subtitle">Left: definitions + running agents. Right: selected agent detail. Click to select your preferred layout.</p>
+
+<div class="cards">
+
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#141414;border-radius:6px;padding:0;overflow:hidden;min-height:220px;font-family:'Barlow',sans-serif">
+      <div style="display:flex;height:220px">
+        <!-- Left pane -->
+        <div style="width:180px;border-right:1px solid #2a2a2a;display:flex;flex-direction:column">
+          <div style="padding:8px 10px;font-size:9px;text-transform:uppercase;letter-spacing:1px;color:#666;border-bottom:1px solid #222">Definitions</div>
+          <div style="padding:4px 6px">
+            <div style="padding:5px 8px;border-radius:3px;font-size:11px;color:#eae6de;background:#1e2a1e;border-left:2px solid #3ddc84;margin-bottom:2px">my-coder-agent <span style="float:right;font-size:9px;color:#3ddc84">● live</span></div>
+            <div style="padding:5px 8px;border-radius:3px;font-size:11px;color:#888;margin-bottom:2px">reviewer-agent</div>
+            <div style="padding:5px 8px;border-radius:3px;font-size:11px;color:#888;margin-bottom:2px">docs-agent</div>
+          </div>
+          <div style="padding:4px 6px;border-top:1px solid #222;margin-top:4px">
+            <div style="padding:4px 8px;font-size:9px;text-transform:uppercase;letter-spacing:1px;color:#666">Running (1)</div>
+            <div style="padding:5px 8px;border-radius:3px;font-size:11px;color:#eae6de;background:#2a1e1e;border-left:2px solid #e05a2f;margin-bottom:2px">my-coder-agent <span style="float:right;font-size:9px;color:#e05a2f">⟳</span></div>
+          </div>
+        </div>
+        <!-- Right pane -->
+        <div style="flex:1;padding:10px;overflow:hidden">
+          <div style="font-size:12px;font-weight:600;color:#eae6de;margin-bottom:2px">my-coder-agent</div>
+          <div style="font-size:10px;color:#888;margin-bottom:8px">Running · Turn 4 / 20</div>
+          <div style="background:#1a1a1a;border-radius:3px;padding:6px 8px;font-size:10px;color:#aaa;margin-bottom:6px;border-left:2px solid #e05a2f">
+            <div style="color:#e05a2f;font-size:9px;margin-bottom:2px">TASK</div>
+            Implement the vertex provider streaming fix
+          </div>
+          <div style="font-size:9px;color:#666;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Recent Steps</div>
+          <div style="font-size:10px;color:#888;margin-bottom:2px">✓ Read forgeVertexProvider.ts</div>
+          <div style="font-size:10px;color:#888;margin-bottom:2px">✓ Edited stream handler</div>
+          <div style="font-size:10px;color:#e05a2f;margin-bottom:6px">⟳ Running tests...</div>
+          <div style="display:flex;gap:4px;margin-top:auto">
+            <div style="padding:3px 8px;background:#2a1a1a;border:1px solid #e05a2f;border-radius:3px;font-size:10px;color:#e05a2f">Cancel</div>
+            <div style="padding:3px 8px;background:#1a1a1a;border:1px solid #333;border-radius:3px;font-size:10px;color:#888">Open Chat</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A — Split Pane (Recommended)</h3>
+      <p>Definitions list + running agents on the left. Clicking any agent shows live detail (task, steps, cancel) on the right.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#141414;border-radius:6px;padding:0;overflow:hidden;min-height:220px;font-family:'Barlow',sans-serif">
+      <div style="padding:10px;height:220px;overflow:hidden">
+        <div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:#666;margin-bottom:6px">Available Agents</div>
+        <!-- Agent cards stacked -->
+        <div style="background:#1e1e1e;border-radius:4px;padding:8px 10px;margin-bottom:4px;display:flex;align-items:center;gap:8px">
+          <div style="width:6px;height:6px;border-radius:50%;background:#3ddc84;box-shadow:0 0 6px rgba(61,220,132,0.5)"></div>
+          <div style="flex:1">
+            <div style="font-size:11px;color:#eae6de">my-coder-agent</div>
+            <div style="font-size:9px;color:#666">Turn 4/20 · Implement vertex streaming fix</div>
+          </div>
+          <div style="font-size:9px;color:#e05a2f;border:1px solid #e05a2f;border-radius:2px;padding:2px 5px">Cancel</div>
+        </div>
+        <div style="background:#1e1e1e;border-radius:4px;padding:8px 10px;margin-bottom:4px;display:flex;align-items:center;gap:8px">
+          <div style="width:6px;height:6px;border-radius:50%;background:#444"></div>
+          <div style="flex:1">
+            <div style="font-size:11px;color:#888">reviewer-agent</div>
+            <div style="font-size:9px;color:#555">Idle</div>
+          </div>
+          <div style="font-size:9px;color:#555;border:1px solid #333;border-radius:2px;padding:2px 5px">Run</div>
+        </div>
+        <div style="background:#1e1e1e;border-radius:4px;padding:8px 10px;display:flex;align-items:center;gap:8px">
+          <div style="width:6px;height:6px;border-radius:50%;background:#444"></div>
+          <div style="flex:1">
+            <div style="font-size:11px;color:#888">docs-agent</div>
+            <div style="font-size:9px;color:#555">Idle</div>
+          </div>
+          <div style="font-size:9px;color:#555;border:1px solid #333;border-radius:2px;padding:2px 5px">Run</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B — Single Scrollable List</h3>
+      <p>All agents as cards showing status inline. Running agents show progress inline. No separate detail pane — actions (Cancel, Run) are inline buttons.</p>
+    </div>
+  </div>
+
+</div>

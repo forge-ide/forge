@@ -5,10 +5,16 @@
 import * as nls from '../../../../nls.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
+import { registerSingleton, InstantiationType } from '../../../../platform/instantiation/common/extensions.js';
 import { Extensions as ViewExtensions, IViewContainersRegistry, IViewDescriptor, IViewsRegistry, ViewContainerLocation } from '../../../common/views.js';
 import { ForgeMcpViewPaneContainer, forgeMcpViewIcon, FORGE_MCP_VIEWLET_ID } from './forgeMcpViewlet.js';
 import { ForgeMcpView, FORGE_MCP_VIEW_ID } from './forgeMcpView.js';
+import { IForgeMcpBridgeHost } from '../../../services/forge/browser/forgeMcpService.js';
+import { ForgeMcpBridgeHost } from '../../forgeAI/browser/forgeMcpBridgeHost.js';
 import './media/forgeMcp.css';
+
+// Bridge between VS Code's IMcpService (contrib/mcp) and ForgeMcpService (services/forge).
+registerSingleton(IForgeMcpBridgeHost, ForgeMcpBridgeHost, InstantiationType.Delayed);
 
 const viewContainer = Registry.as<IViewContainersRegistry>(ViewExtensions.ViewContainersRegistry).registerViewContainer({
 	id: FORGE_MCP_VIEWLET_ID,
