@@ -141,4 +141,68 @@ suite('VertexProvider', () => {
 		const textChunks = chunks.filter(c => !c.done);
 		assert.deepStrictEqual(textChunks.map(c => c.delta), ['Hi']);
 	});
+
+	// --- complete() ---
+
+	test('complete() returns AICompletionResponse for gemini model', async () => {
+		const gemini = makeGeminiModels([], 'Hello from Gemini');
+		const provider = new VertexProvider(gemini as IGeminiModels, makeAnthropicClient() as IAnthropicVertexClient, ['gemini-2.0-flash-001']);
+
+		const response = await provider.complete(makeRequest({ model: 'gemini-2.0-flash-001' }));
+
+		assert.strictEqual(response.content, 'Hello from Gemini');
+		assert.strictEqual(response.model, 'gemini-2.0-flash-001');
+		assert.strictEqual(response.inputTokens, 5);
+		assert.strictEqual(response.outputTokens, 3);
+	});
+
+	test('complete() returns AICompletionResponse for claude model', async () => {
+		const anthropic = makeAnthropicClient([], 'Hello from Claude');
+		const provider = new VertexProvider(makeGeminiModels() as IGeminiModels, anthropic as IAnthropicVertexClient, ['claude-sonnet-4-5@20251001']);
+
+		const response = await provider.complete(makeRequest({ model: 'claude-sonnet-4-5@20251001' }));
+
+		assert.strictEqual(response.content, 'Hello from Claude');
+		assert.strictEqual(response.model, 'claude-sonnet-4-5@20251001');
+		assert.strictEqual(response.inputTokens, 5);
+		assert.strictEqual(response.outputTokens, 3);
+	});
+
+	// --- Claude tool use in stream ---
+
+	test('stream() emits toolUse chunk for claude model with tool call', async () => {
+		const anthropicEvents = [
+			{ type: 'message_start', message: { usage: { input_tokens: 10, output_tokens: 0 } } },
+			{ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool_01', name: 'get_weather' } },
+			{ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"city":' } },
+			{ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '"Paris"}' } },
+			{ type: 'content_block_stop', index: 0 },
+			{ type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 20 } },
+		];
+		const provider = new VertexProvider(makeGeminiModels() as IGeminiModels, makeAnthropicClient(anthropicEvents) as IAnthropicVertexClient, ['claude-sonnet-4-5@20251001']);
+
+		const chunks = [];
+		for await (const chunk of provider.stream(makeRequest({ model: 'claude-sonnet-4-5@20251001', tools: [{ name: 'get_weather', description: 'Get weather', inputSchema: {} }] }))) {
+			chunks.push(chunk);
+		}
+
+		const toolChunk = chunks.find(c => c.toolUse);
+		assert.ok(toolChunk, 'expected a toolUse chunk');
+		assert.strictEqual(toolChunk.toolUse!.id, 'tool_01');
+		assert.strictEqual(toolChunk.toolUse!.name, 'get_weather');
+		assert.deepStrictEqual(toolChunk.toolUse!.input, { city: 'Paris' });
+	});
+
+	// --- availableModels ---
+
+	test('availableModels returns custom list when provided', () => {
+		const provider = new VertexProvider(makeGeminiModels() as IGeminiModels, makeAnthropicClient() as IAnthropicVertexClient, ['gemini-2.0-flash-001', 'claude-sonnet-4-5@20251001']);
+		assert.deepStrictEqual(provider.availableModels, ['gemini-2.0-flash-001', 'claude-sonnet-4-5@20251001']);
+	});
+
+	test('availableModels returns defaults when no list provided', () => {
+		const provider = new VertexProvider(makeGeminiModels() as IGeminiModels, makeAnthropicClient() as IAnthropicVertexClient);
+		assert.ok(provider.availableModels.includes('gemini-2.0-flash-001'));
+		assert.ok(provider.availableModels.includes('claude-sonnet-4-5@20251001'));
+	});
 });
