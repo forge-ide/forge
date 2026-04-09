@@ -139,7 +139,7 @@ export class ForgeProviderBootstrap extends Disposable {
 		this.logService.warn('[ForgeProviderBootstrap] AnthropicVertex not available in SDK — Claude-on-Vertex disabled. Upgrade @anthropic-ai/sdk to enable.');
 		const anthropicVertexStub = {
 			messages: {
-				stream: (_params: unknown): AsyncIterable<unknown> => {
+				stream: (_params: unknown): AsyncIterable<Record<string, unknown>> => {
 					throw new Error('[VertexProvider] Claude-on-Vertex requires AnthropicVertex. Upgrade @anthropic-ai/sdk.');
 				},
 				create: (_params: unknown): Promise<never> => {
