@@ -21,6 +21,7 @@ function makeServer(overrides: Partial<ForgeMcpServerStatusEntry> = {}): ForgeMc
 		status: ForgeMcpServerStatus.Connected,
 		toolCount: 3,
 		disabled: false,
+		transport: 'local',
 		...overrides,
 	};
 }

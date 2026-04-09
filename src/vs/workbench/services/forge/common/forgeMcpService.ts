@@ -10,6 +10,7 @@ export interface ForgeMcpServerStatusEntry {
 	readonly status: ForgeMcpServerStatus;
 	readonly toolCount: number;
 	readonly disabled: boolean;
+	readonly transport: 'local' | 'remote';
 }
 
 export interface IForgeMcpService {

@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Disposable } from '../../../../base/common/lifecycle.js';
-import { IMcpService } from '../../mcp/common/mcpTypes.js';
+import { IMcpService, McpServerTransportType } from '../../mcp/common/mcpTypes.js';
 import { IForgeMcpBridgeHost } from '../../../services/forge/browser/forgeMcpService.js';
 
 /**
@@ -16,29 +16,35 @@ export class ForgeMcpBridgeHost extends Disposable implements IForgeMcpBridgeHos
 	declare readonly _serviceBrand: undefined;
 
 	readonly servers = {
-		get: () => this._mcpService.servers.get().map(server => ({
-			definition: {
-				id: server.definition.id,
-				label: server.definition.label,
-			},
-			connectionState: {
-				get: () => ({ state: server.connectionState.get().state }),
-			},
-			tools: {
-				get: () => server.tools.get().map(tool => ({
-					definition: {
-						name: tool.definition.name,
-						description: tool.definition.description,
-						inputSchema: tool.definition.inputSchema as Record<string, unknown>,
-					},
-					call: (params: Record<string, unknown>) =>
-						tool.call(params) as unknown as Promise<{
-							content: Array<{ type: string; text?: string } & Record<string, unknown>>;
-							isError?: boolean;
-						}>,
-				})),
-			},
-		})),
+		get: () => this._mcpService.servers.get().map(server => {
+			const fullDef = server.readDefinitions().get();
+			const transport: 'local' | 'remote' =
+				fullDef.server?.launch.type === McpServerTransportType.HTTP ? 'remote' : 'local';
+			return {
+				definition: {
+					id: server.definition.id,
+					label: server.definition.label,
+				},
+				connectionState: {
+					get: () => ({ state: server.connectionState.get().state }),
+				},
+				tools: {
+					get: () => server.tools.get().map(tool => ({
+						definition: {
+							name: tool.definition.name,
+							description: tool.definition.description,
+							inputSchema: tool.definition.inputSchema as Record<string, unknown>,
+						},
+						call: (params: Record<string, unknown>) =>
+							tool.call(params) as unknown as Promise<{
+								content: Array<{ type: string; text?: string } & Record<string, unknown>>;
+								isError?: boolean;
+							}>,
+					})),
+				},
+				transport,
+			};
+		}),
 	};
 
 	constructor(@IMcpService private readonly _mcpService: IMcpService) {
