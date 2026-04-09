@@ -15,6 +15,8 @@ import { ViewPane } from '../../../browser/parts/views/viewPane.js';
 import { IViewletViewOptions } from '../../../browser/parts/views/viewsViewlet.js';
 import { IViewDescriptorService } from '../../../common/views.js';
 import { IForgeMcpService, ForgeMcpServerStatusEntry } from '../../../services/forge/common/forgeMcpService.js';
+import { ForgeMcpServerStatus } from '../../../services/forge/common/forgeMcpTypes.js';
+import { localize } from '../../../../nls.js';
 import { AIToolDefinition } from '../../../../platform/ai/common/aiProvider.js';
 import { createServerRow, createToolRow } from './forgeMcpViewHelpers.js';
 
@@ -125,6 +127,13 @@ export class ForgeMcpView extends ViewPane {
 		statusEl.className = 'forge-detail-status';
 		statusEl.textContent = server.disabled ? 'disabled' : `${server.status} · ${server.toolCount} tools`;
 		this.splitRight.appendChild(statusEl);
+
+		if (server.status === ForgeMcpServerStatus.Error) {
+			const errMsg = document.createElement('div');
+			errMsg.className = 'forge-mcp-error-msg';
+			errMsg.textContent = localize('forgeMcp.serverError', 'Server connection error. Check configuration.');
+			this.splitRight.appendChild(errMsg);
+		}
 
 		const actions = document.createElement('div');
 		actions.className = 'forge-detail-actions';
