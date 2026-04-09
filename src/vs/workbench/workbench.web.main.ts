@@ -103,6 +103,8 @@ import { WorkbenchMcpGalleryManifestService } from './services/mcp/browser/mcpGa
 import { UserDataSyncResourceProviderService } from '../platform/userDataSync/common/userDataSyncResourceProvider.js';
 import { IForgeSessionContextService } from './services/forge/common/forgeSessionContextService.js';
 import { ForgeSessionContextService } from './services/forge/browser/forgeSessionContextService.js';
+import { IForgeSkillService } from './services/forge/common/forgeSkillService.js';
+import { ForgeSkillService } from './services/forge/browser/forgeSkillService.js';
 
 registerSingleton(IWorkbenchExtensionManagementService, ExtensionManagementService, InstantiationType.Delayed);
 registerSingleton(IAccessibilityService, AccessibilityService, InstantiationType.Delayed);
@@ -124,6 +126,7 @@ registerSingleton(IWebContentExtractorService, NullWebContentExtractorService, I
 registerSingleton(ISharedWebContentExtractorService, NullSharedWebContentExtractorService, InstantiationType.Delayed);
 registerSingleton(IMcpGalleryManifestService, WorkbenchMcpGalleryManifestService, InstantiationType.Delayed);
 registerSingleton(IForgeSessionContextService, ForgeSessionContextService, InstantiationType.Delayed);
+registerSingleton(IForgeSkillService, ForgeSkillService, InstantiationType.Delayed);
 
 //#endregion
 
