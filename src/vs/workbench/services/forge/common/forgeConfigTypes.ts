@@ -21,6 +21,8 @@ export interface ForgeProviderConfig {
 	readonly name: string;
 	readonly baseURL?: string;
 	readonly envKey?: string;
+	readonly projectId?: string;
+	readonly location?: string;
 	readonly models: ForgeModelConfig[];
 }
 

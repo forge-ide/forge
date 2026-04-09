@@ -78,6 +78,7 @@
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "0.0.42",
     "@anthropic-ai/sdk": "^0.39.0",
+    "@google/genai": "^1.0.0",
     "@google/generative-ai": "^0.24.1",
     "@microsoft/1ds-core-js": "^3.2.13",
     "@microsoft/1ds-post-js": "^3.2.13",
