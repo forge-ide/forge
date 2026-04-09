@@ -97,6 +97,21 @@ suite('VertexProvider', () => {
 		assert.strictEqual(done.usage?.outputTokens, 5);
 	});
 
+	test('stream() emits done chunk even when no usageMetadata present', async () => {
+		const gemini = makeGeminiModels([{ text: 'Hi' }]); // no usage chunk
+		const provider = new VertexProvider(gemini as IGeminiModels, makeAnthropicClient() as IAnthropicVertexClient, ['gemini-2.0-flash-001']);
+
+		const chunks = [];
+		for await (const chunk of provider.stream(makeRequest({ model: 'gemini-2.0-flash-001' }))) {
+			chunks.push(chunk);
+		}
+
+		const done = chunks.find(c => c.done);
+		assert.ok(done, 'expected a done chunk even with no usage data');
+		assert.strictEqual(done.usage?.inputTokens, 0);
+		assert.strictEqual(done.usage?.outputTokens, 0);
+	});
+
 	test('stream() routes claude-* models through Anthropic client, not Gemini', async () => {
 		const gemini = makeGeminiModels(); // should not be called
 		let geminiCalled = false;

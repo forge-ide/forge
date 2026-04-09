@@ -84,9 +84,12 @@ export class VertexProvider implements IAIProvider {
 			config: {
 				...(systemInstruction ? { systemInstruction } : {}),
 				...(request.maxTokens ? { maxOutputTokens: request.maxTokens } : {}),
-				...(request.tools?.length ? { tools: [{ functionDeclarations: request.tools.map(this._toGeminiFunctionDeclaration) }] } : {}),
+				...(request.tools?.length ? { tools: [{ functionDeclarations: request.tools.map(t => this._toGeminiFunctionDeclaration(t)) }] } : {}),
 			},
 		});
+
+		let inputTokens = 0;
+		let outputTokens = 0;
 
 		for await (const chunk of stream) {
 			const parts = chunk.candidates?.[0]?.content?.parts ?? [];
@@ -96,16 +99,12 @@ export class VertexProvider implements IAIProvider {
 				}
 			}
 			if (chunk.usageMetadata) {
-				yield {
-					delta: '',
-					done: true,
-					usage: {
-						inputTokens: chunk.usageMetadata.promptTokenCount ?? 0,
-						outputTokens: chunk.usageMetadata.candidatesTokenCount ?? 0,
-					},
-				};
+				inputTokens = chunk.usageMetadata.promptTokenCount ?? 0;
+				outputTokens = chunk.usageMetadata.candidatesTokenCount ?? 0;
 			}
 		}
+
+		yield { delta: '', done: true, usage: { inputTokens, outputTokens } };
 	}
 
 	private async _completeGemini(request: AICompletionRequest): Promise<AICompletionResponse> {
@@ -117,7 +116,7 @@ export class VertexProvider implements IAIProvider {
 			config: {
 				...(systemInstruction ? { systemInstruction } : {}),
 				...(request.maxTokens ? { maxOutputTokens: request.maxTokens } : {}),
-				...(request.tools?.length ? { tools: [{ functionDeclarations: request.tools.map(this._toGeminiFunctionDeclaration) }] } : {}),
+				...(request.tools?.length ? { tools: [{ functionDeclarations: request.tools.map(t => this._toGeminiFunctionDeclaration(t)) }] } : {}),
 			},
 		});
 
@@ -169,7 +168,7 @@ export class VertexProvider implements IAIProvider {
 			messages,
 			max_tokens: request.maxTokens ?? 4096,
 			...(systemPrompt ? { system: systemPrompt } : {}),
-			...(request.tools?.length ? { tools: request.tools.map(this._toAnthropicTool) } : {}),
+			...(request.tools?.length ? { tools: request.tools.map(t => this._toAnthropicTool(t)) } : {}),
 		};
 
 		let inputTokens = 0;
@@ -186,12 +185,15 @@ export class VertexProvider implements IAIProvider {
 			} else if (event['type'] === 'content_block_start') {
 				const block = event['content_block'] as { type: string; id?: string; name?: string };
 				if (block.type === 'tool_use') {
-					activeToolBlock = { id: block.id!, name: block.name!, inputJson: '' };
+					if (!block.id || !block.name) {
+						throw new Error('Malformed tool_use block: missing id or name');
+					}
+					activeToolBlock = { id: block.id, name: block.name, inputJson: '' };
 				}
 			} else if (event['type'] === 'content_block_delta') {
 				const delta = event['delta'] as { type: string; text?: string; partial_json?: string };
-				if (delta.type === 'text_delta') {
-					yield { delta: delta.text!, done: false };
+				if (delta.type === 'text_delta' && delta.text !== undefined) {
+					yield { delta: delta.text, done: false };
 				} else if (delta.type === 'input_json_delta' && activeToolBlock) {
 					activeToolBlock.inputJson += delta.partial_json;
 				}
@@ -218,7 +220,7 @@ export class VertexProvider implements IAIProvider {
 			messages,
 			max_tokens: request.maxTokens ?? 4096,
 			...(systemPrompt ? { system: systemPrompt } : {}),
-			...(request.tools?.length ? { tools: request.tools.map(this._toAnthropicTool) } : {}),
+			...(request.tools?.length ? { tools: request.tools.map(t => this._toAnthropicTool(t)) } : {}),
 		};
 
 		const result = await this.anthropicClient.messages.create(params);
