@@ -50,3 +50,4 @@ dist
 .claude/worktrees/
 .github/skills/.local/
 .worktrees/
+.worktrees/
