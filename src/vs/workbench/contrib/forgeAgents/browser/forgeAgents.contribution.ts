@@ -5,10 +5,15 @@
 import * as nls from '../../../../nls.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
+import { registerSingleton, InstantiationType } from '../../../../platform/instantiation/common/extensions.js';
 import { Extensions as ViewExtensions, IViewContainersRegistry, IViewDescriptor, IViewsRegistry, ViewContainerLocation } from '../../../common/views.js';
 import { ForgeAgentsViewPaneContainer, forgeAgentsViewIcon, FORGE_AGENTS_VIEWLET_ID } from './forgeAgentsViewlet.js';
 import { ForgeAgentsView, FORGE_AGENTS_VIEW_ID } from './forgeAgentsView.js';
+import { IForgeSessionContextService } from '../../../services/forge/common/forgeSessionContextService.js';
+import { ForgeSessionContextService } from '../../../services/forge/browser/forgeSessionContextService.js';
 import './media/forgeAgents.css';
+
+registerSingleton(IForgeSessionContextService, ForgeSessionContextService, InstantiationType.Delayed);
 
 const viewContainer = Registry.as<IViewContainersRegistry>(ViewExtensions.ViewContainersRegistry).registerViewContainer({
 	id: FORGE_AGENTS_VIEWLET_ID,
