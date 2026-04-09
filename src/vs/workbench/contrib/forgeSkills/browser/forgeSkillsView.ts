@@ -31,7 +31,6 @@ export class ForgeSkillsView extends ViewPane {
 	constructor(
 		options: IViewletViewOptions,
 		@IForgeSkillService private readonly _skillService: IForgeSkillService,
-		@IOpenerService private readonly _myOpenerService: IOpenerService,
 		@IKeybindingService keybindingService: IKeybindingService,
 		@IContextMenuService contextMenuService: IContextMenuService,
 		@IConfigurationService configurationService: IConfigurationService,
@@ -118,7 +117,7 @@ export class ForgeSkillsView extends ViewPane {
 			const editBtn = document.createElement('button');
 			editBtn.className = 'forge-btn forge-btn--neutral forge-skill-edit-btn';
 			editBtn.textContent = localize('forgeSkills.editSkill', 'Edit Skill');
-			editBtn.addEventListener('click', () => this._myOpenerService.open(URI.file(skill.sourcePath!)));
+			editBtn.addEventListener('click', () => this.openerService.open(URI.file(skill.sourcePath!)));
 			this._rightPane.appendChild(editBtn);
 		}
 
