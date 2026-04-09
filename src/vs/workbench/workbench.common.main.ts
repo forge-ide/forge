@@ -149,6 +149,7 @@ import './browser/parts/editor/forgeChat/forgeChat.contribution.js';
 import './contrib/forgeAI/browser/forgeAI.contribution.js';
 import './contrib/forgeAgents/browser/forgeAgents.contribution.js';
 import './contrib/forgeMcp/browser/forgeMcp.contribution.js';
+import './contrib/forgeSkills/browser/forgeSkills.contribution.js';
 import './browser/parts/editor/forgeOnboarding/forgeOnboarding.contribution.js';
 
 import { InstantiationType, registerSingleton } from '../platform/instantiation/common/extensions.js';
