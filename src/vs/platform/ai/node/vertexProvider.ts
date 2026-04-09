@@ -227,7 +227,7 @@ export class VertexProvider implements IAIProvider {
 
 		const content = result.content
 			.filter(b => b.type === 'text')
-			.map(b => b.text!)
+			.map(b => b.text ?? '')
 			.join('');
 
 		return {
