@@ -205,4 +205,23 @@ suite('VertexProvider', () => {
 		assert.ok(provider.availableModels.includes('gemini-2.0-flash-001'));
 		assert.ok(provider.availableModels.includes('claude-sonnet-4-5@20251001'));
 	});
+
+	// --- validateCredentials ---
+
+	test('validateCredentials() returns valid: true when Gemini call succeeds', async () => {
+		const provider = new VertexProvider(makeGeminiModels() as IGeminiModels, makeAnthropicClient() as IAnthropicVertexClient);
+		const result = await provider.validateCredentials();
+		assert.strictEqual(result.valid, true);
+	});
+
+	test('validateCredentials() returns valid: false when Gemini call throws', async () => {
+		const failingGemini = {
+			generateContentStream: async () => { throw new Error('never'); },
+			generateContent: async () => { throw new Error('AUTH_FAILED: invalid credentials'); },
+		};
+		const provider = new VertexProvider(failingGemini as IGeminiModels, makeAnthropicClient() as IAnthropicVertexClient);
+		const result = await provider.validateCredentials();
+		assert.strictEqual(result.valid, false);
+		assert.ok(result.error?.includes('AUTH_FAILED'));
+	});
 });
