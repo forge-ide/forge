@@ -47,7 +47,6 @@ export class ForgeAgentsView extends ViewPane {
 		@IForgeSessionContextService private readonly sessionContextService: IForgeSessionContextService,
 		@IForgeSkillService private readonly skillService: IForgeSkillService,
 		@IForgeMcpService private readonly mcpService: IForgeMcpService,
-		@IOpenerService private readonly _myOpenerService: IOpenerService,
 		@IKeybindingService keybindingService: IKeybindingService,
 		@IContextMenuService contextMenuService: IContextMenuService,
 		@IConfigurationService configurationService: IConfigurationService,
@@ -164,7 +163,7 @@ export class ForgeAgentsView extends ViewPane {
 			editBtn.className = 'forge-btn forge-btn--neutral';
 			editBtn.textContent = 'Edit Agent';
 			editBtn.addEventListener('click', () => {
-				this._myOpenerService.open(URI.file(def.sourcePath!));
+				this.openerService.open(URI.file(def.sourcePath!));
 			});
 			actions.appendChild(editBtn);
 		}
