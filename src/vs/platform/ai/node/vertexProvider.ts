@@ -1,3 +1,8 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Forge IDE Contributors. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
 import type { AICompletionRequest, AICompletionResponse, AIStreamChunk, AIToolDefinition, AIValidationResult, IAIProvider } from '../common/aiProvider.js';
 
 const DEFAULT_MODELS = [
@@ -23,7 +28,7 @@ export interface IGeminiModels {
 // Shape of AnthropicVertex client used for Claude-on-Vertex inference.
 export interface IAnthropicVertexClient {
 	messages: {
-		stream(params: unknown): AsyncIterable<unknown>;
+		stream(params: unknown): AsyncIterable<Record<string, unknown>>;
 		create(params: unknown): Promise<{
 			content: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }>;
 			usage: { input_tokens: number; output_tokens: number };
@@ -175,7 +180,7 @@ export class VertexProvider implements IAIProvider {
 		let outputTokens = 0;
 		let activeToolBlock: { id: string; name: string; inputJson: string } | undefined;
 
-		for await (const event of this.anthropicClient.messages.stream(params) as AsyncIterable<Record<string, unknown>>) {
+		for await (const event of this.anthropicClient.messages.stream(params)) {
 			if (event['type'] === 'message_start') {
 				const msg = event['message'] as { usage: { input_tokens: number } };
 				inputTokens = msg.usage.input_tokens;

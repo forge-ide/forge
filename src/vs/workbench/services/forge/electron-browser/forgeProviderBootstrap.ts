@@ -11,6 +11,20 @@ import { IForgeCredentialService } from '../common/forgeCredentialService.js';
 import { resolveModelConfig, type ForgeProviderConfig } from '../common/forgeConfigTypes.js';
 import { WorkbenchPhase, registerWorkbenchContribution2 } from '../../../common/contributions.js';
 
+/** Minimal shape of @google/genai `ai.models` needed to construct VertexProvider. */
+interface IGeminiModelsShape {
+	generateContentStream(params: unknown): Promise<AsyncIterable<unknown>>;
+	generateContent(params: unknown): Promise<unknown>;
+}
+
+/** Minimal shape of AnthropicVertex client needed to construct VertexProvider. */
+interface IAnthropicVertexClientShape {
+	messages: {
+		stream(params: unknown): AsyncIterable<Record<string, unknown>>;
+		create(params: unknown): Promise<unknown>;
+	};
+}
+
 /**
  * Workbench contribution that bootstraps AI providers from forge.json config
  * after the workbench has been restored. Reads provider configs, resolves
@@ -136,8 +150,8 @@ export class ForgeProviderBootstrap extends Disposable {
 
 		const { VertexProvider } = await import('../../../../platform/ai/node/vertexProvider.js');
 		const provider = new VertexProvider(
-			ai.models as ConstructorParameters<typeof VertexProvider>[0],
-			anthropicVertexStub as ConstructorParameters<typeof VertexProvider>[1],
+			ai.models as IGeminiModelsShape,
+			anthropicVertexStub as IAnthropicVertexClientShape,
 			models.length ? models : undefined,
 		);
 
