@@ -101,7 +101,6 @@ import { IWebContentExtractorService, NullWebContentExtractorService, ISharedWeb
 import { IMcpGalleryManifestService } from '../platform/mcp/common/mcpGalleryManifest.js';
 import { WorkbenchMcpGalleryManifestService } from './services/mcp/browser/mcpGalleryManifestService.js';
 import { UserDataSyncResourceProviderService } from '../platform/userDataSync/common/userDataSyncResourceProvider.js';
-
 registerSingleton(IWorkbenchExtensionManagementService, ExtensionManagementService, InstantiationType.Delayed);
 registerSingleton(IAccessibilityService, AccessibilityService, InstantiationType.Delayed);
 registerSingleton(IContextMenuService, ContextMenuService, InstantiationType.Delayed);

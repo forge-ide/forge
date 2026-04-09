@@ -1,0 +1,64 @@
+<h2>Activity Bar Structure</h2>
+<p class="subtitle">Currently there's one "Forge AI" tab with Workspaces, MCP Servers, and Agents as collapsible panels inside it. How should the new tabs be structured?</p>
+
+<div class="cards">
+
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image" style="display:flex;gap:12px;padding:16px;background:#1a1a1a;border-radius:6px;min-height:160px">
+      <!-- Activity bar -->
+      <div style="width:48px;background:#111;border-radius:4px;display:flex;flex-direction:column;align-items:center;padding:8px 0;gap:4px">
+        <div style="width:32px;height:32px;background:#c0392b;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:16px" title="Agents">🤖</div>
+        <div style="width:32px;height:32px;background:#1e3a5f;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:16px" title="MCP Servers">🔌</div>
+        <div style="width:32px;height:32px;background:#1a3a1a;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:16px" title="Skills">⚡</div>
+        <div style="width:32px;height:24px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:11px;color:#555">···</div>
+      </div>
+      <!-- Sidebar panel -->
+      <div style="flex:1;background:#1e1e1e;border-radius:4px;padding:10px">
+        <div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Agents</div>
+        <div style="background:#2a2a2a;border-radius:3px;padding:6px 8px;margin-bottom:4px;font-size:11px;color:#ccc">my-coder-agent</div>
+        <div style="background:#2a2a2a;border-radius:3px;padding:6px 8px;margin-bottom:4px;font-size:11px;color:#ccc">reviewer-agent</div>
+        <div style="background:#2a2a2a;border-radius:3px;padding:6px 8px;font-size:11px;color:#ccc">+ New Agent</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A — Three Separate Tabs</h3>
+      <p>Agents, MCP Servers, and Skills each get their own dedicated activity bar icon and sidebar. The current "Forge AI" tab is removed or repurposed (e.g. becomes a home/workspace view).</p>
+      <div class="pros-cons" style="margin-top:8px">
+        <div class="pros"><h4>Pros</h4><ul><li>Direct access to any area</li><li>Clear mental model per domain</li><li>Expandable independently</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>More icons in activity bar</li><li>Workspaces panel needs a home</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image" style="display:flex;gap:12px;padding:16px;background:#1a1a1a;border-radius:6px;min-height:160px">
+      <!-- Activity bar -->
+      <div style="width:48px;background:#111;border-radius:4px;display:flex;flex-direction:column;align-items:center;padding:8px 0;gap:4px">
+        <div style="width:32px;height:32px;background:#6d2fe0;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:16px;border-left:2px solid #e05a2f" title="Forge AI">✦</div>
+        <div style="width:32px;height:24px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:11px;color:#555">···</div>
+      </div>
+      <!-- Sidebar panel with sub-tabs -->
+      <div style="flex:1;background:#1e1e1e;border-radius:4px;overflow:hidden">
+        <div style="display:flex;border-bottom:1px solid #333">
+          <div style="padding:6px 10px;font-size:10px;color:#e05a2f;border-bottom:2px solid #e05a2f">Agents</div>
+          <div style="padding:6px 10px;font-size:10px;color:#666">MCP</div>
+          <div style="padding:6px 10px;font-size:10px;color:#666">Skills</div>
+          <div style="padding:6px 10px;font-size:10px;color:#666">Home</div>
+        </div>
+        <div style="padding:10px">
+          <div style="background:#2a2a2a;border-radius:3px;padding:6px 8px;margin-bottom:4px;font-size:11px;color:#ccc">my-coder-agent</div>
+          <div style="background:#2a2a2a;border-radius:3px;padding:6px 8px;margin-bottom:4px;font-size:11px;color:#ccc">reviewer-agent</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B — One Tab, Sub-Tabs Inside</h3>
+      <p>Keep the single "Forge AI" activity bar icon, but add horizontal sub-tabs inside the sidebar for Agents, MCP Servers, Skills, and Workspaces.</p>
+      <div class="pros-cons" style="margin-top:8px">
+        <div class="pros"><h4>Pros</h4><ul><li>One icon, less clutter</li><li>All Forge UI in one place</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>Not what VS Code expects</li><li>Harder to navigate quickly</li><li>Custom tab system to build</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+</div>

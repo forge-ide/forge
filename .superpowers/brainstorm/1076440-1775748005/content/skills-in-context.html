@@ -1,0 +1,113 @@
+<h2>Skills in Context — Where They Live</h2>
+<p class="subtitle">Skills tab becomes a catalog. Skill selection lives in agents + chat. How should skill selection appear in the Agents detail pane?</p>
+
+<div class="cards">
+
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#141414;border-radius:6px;overflow:hidden;min-height:260px;font-family:'Barlow',sans-serif">
+      <div style="display:flex;height:260px">
+        <!-- Left stub -->
+        <div style="width:130px;border-right:1px solid #2a2a2a;padding:8px 0">
+          <div style="padding:4px 8px;font-size:9px;text-transform:uppercase;letter-spacing:1px;color:#555;margin-bottom:4px">Definitions</div>
+          <div style="padding:5px 8px;background:#1e2a1e;border-left:2px solid #3ddc84;font-size:10px;color:#eae6de;margin-bottom:2px">my-coder-agent <span style="float:right;color:#3ddc84;font-size:8px">● live</span></div>
+          <div style="padding:5px 8px;font-size:10px;color:#555;margin-bottom:2px">reviewer-agent</div>
+        </div>
+        <!-- Right: agent detail with skills section -->
+        <div style="flex:1;display:flex;flex-direction:column;overflow:hidden">
+          <!-- Header -->
+          <div style="padding:8px 10px;border-bottom:1px solid #222">
+            <div style="font-size:11px;font-weight:600;color:#eae6de">my-coder-agent</div>
+            <div style="font-size:9px;color:#e05a2f">Running · Turn 4 / 20</div>
+          </div>
+          <!-- Task + steps (compressed) -->
+          <div style="padding:6px 10px;border-bottom:1px solid #1e1e1e">
+            <div style="font-size:9px;color:#666;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">Task</div>
+            <div style="font-size:10px;color:#aaa">Implement vertex streaming fix</div>
+          </div>
+          <!-- Skills section with inline chips -->
+          <div style="padding:6px 10px;border-bottom:1px solid #1e1e1e">
+            <div style="font-size:9px;color:#666;text-transform:uppercase;letter-spacing:1px;margin-bottom:5px">Active Skills</div>
+            <div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center">
+              <div style="padding:2px 7px;background:#1e2a1e;border:1px solid #3ddc84;border-radius:10px;font-size:9px;color:#3ddc84;display:flex;align-items:center;gap:3px">commit <span style="color:#666;cursor:pointer">✕</span></div>
+              <div style="padding:2px 7px;background:#1e2a1e;border:1px solid #3ddc84;border-radius:10px;font-size:9px;color:#3ddc84;display:flex;align-items:center;gap:3px">tdd <span style="color:#666;cursor:pointer">✕</span></div>
+              <div style="padding:2px 7px;background:#1a1a1a;border:1px solid #333;border-radius:10px;font-size:9px;color:#666;cursor:pointer">+ Add</div>
+            </div>
+          </div>
+          <!-- Steps -->
+          <div style="padding:6px 10px;flex:1">
+            <div style="font-size:9px;color:#666;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">Steps</div>
+            <div style="font-size:10px;color:#888;margin-bottom:2px">✓ Read forgeVertexProvider.ts</div>
+            <div style="font-size:10px;color:#e05a2f">⟳ Running tests...</div>
+          </div>
+          <!-- Actions -->
+          <div style="padding:6px 10px;border-top:1px solid #222;display:flex;gap:4px">
+            <div style="padding:3px 8px;background:#2a1a1a;border:1px solid #e05a2f;border-radius:3px;font-size:9px;color:#e05a2f">Cancel</div>
+            <div style="padding:3px 8px;background:#1a1a1a;border:1px solid #333;border-radius:3px;font-size:9px;color:#888">Open Chat</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A — Inline Chips (Recommended)</h3>
+      <p>Active skills shown as pill chips in the agent detail pane. Click ✕ to remove mid-run. "+ Add" opens a popover to pick from the skills catalog. Same pattern repeats in chat windows.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#141414;border-radius:6px;overflow:hidden;min-height:260px;font-family:'Barlow',sans-serif">
+      <div style="display:flex;height:260px">
+        <!-- Left stub -->
+        <div style="width:130px;border-right:1px solid #2a2a2a;padding:8px 0">
+          <div style="padding:4px 8px;font-size:9px;text-transform:uppercase;letter-spacing:1px;color:#555;margin-bottom:4px">Definitions</div>
+          <div style="padding:5px 8px;background:#1e2a1e;border-left:2px solid #3ddc84;font-size:10px;color:#eae6de;margin-bottom:2px">my-coder-agent <span style="float:right;color:#3ddc84;font-size:8px">● live</span></div>
+          <div style="padding:5px 8px;font-size:10px;color:#555;margin-bottom:2px">reviewer-agent</div>
+        </div>
+        <!-- Right: agent detail with collapsible skills -->
+        <div style="flex:1;display:flex;flex-direction:column;overflow:hidden">
+          <div style="padding:8px 10px;border-bottom:1px solid #222">
+            <div style="font-size:11px;font-weight:600;color:#eae6de">my-coder-agent</div>
+            <div style="font-size:9px;color:#e05a2f">Running · Turn 4 / 20</div>
+          </div>
+          <div style="padding:6px 10px;border-bottom:1px solid #1e1e1e">
+            <div style="font-size:9px;color:#666;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">Task</div>
+            <div style="font-size:10px;color:#aaa">Implement vertex streaming fix</div>
+          </div>
+          <!-- Skills as collapsible section with checklist -->
+          <div style="border-bottom:1px solid #1e1e1e">
+            <div style="padding:5px 10px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;background:#1a1a1a">
+              <div style="font-size:9px;color:#666;text-transform:uppercase;letter-spacing:1px">Skills (2 active)</div>
+              <div style="font-size:9px;color:#555">▾</div>
+            </div>
+            <div style="padding:4px 10px 6px">
+              <div style="display:flex;align-items:center;gap:6px;padding:3px 0;border-bottom:1px solid #1e1e1e">
+                <div style="width:10px;height:10px;background:#3ddc84;border-radius:2px;display:flex;align-items:center;justify-content:center;font-size:7px;color:#000;flex-shrink:0">✓</div>
+                <div style="font-size:10px;color:#eae6de">commit</div>
+              </div>
+              <div style="display:flex;align-items:center;gap:6px;padding:3px 0;border-bottom:1px solid #1e1e1e">
+                <div style="width:10px;height:10px;background:#333;border-radius:2px;flex-shrink:0"></div>
+                <div style="font-size:10px;color:#555">brainstorm</div>
+              </div>
+              <div style="display:flex;align-items:center;gap:6px;padding:3px 0">
+                <div style="width:10px;height:10px;background:#3ddc84;border-radius:2px;display:flex;align-items:center;justify-content:center;font-size:7px;color:#000;flex-shrink:0">✓</div>
+                <div style="font-size:10px;color:#eae6de">tdd</div>
+              </div>
+            </div>
+          </div>
+          <div style="padding:6px 10px;flex:1">
+            <div style="font-size:9px;color:#666;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">Steps</div>
+            <div style="font-size:10px;color:#888;margin-bottom:2px">✓ Read forgeVertexProvider.ts</div>
+            <div style="font-size:10px;color:#e05a2f">⟳ Running tests...</div>
+          </div>
+          <div style="padding:6px 10px;border-top:1px solid #222;display:flex;gap:4px">
+            <div style="padding:3px 8px;background:#2a1a1a;border:1px solid #e05a2f;border-radius:3px;font-size:9px;color:#e05a2f">Cancel</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B — Collapsible Checklist</h3>
+      <p>A collapsible "Skills" section in the detail pane shows all available skills as a checklist. Check/uncheck to activate or deactivate mid-run. Always visible at a glance how many are active.</p>
+    </div>
+  </div>
+
+</div>

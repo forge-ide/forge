@@ -1,29 +1,32 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Forge IDE. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ * Forge - ForgeAgentsViewPaneContainer
  *--------------------------------------------------------------------------------------------*/
 
-import './media/forgeAIViewlet.css';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { localize } from '../../../../nls.js';
-import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IStorageService } from '../../../../platform/storage/common/storage.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
+import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
-import { IExtensionService } from '../../../services/extensions/common/extensions.js';
-import { IWorkbenchLayoutService } from '../../../services/layout/browser/layoutService.js';
 import { IViewDescriptorService } from '../../../common/views.js';
 import { ViewPaneContainer } from '../../../browser/parts/views/viewPaneContainer.js';
-import { FORGE_AI_VIEWLET_ID } from '../common/forgeAI.js';
+import { IWorkbenchLayoutService } from '../../../services/layout/browser/layoutService.js';
+import { IExtensionService } from '../../../services/extensions/common/extensions.js';
 
-export const forgeAIViewIcon = registerIcon('forge-ai-view-icon', Codicon.sparkle, localize('forgeAIViewIcon', 'View icon of the Forge AI view.'));
+export const FORGE_AGENTS_VIEWLET_ID = 'workbench.view.forgeAgents';
 
-export class ForgeAIViewPaneContainer extends ViewPaneContainer {
+export const forgeAgentsViewIcon = registerIcon(
+	'forge-agents-view-icon',
+	Codicon.robot,
+	localize('forgeAgentsViewIcon', 'View icon of the Forge Agents view.')
+);
+
+export class ForgeAgentsViewPaneContainer extends ViewPaneContainer {
 
 	constructor(
 		@IWorkbenchLayoutService layoutService: IWorkbenchLayoutService,
@@ -38,12 +41,12 @@ export class ForgeAIViewPaneContainer extends ViewPaneContainer {
 		@IViewDescriptorService viewDescriptorService: IViewDescriptorService,
 		@ILogService logService: ILogService,
 	) {
-		super(FORGE_AI_VIEWLET_ID, { mergeViewWithContainerWhenSingleView: true }, instantiationService, configurationService, layoutService, contextMenuService, telemetryService, extensionService, themeService, storageService, contextService, viewDescriptorService, logService);
+		super(FORGE_AGENTS_VIEWLET_ID, { mergeViewWithContainerWhenSingleView: true }, instantiationService, configurationService, layoutService, contextMenuService, telemetryService, extensionService, themeService, storageService, contextService, viewDescriptorService, logService);
 	}
 
 	override create(parent: HTMLElement): void {
 		super.create(parent);
-		parent.classList.add('forge-ai-viewlet');
+		parent.classList.add('forge-agents-viewlet');
 	}
 
 	override getOptimalWidth(): number {

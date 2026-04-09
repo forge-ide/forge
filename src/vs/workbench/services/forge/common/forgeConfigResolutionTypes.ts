@@ -64,6 +64,8 @@ export interface AgentDefinition {
 	readonly maxTurns?: number;
 	readonly provider?: string;
 	readonly model?: string;
+	readonly skills?: string[];
+	readonly mcpServers?: string[];
 	/** Filesystem path the definition was loaded from */
 	readonly sourcePath?: string;
 }
@@ -101,6 +103,8 @@ export function parseAgentMarkdown(content: string): AgentDefinition | null {
 		maxTurns: typeof frontmatter.maxTurns === 'number' ? frontmatter.maxTurns : undefined,
 		provider: typeof frontmatter.provider === 'string' ? frontmatter.provider : undefined,
 		model: typeof frontmatter.model === 'string' ? frontmatter.model : undefined,
+		skills: Array.isArray(frontmatter.skills) ? frontmatter.skills : undefined,
+		mcpServers: Array.isArray(frontmatter['mcp-servers']) ? frontmatter['mcp-servers'] : undefined,
 	};
 }
 
@@ -111,7 +115,7 @@ export function parseAgentMarkdown(content: string): AgentDefinition | null {
 export function parseYamlFrontmatter(yaml: string): Record<string, unknown> {
 	const result: Record<string, unknown> = {};
 	for (const line of yaml.split('\n')) {
-		const match = line.match(/^(\w+):\s*(.+)$/);
+		const match = line.match(/^([\w-]+):\s*(.+)$/);
 		if (!match) {
 			continue;
 		}

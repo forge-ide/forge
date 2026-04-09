@@ -26,6 +26,7 @@ function createMockVSCodeServer(id: string, label: string, connectionState: numb
 		definition: { id, label },
 		connectionState: { get: () => ({ state: connectionState }) },
 		tools: { get: () => tools },
+		readDefinitions: () => ({ get: () => ({ server: undefined }) }),
 	};
 }
 

@@ -33,6 +33,7 @@ interface IMcpServerMin {
 	readonly definition: { readonly id: string; readonly label: string };
 	readonly connectionState: IReadable<{ readonly state: number }>;
 	readonly tools: IReadable<readonly IMcpToolMin[]>;
+	readonly transport: 'local' | 'remote';
 }
 
 /** Minimal shape of the VS Code IMcpService sufficient for Forge's bridge. */
@@ -158,6 +159,7 @@ export class ForgeMcpService extends Disposable implements IForgeMcpService {
 				status,
 				toolCount,
 				disabled: disabledServers.has(name),
+				transport: server.transport,
 			});
 		}
 

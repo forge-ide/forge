@@ -1,0 +1,123 @@
+<h2>Skills Tab — Master-Detail Design</h2>
+<p class="subtitle">Full management: list left, skill content + actions right. Which detail pane treatment works best?</p>
+
+<div class="cards">
+
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#141414;border-radius:6px;overflow:hidden;min-height:240px;font-family:'Barlow',sans-serif">
+      <div style="display:flex;height:240px">
+        <!-- Left: skills list -->
+        <div style="width:150px;border-right:1px solid #2a2a2a;display:flex;flex-direction:column;overflow:hidden">
+          <div style="padding:6px 8px;font-size:9px;text-transform:uppercase;letter-spacing:1px;color:#666;border-bottom:1px solid #222">Skills (4)</div>
+          <div style="padding:4px 6px;background:#1e2a1e;border-left:2px solid #e05a2f;margin:2px 0">
+            <div style="font-size:10px;color:#eae6de">commit</div>
+            <div style="font-size:9px;color:#666;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Create git commits...</div>
+          </div>
+          <div style="padding:4px 6px;margin:2px 0">
+            <div style="font-size:10px;color:#888">review-pr</div>
+            <div style="font-size:9px;color:#555;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Code review workflow</div>
+          </div>
+          <div style="padding:4px 6px;margin:2px 0;opacity:0.45">
+            <div style="font-size:10px;color:#666">tdd</div>
+            <div style="font-size:9px;color:#444;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Test-driven dev</div>
+          </div>
+          <div style="padding:4px 6px;margin:2px 0">
+            <div style="font-size:10px;color:#888">brainstorm</div>
+            <div style="font-size:9px;color:#555;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Brainstorm designs</div>
+          </div>
+        </div>
+        <!-- Right: skill detail -->
+        <div style="flex:1;padding:8px;display:flex;flex-direction:column;overflow:hidden">
+          <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:4px">
+            <div>
+              <div style="font-size:11px;font-weight:600;color:#eae6de">commit</div>
+              <div style="font-size:9px;color:#3ddc84">● enabled</div>
+            </div>
+            <div style="display:flex;gap:4px">
+              <div style="padding:2px 6px;background:#1a1a1a;border:1px solid #333;border-radius:3px;font-size:9px;color:#888">Open File</div>
+              <div style="padding:2px 6px;background:#2a1a1a;border:1px solid #e05a2f;border-radius:3px;font-size:9px;color:#e05a2f">Disable</div>
+            </div>
+          </div>
+          <div style="font-size:9px;color:#666;margin-bottom:6px">~/.claude-personal/plugins/commit.md</div>
+          <div style="font-size:9px;color:#666;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Preview</div>
+          <div style="flex:1;background:#111;border-radius:3px;padding:6px 8px;overflow:hidden;font-family:'Fira Code',monospace;font-size:9px;color:#888;line-height:1.5">
+            <span style="color:#e05a2f">---</span><br>
+            <span style="color:#7aaaff">name</span>: commit<br>
+            <span style="color:#7aaaff">description</span>: Create git commits...<br>
+            <span style="color:#e05a2f">---</span><br>
+            <br>
+            <span style="color:#aaa"># Commit Skill</span><br>
+            <span style="color:#666">Stage and commit changes</span><br>
+            <span style="color:#666">following project conventions...</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A — List + Inline Preview (Recommended)</h3>
+      <p>Skills list on the left (with enable/disable state shown). Right pane shows: status, source path, Enable/Disable button, Open File button, and a read-only content preview.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#141414;border-radius:6px;overflow:hidden;min-height:240px;font-family:'Barlow',sans-serif">
+      <div style="display:flex;height:240px">
+        <!-- Left: skills list with toggle switches -->
+        <div style="width:160px;border-right:1px solid #2a2a2a;display:flex;flex-direction:column;overflow:hidden">
+          <div style="padding:6px 8px;font-size:9px;text-transform:uppercase;letter-spacing:1px;color:#666;border-bottom:1px solid #222">Skills</div>
+          <div style="padding:5px 8px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #1e1e1e;background:#1a2a1a">
+            <div>
+              <div style="font-size:10px;color:#eae6de">commit</div>
+              <div style="font-size:9px;color:#555">git workflow</div>
+            </div>
+            <div style="width:24px;height:13px;background:#3ddc84;border-radius:7px;position:relative"><div style="width:9px;height:9px;background:white;border-radius:50%;position:absolute;right:2px;top:2px"></div></div>
+          </div>
+          <div style="padding:5px 8px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #1e1e1e">
+            <div>
+              <div style="font-size:10px;color:#eae6de">review-pr</div>
+              <div style="font-size:9px;color:#555">code review</div>
+            </div>
+            <div style="width:24px;height:13px;background:#3ddc84;border-radius:7px;position:relative"><div style="width:9px;height:9px;background:white;border-radius:50%;position:absolute;right:2px;top:2px"></div></div>
+          </div>
+          <div style="padding:5px 8px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #1e1e1e;opacity:0.45">
+            <div>
+              <div style="font-size:10px;color:#666">tdd</div>
+              <div style="font-size:9px;color:#444">test-driven</div>
+            </div>
+            <div style="width:24px;height:13px;background:#333;border-radius:7px;position:relative"><div style="width:9px;height:9px;background:#666;border-radius:50%;position:absolute;left:2px;top:2px"></div></div>
+          </div>
+          <div style="padding:5px 8px;display:flex;align-items:center;justify-content:space-between">
+            <div>
+              <div style="font-size:10px;color:#eae6de">brainstorm</div>
+              <div style="font-size:9px;color:#555">design ideation</div>
+            </div>
+            <div style="width:24px;height:13px;background:#3ddc84;border-radius:7px;position:relative"><div style="width:9px;height:9px;background:white;border-radius:50%;position:absolute;right:2px;top:2px"></div></div>
+          </div>
+        </div>
+        <!-- Right: full content viewer -->
+        <div style="flex:1;display:flex;flex-direction:column;overflow:hidden">
+          <div style="padding:6px 8px;border-bottom:1px solid #222;display:flex;align-items:center;justify-content:space-between">
+            <div style="font-size:10px;color:#eae6de">commit</div>
+            <div style="padding:2px 6px;background:#1a1a1a;border:1px solid #333;border-radius:3px;font-size:9px;color:#888">Open File ↗</div>
+          </div>
+          <div style="flex:1;padding:8px;font-family:'Fira Code',monospace;font-size:9px;color:#888;line-height:1.6;overflow:hidden">
+            <span style="color:#e05a2f">---</span><br>
+            <span style="color:#7aaaff">name</span>: commit<br>
+            <span style="color:#7aaaff">description</span>: Create git commits following project conventions<br>
+            <span style="color:#e05a2f">---</span><br><br>
+            <span style="color:#aaa"># Commit Skill</span><br><br>
+            <span style="color:#666">When creating commits, always:</span><br>
+            <span style="color:#666">1. Run git status first</span><br>
+            <span style="color:#666">2. Stage specific files</span><br>
+            <span style="color:#666">3. Write conventional...</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B — Toggle List + Full Content Viewer</h3>
+      <p>Left pane has inline toggle switches for quick enable/disable. Right pane is a full-height read-only content viewer of the selected skill's markdown. Open File button jumps to the source.</p>
+    </div>
+  </div>
+
+</div>

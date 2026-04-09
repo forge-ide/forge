@@ -183,6 +183,18 @@
 			"project": "vscode-workbench"
 		},
 		{
+			"name": "vs/workbench/contrib/forgeAgents",
+			"project": "vscode-workbench"
+		},
+		{
+			"name": "vs/workbench/contrib/forgeMcp",
+			"project": "vscode-workbench"
+		},
+		{
+			"name": "vs/workbench/contrib/forgeSkills",
+			"project": "vscode-workbench"
+		},
+		{
 			"name": "vs/workbench/contrib/quickaccess",
 			"project": "vscode-workbench"
 		},
