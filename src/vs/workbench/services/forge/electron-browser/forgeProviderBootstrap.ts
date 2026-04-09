@@ -8,7 +8,7 @@ import { ILogService } from '../../../../platform/log/common/log.js';
 import { IAIProviderService } from '../../../../platform/ai/common/aiProviderService.js';
 import { IForgeConfigService } from '../common/forgeConfigService.js';
 import { IForgeCredentialService } from '../common/forgeCredentialService.js';
-import { resolveModelConfig } from '../common/forgeConfigTypes.js';
+import { resolveModelConfig, type ForgeProviderConfig } from '../common/forgeConfigTypes.js';
 import { WorkbenchPhase, registerWorkbenchContribution2 } from '../../../common/contributions.js';
 
 /**
@@ -57,23 +57,79 @@ export class ForgeProviderBootstrap extends Disposable {
 		const config = this.forgeConfigService.getConfig();
 
 		for (const providerConfig of config.providers) {
-			const resolved = resolveModelConfig(config, providerConfig.name);
-			if (!resolved) {
-				continue;
-			}
-
-			const hasKey = await this.credentialService.hasApiKey(providerConfig.name, resolved.envKey);
-			if (hasKey) {
-				this.logService.info(`[ForgeProviderBootstrap] Credential available for '${providerConfig.name}'`);
-			} else {
-				this.logService.debug(`[ForgeProviderBootstrap] No credential for '${providerConfig.name}', skipping`);
+			try {
+				await this._registerProvider(providerConfig);
+			} catch (err) {
+				this.logService.error(`[ForgeProviderBootstrap] Failed to register '${providerConfig.name}'`, err);
 			}
 		}
 
-		// Set the default provider name from config
 		if (config.defaultProvider) {
 			this.aiProviderService.setDefaultProviderName(config.defaultProvider);
 		}
+	}
+
+	private async _registerProvider(providerConfig: ForgeProviderConfig): Promise<void> {
+		const { name } = providerConfig;
+
+		if (name === 'vertex') {
+			await this._registerVertex(providerConfig);
+			return;
+		}
+
+		const resolved = resolveModelConfig(this.forgeConfigService.getConfig(), name);
+		if (!resolved) { return; }
+
+		const hasKey = await this.credentialService.hasApiKey(name, resolved.envKey);
+		if (hasKey) {
+			this.logService.info(`[ForgeProviderBootstrap] Credential available for '${name}'`);
+		} else {
+			this.logService.debug(`[ForgeProviderBootstrap] No credential for '${name}', skipping`);
+		}
+	}
+
+	private async _registerVertex(providerConfig: ForgeProviderConfig): Promise<void> {
+		const projectId = providerConfig.projectId ?? process.env['GOOGLE_CLOUD_PROJECT'];
+		const location = providerConfig.location ?? process.env['GOOGLE_CLOUD_LOCATION'];
+
+		if (!projectId || !location) {
+			this.logService.warn('[ForgeProviderBootstrap] Vertex: missing projectId or location, skipping registration');
+			return;
+		}
+
+		const serviceAccountJson = await this.credentialService.getApiKey('vertex', '');
+
+		const authOptions = serviceAccountJson
+			? { googleAuthOptions: { credentials: JSON.parse(serviceAccountJson) as Record<string, unknown> } }
+			: {};
+
+		const models = providerConfig.models.map(m => m.id);
+
+		const { GoogleGenAI } = await import('@google/genai');
+
+		const ai = new GoogleGenAI({ vertexai: true, project: projectId, location, ...authOptions });
+		// AnthropicVertex is loaded dynamically; the SDK may not expose a /vertex subpath in all versions.
+		// Degrades gracefully to Gemini-only if unavailable.
+		let anthropicVertex: unknown;
+		try {
+			const mod = await import('@anthropic-ai/sdk/vertex' as string) as Record<string, new (opts: unknown) => unknown>;
+			const AnthropicVertex = mod['default'] ?? mod['AnthropicVertex'];
+			if (AnthropicVertex) {
+				anthropicVertex = new AnthropicVertex({ projectId, region: location, ...authOptions });
+			}
+		} catch {
+			this.logService.warn('[ForgeProviderBootstrap] Vertex: AnthropicVertex SDK unavailable; Claude-on-Vertex models will not work');
+		}
+
+		const { VertexProvider } = await import('../../../../platform/ai/node/vertexProvider.js');
+		const provider = new VertexProvider(
+			ai.models as ConstructorParameters<typeof VertexProvider>[0],
+			anthropicVertex as ConstructorParameters<typeof VertexProvider>[1],
+			models.length ? models : undefined,
+		);
+
+		this.aiProviderService.registerProvider('vertex', provider);
+		this.logService.info('[ForgeProviderBootstrap] Registered vertex provider');
 	}
 }
 
