@@ -99,8 +99,18 @@ export class ForgeProviderBootstrap extends Disposable {
 
 		const serviceAccountJson = await this.credentialService.getApiKey('vertex', '');
 
-		const authOptions = serviceAccountJson
-			? { googleAuthOptions: { credentials: JSON.parse(serviceAccountJson) as Record<string, unknown> } }
+		let parsedCredentials: Record<string, unknown> | undefined;
+		if (serviceAccountJson) {
+			try {
+				parsedCredentials = JSON.parse(serviceAccountJson) as Record<string, unknown>;
+			} catch (e) {
+				this.logService.warn('[ForgeProviderBootstrap] Vertex: failed to parse service account JSON from SecretStorage, falling back to ADC');
+				parsedCredentials = undefined;
+			}
+		}
+
+		const authOptions = parsedCredentials
+			? { googleAuthOptions: { credentials: parsedCredentials } }
 			: {};
 
 		const models = providerConfig.models.map(m => m.id);
@@ -108,23 +118,26 @@ export class ForgeProviderBootstrap extends Disposable {
 		const { GoogleGenAI } = await import('@google/genai');
 
 		const ai = new GoogleGenAI({ vertexai: true, project: projectId, location, ...authOptions });
-		// AnthropicVertex is loaded dynamically; the SDK may not expose a /vertex subpath in all versions.
-		// Degrades gracefully to Gemini-only if unavailable.
-		let anthropicVertex: unknown;
-		try {
-			const mod = await import('@anthropic-ai/sdk/vertex' as string) as Record<string, new (opts: unknown) => unknown>;
-			const AnthropicVertex = mod['default'] ?? mod['AnthropicVertex'];
-			if (AnthropicVertex) {
-				anthropicVertex = new AnthropicVertex({ projectId, region: location, ...authOptions });
-			}
-		} catch {
-			this.logService.warn('[ForgeProviderBootstrap] Vertex: AnthropicVertex SDK unavailable; Claude-on-Vertex models will not work');
-		}
+
+		// AnthropicVertex is not available in the installed SDK version.
+		// Claude-on-Vertex support requires @anthropic-ai/sdk with AnthropicVertex.
+		// For now, provide a stub that surfaces a clear error if Claude models are used.
+		this.logService.warn('[ForgeProviderBootstrap] AnthropicVertex not available in SDK — Claude-on-Vertex disabled. Upgrade @anthropic-ai/sdk to enable.');
+		const anthropicVertexStub = {
+			messages: {
+				stream: (_params: unknown): AsyncIterable<unknown> => {
+					throw new Error('[VertexProvider] Claude-on-Vertex requires AnthropicVertex. Upgrade @anthropic-ai/sdk.');
+				},
+				create: (_params: unknown): Promise<never> => {
+					throw new Error('[VertexProvider] Claude-on-Vertex requires AnthropicVertex. Upgrade @anthropic-ai/sdk.');
+				},
+			},
+		};
 
 		const { VertexProvider } = await import('../../../../platform/ai/node/vertexProvider.js');
 		const provider = new VertexProvider(
 			ai.models as ConstructorParameters<typeof VertexProvider>[0],
-			anthropicVertex as ConstructorParameters<typeof VertexProvider>[1],
+			anthropicVertexStub as ConstructorParameters<typeof VertexProvider>[1],
 			models.length ? models : undefined,
 		);
 
