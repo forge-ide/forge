@@ -11,6 +11,7 @@ import type { ISecretStorageService } from '../../../../../../../platform/secret
 import type { IConfigurationService } from '../../../../../../../platform/configuration/common/configuration.js';
 import type { IFileDialogService } from '../../../../../../../platform/dialogs/common/dialogs.js';
 import type { IFileService } from '../../../../../../../platform/files/common/files.js';
+import type { ILogService } from '../../../../../../../platform/log/common/log.js';
 import { Step3Provider } from '../step3Provider.js';
 
 const baseEnv: IEnvironmentDetectionResult = {
@@ -48,11 +49,20 @@ function createStep() {
 		readFile: async () => ({ value: { toString: () => '' } }),
 	};
 
+	const mockLogService = {
+		trace: () => { },
+		debug: () => { },
+		info: () => { },
+		warn: () => { },
+		error: () => { },
+	};
+
 	const step = new Step3Provider(
 		mockSecretStorage as unknown as ISecretStorageService,
 		mockConfigService as unknown as IConfigurationService,
 		mockFileDialogService as unknown as IFileDialogService,
 		mockFileService as unknown as IFileService,
+		mockLogService as unknown as ILogService,
 	);
 
 	return { step, storedSecrets, getSavedConfig: () => savedConfig };

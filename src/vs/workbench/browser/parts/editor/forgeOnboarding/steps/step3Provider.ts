@@ -8,6 +8,7 @@ import { ISecretStorageService } from '../../../../../../platform/secrets/common
 import { IConfigurationService, ConfigurationTarget } from '../../../../../../platform/configuration/common/configuration.js';
 import { IFileDialogService } from '../../../../../../platform/dialogs/common/dialogs.js';
 import { IFileService } from '../../../../../../platform/files/common/files.js';
+import { ILogService } from '../../../../../../platform/log/common/log.js';
 import { IOnboardingStep } from '../forgeOnboardingView.js';
 import { ForgeProviderConfig } from '../../../../../services/forge/common/forgeConfigTypes.js';
 
@@ -72,6 +73,7 @@ export class Step3Provider implements IOnboardingStep {
 		@IConfigurationService private readonly _configurationService: IConfigurationService,
 		@IFileDialogService private readonly _fileDialogService: IFileDialogService,
 		@IFileService private readonly _fileService: IFileService,
+		@ILogService private readonly _logService: ILogService,
 	) { }
 
 	render(container: HTMLElement, env: IEnvironmentDetectionResult): void {
@@ -314,7 +316,7 @@ export class Step3Provider implements IOnboardingStep {
 				});
 
 				browseLink.addEventListener('click', () => {
-					this._browseForJson(json => {
+					void this._browseForJson(json => {
 						textarea.value = json;
 						values.set(field.id, json);
 					});
@@ -356,16 +358,20 @@ export class Step3Provider implements IOnboardingStep {
 	}
 
 	private async _browseForJson(onSelect: (json: string) => void): Promise<void> {
-		const uris = await this._fileDialogService.showOpenDialog({
-			title: 'Select Service Account JSON',
-			canSelectFiles: true,
-			canSelectFolders: false,
-			canSelectMany: false,
-			filters: [{ name: 'JSON Files', extensions: ['json'] }],
-		});
-		if (!uris || uris.length === 0) { return; }
-		const content = await this._fileService.readFile(uris[0]);
-		onSelect(content.value.toString());
+		try {
+			const uris = await this._fileDialogService.showOpenDialog({
+				title: 'Select Service Account JSON',
+				canSelectFiles: true,
+				canSelectFolders: false,
+				canSelectMany: false,
+				filters: [{ name: 'JSON Files', extensions: ['json'] }],
+			});
+			if (!uris || uris.length === 0) { return; }
+			const content = await this._fileService.readFile(uris[0]);
+			onSelect(content.value.toString());
+		} catch (err) {
+			this._logService.error('[Step3Provider] Failed to read service account JSON file', err);
+		}
 	}
 
 	private _updateKeyConfirm(providerId: string, fromEnvironment: boolean): void {
