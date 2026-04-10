@@ -92,6 +92,19 @@ export class Step3Provider implements IOnboardingStep {
 			container.appendChild(banner);
 		}
 
+		// Vertex env detection banner
+		if (env.vertexEnv.projectId && env.vertexEnv.location) {
+			const vertexBanner = document.createElement('div');
+			vertexBanner.className = 'forge-onboarding-detect found';
+
+			const dot = document.createElement('div');
+			dot.className = 'forge-onboarding-detect-dot';
+			vertexBanner.appendChild(dot);
+
+			vertexBanner.appendChild(document.createTextNode('GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION detected'));
+			container.appendChild(vertexBanner);
+		}
+
 		const list = document.createElement('div');
 		list.className = 'forge-onboarding-provider-list';
 
