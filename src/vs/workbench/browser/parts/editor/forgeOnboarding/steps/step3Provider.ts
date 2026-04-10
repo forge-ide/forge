@@ -5,10 +5,11 @@
 
 import { IEnvironmentDetectionResult } from '../../../../../services/forge/common/forgeOnboardingService.js';
 import { ISecretStorageService } from '../../../../../../platform/secrets/common/secrets.js';
-import { IConfigurationService } from '../../../../../../platform/configuration/common/configuration.js';
+import { IConfigurationService, ConfigurationTarget } from '../../../../../../platform/configuration/common/configuration.js';
 import { IFileDialogService } from '../../../../../../platform/dialogs/common/dialogs.js';
 import { IFileService } from '../../../../../../platform/files/common/files.js';
 import { IOnboardingStep } from '../forgeOnboardingView.js';
+import { ForgeProviderConfig } from '../../../../../services/forge/common/forgeConfigTypes.js';
 
 interface ProviderField {
 	id: string;
@@ -68,9 +69,9 @@ export class Step3Provider implements IOnboardingStep {
 
 	constructor(
 		@ISecretStorageService private readonly _secretStorageService: ISecretStorageService,
-		@IConfigurationService _configurationService: IConfigurationService,
-		@IFileDialogService _fileDialogService: IFileDialogService,
-		@IFileService _fileService: IFileService,
+		@IConfigurationService private readonly _configurationService: IConfigurationService,
+		@IFileDialogService private readonly _fileDialogService: IFileDialogService,
+		@IFileService private readonly _fileService: IFileService,
 	) { }
 
 	render(container: HTMLElement, env: IEnvironmentDetectionResult): void {
@@ -100,6 +101,19 @@ export class Step3Provider implements IOnboardingStep {
 	}
 
 	validate(): boolean {
+		// Field-based providers (e.g. Vertex)
+		for (const provider of PROVIDERS) {
+			if (!provider.fields) { continue; }
+			const checkbox = this._checkboxes.get(provider.id);
+			if (!checkbox?.checked) { continue; }
+			const values = this._fieldValues.get(provider.id);
+			const allRequiredSet = provider.fields
+				.filter(f => !f.optional)
+				.every(f => (values?.get(f.id) ?? '').length > 0);
+			if (allRequiredSet) { return true; }
+		}
+
+		// Legacy single-key providers
 		for (const [providerId, key] of this._apiKeys) {
 			const def = PROVIDERS.find(p => p.id === providerId);
 			if (def?.isLocal || key.length > 0) {
@@ -110,9 +124,36 @@ export class Step3Provider implements IOnboardingStep {
 	}
 
 	async onNext(): Promise<void> {
+		// Legacy single-key providers
 		for (const [providerId, key] of this._apiKeys.entries()) {
 			if (key && this._checkboxes.get(providerId)?.checked) {
 				await this._secretStorageService.set(`forge.provider.apiKey.${providerId}`, key);
+			}
+		}
+
+		// Field-based providers
+		for (const provider of PROVIDERS) {
+			if (!provider.fields) { continue; }
+			const checkbox = this._checkboxes.get(provider.id);
+			if (!checkbox?.checked) { continue; }
+
+			const values = this._fieldValues.get(provider.id) ?? new Map<string, string>();
+
+			if (provider.id === 'vertex') {
+				const projectId = values.get('projectId') ?? '';
+				const location = values.get('location') ?? '';
+				const serviceAccountJson = values.get('serviceAccountJson') ?? '';
+
+				const currentProviders = this._configurationService.getValue<ForgeProviderConfig[]>('forge.providers') ?? [];
+				const withoutVertex = currentProviders.filter(p => p.name !== 'vertex');
+				const vertexEntry: ForgeProviderConfig = { name: 'vertex', projectId, location, models: [] };
+				await this._configurationService.updateValue(
+					'forge.providers',
+					[...withoutVertex, vertexEntry],
+					ConfigurationTarget.USER,
+				);
+
+				await this._secretStorageService.set('forge.provider.apiKey.vertex', serviceAccountJson);
 			}
 		}
 	}
@@ -173,42 +214,158 @@ export class Step3Provider implements IOnboardingStep {
 			option.classList.toggle('checked', checkbox.checked);
 		});
 
-		// API key section (for non-local providers)
+		// Form section: multi-field (vertex) or single API key
 		if (!provider.isLocal) {
-			const keySection = document.createElement('div');
-			keySection.className = 'forge-onboarding-api-key-section';
-			keySection.style.display = checkbox.checked ? '' : 'none';
+			if (provider.fields) {
+				// Multi-field provider (e.g. Vertex)
+				const fieldsSection = document.createElement('div');
+				fieldsSection.className = 'forge-onboarding-api-key-section';
+				fieldsSection.style.display = checkbox.checked ? '' : 'none';
+				fieldsSection.appendChild(this._buildFieldsForm(provider, env));
+				option.appendChild(fieldsSection);
+				this._keySections.set(provider.id, fieldsSection);
 
-			const keyInput = document.createElement('input');
-			keyInput.type = 'password';
-			keyInput.className = 'forge-onboarding-api-key-input';
-			keyInput.placeholder = `Enter ${provider.label} API key`;
-			if (detectedKey) {
-				keyInput.value = detectedKey;
-			}
+				// Auto-check when env vars are fully set
+				const hasFullVertexEnv = provider.id === 'vertex' && !!env.vertexEnv.projectId && !!env.vertexEnv.location;
+				if (hasFullVertexEnv && !checkbox.checked) {
+					this._setChecked(provider.id, true, '');
+					option.classList.add('checked');
+				}
+			} else {
+				// Legacy single-key provider
+				const keySection = document.createElement('div');
+				keySection.className = 'forge-onboarding-api-key-section';
+				keySection.style.display = checkbox.checked ? '' : 'none';
 
-			const confirm = document.createElement('div');
-			confirm.className = 'forge-onboarding-api-key-confirm';
-			confirm.style.display = 'none';
-			this._keyConfirms.set(provider.id, confirm);
+				const keyInput = document.createElement('input');
+				keyInput.type = 'password';
+				keyInput.className = 'forge-onboarding-api-key-input';
+				keyInput.placeholder = `Enter ${provider.label} API key`;
+				if (detectedKey) {
+					keyInput.value = detectedKey;
+				}
 
-			keyInput.addEventListener('input', () => {
-				this._apiKeys.set(provider.id, keyInput.value);
+				const confirm = document.createElement('div');
+				confirm.className = 'forge-onboarding-api-key-confirm';
+				confirm.style.display = 'none';
+				this._keyConfirms.set(provider.id, confirm);
+
+				keyInput.addEventListener('input', () => {
+					this._apiKeys.set(provider.id, keyInput.value);
+					this._updateKeyConfirm(provider.id, !!detectedKey);
+				});
+
+				keySection.appendChild(keyInput);
+				keySection.appendChild(confirm);
+				option.appendChild(keySection);
+
+				this._keyInputs.set(provider.id, keyInput);
+				this._keySections.set(provider.id, keySection);
+
 				this._updateKeyConfirm(provider.id, !!detectedKey);
-			});
-
-			keySection.appendChild(keyInput);
-			keySection.appendChild(confirm);
-			option.appendChild(keySection);
-
-			this._keyInputs.set(provider.id, keyInput);
-			this._keySections.set(provider.id, keySection);
-
-			// Show confirmation immediately if a key was pre-filled
-			this._updateKeyConfirm(provider.id, !!detectedKey);
+			}
 		}
 
 		return option;
+	}
+
+	private _buildFieldsForm(provider: ProviderDefinition, env: IEnvironmentDetectionResult): HTMLElement {
+		const form = document.createElement('div');
+		form.className = 'forge-onboarding-fields-form';
+
+		if (!this._fieldValues.has(provider.id)) {
+			this._fieldValues.set(provider.id, new Map());
+		}
+		const values = this._fieldValues.get(provider.id)!;
+
+		for (const field of provider.fields ?? []) {
+			const fieldRow = document.createElement('div');
+			fieldRow.className = 'forge-onboarding-field-row';
+
+			// Label + optional env badge
+			const labelRow = document.createElement('div');
+			labelRow.className = 'forge-onboarding-field-label-row';
+
+			const labelEl = document.createElement('label');
+			labelEl.textContent = field.label;
+			if (field.optional) {
+				const optionalBadge = document.createElement('span');
+				optionalBadge.className = 'forge-onboarding-field-optional';
+				optionalBadge.textContent = 'optional';
+				labelEl.appendChild(optionalBadge);
+			}
+			labelRow.appendChild(labelEl);
+
+			fieldRow.appendChild(labelRow);
+
+			if (field.type === 'json') {
+				const browseLink = document.createElement('button');
+				browseLink.type = 'button';
+				browseLink.className = 'forge-onboarding-json-browse';
+				browseLink.textContent = 'Browse...';
+				labelRow.appendChild(browseLink);
+
+				const textarea = document.createElement('textarea');
+				textarea.className = 'forge-onboarding-provider-json-input';
+				textarea.placeholder = 'Paste service account JSON or use Browse';
+				textarea.rows = 4;
+				textarea.addEventListener('input', () => {
+					values.set(field.id, textarea.value);
+				});
+
+				browseLink.addEventListener('click', () => {
+					this._browseForJson(json => {
+						textarea.value = json;
+						values.set(field.id, json);
+					});
+				});
+
+				fieldRow.appendChild(textarea);
+			} else {
+				// Determine pre-fill value from vertexEnv
+				let prefillValue = '';
+				if (field.envVar === 'GOOGLE_CLOUD_PROJECT' && env.vertexEnv.projectId) {
+					prefillValue = env.vertexEnv.projectId;
+				} else if (field.envVar === 'GOOGLE_CLOUD_LOCATION' && env.vertexEnv.location) {
+					prefillValue = env.vertexEnv.location;
+				}
+
+				const input = document.createElement('input');
+				input.type = 'text';
+				input.className = 'forge-onboarding-provider-field-input';
+				if (field.placeholder) { input.placeholder = field.placeholder; }
+				if (prefillValue) {
+					input.value = prefillValue;
+					values.set(field.id, prefillValue);
+
+					const envBadge = document.createElement('span');
+					envBadge.className = 'forge-onboarding-field-env-badge';
+					envBadge.textContent = 'from environment';
+					labelRow.appendChild(envBadge);
+				}
+				input.addEventListener('input', () => {
+					values.set(field.id, input.value);
+				});
+				fieldRow.appendChild(input);
+			}
+
+			form.appendChild(fieldRow);
+		}
+
+		return form;
+	}
+
+	private async _browseForJson(onSelect: (json: string) => void): Promise<void> {
+		const uris = await this._fileDialogService.showOpenDialog({
+			title: 'Select Service Account JSON',
+			canSelectFiles: true,
+			canSelectFolders: false,
+			canSelectMany: false,
+			filters: [{ name: 'JSON Files', extensions: ['json'] }],
+		});
+		if (!uris || uris.length === 0) { return; }
+		const content = await this._fileService.readFile(uris[0]);
+		onSelect(content.value.toString());
 	}
 
 	private _updateKeyConfirm(providerId: string, fromEnvironment: boolean): void {
@@ -251,6 +408,12 @@ export class Step3Provider implements IOnboardingStep {
 		if (checked) {
 			if (def?.isLocal) {
 				this._apiKeys.set(providerId, '');
+			} else if (def?.fields) {
+				// Multi-field provider: initialize values map if not already set
+				if (!this._fieldValues.has(providerId)) {
+					this._fieldValues.set(providerId, new Map());
+				}
+				if (keySection) { keySection.style.display = 'block'; }
 			} else {
 				if (keyInput && !keyInput.value && prefillKey) {
 					keyInput.value = prefillKey;
@@ -260,6 +423,8 @@ export class Step3Provider implements IOnboardingStep {
 			}
 		} else {
 			this._apiKeys.delete(providerId);
+			// Do NOT delete _fieldValues here — values persist across uncheck/recheck so pre-filled
+			// env values aren't lost. onNext() and validate() both gate on checkbox.checked.
 			if (keySection) { keySection.style.display = 'none'; }
 		}
 	}
