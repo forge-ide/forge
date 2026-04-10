@@ -9,6 +9,7 @@ export interface IEnvironmentDetectionResult {
 	ollamaRunning: boolean;
 	lmStudioRunning: boolean;
 	npxAvailable: boolean;
+	vertexEnv: { projectId: string | undefined; location: string | undefined };
 }
 
 export interface IForgeOnboardingService {
