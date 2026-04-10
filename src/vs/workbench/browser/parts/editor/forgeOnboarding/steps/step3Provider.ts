@@ -5,18 +5,42 @@
 
 import { IEnvironmentDetectionResult } from '../../../../../services/forge/common/forgeOnboardingService.js';
 import { ISecretStorageService } from '../../../../../../platform/secrets/common/secrets.js';
+import { IConfigurationService } from '../../../../../../platform/configuration/common/configuration.js';
+import { IFileDialogService } from '../../../../../../platform/dialogs/common/dialogs.js';
+import { IFileService } from '../../../../../../platform/files/common/files.js';
 import { IOnboardingStep } from '../forgeOnboardingView.js';
+
+interface ProviderField {
+	id: string;
+	label: string;
+	placeholder?: string;
+	envVar?: string;     // pre-fill value from this env var; shows "from environment" badge
+	type?: 'text' | 'json'; // 'text' = single-line input (default), 'json' = textarea + browse
+	optional?: boolean;  // if true, may be empty and step still validates
+}
 
 interface ProviderDefinition {
 	id: string;
 	label: string;
 	description: string;
 	isLocal: boolean;
+	fields?: ProviderField[]; // absent → legacy single API key input
 }
 
 const PROVIDERS: ProviderDefinition[] = [
 	{ id: 'anthropic', label: 'Anthropic', description: 'Claude 3.5 Sonnet, Claude 3 Haiku and more', isLocal: false },
 	{ id: 'openai', label: 'OpenAI', description: 'GPT-4o, GPT-4 Turbo, o1 and more', isLocal: false },
+	{
+		id: 'vertex',
+		label: 'Google Vertex AI',
+		description: 'Gemini and Claude models via Google Cloud',
+		isLocal: false,
+		fields: [
+			{ id: 'projectId', label: 'Project ID', envVar: 'GOOGLE_CLOUD_PROJECT', type: 'text' },
+			{ id: 'location', label: 'Location', envVar: 'GOOGLE_CLOUD_LOCATION', type: 'text', placeholder: 'us-central1' },
+			{ id: 'serviceAccountJson', label: 'Service Account JSON', type: 'json', optional: true },
+		],
+	},
 	{ id: 'custom', label: 'Custom endpoint', description: 'Any OpenAI-compatible API - Azure, Together, Groq, your own', isLocal: false },
 	{ id: 'local', label: 'Local - Ollama / LM Studio', description: 'No local server detected - install Ollama to use local models', isLocal: true },
 ];
@@ -33,13 +57,20 @@ export class Step3Provider implements IOnboardingStep {
 	private readonly _keySections = new Map<string, HTMLElement>();
 	private readonly _optionEls = new Map<string, HTMLElement>();
 	private readonly _keyConfirms = new Map<string, HTMLElement>();
+	// For multi-field providers: providerId -> fieldId -> value
+	private readonly _fieldValues = new Map<string, Map<string, string>>();
 
 	get configuredProviders(): string[] {
-		return Array.from(this._apiKeys.keys());
+		const fromApiKeys = Array.from(this._apiKeys.keys());
+		const fromFields = Array.from(this._fieldValues.keys()).filter(id => this._checkboxes.get(id)?.checked);
+		return [...fromApiKeys, ...fromFields];
 	}
 
 	constructor(
 		@ISecretStorageService private readonly _secretStorageService: ISecretStorageService,
+		@IConfigurationService _configurationService: IConfigurationService,
+		@IFileDialogService _fileDialogService: IFileDialogService,
+		@IFileService _fileService: IFileService,
 	) { }
 
 	render(container: HTMLElement, env: IEnvironmentDetectionResult): void {
