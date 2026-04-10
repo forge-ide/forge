@@ -101,7 +101,7 @@ export class Step3Provider implements IOnboardingStep {
 			dot.className = 'forge-onboarding-detect-dot';
 			vertexBanner.appendChild(dot);
 
-			vertexBanner.appendChild(document.createTextNode('GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION detected'));
+			vertexBanner.appendChild(document.createTextNode('Google Cloud environment detected (project + location)'));
 			container.appendChild(vertexBanner);
 		}
 
@@ -169,6 +169,8 @@ export class Step3Provider implements IOnboardingStep {
 				);
 
 				await this._secretStorageService.set('forge.provider.apiKey.vertex', serviceAccountJson);
+			} else {
+				this._logService.warn(`[Step3Provider] Unhandled field-based provider in onNext(): ${provider.id}`);
 			}
 		}
 	}
