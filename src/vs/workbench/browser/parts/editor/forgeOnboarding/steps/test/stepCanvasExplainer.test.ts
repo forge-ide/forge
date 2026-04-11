@@ -32,6 +32,7 @@ suite('StepCanvasExplainer', () => {
 			ollamaRunning: false,
 			lmStudioRunning: false,
 			npxAvailable: false,
+			vertexEnv: { projectId: undefined, location: undefined },
 		});
 		assert.ok(container.querySelector('.forge-onboarding-quad-preview'), 'quad preview not found');
 	});
@@ -46,6 +47,7 @@ suite('StepCanvasExplainer', () => {
 			ollamaRunning: false,
 			lmStudioRunning: false,
 			npxAvailable: false,
+			vertexEnv: { projectId: undefined, location: undefined },
 		});
 		const preview = container.querySelector('.forge-onboarding-quad-preview');
 		assert.ok(preview, 'quad preview not found');
@@ -63,6 +65,7 @@ suite('StepCanvasExplainer', () => {
 			ollamaRunning: false,
 			lmStudioRunning: false,
 			npxAvailable: false,
+			vertexEnv: { projectId: undefined, location: undefined },
 		});
 		const requiredTag = container.querySelector('.forge-onboarding-required-tag');
 		assert.ok(requiredTag, 'required tag not found');

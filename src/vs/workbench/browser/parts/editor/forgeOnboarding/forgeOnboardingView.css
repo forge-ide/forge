@@ -383,6 +383,105 @@
 	font-weight: 700;
 }
 
+/* Multi-field provider forms (e.g. Vertex AI) */
+.forge-onboarding-fields-form {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.forge-onboarding-field-row {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.forge-onboarding-field-label-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12px;
+	color: var(--color-text-secondary);
+}
+
+.forge-onboarding-field-optional {
+	font-size: 10px;
+	padding: 1px 5px;
+	border-radius: 3px;
+	background: var(--color-surface-2);
+	border: 1px solid var(--color-border-1);
+	color: var(--color-text-tertiary);
+}
+
+.forge-onboarding-field-env-badge {
+	font-size: 10px;
+	padding: 1px 5px;
+	border-radius: 3px;
+	background: var(--color-surface-2);
+	border: 1px solid var(--color-border-1);
+	color: var(--color-success);
+}
+
+.forge-onboarding-provider-field-input {
+	width: 100%;
+	box-sizing: border-box;
+	padding: 8px 12px;
+	background: var(--color-surface-2);
+	border: 1px solid var(--color-border-2);
+	border-radius: 4px;
+	color: var(--color-text-primary);
+	font-family: 'Fira Code', monospace;
+	font-size: 13px;
+}
+
+.forge-onboarding-provider-field-input:hover {
+	border-color: var(--color-iron-300);
+}
+
+.forge-onboarding-provider-field-input:focus {
+	outline: none;
+	border-color: var(--color-ember-400);
+}
+
+.forge-onboarding-provider-json-input {
+	width: 100%;
+	box-sizing: border-box;
+	padding: 8px 12px;
+	background: var(--color-surface-2);
+	border: 1px solid var(--color-border-2);
+	border-radius: 4px;
+	color: var(--color-text-primary);
+	font-family: 'Fira Code', monospace;
+	font-size: 12px;
+	resize: vertical;
+	min-height: 80px;
+}
+
+.forge-onboarding-provider-json-input:hover {
+	border-color: var(--color-iron-300);
+}
+
+.forge-onboarding-provider-json-input:focus {
+	outline: none;
+	border-color: var(--color-ember-400);
+}
+
+.forge-onboarding-json-browse {
+	align-self: flex-start;
+	padding: 4px 10px;
+	font-size: 11px;
+	background: transparent;
+	border: 1px solid var(--color-border-1);
+	border-radius: 3px;
+	color: var(--color-text-secondary);
+	cursor: pointer;
+}
+
+.forge-onboarding-json-browse:hover {
+	border-color: var(--color-iron-300);
+	color: var(--color-text-primary);
+}
+
 /* Step 4 ready styles */
 .forge-onboarding-summary {
 	display: flex;

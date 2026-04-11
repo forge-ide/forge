@@ -170,3 +170,13 @@ The `@` context picker offers a "Git Diff" option, but it currently returns a no
 `ForgeAgentTask.allowedTools` is populated from agent definitions but never applied in `runAgentLoop`. All tools from `forgeMcpService.listTools()` are passed to the agent regardless of what `allowedTools` specifies.
 
 **Action:** In `runAgentLoop`, when `allowedTools` is set on the task, filter the tools list returned by `forgeMcpService.listTools()` to only include tools whose names appear in `allowedTools` before passing the list to the model.
+
+---
+
+### Generalize multi-field provider env-var pre-fill
+
+**File:** `src/vs/workbench/browser/parts/editor/forgeOnboarding/steps/step3Provider.ts` (lines 340–346 in `_buildFieldsForm()`)
+
+Currently, environment variable pre-filling is hardcoded for Vertex: the code checks `field.envVar === 'GOOGLE_CLOUD_PROJECT'` and looks it up in `env.vertexEnv.projectId`. This pattern should be generalized before a second multi-field provider is added.
+
+**Action:** Refactor `_buildFieldsForm()` to use a generic `field.envVar` lookup mechanism. The `IEnvironmentDetectionResult` type should store detected environment variables in a flat map (e.g. `env.detectedEnvVars: Record<string, string>`) or similar structure, then `_buildFieldsForm()` checks `field.envVar` against that map. This removes the Vertex-specific conditional and scales to any number of field-based providers.

@@ -36,6 +36,7 @@ suite('StepMCP', () => {
 		ollamaRunning: false,
 		lmStudioRunning: false,
 		npxAvailable: false,
+		vertexEnv: { projectId: undefined, location: undefined },
 	};
 
 	test('stepId is mcp', () => {
