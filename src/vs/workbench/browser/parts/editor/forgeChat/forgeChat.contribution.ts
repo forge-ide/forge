@@ -207,5 +207,48 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).regis
 			default: false,
 			description: localize('forge.autoAttachActiveEditor', "Automatically attach the active code editor as context to the nearest AI chat pane."),
 		},
+		'forge.providers': {
+			type: 'array',
+			default: [],
+			description: localize('forge.providers', "AI provider configurations saved by the Forge onboarding flow."),
+			items: {
+				type: 'object',
+				properties: {
+					name: { type: 'string' },
+					baseURL: { type: 'string' },
+					envKey: { type: 'string' },
+					projectId: { type: 'string' },
+					location: { type: 'string' },
+					models: {
+						type: 'array',
+						items: {
+							type: 'object',
+							properties: {
+								id: { type: 'string' },
+								maxTokens: { type: 'number' },
+								contextBudget: { type: 'number' },
+							},
+							required: ['id'],
+						},
+					},
+				},
+				required: ['name', 'models'],
+			},
+		},
+		'forge.defaultProvider': {
+			type: 'string',
+			default: '',
+			description: localize('forge.defaultProvider', "Name of the default AI provider (e.g. 'anthropic', 'openai', 'vertex')."),
+		},
+		'forge.defaultModel': {
+			type: 'string',
+			default: '',
+			description: localize('forge.defaultModel', "Model ID to use when none is specified."),
+		},
+		'forge.stream': {
+			type: 'boolean',
+			default: true,
+			description: localize('forge.stream', "Stream AI responses incrementally."),
+		},
 	},
 });

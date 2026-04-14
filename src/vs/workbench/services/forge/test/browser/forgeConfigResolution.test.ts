@@ -20,6 +20,9 @@ suite('ForgeConfigResolutionService', () => {
 
 	ensureNoDisposablesAreLeakedInTestSuite();
 
+	// Global forge.json is at userRoamingDataHome/forge/forge.json
+	const GLOBAL_FORGE_JSON = '/home/user/.config/forge/forge.json';
+
 	function createMockFileService(files: Record<string, string>, fileChangeEmitter?: Emitter<void>) {
 		return {
 			_serviceBrand: undefined,
@@ -45,21 +48,16 @@ suite('ForgeConfigResolutionService', () => {
 			exists: async (uri: { path: string }) => Object.prototype.hasOwnProperty.call(files, uri.path),
 			watch: (): { dispose: () => void } => ({ dispose: () => { } }),
 			onDidFilesChange: (fileChangeEmitter ? fileChangeEmitter.event : Event.None) as never,
+			writeFile: async (uri: { path: string }, data: { toString: () => string }) => {
+				files[uri.path] = data.toString();
+			},
 		};
 	}
 
-	function createMockConfigService(config: Record<string, unknown> = {}) {
+	function createMockEnvironmentService(roamingDataHome: string = '/home/user/.config') {
 		return {
 			_serviceBrand: undefined,
-			getConfig: () => ({
-				defaultProvider: 'anthropic',
-				providers: [],
-				configPaths: config['configPaths'],
-				disabled: config['disabled'],
-			}),
-			updateConfig: async (partial: Record<string, unknown>) => {
-				Object.assign(config, partial);
-			},
+			userRoamingDataHome: URI.file(roamingDataHome),
 		};
 	}
 
@@ -82,7 +80,7 @@ suite('ForgeConfigResolutionService', () => {
 		};
 		const service = disposables.add(new ForgeConfigResolutionService(
 			createMockFileService(files) as never,
-			createMockConfigService() as never,
+			createMockEnvironmentService() as never,
 			createMockPathService() as never,
 			new NullLogService(),
 		));
@@ -102,7 +100,7 @@ suite('ForgeConfigResolutionService', () => {
 		};
 		const service = disposables.add(new ForgeConfigResolutionService(
 			createMockFileService(files) as never,
-			createMockConfigService() as never,
+			createMockEnvironmentService() as never,
 			createMockPathService() as never,
 			new NullLogService(),
 		));
@@ -118,11 +116,14 @@ suite('ForgeConfigResolutionService', () => {
 					keep: { command: 'keep-cmd', args: [] },
 					drop: { command: 'drop-cmd', args: [] }
 				}
+			}),
+			'/workspace/forge.json': JSON.stringify({
+				disabled: { mcpServers: ['drop'], agents: [] }
 			})
 		};
 		const service = disposables.add(new ForgeConfigResolutionService(
 			createMockFileService(files) as never,
-			createMockConfigService({ disabled: { mcpServers: ['drop'], agents: [] } }) as never,
+			createMockEnvironmentService() as never,
 			createMockPathService() as never,
 			new NullLogService(),
 		));
@@ -135,11 +136,14 @@ suite('ForgeConfigResolutionService', () => {
 		const files: Record<string, string> = {
 			'/shared/team/.mcp.json': JSON.stringify({
 				mcpServers: { team_server: { command: 'team-cmd', args: [] } }
+			}),
+			'/workspace/forge.json': JSON.stringify({
+				configPaths: { mcp: ['/shared/team/'] }
 			})
 		};
 		const service = disposables.add(new ForgeConfigResolutionService(
 			createMockFileService(files) as never,
-			createMockConfigService({ configPaths: { mcp: ['/shared/team/'] } }) as never,
+			createMockEnvironmentService() as never,
 			createMockPathService() as never,
 			new NullLogService(),
 		));
@@ -151,7 +155,7 @@ suite('ForgeConfigResolutionService', () => {
 	test('getCached returns undefined before first resolve', () => {
 		const service = disposables.add(new ForgeConfigResolutionService(
 			createMockFileService({}) as never,
-			createMockConfigService() as never,
+			createMockEnvironmentService() as never,
 			createMockPathService() as never,
 			new NullLogService(),
 		));
@@ -166,7 +170,7 @@ suite('ForgeConfigResolutionService', () => {
 		};
 		const service = disposables.add(new ForgeConfigResolutionService(
 			createMockFileService(files) as never,
-			createMockConfigService() as never,
+			createMockEnvironmentService() as never,
 			createMockPathService() as never,
 			new NullLogService(),
 		));
@@ -179,7 +183,7 @@ suite('ForgeConfigResolutionService', () => {
 	test('no config files exist returns empty config without throwing', async () => {
 		const service = disposables.add(new ForgeConfigResolutionService(
 			createMockFileService({}) as never,
-			createMockConfigService() as never,
+			createMockEnvironmentService() as never,
 			createMockPathService() as never,
 			new NullLogService(),
 		));
@@ -203,7 +207,7 @@ suite('ForgeConfigResolutionService', () => {
 		};
 		const service = disposables.add(new ForgeConfigResolutionService(
 			createMockFileService(files) as never,
-			createMockConfigService() as never,
+			createMockEnvironmentService() as never,
 			createMockPathService() as never,
 			new NullLogService(),
 		));
@@ -225,7 +229,7 @@ suite('ForgeConfigResolutionService', () => {
 		};
 		const service = disposables.add(new ForgeConfigResolutionService(
 			createMockFileService(files) as never,
-			createMockConfigService() as never,
+			createMockEnvironmentService() as never,
 			createMockPathService() as never,
 			new NullLogService(),
 		));
@@ -242,10 +246,13 @@ suite('ForgeConfigResolutionService', () => {
 			'/home/user/.agents/drop.md': [
 				'---', 'name: drop', '---', 'Drop this agent.',
 			].join('\n'),
+			'/workspace/forge.json': JSON.stringify({
+				disabled: { mcpServers: [], agents: ['drop'] }
+			})
 		};
 		const service = disposables.add(new ForgeConfigResolutionService(
 			createMockFileService(files) as never,
-			createMockConfigService({ disabled: { mcpServers: [], agents: ['drop'] } }) as never,
+			createMockEnvironmentService() as never,
 			createMockPathService() as never,
 			new NullLogService(),
 		));
@@ -255,9 +262,14 @@ suite('ForgeConfigResolutionService', () => {
 	});
 
 	test('missing file at configPaths.mcp is skipped gracefully', async () => {
+		const files: Record<string, string> = {
+			'/workspace/forge.json': JSON.stringify({
+				configPaths: { mcp: ['/nonexistent/path/'] }
+			})
+		};
 		const service = disposables.add(new ForgeConfigResolutionService(
-			createMockFileService({}) as never,
-			createMockConfigService({ configPaths: { mcp: ['/nonexistent/path/'] } }) as never,
+			createMockFileService(files) as never,
+			createMockEnvironmentService() as never,
 			createMockPathService() as never,
 			new NullLogService(),
 		));
@@ -277,7 +289,7 @@ suite('ForgeConfigResolutionService', () => {
 		};
 		const service = disposables.add(new ForgeConfigResolutionService(
 			createMockFileService(files) as never,
-			createMockConfigService() as never,
+			createMockEnvironmentService() as never,
 			createMockPathService() as never,
 			new NullLogService(),
 		));
@@ -290,7 +302,7 @@ suite('ForgeConfigResolutionService', () => {
 	test('onDidChangeResolved fires after resolve completes', async () => {
 		const service = disposables.add(new ForgeConfigResolutionService(
 			createMockFileService({}) as never,
-			createMockConfigService() as never,
+			createMockEnvironmentService() as never,
 			createMockPathService() as never,
 			new NullLogService(),
 		));
@@ -301,81 +313,94 @@ suite('ForgeConfigResolutionService', () => {
 	});
 
 	test('setMcpServerDisabled adds server to disabled list', async () => {
-		const config: Record<string, unknown> = {};
+		const files: Record<string, string> = {};
 		const service = disposables.add(new ForgeConfigResolutionService(
-			createMockFileService({}) as never,
-			createMockConfigService(config) as never,
+			createMockFileService(files) as never,
+			createMockEnvironmentService() as never,
 			createMockPathService() as never,
 			new NullLogService(),
 		));
 		await service.setMcpServerDisabled('my-server', true);
-		const disabled = (config['disabled'] as { mcpServers: string[] } | undefined)?.mcpServers;
-		assert.ok(disabled?.includes('my-server'));
+		const written = files[GLOBAL_FORGE_JSON];
+		assert.ok(written, 'forge.json should have been written');
+		const parsed = JSON.parse(written) as { disabled: { mcpServers: string[] } };
+		assert.ok(parsed.disabled.mcpServers.includes('my-server'));
 	});
 
 	test('setMcpServerDisabled removing server is idempotent', async () => {
-		const config: Record<string, unknown> = {
-			disabled: { mcpServers: ['my-server'], agents: [] }
+		const files: Record<string, string> = {
+			[GLOBAL_FORGE_JSON]: JSON.stringify({
+				disabled: { mcpServers: ['my-server'], agents: [] }
+			})
 		};
 		const service = disposables.add(new ForgeConfigResolutionService(
-			createMockFileService({}) as never,
-			createMockConfigService(config) as never,
+			createMockFileService(files) as never,
+			createMockEnvironmentService() as never,
 			createMockPathService() as never,
 			new NullLogService(),
 		));
 		await service.setMcpServerDisabled('my-server', false);
-		const disabled = (config['disabled'] as { mcpServers: string[] }).mcpServers;
-		assert.ok(!disabled.includes('my-server'));
+		const written = files[GLOBAL_FORGE_JSON];
+		const parsed = JSON.parse(written) as { disabled: { mcpServers: string[] } };
+		assert.ok(!parsed.disabled.mcpServers.includes('my-server'));
 	});
 
 	test('setMcpServerDisabled disabling twice does not duplicate', async () => {
-		const config: Record<string, unknown> = {
-			disabled: { mcpServers: ['existing'], agents: [] }
+		const files: Record<string, string> = {
+			[GLOBAL_FORGE_JSON]: JSON.stringify({
+				disabled: { mcpServers: ['existing'], agents: [] }
+			})
 		};
 		const service = disposables.add(new ForgeConfigResolutionService(
-			createMockFileService({}) as never,
-			createMockConfigService(config) as never,
+			createMockFileService(files) as never,
+			createMockEnvironmentService() as never,
 			createMockPathService() as never,
 			new NullLogService(),
 		));
 		await service.setMcpServerDisabled('existing', true);
-		const disabled = (config['disabled'] as { mcpServers: string[] }).mcpServers;
-		assert.strictEqual(disabled.filter(s => s === 'existing').length, 1);
+		const written = files[GLOBAL_FORGE_JSON];
+		const parsed = JSON.parse(written) as { disabled: { mcpServers: string[] } };
+		assert.strictEqual(parsed.disabled.mcpServers.filter(s => s === 'existing').length, 1);
 	});
 
 	test('setAgentDisabled adds agent to disabled list', async () => {
-		const config: Record<string, unknown> = {};
+		const files: Record<string, string> = {};
 		const service = disposables.add(new ForgeConfigResolutionService(
-			createMockFileService({}) as never,
-			createMockConfigService(config) as never,
+			createMockFileService(files) as never,
+			createMockEnvironmentService() as never,
 			createMockPathService() as never,
 			new NullLogService(),
 		));
 		await service.setAgentDisabled('developer', true);
-		const disabled = (config['disabled'] as { agents: string[] } | undefined)?.agents;
-		assert.ok(disabled?.includes('developer'));
+		const written = files[GLOBAL_FORGE_JSON];
+		assert.ok(written, 'forge.json should have been written');
+		const parsed = JSON.parse(written) as { disabled: { agents: string[] } };
+		assert.ok(parsed.disabled.agents.includes('developer'));
 	});
 
 	test('setAgentDisabled re-enabling removes agent from disabled list', async () => {
-		const config: Record<string, unknown> = {
-			disabled: { mcpServers: [], agents: ['developer'] }
+		const files: Record<string, string> = {
+			[GLOBAL_FORGE_JSON]: JSON.stringify({
+				disabled: { mcpServers: [], agents: ['developer'] }
+			})
 		};
 		const service = disposables.add(new ForgeConfigResolutionService(
-			createMockFileService({}) as never,
-			createMockConfigService(config) as never,
+			createMockFileService(files) as never,
+			createMockEnvironmentService() as never,
 			createMockPathService() as never,
 			new NullLogService(),
 		));
 		await service.setAgentDisabled('developer', false);
-		const disabled = (config['disabled'] as { agents: string[] }).agents;
-		assert.ok(!disabled.includes('developer'));
+		const written = files[GLOBAL_FORGE_JSON];
+		const parsed = JSON.parse(written) as { disabled: { agents: string[] } };
+		assert.ok(!parsed.disabled.agents.includes('developer'));
 	});
 
 	test('file watcher triggers onDidChangeResolved after debounce', async () => {
 		const fileChangeEmitter = disposables.add(new Emitter<void>());
 		const service = disposables.add(new ForgeConfigResolutionService(
 			createMockFileService({}, fileChangeEmitter) as never,
-			createMockConfigService() as never,
+			createMockEnvironmentService() as never,
 			createMockPathService() as never,
 			new NullLogService(),
 		));
@@ -396,7 +421,7 @@ suite('ForgeConfigResolutionService', () => {
 		const fileChangeEmitter = disposables.add(new Emitter<void>());
 		const service = disposables.add(new ForgeConfigResolutionService(
 			createMockFileService({}, fileChangeEmitter) as never,
-			createMockConfigService() as never,
+			createMockEnvironmentService() as never,
 			createMockPathService() as never,
 			new NullLogService(),
 		));
@@ -423,7 +448,7 @@ suite('ForgeConfigResolutionService', () => {
 		};
 		const service = disposables.add(new ForgeConfigResolutionService(
 			createMockFileService(files) as never,
-			createMockConfigService() as never,
+			createMockEnvironmentService() as never,
 			createMockPathService() as never,
 			new NullLogService(),
 		));

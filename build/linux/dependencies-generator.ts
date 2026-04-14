@@ -64,6 +64,10 @@ export async function getDependencies(packageType: 'deb' | 'rpm', buildDir: stri
 		if (file.includes('/prebuilds/')) {
 			return file.includes(`/prebuilds/linux-${archFilter}/`);
 		}
+		// Skip musl-linked native modules — not usable on glibc-based systems
+		if (file.includes('-musl/')) {
+			return false;
+		}
 		return true;
 	});
 	// Add the tunnel binary.

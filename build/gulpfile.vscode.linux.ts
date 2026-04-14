@@ -78,7 +78,7 @@ function prepareDebPackage(arch: string) {
 			.pipe(replace('@@APPNAME@@', product.applicationName))
 			.pipe(rename('usr/share/zsh/vendor-completions/_' + product.applicationName));
 
-		const code = gulp.src(binaryDir + '/**/*', { base: binaryDir })
+		const code = gulp.src([binaryDir + '/**/*', '!' + binaryDir + '/resources/app/node_modules/*-musl/**'], { base: binaryDir })
 			.pipe(rename(function (p) { p.dirname = 'usr/share/' + product.applicationName + '/' + p.dirname; }));
 
 		let size = 0;
@@ -188,7 +188,7 @@ function prepareRpmPackage(arch: string) {
 			.pipe(replace('@@APPNAME@@', product.applicationName))
 			.pipe(rename('BUILD/usr/share/zsh/site-functions/_' + product.applicationName));
 
-		const code = gulp.src(binaryDir + '/**/*', { base: binaryDir })
+		const code = gulp.src([binaryDir + '/**/*', '!' + binaryDir + '/resources/app/node_modules/*-musl/**'], { base: binaryDir })
 			.pipe(rename(function (p) { p.dirname = 'BUILD/usr/share/' + product.applicationName + '/' + p.dirname; }));
 
 		const spec = gulp.src('resources/linux/rpm/code.spec.template', { base: '.' })

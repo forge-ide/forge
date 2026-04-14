@@ -1,16 +1,18 @@
+import { VSBuffer } from '../../../../base/common/buffer.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
+import { IEnvironmentService } from '../../../../platform/environment/common/environment.js';
 import { IForgeConfigResolutionService } from '../common/forgeConfigResolution.js';
-import { IForgeConfigService } from '../common/forgeConfigService.js';
 import {
 	ResolvedConfig,
 	McpServerEntry,
 	AgentDefinition,
 	SkillDefinition,
 	DisabledConfig,
+	ConfigPaths,
 	parseMcpJson,
 	parseAgentMarkdown,
 } from '../common/forgeConfigResolutionTypes.js';
@@ -28,6 +30,8 @@ export class ForgeConfigResolutionService
 	readonly onDidChangeResolved: Event<ResolvedConfig> =
 		this._onDidChangeResolved.event;
 
+	private readonly _globalForgeJsonUri: URI;
+
 	private _cached: ResolvedConfig | undefined;
 	private _lastWorkspaceRoot: string | undefined;
 	private _debounceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -35,11 +39,16 @@ export class ForgeConfigResolutionService
 
 	constructor(
 		@IFileService private readonly fileService: IFileService,
-		@IForgeConfigService private readonly configService: IForgeConfigService,
+		@IEnvironmentService environmentService: IEnvironmentService,
 		@IPathService private readonly pathService: IPathService,
 		@ILogService private readonly logService: ILogService,
 	) {
 		super();
+		this._globalForgeJsonUri = URI.joinPath(
+			environmentService.userRoamingDataHome,
+			'forge',
+			'forge.json',
+		);
 	}
 
 	getCached(): ResolvedConfig | undefined {
@@ -47,14 +56,10 @@ export class ForgeConfigResolutionService
 	}
 
 	async resolve(workspaceRoot: string): Promise<ResolvedConfig> {
-		const config = this.configService.getConfig();
+		const { configPaths, disabled: rawDisabled } = await this.readDiscoveryConfig(workspaceRoot);
+		const disabled: DisabledConfig = rawDisabled ?? { mcpServers: [], agents: [] };
 		const homeUri = await this.pathService.userHome();
 		const homePath = homeUri.path;
-		const configPaths = config.configPaths;
-		const disabled: DisabledConfig = config.disabled ?? {
-			mcpServers: [],
-			agents: [],
-		};
 
 		// --- Collect MCP servers ---
 		const serverMap = new Map<string, McpServerEntry>();
@@ -159,9 +164,12 @@ export class ForgeConfigResolutionService
 		serverName: string,
 		disabled: boolean,
 	): Promise<void> {
-		const config = this.configService.getConfig();
-		const current = config.disabled ?? { mcpServers: [], agents: [] };
-		const mcpSet = new Set(current.mcpServers);
+		if (!this._lastWorkspaceRoot) {
+			this.logService.warn('[ForgeConfigResolution] setMcpServerDisabled called before resolve() — writing to global forge.json');
+		}
+		const { disabled: current, sourceUri } = await this.readDiscoveryConfig(this._lastWorkspaceRoot ?? '');
+		const currentDisabled = current ?? { mcpServers: [], agents: [] };
+		const mcpSet = new Set(currentDisabled.mcpServers);
 
 		if (disabled) {
 			mcpSet.add(serverName);
@@ -169,15 +177,19 @@ export class ForgeConfigResolutionService
 			mcpSet.delete(serverName);
 		}
 
-		await this.configService.updateConfig({
-			disabled: { mcpServers: Array.from(mcpSet), agents: current.agents },
-		});
+		await this.writeDiscoveryConfig(
+			{ disabled: { mcpServers: Array.from(mcpSet), agents: currentDisabled.agents } },
+			sourceUri,
+		);
 	}
 
 	async setAgentDisabled(agentName: string, disabled: boolean): Promise<void> {
-		const config = this.configService.getConfig();
-		const current = config.disabled ?? { mcpServers: [], agents: [] };
-		const agentSet = new Set(current.agents);
+		if (!this._lastWorkspaceRoot) {
+			this.logService.warn('[ForgeConfigResolution] setAgentDisabled called before resolve() — writing to global forge.json');
+		}
+		const { disabled: current, sourceUri } = await this.readDiscoveryConfig(this._lastWorkspaceRoot ?? '');
+		const currentDisabled = current ?? { mcpServers: [], agents: [] };
+		const agentSet = new Set(currentDisabled.agents);
 
 		if (disabled) {
 			agentSet.add(agentName);
@@ -185,12 +197,51 @@ export class ForgeConfigResolutionService
 			agentSet.delete(agentName);
 		}
 
-		await this.configService.updateConfig({
-			disabled: {
-				mcpServers: current.mcpServers,
-				agents: Array.from(agentSet),
-			},
-		});
+		await this.writeDiscoveryConfig(
+			{ disabled: { mcpServers: currentDisabled.mcpServers, agents: Array.from(agentSet) } },
+			sourceUri,
+		);
+	}
+
+	// --- Discovery config (forge.json) ---
+
+	private async readDiscoveryConfig(workspaceRoot: string): Promise<{ configPaths?: ConfigPaths; disabled?: DisabledConfig; sourceUri: URI }> {
+		const candidates = [
+			URI.joinPath(URI.file(workspaceRoot), 'forge.json'),
+			this._globalForgeJsonUri,
+		];
+
+		for (const uri of candidates) {
+			try {
+				const content = await this.fileService.readFile(uri);
+				const parsed = JSON.parse(content.value.toString()) as { configPaths?: ConfigPaths; disabled?: DisabledConfig };
+				if (parsed.configPaths !== undefined || parsed.disabled !== undefined) {
+					return {
+						configPaths: parsed.configPaths,
+						disabled: parsed.disabled,
+						sourceUri: uri,
+					};
+				}
+			} catch {
+				// File absent or unreadable — try next candidate
+			}
+		}
+
+		return { sourceUri: this._globalForgeJsonUri };
+	}
+
+	private async writeDiscoveryConfig(partial: { configPaths?: ConfigPaths; disabled?: DisabledConfig }, targetUri: URI): Promise<void> {
+		let existing: Record<string, unknown> = {};
+		try {
+			const content = await this.fileService.readFile(targetUri);
+			existing = JSON.parse(content.value.toString()) as Record<string, unknown>;
+		} catch {
+			// File doesn't exist yet — will be created
+		}
+
+		const updated = { ...existing, ...partial };
+		const serialized = JSON.stringify(updated, undefined, '\t');
+		await this.fileService.writeFile(targetUri, VSBuffer.fromString(serialized));
 	}
 
 	// --- File watching ---
