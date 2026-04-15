@@ -1748,6 +1748,35 @@ export default tseslint.config(
 					]
 				},
 				{
+					'target': 'src/vs/workbench/contrib/forgeChats/~',
+					'restrictions': [
+						'vs/base/~',
+						'vs/base/parts/*/~',
+						'vs/platform/*/~',
+						'vs/editor/~',
+						'vs/editor/contrib/*/~',
+						'vs/workbench/~',
+						'vs/workbench/services/*/~',
+						'vs/workbench/contrib/*/~',
+						'vs/sessions/~',
+						'vs/sessions/contrib/sessions/browser/sessionsManagementService.js',
+						'vscode-notebook-renderer', // Type only import
+						'@vscode/tree-sitter-wasm', // type import
+						{
+							'when': 'hasBrowser',
+							'pattern': '@xterm/xterm'
+						},
+						{
+							'when': 'hasBrowser',
+							'pattern': '@xterm/addon-*'
+						},
+						{
+							'when': 'hasBrowser',
+							'pattern': 'vscode-textmate'
+						}
+					]
+				},
+				{
 					'target': 'src/vs/workbench/contrib/*/~',
 					'restrictions': [
 						'vs/base/~',

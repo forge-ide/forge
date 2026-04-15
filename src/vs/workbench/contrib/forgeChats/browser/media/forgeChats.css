@@ -1,0 +1,275 @@
+/*---------------------------------------------------------------------------------------------
+ * Forge - Chats panel styles
+ *--------------------------------------------------------------------------------------------*/
+
+.forge-chats-view {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	overflow: hidden;
+}
+
+/* Tab bar */
+.forge-chats-tab-bar {
+	display: flex;
+	flex-shrink: 0;
+	border-bottom: 1px solid var(--color-border-1, var(--vscode-sideBarSectionHeader-border));
+	background: var(--color-surface-2, var(--vscode-sideBar-background));
+}
+
+.forge-chats-tab {
+	padding: 5px 14px;
+	font-size: 11px;
+	color: var(--color-text-secondary, var(--vscode-sideBarTitle-foreground));
+	cursor: pointer;
+	border-bottom: 2px solid transparent;
+	user-select: none;
+}
+
+.forge-chats-tab:hover {
+	color: var(--color-text-primary, var(--vscode-foreground));
+}
+
+.forge-chats-tab--active {
+	color: var(--color-text-primary, var(--vscode-foreground));
+	border-bottom-color: var(--color-ember-400, var(--vscode-focusBorder));
+}
+
+/* Panes */
+.forge-chats-pane {
+	flex: 1;
+	overflow-y: auto;
+}
+
+.forge-chats-pane--hidden {
+	display: none;
+}
+
+/* Empty state */
+.forge-chats-empty {
+	padding: 16px 12px;
+	font-size: 11px;
+	color: var(--color-text-secondary, var(--vscode-descriptionForeground));
+	font-style: italic;
+}
+
+/* Provider headers (Chats tab) */
+.forge-provider-header {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 5px 8px;
+	font-size: 10px;
+	font-weight: 600;
+	color: var(--color-text-secondary, var(--vscode-sideBarSectionHeader-foreground));
+	background: var(--color-surface-2, var(--vscode-sideBarSectionHeader-background));
+	border-bottom: 1px solid var(--color-border-1, var(--vscode-sideBarSectionHeader-border));
+	cursor: pointer;
+	user-select: none;
+	position: sticky;
+	top: 0;
+	z-index: 1;
+}
+
+.forge-provider-header__dot {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--vscode-testing-iconPassed, #4caf50);
+	flex-shrink: 0;
+}
+
+.forge-provider-name {
+	flex: 1;
+}
+
+.forge-provider-header__chevron {
+	font-size: 9px;
+	color: var(--color-text-secondary, var(--vscode-descriptionForeground));
+}
+
+/* Chat rows */
+.forge-chat-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 5px 8px 5px 20px;
+	font-size: 11px;
+	color: var(--color-text-secondary, var(--vscode-foreground));
+	border-bottom: 1px solid var(--color-border-1, var(--vscode-sideBar-border));
+	cursor: pointer;
+}
+
+.forge-chat-row:hover {
+	background: var(--color-surface-3, var(--vscode-list-hoverBackground));
+}
+
+.forge-chat-row--expanded {
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 0;
+	background: var(--color-surface-3, var(--vscode-list-activeSelectionBackground));
+	border-left: 2px solid var(--color-ember-400, var(--vscode-focusBorder));
+	padding: 6px 8px 8px 18px;
+}
+
+.forge-chat-row-top {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	width: 100%;
+}
+
+.forge-chat-row-icon {
+	font-size: 9px;
+	color: var(--color-text-tertiary, var(--vscode-descriptionForeground));
+	flex-shrink: 0;
+}
+
+.forge-chat-row-label {
+	flex: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.forge-chat-row--expanded .forge-chat-row-label {
+	font-weight: 600;
+	color: var(--color-text-primary, #eae6de);
+	white-space: normal;
+}
+
+.forge-chat-row__badge {
+	font-size: 8px;
+	background: var(--color-surface-3, var(--vscode-badge-background));
+	border: 1px solid var(--color-border-1, var(--vscode-contrastBorder));
+	padding: 1px 5px;
+	border-radius: 3px;
+	color: var(--color-text-secondary, var(--vscode-badge-foreground));
+	flex-shrink: 0;
+	max-width: 90px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.forge-chat-snippet {
+	font-size: 9px;
+	color: var(--color-text-tertiary, var(--vscode-descriptionForeground));
+	font-style: italic;
+	margin-top: 3px;
+	line-height: 1.4;
+	overflow: hidden;
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+}
+
+.forge-chat-meta {
+	font-size: 9px;
+	color: var(--color-text-tertiary, var(--vscode-descriptionForeground));
+	margin-top: 3px;
+}
+
+.forge-chat-actions {
+	display: flex;
+	gap: 10px;
+	margin-top: 6px;
+}
+
+.forge-chat-action {
+	font-size: 9px;
+	color: var(--color-ember-400, var(--vscode-textLink-foreground));
+	cursor: pointer;
+	padding: 2px 0;
+}
+
+.forge-chat-action:hover {
+	text-decoration: underline;
+}
+
+.forge-chat-row__action--danger {
+	color: var(--vscode-errorForeground);
+}
+
+/* Provider cards (Providers tab) */
+.forge-provider-card {
+	margin: 8px;
+	border: 1px solid var(--color-border-1, var(--vscode-sideBar-border));
+	border-radius: 4px;
+	overflow: hidden;
+}
+
+.forge-provider-card-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 7px 10px;
+	font-size: 11px;
+	font-weight: 600;
+	color: var(--color-text-primary, var(--vscode-foreground));
+	background: var(--color-surface-2, var(--vscode-sideBarSectionHeader-background));
+	border-bottom: 1px solid var(--color-border-1, var(--vscode-sideBarSectionHeader-border));
+}
+
+.forge-new-chat-btn {
+	margin-left: auto;
+	font-size: 9px;
+	background: var(--color-ember-400, var(--vscode-button-background));
+	color: var(--vscode-button-foreground, #fff);
+	border: none;
+	padding: 2px 7px;
+	border-radius: 3px;
+	font-weight: 500;
+	cursor: pointer;
+	white-space: nowrap;
+	font-family: inherit;
+}
+
+.forge-new-chat-btn:hover {
+	opacity: 0.9;
+}
+
+.forge-model-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 5px 10px 5px 18px;
+	font-size: 10px;
+	color: var(--color-text-secondary, var(--vscode-descriptionForeground));
+	border-bottom: 1px solid var(--color-border-1, var(--vscode-sideBar-border));
+	cursor: pointer;
+}
+
+.forge-model-row:hover {
+	background: var(--color-surface-3, var(--vscode-list-hoverBackground));
+}
+
+.forge-model-id {
+	flex: 1;
+}
+
+.forge-model-new-chat {
+	font-size: 8px;
+	color: var(--color-ember-400, var(--vscode-textLink-foreground));
+	opacity: 0;
+	transition: opacity 0.15s;
+	white-space: nowrap;
+}
+
+.forge-model-row:hover .forge-model-new-chat {
+	opacity: 1;
+}
+
+/* Unconfigured provider state */
+.forge-provider-card--unconfigured {
+	opacity: 0.5;
+	pointer-events: none;
+}
+
+.forge-provider-not-configured {
+	margin-left: auto;
+	font-size: 9px;
+	color: var(--color-text-tertiary, var(--vscode-descriptionForeground));
+	font-weight: 400;
+}
