@@ -13,13 +13,13 @@ use crate::orchestrator::{run_turn, PendingApprovals};
 use crate::session::Session;
 
 /// Start a session server using the default `MockProvider`.
-pub async fn serve(path: &Path) -> Result<()> {
+pub async fn serve(path: &Path, auto_approve: bool) -> Result<()> {
     let log_path = std::env::temp_dir()
         .join(format!("forge-session-{}", SessionId::new()))
         .join("events.jsonl");
     let session = Arc::new(Session::create(log_path).await?);
     let provider = Arc::new(MockProvider::with_default_path());
-    serve_with_session(path, session, provider).await
+    serve_with_session(path, session, provider, auto_approve).await
 }
 
 /// Start a session server with an explicit provider.
@@ -27,6 +27,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
     path: &Path,
     session: Arc<Session>,
     provider: Arc<P>,
+    auto_approve: bool,
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -40,7 +41,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
         let session = Arc::clone(&session);
         let provider = Arc::clone(&provider);
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, session, provider).await {
+            if let Err(e) = handle_connection(stream, session, provider, auto_approve).await {
                 eprintln!("connection error: {e}");
             }
         });
@@ -51,6 +52,7 @@ async fn handle_connection<P: Provider + 'static>(
     mut stream: UnixStream,
     session: Arc<Session>,
     provider: Arc<P>,
+    auto_approve: bool,
 ) -> Result<()> {
     // ── Handshake ──────────────────────────────────────────────────────────────
     let msg = forge_ipc::read_frame(&mut stream).await?;
@@ -143,7 +145,7 @@ async fn handle_connection<P: Provider + 'static>(
                             // TODO(F-013): thread AgentDef.allowed_paths once agent
                             // context is passed through the server connection.
                             // Using ["**"] (allow all) until then.
-                            if let Err(e) = run_turn(session, provider, m.text, approvals, vec!["**".to_string()]).await {
+                            if let Err(e) = run_turn(session, provider, m.text, approvals, vec!["**".to_string()], auto_approve).await {
                                 eprintln!("turn error: {e}");
                             }
                         });

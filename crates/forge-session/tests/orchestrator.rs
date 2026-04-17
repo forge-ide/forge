@@ -90,7 +90,7 @@ async fn full_turn_with_tool_call_emits_correct_event_sequence() {
     let server_provider = Arc::clone(&provider);
     let server_sock = sock_path.clone();
     tokio::spawn(async move {
-        serve_with_session(&server_sock, server_session, server_provider)
+        serve_with_session(&server_sock, server_session, server_provider, false)
             .await
             .unwrap();
     });
@@ -242,7 +242,7 @@ async fn approval_gate_fires_and_blocks_until_client_approves() {
     let server_provider = Arc::clone(&provider);
     let server_sock = sock_path.clone();
     tokio::spawn(async move {
-        serve_with_session(&server_sock, server_session, server_provider)
+        serve_with_session(&server_sock, server_session, server_provider, false)
             .await
             .unwrap();
     });
@@ -302,6 +302,127 @@ async fn approval_gate_fires_and_blocks_until_client_approves() {
     assert!(saw_completed, "expected ToolCallCompleted after approval");
 }
 
+/// With --auto-approve-unsafe, tool calls proceed without client approval.
+/// ToolCallApproved { by: Auto } must be emitted; ToolCallApprovalRequested must not.
+#[tokio::test]
+async fn auto_approve_skips_approval_gate_and_emits_auto_approved() {
+    let dir = TempDir::new().unwrap();
+    let log_path = dir.path().join("events.jsonl");
+    let sock_path = dir.path().join("auto_approve.sock");
+
+    let session = Arc::new(Session::create(log_path).await.unwrap());
+    let provider = Arc::new(
+        MockProvider::from_responses(vec![
+            SCRIPT_INITIAL.to_string(),
+            SCRIPT_CONTINUATION.to_string(),
+        ])
+        .unwrap(),
+    );
+
+    let server_session = Arc::clone(&session);
+    let server_provider = Arc::clone(&provider);
+    let server_sock = sock_path.clone();
+    tokio::spawn(async move {
+        serve_with_session(&server_sock, server_session, server_provider, true)
+            .await
+            .unwrap();
+    });
+
+    let mut stream = connect_with_retry(&sock_path).await;
+    do_handshake(&mut stream).await;
+    forge_ipc::write_frame(&mut stream, &IpcMessage::Subscribe(Subscribe { since: 0 }))
+        .await
+        .unwrap();
+    forge_ipc::write_frame(
+        &mut stream,
+        &IpcMessage::SendUserMessage(SendUserMessage {
+            text: "hello".to_string(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    // Collect events until the turn completes (two finalised AssistantMessages).
+    // No client approval is sent — the session must complete without it.
+    let mut events: Vec<Event> = Vec::new();
+    let mut final_count = 0;
+    let (reader, _writer) = stream.into_split();
+    // Use a timeout so the test fails fast if the session blocks waiting for approval.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut reader = reader;
+
+    loop {
+        let frame = tokio::time::timeout_at(deadline, forge_ipc::read_frame(&mut reader))
+            .await
+            .expect("timed out — session may be blocked waiting for approval")
+            .unwrap();
+        let Some(event) = extract_event(&frame) else {
+            continue;
+        };
+        if matches!(
+            event,
+            Event::AssistantMessage {
+                stream_finalised: true,
+                ..
+            }
+        ) {
+            final_count += 1;
+        }
+        events.push(event);
+        if final_count >= 2 {
+            break;
+        }
+    }
+
+    let kinds: Vec<&str> = events
+        .iter()
+        .map(|e| match e {
+            Event::UserMessage { .. } => "UserMessage",
+            Event::AssistantMessage {
+                stream_finalised: false,
+                ..
+            } => "AssistantMessage(open)",
+            Event::AssistantMessage {
+                stream_finalised: true,
+                ..
+            } => "AssistantMessage(final)",
+            Event::AssistantDelta { .. } => "AssistantDelta",
+            Event::ToolCallStarted { .. } => "ToolCallStarted",
+            Event::ToolCallApprovalRequested { .. } => "ToolCallApprovalRequested",
+            Event::ToolCallApproved { .. } => "ToolCallApproved",
+            Event::ToolCallCompleted { .. } => "ToolCallCompleted",
+            _ => "Other",
+        })
+        .collect();
+
+    // ToolCallApprovalRequested must NOT appear; ToolCallApproved must appear.
+    assert!(
+        !kinds.contains(&"ToolCallApprovalRequested"),
+        "auto-approve must not emit ToolCallApprovalRequested; got: {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&"ToolCallApproved"),
+        "auto-approve must emit ToolCallApproved; got: {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&"ToolCallCompleted"),
+        "auto-approve must emit ToolCallCompleted; got: {kinds:?}"
+    );
+
+    // Verify ToolCallApproved carries ApprovalSource::Auto.
+    use forge_core::ApprovalSource;
+    let auto_approved = events.iter().any(|e| {
+        matches!(
+            e,
+            Event::ToolCallApproved {
+                by: ApprovalSource::Auto,
+                ..
+            }
+        )
+    });
+    assert!(auto_approved, "ToolCallApproved must have by=Auto");
+}
+
 /// Verify tool result is included in the next ChatRequest to the provider.
 /// Proven by: the continuation response arrives (provider was called a second time).
 #[tokio::test]
@@ -323,7 +444,7 @@ async fn tool_result_fed_back_to_provider_in_continuation() {
     let server_provider = Arc::clone(&provider);
     let server_sock = sock_path.clone();
     tokio::spawn(async move {
-        serve_with_session(&server_sock, server_session, server_provider)
+        serve_with_session(&server_sock, server_session, server_provider, false)
             .await
             .unwrap();
     });

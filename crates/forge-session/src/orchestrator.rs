@@ -33,6 +33,7 @@ pub async fn run_turn<P: Provider>(
     text: String,
     pending_approvals: PendingApprovals,
     allowed_paths: Vec<String>,
+    auto_approve: bool,
 ) -> Result<()> {
     let msg_id = MessageId::new();
 
@@ -61,6 +62,7 @@ pub async fn run_turn<P: Provider>(
         msg_id,
         pending_approvals,
         allowed_paths,
+        auto_approve,
     )
     .await
 }
@@ -76,6 +78,7 @@ async fn run_request_loop<P: Provider>(
     msg_id: MessageId,
     pending_approvals: PendingApprovals,
     allowed_paths: Vec<String>,
+    auto_approve: bool,
 ) -> Result<()> {
     // Fixed provider/model identifiers for the mock provider.
     let provider_id = ProviderId::new();
@@ -133,43 +136,69 @@ async fn run_request_loop<P: Provider>(
                         })
                         .await?;
 
-                    // Approval gate: register oneshot before emitting the event
-                    // so the connection handler can resolve it immediately on receipt.
-                    let (tx, rx) = oneshot::channel::<bool>();
-                    pending_approvals
-                        .lock()
-                        .await
-                        .insert(call_id.to_string(), tx);
-
-                    session
-                        .emit(Event::ToolCallApprovalRequested {
-                            id: call_id.clone(),
-                            preview: ApprovalPreview {
-                                description: format!("Run tool '{name}'?"),
-                            },
-                        })
-                        .await?;
-
-                    let approved = rx.await.unwrap_or(false);
-
-                    if !approved {
+                    if auto_approve {
+                        // --auto-approve-unsafe: skip the approval gate entirely.
                         session
-                            .emit(Event::ToolCallRejected {
-                                id: call_id,
-                                reason: Some("rejected by client".to_string()),
+                            .emit(Event::ToolCallApproved {
+                                id: call_id.clone(),
+                                by: ApprovalSource::Auto,
+                                scope: ApprovalScope::Once,
+                                at: Utc::now(),
                             })
                             .await?;
-                        return Ok(());
-                    }
+                    } else {
+                        // Approval gate: register oneshot before emitting the event
+                        // so the connection handler can resolve it immediately on receipt.
+                        let (tx, rx) = oneshot::channel::<bool>();
+                        pending_approvals
+                            .lock()
+                            .await
+                            .insert(call_id.to_string(), tx);
 
-                    session
-                        .emit(Event::ToolCallApproved {
-                            id: call_id.clone(),
-                            by: ApprovalSource::User,
-                            scope: ApprovalScope::Once,
-                            at: Utc::now(),
-                        })
-                        .await?;
+                        session
+                            .emit(Event::ToolCallApprovalRequested {
+                                id: call_id.clone(),
+                                preview: ApprovalPreview {
+                                    description: format!("Run tool '{name}'?"),
+                                },
+                            })
+                            .await?;
+
+                        let approved = rx.await.unwrap_or(false);
+
+                        if !approved {
+                            session
+                                .emit(Event::ToolCallRejected {
+                                    id: call_id,
+                                    reason: Some("rejected by client".to_string()),
+                                })
+                                .await?;
+                            // Finalise the open AssistantMessage so the session log
+                            // is never left with a dangling un-finalised message.
+                            session
+                                .emit(Event::AssistantMessage {
+                                    id: msg_id.clone(),
+                                    provider: provider_id.clone(),
+                                    model: model.clone(),
+                                    at: Utc::now(),
+                                    stream_finalised: true,
+                                    text: assistant_text.clone(),
+                                    branch_parent: None,
+                                    branch_variant_index: 0,
+                                })
+                                .await?;
+                            return Ok(());
+                        }
+
+                        session
+                            .emit(Event::ToolCallApproved {
+                                id: call_id.clone(),
+                                by: ApprovalSource::User,
+                                scope: ApprovalScope::Once,
+                                at: Utc::now(),
+                            })
+                            .await?;
+                    }
 
                     // Execute the tool.
                     let started = Instant::now();
