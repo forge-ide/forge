@@ -23,6 +23,8 @@ Invoke `forge-start-task`. Complete all steps before writing any code:
 
 **Delegate all exploration to an `Explore` subagent before writing any code.** The subagent should map the relevant crates, existing patterns, test conventions, and public APIs needed to implement the DoD. Bring only the findings summary back to the main context.
 
+If the DoD involves a UI view, pane, component, or interaction pattern, invoke `frontend-design:frontend-design` before writing any code. Use it to establish purpose, aesthetic direction, and key interaction states. Skip this if the task is purely backend.
+
 Invoke `superpowers:test-driven-development` for every change. No exceptions.
 
 - RED: write a failing test for each DoD behavior (delegate test runs to Bash, keep results terse)
@@ -61,6 +63,7 @@ Steps delegated inside `forge-finish-task`:
 | Writing code before reading the DoD | Always finish Phase 1 first |
 | Exploring the codebase inline | Spawn an `Explore` subagent |
 | Skipping TDD "just for simple changes" | TDD applies to every change |
+| Skipping frontend-design for UI tasks | Invoke it before any UI code — design direction first |
 | Pushing before build/review pass | `forge-finish-task` gates the push |
 | Re-claiming a new issue after gaps found | Loop Phase 2 → Phase 3 only |
 | Inlining DoD or code-review checks | Let `forge-finish-task` spawn those subagents |
