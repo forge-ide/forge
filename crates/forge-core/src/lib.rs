@@ -2,9 +2,11 @@ mod error;
 mod event;
 mod event_log;
 pub mod ids;
+pub mod meta;
 mod transcript;
 pub mod types;
 pub mod workspace;
+pub mod workspaces;
 
 pub use error::{ForgeError, Result};
 pub use event::{ApprovalPreview, ApprovalSource, ContextRef, EndReason, Event};

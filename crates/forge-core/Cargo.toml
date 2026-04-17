@@ -12,6 +12,7 @@ ts-rs = { version = "10", features = ["serde-compat"] }
 rand = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["io-util", "fs", "time", "sync", "rt"] }
+toml = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
