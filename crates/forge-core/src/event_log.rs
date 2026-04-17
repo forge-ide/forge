@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
@@ -100,6 +100,37 @@ impl EventLog {
         self.flush_task.abort();
         self.flush().await
     }
+}
+
+/// Reads events from the log at `path` that have sequence number greater than `since`.
+///
+/// Events are 1-indexed: the first event in the file is seq 1. Sending `since: 0`
+/// returns all events; `since: N` returns events N+1 onward.
+pub async fn read_since(path: &Path, since: u64) -> Result<Vec<(u64, Event)>> {
+    let file = tokio::fs::File::open(path).await?;
+    let mut lines = BufReader::new(file).lines();
+
+    let header = lines
+        .next_line()
+        .await?
+        .ok_or_else(|| ForgeError::Other(anyhow::anyhow!("event log is empty")))?;
+    if header != SCHEMA_HEADER {
+        return Err(ForgeError::Other(anyhow::anyhow!(
+            "schema header mismatch: expected {SCHEMA_HEADER:?}, got {header:?}"
+        )));
+    }
+
+    let mut events = Vec::new();
+    let mut seq = 0u64;
+    while let Some(line) = lines.next_line().await? {
+        seq += 1;
+        if seq > since {
+            let event: Event = serde_json::from_str(&line)
+                .map_err(|e| ForgeError::Other(anyhow::anyhow!("bad event at seq {seq}: {e}")))?;
+            events.push((seq, event));
+        }
+    }
+    Ok(events)
 }
 
 /// Returns the workspace root if `path` is nested under a `.forge` directory.
