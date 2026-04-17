@@ -19,54 +19,62 @@ gh api repos/forge-ide/forge/milestones --jq '.[] | select(.title == "<milestone
 
 Extract: title, description (outcome + bullet list).
 
-### 2. Research via subagents — do not explore inline
+### 2. Research — invoke `superpowers:dispatching-parallel-agents`
 
-Spawn two subagents in parallel:
+Two independent research tasks; run them in parallel:
 
-**Subagent A — Codebase state:**
+**Agent A — Codebase state:**
 > Read the forge repo at /home/jeroche/repos/github/jeff-roche/forge. For each bullet in this milestone's description, find: which crates are touched, what already exists, what is missing. Also read relevant docs under docs/architecture/. Return a per-bullet summary: crate(s), existing symbols, gaps.
 
-**Subagent B — Existing issues:**
+**Agent B — Existing issues:**
 ```bash
-gh issue list --repo forge-ide/forge --state all --json number,title --jq 'sort_by(.number)'
+gh issue list --repo forge-ide/forge --state all --json number,title \
+  --jq 'sort_by(.number)'
 ```
-> Return the full list so we can find the next available F-number and avoid duplicates.
+> Return the full list to find the next available F-number and avoid duplicates.
 
 ### 3. Find the next F-number
 
-From Subagent B's result:
+From Agent B's result:
+
 ```bash
 gh issue list --repo forge-ide/forge --state all --json title \
   --jq '[.[].title | scan("F-([0-9]+)") | .[0] | tonumber] | max + 1'
 ```
 
-### 4. Map bullets → issues
+### 4. Brainstorm the task breakdown — invoke `superpowers:brainstorming`
 
-For each bullet in the milestone description:
-- If the bullet is a single cohesive unit of work → one issue
-- If it contains multiple independently deliverable pieces → split into multiple issues
-- If it depends on another bullet being done first → note the dependency in Scope
+Before writing any issues, use brainstorming to work through:
+- The right granularity (one bullet = one issue? or split/merge?)
+- Dependencies between bullets — which must land first?
+- Anything implied by the milestone but not explicitly listed
+- Correct type label per issue (`feat` / `chore` / `bug`)
 
-Use the codebase research (Subagent A) to write specific, accurate Scope paragraphs.
+The design to confirm: the ordered list of proposed issues with one-line summaries.
 
-**Issue format:**
+**HARD GATE:** Do not write any issues until the task breakdown has been presented and approved.
+
+### 5. Write the issues
+
+For each approved issue, follow this format exactly:
+
 ```
-Title: [F-NNN] <imperative verb> <short description>  (≤60 chars after prefix)
+Title:  [F-NNN] <imperative verb> <short description>  (≤60 chars after prefix)
 Milestone: <Phase N: Title>
-Label: type: feat | type: chore | type: bug
-Body:
-  ## Scope
-  <One paragraph: what is built, which crates, which docs/specs are relevant. Be specific.>
+Label:  type: feat | type: chore | type: bug
 
-  ## Definition of Done
-  - [ ] <Concrete, testable criterion — name the symbol, file, or test>
-  - [ ] <Another criterion>
-  - [ ] Tests pass in CI
+## Scope
+<One paragraph: what is built, which crates, which docs/spec sections are relevant.>
+
+## Definition of Done
+- [ ] <Concrete, testable criterion — name the symbol, file, or test>
+- [ ] <Another criterion>
+- [ ] Tests pass in CI
 ```
 
 **DoD rules:**
 - Name the actual symbol, file, or test (not "works correctly")
-- Integration/unit tests are a separate checkbox from the implementation
+- Implementation and its tests are separate checkboxes
 - CI pass is always the last checkbox
 
 **Label rules:**
@@ -77,23 +85,9 @@ Body:
 | `type: chore` | Scaffolding, docs, CI, config, refactor |
 | `type: bug` | Fixing incorrect behaviour |
 
-### 5. Present the plan before creating
-
-Output a numbered list:
-```
-[F-NNN] <title> (type: feat)
-  Scope: <one sentence>
-  DoD: <bullet count> items
-
-[F-NNN+1] <title> (type: chore)
-  ...
-```
-
-**Stop here.** Ask for confirmation before creating any issues.
-
 ### 6. Create issues
 
-After confirmation, create each issue with `forge-create-task` conventions:
+Create each issue sequentially (to avoid F-number collisions):
 
 ```bash
 gh issue create \
@@ -114,15 +108,27 @@ EOF
 )"
 ```
 
-Create sequentially (each issue must exist before the next to avoid F-number collisions).
+### 7. Verify — invoke `superpowers:verification-before-completion`
+
+After all issues are created, verify before claiming done:
+
+```bash
+gh issue list --repo forge-ide/forge \
+  --milestone "<Phase N: Title>" --state open \
+  --json number,title,labels,milestone
+```
+
+Confirm: every planned issue appears with the correct title, milestone, and label. Do not claim the milestone is planned until this evidence is in hand.
 
 ## Common Mistakes
 
 | Mistake | Correct |
 |---------|---------|
+| Skipping brainstorming ("bullets are obvious") | Always brainstorm — granularity and dependencies need explicit review |
 | One issue per milestone (too coarse) | One issue per independently deliverable unit |
 | Vague DoD: "implement X" | Specific: "`forge_ipc::read_frame` returns `Err` on oversized frame" |
-| Generic scope paragraph | Reference actual crate names, file paths, and spec sections |
-| Creating issues without confirming | Always present plan and wait for approval |
-| Exploring codebase inline | Spawn Explore subagent — keep main context surgical |
-| Skipping dependency notes | If bullet B needs bullet A, say so in Scope |
+| Generic scope paragraph | Reference actual crate names, file paths, spec sections |
+| Creating issues without presenting the plan | Brainstorming hard-gates this |
+| Claiming done without checking GitHub | `verification-before-completion` requires evidence |
+| Exploring codebase inline | Use `dispatching-parallel-agents` — keep main context surgical |
+| Creating issues in parallel | Sequential only — avoids F-number collisions |
