@@ -54,7 +54,20 @@ The design to confirm: the ordered list of proposed issues with one-line summari
 
 **HARD GATE:** Do not write any issues until the task breakdown has been presented and approved.
 
-### 5. Write the issues
+### 5. Frontend design — invoke `frontend-design:frontend-design` when applicable
+
+After the task breakdown is approved, scan the issue list for any bullet that involves a UI view, pane, component, or interaction pattern (e.g. "Dashboard view", "Tool call cards", "Command palette", "Settings UI").
+
+For each such issue, invoke `frontend-design:frontend-design` **before writing the Scope and DoD**. Use it to establish:
+- Purpose and audience for the component
+- Aesthetic direction and tone
+- Key interaction patterns and states
+
+Bring only the design decisions back into the Scope paragraph and DoD checkboxes — do not write implementation code at this stage.
+
+**Skip this step entirely** if the milestone contains no UI work.
+
+### 6. Write the issues
 
 For each approved issue, follow this format exactly:
 
@@ -85,7 +98,7 @@ Label:  type: feat | type: chore | type: bug
 | `type: chore` | Scaffolding, docs, CI, config, refactor |
 | `type: bug` | Fixing incorrect behaviour |
 
-### 6. Create issues
+### 7. Create issues
 
 Create each issue sequentially (to avoid F-number collisions):
 
@@ -108,7 +121,7 @@ EOF
 )"
 ```
 
-### 7. Verify — invoke `superpowers:verification-before-completion`
+### 8. Verify — invoke `superpowers:verification-before-completion`
 
 After all issues are created, verify before claiming done:
 
@@ -132,3 +145,5 @@ Confirm: every planned issue appears with the correct title, milestone, and labe
 | Claiming done without checking GitHub | `verification-before-completion` requires evidence |
 | Exploring codebase inline | Use `dispatching-parallel-agents` — keep main context surgical |
 | Creating issues in parallel | Sequential only — avoids F-number collisions |
+| Skipping frontend-design for UI bullets | Invoke it — vague Scope for UI issues produces vague implementations |
+| Running frontend-design on backend-only milestones | Skip it entirely if no UI work is present |
