@@ -8,8 +8,8 @@ target/
 # Tauri
 src-tauri/target/
 
-# Generated
-web/packages/ipc/src/generated/
+# Generated (tracked intentionally — CI verifies drift)
+# web/packages/ipc/src/generated/
 
 # Editor
 .vscode/
