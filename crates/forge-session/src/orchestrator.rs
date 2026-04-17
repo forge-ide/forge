@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use forge_fs::read_file;
+
 use anyhow::Result;
 use chrono::Utc;
 use forge_core::{
@@ -23,12 +25,14 @@ pub type PendingApprovals = Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>;
 /// AssistantMessage(finalised)
 ///
 /// Tool calls block until the client sends `ToolCallApproved` / `ToolCallRejected`
-/// through `pending_approvals`.
+/// through `pending_approvals`. `allowed_paths` is the set of glob patterns the
+/// agent is permitted to access via `fs.read`.
 pub async fn run_turn<P: Provider>(
     session: Arc<Session>,
     provider: Arc<P>,
     text: String,
     pending_approvals: PendingApprovals,
+    allowed_paths: Vec<String>,
 ) -> Result<()> {
     let msg_id = MessageId::new();
 
@@ -50,7 +54,15 @@ pub async fn run_turn<P: Provider>(
         }],
     };
 
-    run_request_loop(session, provider, initial_req, msg_id, pending_approvals).await
+    run_request_loop(
+        session,
+        provider,
+        initial_req,
+        msg_id,
+        pending_approvals,
+        allowed_paths,
+    )
+    .await
 }
 
 /// Drives the provider request loop for one logical turn.
@@ -63,6 +75,7 @@ async fn run_request_loop<P: Provider>(
     mut req: ChatRequest,
     msg_id: MessageId,
     pending_approvals: PendingApprovals,
+    allowed_paths: Vec<String>,
 ) -> Result<()> {
     // Fixed provider/model identifiers for the mock provider.
     let provider_id = ProviderId::new();
@@ -158,9 +171,9 @@ async fn run_request_loop<P: Provider>(
                         })
                         .await?;
 
-                    // Stub executor: returns a fixed result.
+                    // Execute the tool.
                     let started = Instant::now();
-                    let result = serde_json::json!({ "content": "stub tool result" });
+                    let result = dispatch_tool(&name, &args, &allowed_paths);
                     let duration_ms = started.elapsed().as_millis() as u64;
 
                     session
@@ -238,5 +251,26 @@ async fn run_request_loop<P: Provider>(
             role: ChatRole::User,
             content: tr_blocks,
         });
+    }
+}
+
+fn dispatch_tool(
+    name: &str,
+    args: &serde_json::Value,
+    allowed_paths: &[String],
+) -> serde_json::Value {
+    match name {
+        "fs.read" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            match read_file(path, allowed_paths) {
+                Ok(r) => serde_json::json!({
+                    "content": r.content,
+                    "bytes": r.bytes,
+                    "sha256": r.sha256,
+                }),
+                Err(e) => serde_json::json!({ "error": e.to_string() }),
+            }
+        }
+        _ => serde_json::json!({ "content": "stub tool result" }),
     }
 }

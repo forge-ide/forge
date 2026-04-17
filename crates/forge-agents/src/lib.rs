@@ -8,6 +8,7 @@ pub struct AgentDef {
     pub name: String,
     pub description: Option<String>,
     pub body: String,
+    pub allowed_paths: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -15,6 +16,7 @@ struct Frontmatter {
     name: Option<String>,
     description: Option<String>,
     isolation: Option<String>,
+    allowed_paths: Option<Vec<String>>,
 }
 
 fn parse_agent_file(path: &Path) -> Result<AgentDef> {
@@ -43,12 +45,14 @@ fn parse_agent_file(path: &Path) -> Result<AgentDef> {
                 name: fm.name.unwrap_or(stem),
                 description: fm.description,
                 body: parsed.content,
+                allowed_paths: fm.allowed_paths.unwrap_or_default(),
             })
         }
         None => Ok(AgentDef {
             name: stem,
             description: None,
             body: parsed.content,
+            allowed_paths: vec![],
         }),
     }
 }

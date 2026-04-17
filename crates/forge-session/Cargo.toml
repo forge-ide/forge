@@ -15,6 +15,7 @@ path = "src/main.rs"
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 forge-core = { path = "../forge-core" }
+forge-fs = { path = "../forge-fs" }
 forge-ipc = { path = "../forge-ipc" }
 forge-providers = { path = "../forge-providers" }
 futures = "0.3"
