@@ -1,6 +1,11 @@
 use anyhow::Result;
-use forge_session::server::serve;
+use forge_providers::MockProvider;
+use forge_session::{
+    server::{serve, serve_with_session},
+    session::Session,
+};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -15,7 +20,22 @@ async fn main() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| resolve_socket_path(&session_id));
     eprintln!("forged: listening on {}", socket_path.display());
-    serve(&socket_path, auto_approve).await
+
+    // FORGE_MOCK_SEQUENCE_FILE points to a JSON array of NDJSON scripts.
+    // Each element is used in order as the response for successive provider calls.
+    // Used by integration tests to inject scripted multi-turn responses.
+    if let Ok(seq_file) = std::env::var("FORGE_MOCK_SEQUENCE_FILE") {
+        let content = tokio::fs::read_to_string(&seq_file).await?;
+        let scripts: Vec<String> = serde_json::from_str(&content)?;
+        let log_path = std::env::temp_dir()
+            .join(format!("forge-session-{session_id}"))
+            .join("events.jsonl");
+        let session = Arc::new(Session::create(log_path).await?);
+        let provider = Arc::new(MockProvider::from_responses(scripts)?);
+        serve_with_session(&socket_path, session, provider, auto_approve).await
+    } else {
+        serve(&socket_path, auto_approve).await
+    }
 }
 
 fn resolve_socket_path(session_id: &str) -> PathBuf {
