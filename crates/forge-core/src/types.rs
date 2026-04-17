@@ -33,6 +33,13 @@ pub enum ApprovalScope {
     ThisTool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub enum CompactTrigger {
+    AutoAt98Pct,
+    UserRequested,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
