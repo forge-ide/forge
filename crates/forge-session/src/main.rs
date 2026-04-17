@@ -7,8 +7,13 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let auto_approve = args.iter().any(|a| a == "--auto-approve-unsafe");
 
-    let session_id = forge_core::SessionId::new();
-    let socket_path = resolve_socket_path(&session_id.to_string());
+    // Allow the CLI to pre-assign the session ID and socket path so it can
+    // print the path before forged starts and can track it for `session kill`.
+    let session_id = std::env::var("FORGE_SESSION_ID")
+        .unwrap_or_else(|_| forge_core::SessionId::new().to_string());
+    let socket_path = std::env::var("FORGE_SOCKET_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| resolve_socket_path(&session_id));
     eprintln!("forged: listening on {}", socket_path.display());
     serve(&socket_path, auto_approve).await
 }
