@@ -7,6 +7,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
 use crate::event::Event;
+use crate::workspace;
 use crate::{ForgeError, Result};
 
 const SCHEMA_HEADER: &str = r#"{"schema_version":1}"#;
@@ -21,6 +22,9 @@ impl EventLog {
     pub async fn create(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
+        }
+        if let Some(root) = forge_dir_parent(path) {
+            workspace::ensure_gitignore(root).await?;
         }
         let file = tokio::fs::OpenOptions::new()
             .create(true)
@@ -95,6 +99,19 @@ impl EventLog {
     pub async fn close(mut self) -> Result<()> {
         self.flush_task.abort();
         self.flush().await
+    }
+}
+
+/// Returns the workspace root if `path` is nested under a `.forge` directory.
+/// Returns `None` (and silently skips gitignore creation) for paths outside `.forge/`.
+/// Production callers are expected to always nest EventLog files under `.forge/`.
+fn forge_dir_parent(path: &Path) -> Option<&Path> {
+    let mut cur = path.parent()?;
+    loop {
+        if cur.file_name()? == ".forge" {
+            return cur.parent();
+        }
+        cur = cur.parent()?;
     }
 }
 
