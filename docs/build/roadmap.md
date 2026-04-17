@@ -86,7 +86,7 @@ A CLI-only preview where `forge session new agent default` spawns a real session
 
 ### Tickets
 
-**F-000 · Repo reset: retire the VS Code fork · 0.5 day**
+**F-000 · Repo reset: retire the VS Code fork · ✅ COMPLETE**
 The `forge-ide/forge` repo currently holds a VS Code fork. That codebase is incompatible with everything we're building — different language, different architecture, different product. This ticket wipes the slate.
 
 Steps:
