@@ -4,6 +4,7 @@ mod event_log;
 pub mod ids;
 mod transcript;
 pub mod types;
+pub mod workspace;
 
 pub use error::{ForgeError, Result};
 pub use event::{ApprovalPreview, ApprovalSource, ContextRef, EndReason, Event};
