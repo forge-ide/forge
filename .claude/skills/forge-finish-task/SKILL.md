@@ -44,7 +44,7 @@ Prompt template:
 3. **Verify the build**
 
 ```bash
-cargo check --workspace && cargo test --workspace && cargo clippy --all-targets -- -D warnings
+cargo fmt --check && cargo check --workspace && cargo test --workspace && cargo clippy --all-targets -- -D warnings
 ```
 
 All must pass before continuing.
