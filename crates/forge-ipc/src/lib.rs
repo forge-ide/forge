@@ -15,6 +15,19 @@ const MAX_FRAME_SIZE: usize = 4 * 1024 * 1024;
 pub enum IpcMessage {
     Hello(Hello),
     HelloAck(HelloAck),
+    Subscribe(Subscribe),
+    Event(IpcEvent),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Subscribe {
+    pub since: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IpcEvent {
+    pub seq: u64,
+    pub event: serde_json::Value,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
