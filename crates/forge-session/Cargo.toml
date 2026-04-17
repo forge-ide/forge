@@ -1,0 +1,8 @@
+[package]
+name = "forge-session"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "forged"
+path = "src/main.rs"
