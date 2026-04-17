@@ -1,0 +1,2598 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Forge — Mocks</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@700;800;900&family=Barlow:wght@300;400;500;600&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+/* =============================================================
+   FORGE DESIGN TOKENS — single source, pulled from DESIGN.md
+   ============================================================= */
+:root {
+  /* ember brand */
+  --ember-900:#2a0800; --ember-500:#cc3a00; --ember-400:#ff4a12;
+  --ember-300:#ff7a30; --ember-200:#ffaa33; --ember-100:#ffd166;
+
+  /* iron surfaces */
+  --bg:#07080a;  --s1:#0d0f13;  --s2:#13161d;  --s3:#181c26;
+  --b1:#1c2230; --b2:#252f3e;
+
+  /* text */
+  --t-pri:#eae6de; --t-sec:#8a9aac; --t-ter:#3a4558; --t-dis:#252f3e;
+  --t-link:#7aaaff;
+
+  /* semantic */
+  --ok:#3ddc84; --warn:#ffaa33; --err:#ff4a12; --info:#7aaaff;
+  --ok-bg:rgba(61,220,132,.07); --warn-bg:rgba(255,170,51,.07);
+  --err-bg:rgba(255,74,18,.07);  --info-bg:rgba(122,170,255,.07);
+  --ok-bd:rgba(61,220,132,.22); --warn-bd:rgba(255,170,51,.22);
+  --err-bd:rgba(255,74,18,.22);  --info-bd:rgba(122,170,255,.22);
+
+  /* providers */
+  --p-anthropic:#ff4a12; --p-openai:#ffaa33; --p-local:#7aaaff; --p-custom:#8a9aac;
+
+  /* syntax */
+  --sx-kw:#ff7a30; --sx-fn:#ffd166; --sx-str:#3ddc84;
+  --sx-type:#7a9fff; --sx-num:#ff9966; --sx-comment:#3a4558;
+
+  /* spacing */
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:20px;
+  --sp-6:24px; --sp-8:32px; --sp-10:40px; --sp-12:48px;
+
+  /* radii */
+  --r-sm:3px; --r-md:5px; --r-lg:8px;
+  --ease:.15s ease;
+
+  /* type */
+  --f-d:'Barlow Condensed',sans-serif;
+  --f-b:'Barlow',sans-serif;
+  --f-m:'Fira Code',ui-monospace,monospace;
+}
+
+/* =============================================================
+   BASE + MOCK SHELL
+   ============================================================= */
+* { box-sizing:border-box; margin:0; padding:0; }
+html,body { height:100%; }
+body {
+  background:var(--bg); color:var(--t-pri);
+  font-family:var(--f-b); font-size:14px; line-height:1.45;
+  -webkit-font-smoothing:antialiased;
+  overflow:hidden;
+  /* subtle film grain via repeated gradient — atmospheric, not decorative */
+  background-image:
+    radial-gradient(circle at 20% 0%, rgba(255,74,18,.015), transparent 40%),
+    radial-gradient(circle at 80% 100%, rgba(122,170,255,.01), transparent 40%);
+}
+button { font-family:inherit; cursor:pointer; border:0; background:none; color:inherit; }
+input { font-family:inherit; color:inherit; background:none; border:0; outline:none; }
+
+/* mock nav — not part of the product; it's chrome for flipping between views */
+.mock-nav {
+  position:fixed; top:var(--sp-3); left:50%; transform:translateX(-50%);
+  z-index:1000;
+  display:flex; gap:2px; padding:3px;
+  background:rgba(13,15,19,.85); backdrop-filter:blur(12px);
+  border:1px solid var(--b1); border-radius:var(--r-md);
+  box-shadow:0 8px 24px rgba(0,0,0,.6);
+}
+.mock-nav button {
+  font-family:var(--f-d); font-weight:700; font-size:10px;
+  letter-spacing:.14em; text-transform:uppercase;
+  padding:6px 12px; border-radius:var(--r-sm);
+  color:var(--t-sec); transition:all var(--ease);
+}
+.mock-nav button:hover { color:var(--t-pri); background:var(--s3); }
+.mock-nav button.active { color:#fff; background:var(--ember-400); }
+
+.mock-note {
+  position:fixed; bottom:var(--sp-3); left:var(--sp-3); z-index:1000;
+  font-family:var(--f-m); font-size:9px; color:var(--t-ter);
+  letter-spacing:.1em; text-transform:uppercase;
+  pointer-events:none;
+}
+
+.view { display:none; height:100vh; width:100vw; }
+.view.active { display:flex; flex-direction:column; }
+
+/* =============================================================
+   SHARED CHROME — status bar, title bar, activity bar
+   ============================================================= */
+.title-bar {
+  height:32px; flex-shrink:0;
+  display:flex; align-items:center; padding:0 var(--sp-3);
+  background:var(--s1); border-bottom:1px solid var(--b1);
+  -webkit-app-region:drag;
+  gap:var(--sp-2);
+}
+.traffic { display:flex; gap:6px; padding-right:var(--sp-3); }
+.traffic i { width:12px; height:12px; border-radius:50%; display:block; }
+.traffic i:nth-child(1){ background:#ff5f57; } .traffic i:nth-child(2){ background:#febc2e; } .traffic i:nth-child(3){ background:#28c840; }
+.title-bar .title {
+  font-family:var(--f-m); font-size:11px; color:var(--t-sec);
+  letter-spacing:.05em; flex:1; text-align:center;
+}
+.title-bar .title b { color:var(--t-pri); font-weight:500; }
+.title-bar .right { display:flex; gap:var(--sp-2); align-items:center; -webkit-app-region:no-drag; }
+.title-bar .badge {
+  font-family:var(--f-m); font-size:9px; color:var(--t-sec);
+  letter-spacing:.14em; text-transform:uppercase;
+  padding:2px 8px; border:1px solid var(--b1); border-radius:var(--r-sm);
+}
+
+.status-bar {
+  height:22px; flex-shrink:0;
+  display:flex; align-items:center; padding:0 var(--sp-3);
+  background:var(--ember-400); color:#fff;
+  font-family:var(--f-m); font-size:10px;
+  letter-spacing:.05em;
+  gap:var(--sp-4);
+}
+.status-bar .sep { opacity:.5; }
+.status-bar .ml-auto { margin-left:auto; }
+.status-bar .group { display:flex; gap:var(--sp-2); align-items:center; }
+.status-bar .dot { width:6px; height:6px; border-radius:50%; background:#fff; opacity:.9; }
+.status-bar svg { width:12px; height:12px; }
+
+.shell { flex:1; display:flex; min-height:0; }
+
+.activity-bar {
+  width:44px; flex-shrink:0;
+  background:var(--s1); border-right:1px solid var(--b1);
+  display:flex; flex-direction:column; align-items:center; padding:var(--sp-2) 0;
+  gap:var(--sp-1);
+}
+.activity-bar button {
+  width:36px; height:36px; border-radius:var(--r-sm);
+  display:flex; align-items:center; justify-content:center;
+  color:var(--t-sec); transition:all var(--ease);
+  position:relative;
+}
+.activity-bar button svg { width:18px; height:18px; }
+.activity-bar button:hover { color:var(--t-pri); background:var(--s3); }
+.activity-bar button.active { color:var(--t-pri); }
+.activity-bar button.active::before {
+  content:''; position:absolute; left:-2px; top:6px; bottom:6px; width:2px;
+  background:var(--ember-400); border-radius:0 2px 2px 0;
+}
+.activity-bar .spacer { flex:1; }
+
+/* =============================================================
+   FORGE MARK — hub & spokes with hammer (per DESIGN.md)
+   ============================================================= */
+.forge-mark { width:18px; height:18px; flex-shrink:0; }
+
+/* section label — mono xs, uppercase, tracked */
+.label {
+  font-family:var(--f-m); font-size:9px; font-weight:500;
+  color:var(--t-sec); letter-spacing:.3em; text-transform:uppercase;
+}
+
+/* primary/secondary/ghost/icon button */
+.btn {
+  font-family:var(--f-d); font-weight:700;
+  font-size:11px; letter-spacing:.1em; text-transform:uppercase;
+  padding:6px 12px; border-radius:var(--r-sm);
+  display:inline-flex; align-items:center; gap:var(--sp-2);
+  transition:all var(--ease);
+}
+.btn:active { transform:translateY(1px); }
+.btn-pri { background:var(--ember-400); color:#fff; }
+.btn-pri:hover { background:var(--ember-300); }
+.btn-sec { background:transparent; color:var(--ember-400); border:1px solid var(--ember-400); }
+.btn-sec:hover { background:var(--ember-900); }
+.btn-ghost { background:transparent; color:var(--t-sec); border:1px solid var(--b2); }
+.btn-ghost:hover { color:var(--t-pri); border-color:var(--t-sec); }
+.btn-ic {
+  padding:6px; border:1px solid var(--b1); color:var(--t-sec);
+  border-radius:var(--r-sm);
+}
+.btn-ic:hover { color:var(--t-pri); border-color:var(--b2); }
+.btn-ic svg { width:14px; height:14px; display:block; }
+
+/* provider dot */
+.p-dot { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
+.p-dot.anthropic { background:var(--p-anthropic); }
+.p-dot.openai    { background:var(--p-openai); }
+.p-dot.local     { background:var(--p-local); box-shadow:0 0 6px rgba(122,170,255,.5); }
+.p-dot.custom    { background:var(--p-custom); }
+
+/* connectivity dot — glow signals *live network* only */
+.live-dot { width:7px; height:7px; border-radius:50%; background:var(--ok); box-shadow:0 0 6px rgba(61,220,132,.5); flex-shrink:0; }
+.live-dot.warn { background:var(--warn); box-shadow:0 0 6px rgba(255,170,51,.5); }
+.live-dot.err  { background:var(--err);  box-shadow:0 0 6px rgba(255,74,18,.5); }
+.live-dot.off  { background:var(--t-ter); box-shadow:none; }
+
+/* custom scrollbars */
+::-webkit-scrollbar { width:10px; height:10px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:var(--b1); border-radius:var(--r-sm); border:2px solid var(--bg); }
+::-webkit-scrollbar-thumb:hover { background:var(--b2); }
+
+/* =============================================================
+   VIEW 1 — DASHBOARD
+   ============================================================= */
+.dash { flex:1; display:grid; grid-template-columns:190px 1fr; min-height:0; }
+
+.dash .side {
+  background:var(--s1); border-right:1px solid var(--b1);
+  display:flex; flex-direction:column; min-height:0;
+}
+.dash .side .brand {
+  padding:var(--sp-4); display:flex; align-items:center; gap:var(--sp-2);
+  border-bottom:1px solid var(--b1);
+}
+.dash .side .brand .word {
+  font-family:var(--f-d); font-weight:900; font-size:16px;
+  letter-spacing:.04em; text-transform:uppercase;
+}
+.dash .side .brand .tag {
+  font-family:var(--f-m); font-size:8px; color:var(--t-ter);
+  letter-spacing:.12em;
+}
+.dash .side nav { padding:var(--sp-3); display:flex; flex-direction:column; gap:1px; flex:1; overflow:auto; }
+.dash .side nav .group-label { padding:var(--sp-3) var(--sp-2) var(--sp-1); }
+.dash .side nav a {
+  display:flex; align-items:center; gap:var(--sp-3);
+  padding:var(--sp-2) var(--sp-3);
+  border-radius:var(--r-sm);
+  font-family:var(--f-b); font-size:13px; font-weight:400;
+  color:var(--t-sec); text-decoration:none;
+  transition:all var(--ease);
+  position:relative;
+}
+.dash .side nav a:hover { color:var(--t-pri); background:var(--s3); }
+.dash .side nav a.active { color:var(--t-pri); background:var(--s3); }
+.dash .side nav a.active::before {
+  content:''; position:absolute; left:-var(--sp-3); top:6px; bottom:6px; width:2px;
+  background:var(--ember-400); border-radius:2px;
+}
+.dash .side nav a svg { width:14px; height:14px; color:var(--t-ter); flex-shrink:0; }
+.dash .side nav a.active svg { color:var(--ember-400); }
+.dash .side nav a .count {
+  margin-left:auto; font-family:var(--f-m); font-size:10px; color:var(--t-ter);
+}
+
+.dash .main { display:flex; flex-direction:column; min-height:0; overflow:auto; }
+.dash .main .hero {
+  padding:var(--sp-8); border-bottom:1px solid var(--b1);
+  display:grid; grid-template-columns:1fr auto; gap:var(--sp-6); align-items:end;
+}
+.dash .main .hero h1 {
+  font-family:var(--f-d); font-weight:800; font-size:40px;
+  letter-spacing:.02em; text-transform:uppercase; line-height:.95;
+}
+.dash .main .hero h1 em {
+  font-style:normal; color:var(--ember-400);
+}
+.dash .main .hero p {
+  margin-top:var(--sp-3); color:var(--t-sec); font-size:15px; max-width:560px;
+}
+.dash .main .hero .cta { display:flex; gap:var(--sp-2); }
+
+.dash .main .grid {
+  padding:var(--sp-6) var(--sp-8);
+  display:grid; grid-template-columns:repeat(12, 1fr); gap:var(--sp-4);
+}
+
+.card {
+  background:var(--s2); border:1px solid var(--b1); border-radius:var(--r-lg);
+  overflow:hidden;
+  display:flex; flex-direction:column;
+}
+.card .head {
+  padding:var(--sp-3) var(--sp-4);
+  display:flex; align-items:center; justify-content:space-between;
+  border-bottom:1px solid var(--b1);
+}
+.card .body { padding:var(--sp-4); flex:1; }
+.card .foot { padding:var(--sp-3) var(--sp-4); border-top:1px solid var(--b1); font-family:var(--f-m); font-size:10px; color:var(--t-sec); display:flex; justify-content:space-between; }
+
+.col-6 { grid-column:span 6; }
+.col-4 { grid-column:span 4; }
+.col-8 { grid-column:span 8; }
+.col-12 { grid-column:span 12; }
+
+/* session cards */
+.sessions .session {
+  display:grid; grid-template-columns:auto 1fr auto; gap:var(--sp-3); align-items:center;
+  padding:var(--sp-3); border-radius:var(--r-sm);
+  transition:background var(--ease); cursor:pointer;
+}
+.sessions .session:hover { background:var(--s3); }
+.sessions .session + .session { border-top:1px solid var(--b1); border-radius:0; }
+.sessions .session + .session:hover { background:var(--s3); }
+
+.session .icon { width:32px; height:32px; background:var(--bg); border:1px solid var(--b1); border-radius:var(--r-sm); display:flex; align-items:center; justify-content:center; color:var(--ember-400); }
+.session .meta .name { font-weight:500; display:flex; align-items:center; gap:var(--sp-2); }
+.session .meta .name .p-dot { margin-right:2px; }
+.session .meta .path { font-family:var(--f-m); font-size:10px; color:var(--t-ter); margin-top:2px; }
+.session .state {
+  font-family:var(--f-m); font-size:10px; color:var(--t-sec);
+  letter-spacing:.06em; display:flex; align-items:center; gap:var(--sp-2);
+  text-transform:lowercase;
+}
+.session .state.run  { color:var(--ember-200); }
+.session .state.idle { color:var(--t-sec); }
+.session .state.done { color:var(--ok); }
+.session .state .pulse { width:6px; height:6px; border-radius:50%; background:currentColor; animation:pulse 1.6s infinite; }
+@keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.4;} }
+
+/* provider cards */
+.providers { display:grid; grid-template-columns:1fr 1fr; gap:var(--sp-2); padding:var(--sp-3); }
+.provider {
+  padding:var(--sp-3); border:1px solid var(--b1); border-radius:var(--r-sm);
+  display:flex; align-items:center; gap:var(--sp-3);
+  background:var(--s1);
+}
+.provider .dot-lg { width:10px; height:10px; border-radius:50%; }
+.provider .info { flex:1; min-width:0; }
+.provider .info .n { font-weight:500; font-size:13px; }
+.provider .info .s { font-family:var(--f-m); font-size:10px; color:var(--t-ter); margin-top:2px; }
+.provider .ok { color:var(--ok); font-family:var(--f-m); font-size:10px; display:flex; align-items:center; gap:4px; }
+.provider .bad { color:var(--err); font-family:var(--f-m); font-size:10px; display:flex; align-items:center; gap:4px; }
+
+/* usage sparkline */
+.usage-stat { display:flex; gap:var(--sp-6); padding:var(--sp-3) var(--sp-4) 0; }
+.usage-stat > div { flex:1; }
+.usage-stat .num { font-family:var(--f-d); font-weight:800; font-size:28px; letter-spacing:.02em; }
+.usage-stat .num em { color:var(--ember-400); font-style:normal; }
+.usage-stat .lbl { font-family:var(--f-m); font-size:9px; color:var(--t-sec); letter-spacing:.2em; text-transform:uppercase; margin-top:4px; }
+.usage-stat .delta { font-family:var(--f-m); font-size:10px; margin-top:4px; }
+.usage-stat .delta.up { color:var(--warn); }
+.usage-stat .delta.dn { color:var(--ok); }
+
+.spark { height:60px; padding:var(--sp-4); padding-top:0; }
+.spark svg { width:100%; height:100%; overflow:visible; }
+
+/* skills / mcp list */
+.mini-list .row {
+  display:grid; grid-template-columns:auto 1fr auto auto; gap:var(--sp-3); align-items:center;
+  padding:var(--sp-2) var(--sp-4);
+  font-size:13px;
+  border-bottom:1px solid var(--b1);
+}
+.mini-list .row:last-child { border-bottom:0; }
+.mini-list .row:hover { background:var(--s3); }
+.mini-list .row .icon { width:20px; height:20px; color:var(--t-sec); display:flex; align-items:center; justify-content:center; }
+.mini-list .row .name { font-weight:400; }
+.mini-list .row .name .sub { font-family:var(--f-m); font-size:10px; color:var(--t-ter); display:block; margin-top:1px; }
+.mini-list .row .chip {
+  font-family:var(--f-m); font-size:9px; letter-spacing:.1em; text-transform:uppercase;
+  padding:2px 6px; border:1px solid var(--b1); border-radius:var(--r-sm); color:var(--t-sec);
+}
+.mini-list .row .chip.on { color:var(--ok); border-color:var(--ok-bd); background:var(--ok-bg); }
+.mini-list .row .tog {
+  width:28px; height:16px; border-radius:8px; background:var(--b1); position:relative; cursor:pointer;
+  transition:background var(--ease);
+}
+.mini-list .row .tog::after { content:''; position:absolute; top:2px; left:2px; width:12px; height:12px; background:var(--t-ter); border-radius:50%; transition:all var(--ease); }
+.mini-list .row .tog.on { background:var(--ember-900); }
+.mini-list .row .tog.on::after { left:14px; background:var(--ember-400); }
+
+/* container list */
+.container-row {
+  display:grid; grid-template-columns:auto 1fr auto auto auto; gap:var(--sp-3); align-items:center;
+  padding:var(--sp-2) var(--sp-4);
+  font-size:13px; border-bottom:1px solid var(--b1);
+}
+.container-row:last-child { border-bottom:0; }
+.container-row .id { font-family:var(--f-m); font-size:11px; color:var(--t-ter); }
+.container-row .img { font-family:var(--f-m); font-size:11px; }
+.container-row .res { font-family:var(--f-m); font-size:10px; color:var(--t-sec); }
+
+/* =============================================================
+   VIEW 2 — SESSION
+   ============================================================= */
+.sess { flex:1; display:flex; min-height:0; }
+.sess-side {
+  width:230px; flex-shrink:0;
+  background:var(--s1); border-right:1px solid var(--b1);
+  display:flex; flex-direction:column; min-height:0;
+}
+.sess-side .head {
+  padding:var(--sp-3) var(--sp-4);
+  border-bottom:1px solid var(--b1);
+  display:flex; align-items:center; gap:var(--sp-2);
+}
+.sess-side .head .name {
+  font-family:var(--f-d); font-weight:700; font-size:13px;
+  letter-spacing:.06em; text-transform:uppercase;
+  flex:1;
+}
+.sess-side .section { padding:var(--sp-3) var(--sp-3) var(--sp-2); display:flex; justify-content:space-between; align-items:center; }
+.sess-side .tree { font-family:var(--f-m); font-size:11px; padding:0 var(--sp-2); flex:1; overflow:auto; }
+.sess-side .tree .node {
+  display:flex; align-items:center; gap:var(--sp-2);
+  padding:3px var(--sp-2); border-radius:var(--r-sm);
+  color:var(--t-sec); cursor:pointer;
+}
+.sess-side .tree .node:hover { background:var(--s3); color:var(--t-pri); }
+.sess-side .tree .node.folder { color:var(--t-pri); }
+.sess-side .tree .node.active { background:var(--s3); color:var(--t-pri); }
+.sess-side .tree .node.active::before {
+  content:''; width:2px; height:14px; background:var(--ember-400); margin-left:-10px; margin-right:4px; border-radius:1px;
+}
+.sess-side .tree .indent { padding-left:var(--sp-4); }
+.sess-side .tree .indent-2 { padding-left:var(--sp-6); }
+.sess-side .tree svg { width:12px; height:12px; flex-shrink:0; color:var(--t-ter); }
+.sess-side .tree .git-m { color:var(--warn); font-size:9px; margin-left:auto; }
+.sess-side .tree .git-a { color:var(--ok); font-size:9px; margin-left:auto; }
+
+.sess-side .roster { padding:var(--sp-2) var(--sp-3) var(--sp-3); border-top:1px solid var(--b1); }
+.sess-side .roster .r-row {
+  display:flex; align-items:center; gap:var(--sp-2);
+  padding:var(--sp-2); border-radius:var(--r-sm);
+  font-size:12px;
+}
+.sess-side .roster .r-row:hover { background:var(--s3); }
+.sess-side .roster .r-row .lbl-s { color:var(--t-sec); font-size:11px; flex:1; }
+.sess-side .roster .r-row .n { color:var(--t-pri); font-family:var(--f-m); font-size:10px; }
+
+/* main canvas */
+.sess-main { flex:1; display:flex; flex-direction:column; min-height:0; min-width:0; }
+.sess-tabs {
+  height:33px; flex-shrink:0; display:flex; align-items:stretch;
+  background:var(--s2); border-bottom:1px solid var(--b1);
+  padding-left:var(--sp-2);
+}
+.sess-tabs .tab {
+  display:flex; align-items:center; gap:var(--sp-2);
+  padding:0 var(--sp-3);
+  font-family:var(--f-m); font-size:11px;
+  color:var(--t-sec); border-right:1px solid var(--b1);
+  position:relative; cursor:pointer;
+}
+.sess-tabs .tab.active { color:var(--t-pri); background:var(--bg); }
+.sess-tabs .tab.active::after {
+  content:''; position:absolute; top:0; left:0; right:0; height:1px;
+  background:var(--ember-400);
+}
+.sess-tabs .tab .dot { font-size:8px; color:var(--warn); }
+.sess-tabs .tab svg { width:12px; height:12px; color:var(--t-ter); }
+.sess-tabs .spacer { flex:1; border-right:1px solid var(--b1); }
+.sess-tabs .split-ctrls { display:flex; align-items:center; gap:var(--sp-1); padding:0 var(--sp-2); }
+.sess-tabs .split-ctrls button { color:var(--t-ter); padding:4px; border-radius:var(--r-sm); }
+.sess-tabs .split-ctrls button:hover { color:var(--t-pri); background:var(--s3); }
+
+.quad {
+  flex:1; min-height:0; min-width:0;
+  display:grid; grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr;
+  gap:1px; background:var(--b1);
+}
+.pane { background:var(--bg); display:flex; flex-direction:column; min-height:0; min-width:0; overflow:hidden; }
+.pane.span-v { grid-row:1/3; }
+
+.pane-head {
+  height:28px; flex-shrink:0;
+  display:flex; align-items:center; padding:0 var(--sp-3);
+  background:var(--s1); border-bottom:1px solid var(--b1);
+  gap:var(--sp-2);
+}
+.pane-head .lbl-t { font-family:var(--f-m); font-size:10px; color:var(--t-sec); letter-spacing:.16em; text-transform:uppercase; }
+.pane-head .name { font-family:var(--f-m); font-size:11px; color:var(--t-pri); display:flex; align-items:center; gap:var(--sp-2); }
+.pane-head .right { margin-left:auto; display:flex; gap:var(--sp-1); align-items:center; }
+.pane-head .right button { color:var(--t-ter); padding:3px; border-radius:var(--r-sm); }
+.pane-head .right button:hover { color:var(--t-pri); background:var(--s3); }
+.pane-head .right button svg { width:12px; height:12px; display:block; }
+.pane-head .cost { font-family:var(--f-m); font-size:10px; color:var(--t-ter); }
+.pane-head .cost em { color:var(--t-sec); font-style:normal; }
+
+/* chat pane */
+.chat-body {
+  flex:1; overflow:auto; padding:var(--sp-4) var(--sp-5);
+  display:flex; flex-direction:column; gap:var(--sp-5);
+}
+.msg { display:flex; flex-direction:column; gap:var(--sp-2); }
+.msg .author {
+  display:flex; align-items:center; gap:var(--sp-2);
+  font-family:var(--f-m); font-size:10px; color:var(--t-sec);
+  letter-spacing:.12em; text-transform:uppercase;
+}
+.msg .author .time { margin-left:auto; color:var(--t-ter); letter-spacing:.05em; }
+.msg .bubble { font-size:13.5px; line-height:1.55; color:var(--t-pri); }
+.msg .bubble code {
+  font-family:var(--f-m); font-size:12px;
+  background:var(--s2); padding:1px 6px; border-radius:var(--r-sm);
+  border:1px solid var(--b1);
+}
+.msg.user .bubble { color:var(--t-pri); }
+.msg.user .author { color:var(--t-sec); }
+
+.tool-call {
+  margin-top:var(--sp-2);
+  background:rgba(255,209,102,.04);
+  border:1px solid rgba(255,209,102,.15);
+  border-radius:var(--r-sm); overflow:hidden;
+}
+.tool-call.nested { margin-left:var(--sp-5); }
+.tool-call .tc-head {
+  display:flex; align-items:center; gap:var(--sp-2);
+  padding:var(--sp-2) var(--sp-3);
+  font-family:var(--f-m); font-size:11px;
+  cursor:pointer;
+}
+.tool-call .tc-head svg.icon { width:13px; height:13px; color:var(--ember-100); }
+.tool-call .tc-head .name { color:var(--ember-100); }
+.tool-call .tc-head .arg { color:var(--t-sec); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; min-width:0; }
+.tool-call .tc-head .dur { color:var(--t-ter); }
+.tool-call .tc-head .ok { color:var(--ok); }
+.tool-call .tc-head .chev { color:var(--t-ter); transition:transform var(--ease); }
+.tool-call.open .tc-head .chev { transform:rotate(90deg); }
+.tool-call .tc-body {
+  display:none;
+  padding:0 var(--sp-3) var(--sp-3);
+  font-family:var(--f-m); font-size:11px; color:var(--t-sec);
+  border-top:1px solid rgba(255,209,102,.1);
+  background:rgba(255,209,102,.02);
+}
+.tool-call.open .tc-body { display:block; padding-top:var(--sp-2); }
+.tool-call .tc-body pre {
+  white-space:pre-wrap; padding:var(--sp-2); background:rgba(0,0,0,.25); border-radius:var(--r-sm);
+  color:var(--t-pri); font-size:11px; margin-top:var(--sp-2);
+}
+.tool-call .tc-body .k { color:var(--sx-kw); }
+.tool-call .tc-body .s { color:var(--sx-str); }
+
+/* sub-agent banner */
+.subagent {
+  margin-top:var(--sp-3);
+  border:1px solid var(--b1); border-left:2px solid var(--ember-400);
+  border-radius:var(--r-sm); overflow:hidden;
+  background:var(--s1);
+}
+.subagent .sa-head {
+  display:flex; align-items:center; gap:var(--sp-2);
+  padding:var(--sp-2) var(--sp-3);
+  font-family:var(--f-m); font-size:11px;
+}
+.subagent .sa-head .spawn { color:var(--ember-100); }
+.subagent .sa-head .name { color:var(--t-pri); font-weight:500; }
+.subagent .sa-head .chips { margin-left:auto; display:flex; gap:var(--sp-1); }
+.subagent .chip {
+  font-family:var(--f-m); font-size:9px; letter-spacing:.08em;
+  padding:2px 6px; border-radius:var(--r-sm);
+  border:1px solid var(--b1); color:var(--t-sec);
+}
+.subagent .chip.run { color:var(--ember-200); border-color:var(--warn-bd); background:var(--warn-bg); }
+.subagent .sa-body { padding:var(--sp-3); font-size:12.5px; color:var(--t-sec); border-top:1px solid var(--b1); }
+.subagent .sa-body p + p { margin-top:var(--sp-2); }
+
+/* streaming cursor */
+.stream-cursor {
+  display:inline-block; width:5px; height:12px; background:var(--ember-400);
+  border-radius:1px; vertical-align:text-bottom;
+  animation:blink 1s steps(1,end) infinite;
+  margin-left:2px;
+}
+@keyframes blink { 0%,50%{opacity:1;} 51%,100%{opacity:0;} }
+
+/* chat composer */
+.composer {
+  flex-shrink:0; border-top:1px solid var(--b1);
+  padding:var(--sp-3) var(--sp-4);
+  background:var(--s1);
+}
+.composer .ctx-chips { display:flex; gap:var(--sp-1); margin-bottom:var(--sp-2); flex-wrap:wrap; }
+.composer .ctx-chips .c {
+  display:inline-flex; align-items:center; gap:4px;
+  font-family:var(--f-m); font-size:10px; color:var(--t-sec);
+  padding:2px 8px; border:1px solid var(--b1); border-radius:var(--r-sm);
+  background:var(--s2);
+}
+.composer .ctx-chips .c .x { color:var(--t-ter); cursor:pointer; }
+.composer .input-wrap {
+  background:var(--s2); border:1px solid var(--b1); border-radius:var(--r-sm);
+  padding:var(--sp-3);
+  transition:border-color var(--ease);
+}
+.composer .input-wrap:focus-within { border-color:var(--ember-400); }
+.composer textarea {
+  width:100%; background:none; color:var(--t-pri); border:0; outline:none; resize:none;
+  font-family:var(--f-b); font-size:13.5px; min-height:52px;
+}
+.composer .bottom {
+  display:flex; align-items:center; gap:var(--sp-2); margin-top:var(--sp-2);
+  padding-top:var(--sp-2); border-top:1px solid var(--b1);
+}
+.composer .bottom .provider-pick {
+  display:flex; align-items:center; gap:var(--sp-2);
+  padding:4px 8px; border:1px solid var(--b1); border-radius:var(--r-sm);
+  font-family:var(--f-m); font-size:11px; color:var(--t-pri);
+  cursor:pointer;
+}
+.composer .bottom .provider-pick:hover { border-color:var(--b2); }
+.composer .bottom .provider-pick .mdl { color:var(--t-sec); }
+.composer .bottom .ghost-pill {
+  font-family:var(--f-m); font-size:10px; color:var(--t-ter);
+  letter-spacing:.08em;
+}
+.composer .bottom .send {
+  margin-left:auto;
+  display:flex; gap:var(--sp-1);
+}
+.composer .bottom .send-btn {
+  background:var(--ember-400); color:#fff;
+  padding:6px 10px; border-radius:var(--r-sm);
+  display:flex; align-items:center; gap:var(--sp-2);
+  font-family:var(--f-d); font-weight:700; font-size:11px;
+  letter-spacing:.1em; text-transform:uppercase;
+}
+.composer .bottom .send-btn:hover { background:var(--ember-300); }
+.composer .bottom .send-kbd { font-family:var(--f-m); font-size:9px; opacity:.7; }
+
+/* terminal pane */
+.term {
+  flex:1; overflow:auto; padding:var(--sp-3);
+  font-family:var(--f-m); font-size:11.5px; line-height:1.55;
+  background:#050709;
+}
+.term .prompt { color:var(--ember-300); }
+.term .dir { color:var(--p-local); }
+.term .out { color:var(--t-pri); }
+.term .dim { color:var(--t-ter); }
+.term .ok { color:var(--ok); }
+.term .err { color:var(--err); }
+.term .cmd { color:var(--t-pri); }
+
+/* editor pane */
+.editor {
+  flex:1; overflow:auto;
+  font-family:var(--f-m); font-size:12px; line-height:1.6;
+  background:#050709;
+  display:flex;
+}
+.editor .gutter {
+  padding:var(--sp-3) var(--sp-2); color:var(--t-ter); text-align:right;
+  background:var(--s1); border-right:1px solid var(--b1);
+  user-select:none;
+}
+.editor .code { padding:var(--sp-3); flex:1; white-space:pre; }
+.editor .code .kw { color:var(--sx-kw); }
+.editor .code .fn { color:var(--sx-fn); }
+.editor .code .st { color:var(--sx-str); }
+.editor .code .ty { color:var(--sx-type); }
+.editor .code .nm { color:var(--sx-num); }
+.editor .code .cm { color:var(--sx-comment); font-style:italic; }
+.editor .code .hi { background:rgba(255,74,18,.07); border-left:2px solid var(--ember-400); margin-left:calc(-1 * var(--sp-3)); padding-left:calc(var(--sp-3) - 2px); display:block; }
+
+/* =============================================================
+   VIEW 3 — AGENT MONITOR
+   ============================================================= */
+.mon { flex:1; display:grid; grid-template-columns:280px 1fr 340px; min-height:0; }
+
+.mon-list { background:var(--s1); border-right:1px solid var(--b1); display:flex; flex-direction:column; min-height:0; }
+.mon-list .head { padding:var(--sp-3) var(--sp-4); border-bottom:1px solid var(--b1); display:flex; justify-content:space-between; align-items:center; }
+.mon-list .head h2 { font-family:var(--f-d); font-weight:800; font-size:14px; letter-spacing:.1em; text-transform:uppercase; }
+.mon-list .rows { flex:1; overflow:auto; }
+
+.mon-agent {
+  padding:var(--sp-3) var(--sp-4);
+  border-bottom:1px solid var(--b1);
+  cursor:pointer; transition:background var(--ease);
+}
+.mon-agent:hover { background:var(--s2); }
+.mon-agent.active { background:var(--s2); }
+.mon-agent.active { border-left:2px solid var(--ember-400); padding-left:calc(var(--sp-4) - 2px); }
+.mon-agent .top { display:flex; align-items:center; gap:var(--sp-2); }
+.mon-agent .name { font-weight:500; font-size:13.5px; }
+.mon-agent .sub { font-family:var(--f-m); font-size:10px; color:var(--t-ter); margin-top:2px; }
+.mon-agent .bar-wrap { margin-top:var(--sp-2); height:3px; background:var(--s2); border-radius:2px; overflow:hidden; }
+.mon-agent .bar { height:100%; border-radius:2px; }
+.mon-agent .bar.run  { background:var(--warn); }
+.mon-agent .bar.done { background:var(--ok); }
+.mon-agent .bar.queue{ background:var(--t-ter); }
+.mon-agent .bar.err  { background:var(--err); }
+.mon-agent .meta { display:flex; gap:var(--sp-3); margin-top:var(--sp-2); font-family:var(--f-m); font-size:10px; color:var(--t-ter); }
+.mon-agent .meta .state.run  { color:var(--ember-200); }
+.mon-agent .meta .state.done { color:var(--ok); }
+.mon-agent .meta .state.queue{ color:var(--t-sec); }
+.mon-agent .meta .state.err  { color:var(--err); }
+
+/* trace middle */
+.mon-trace { display:flex; flex-direction:column; min-height:0; }
+.mon-trace .head {
+  padding:var(--sp-4) var(--sp-6); border-bottom:1px solid var(--b1);
+  display:flex; align-items:center; gap:var(--sp-3);
+}
+.mon-trace .head .h-name { font-family:var(--f-d); font-weight:800; font-size:20px; letter-spacing:.06em; text-transform:uppercase; flex:1; }
+.mon-trace .head .id { font-family:var(--f-m); font-size:11px; color:var(--t-ter); }
+.mon-trace .head .chip {
+  font-family:var(--f-m); font-size:9px; letter-spacing:.1em; text-transform:uppercase;
+  padding:3px 8px; border-radius:var(--r-sm);
+  background:var(--warn-bg); border:1px solid var(--warn-bd); color:var(--ember-200);
+}
+
+.mon-trace .tb {
+  padding:var(--sp-2) var(--sp-6); border-bottom:1px solid var(--b1);
+  display:flex; gap:var(--sp-4); font-family:var(--f-m); font-size:10px; color:var(--t-sec); letter-spacing:.08em;
+}
+.mon-trace .tb b { color:var(--t-pri); font-weight:500; }
+.mon-trace .tb .sep { opacity:.4; }
+
+.mon-trace .body { flex:1; overflow:auto; padding:var(--sp-4) var(--sp-6); }
+
+.step {
+  display:grid; grid-template-columns:auto 1fr; gap:var(--sp-3);
+  padding-bottom:var(--sp-4);
+  position:relative;
+}
+.step .rail { width:2px; background:var(--b1); border-radius:1px; justify-self:center; position:absolute; left:7px; top:22px; bottom:0; }
+.step:last-child .rail { display:none; }
+.step .dot { width:16px; height:16px; border-radius:50%; border:2px solid var(--bg); background:var(--t-ter); position:relative; z-index:1; flex-shrink:0; }
+.step.done .dot { background:var(--ok); }
+.step.run  .dot { background:var(--warn); box-shadow:0 0 0 4px rgba(255,170,51,.15); }
+.step.run  .dot::after { content:''; position:absolute; inset:-1px; border-radius:50%; border:1px solid var(--warn); animation:ring 1.5s infinite; }
+@keyframes ring { 0%{transform:scale(1);opacity:1;} 100%{transform:scale(2);opacity:0;} }
+.step.err  .dot { background:var(--err); }
+
+.step .content { min-width:0; }
+.step .content .title {
+  display:flex; align-items:center; gap:var(--sp-2);
+  font-family:var(--f-m); font-size:12px; color:var(--t-pri);
+}
+.step .content .title .kind {
+  font-family:var(--f-m); font-size:9px; letter-spacing:.15em; text-transform:uppercase;
+  padding:1px 6px; border-radius:var(--r-sm);
+}
+.step .content .title .kind.tool { background:rgba(255,209,102,.05); color:var(--ember-100); border:1px solid rgba(255,209,102,.2); }
+.step .content .title .kind.spawn { background:rgba(255,74,18,.05); color:var(--ember-400); border:1px solid rgba(255,74,18,.2); }
+.step .content .title .kind.think { background:var(--s2); color:var(--t-sec); border:1px solid var(--b1); }
+.step .content .title .kind.mcp  { background:var(--info-bg); color:var(--info); border:1px solid var(--info-bd); }
+.step .content .title .ts { margin-left:auto; font-family:var(--f-m); font-size:10px; color:var(--t-ter); }
+.step .content .title .dur { font-family:var(--f-m); font-size:10px; color:var(--t-ter); }
+.step .content .desc { font-size:13px; color:var(--t-sec); margin-top:4px; }
+.step .content .preview {
+  margin-top:var(--sp-2); padding:var(--sp-2) var(--sp-3);
+  background:#050709; border:1px solid var(--b1); border-radius:var(--r-sm);
+  font-family:var(--f-m); font-size:11px; color:var(--t-sec); overflow-x:auto;
+}
+
+/* inspector right */
+.mon-inspect { background:var(--s1); border-left:1px solid var(--b1); display:flex; flex-direction:column; min-height:0; overflow:auto; }
+.mon-inspect h3 { font-family:var(--f-d); font-weight:800; font-size:12px; letter-spacing:.12em; text-transform:uppercase; padding:var(--sp-4); border-bottom:1px solid var(--b1); color:var(--t-sec); }
+.mon-inspect .sec { padding:var(--sp-4); border-bottom:1px solid var(--b1); }
+.mon-inspect .sec h4 { font-family:var(--f-m); font-size:9px; color:var(--t-sec); letter-spacing:.25em; text-transform:uppercase; margin-bottom:var(--sp-3); }
+.mon-inspect .kv { display:grid; grid-template-columns:1fr auto; gap:var(--sp-2); font-family:var(--f-m); font-size:11px; }
+.mon-inspect .kv .k { color:var(--t-sec); }
+.mon-inspect .kv .v { color:var(--t-pri); text-align:right; }
+.mon-inspect .pill-list { display:flex; flex-wrap:wrap; gap:4px; }
+.mon-inspect .pill { font-family:var(--f-m); font-size:10px; padding:3px 8px; border:1px solid var(--b1); border-radius:var(--r-sm); color:var(--t-sec); }
+
+/* =============================================================
+   VIEW 4 — SKILLS / MCP / AGENTS MANAGER
+   ============================================================= */
+.mgr { flex:1; display:grid; grid-template-columns:200px 1fr; min-height:0; }
+.mgr-side { background:var(--s1); border-right:1px solid var(--b1); padding:var(--sp-4) 0; }
+.mgr-side .title { padding:0 var(--sp-4) var(--sp-4); }
+.mgr-side .title h1 { font-family:var(--f-d); font-weight:800; font-size:18px; letter-spacing:.06em; text-transform:uppercase; }
+.mgr-side .tabs { display:flex; flex-direction:column; }
+.mgr-side .tab {
+  padding:var(--sp-2) var(--sp-4);
+  font-family:var(--f-b); font-size:13px; color:var(--t-sec);
+  cursor:pointer; transition:all var(--ease); position:relative;
+  display:flex; align-items:center; gap:var(--sp-3);
+}
+.mgr-side .tab svg { width:14px; height:14px; color:var(--t-ter); }
+.mgr-side .tab:hover { color:var(--t-pri); background:var(--s2); }
+.mgr-side .tab.active { color:var(--t-pri); background:var(--s2); }
+.mgr-side .tab.active::before {
+  content:''; position:absolute; left:0; top:6px; bottom:6px; width:2px; background:var(--ember-400); border-radius:0 2px 2px 0;
+}
+.mgr-side .tab.active svg { color:var(--ember-400); }
+.mgr-side .tab .n { margin-left:auto; font-family:var(--f-m); font-size:10px; color:var(--t-ter); }
+
+.mgr-main { display:flex; flex-direction:column; min-height:0; overflow:auto; }
+.mgr-head {
+  padding:var(--sp-6) var(--sp-8);
+  border-bottom:1px solid var(--b1);
+  display:flex; gap:var(--sp-4); align-items:center;
+}
+.mgr-head h1 { font-family:var(--f-d); font-weight:800; font-size:28px; letter-spacing:.04em; text-transform:uppercase; }
+.mgr-head p { color:var(--t-sec); font-size:13px; margin-top:4px; max-width:520px; }
+.mgr-head .right { margin-left:auto; display:flex; gap:var(--sp-2); }
+
+.mgr-search {
+  padding:var(--sp-4) var(--sp-8);
+  border-bottom:1px solid var(--b1);
+  display:flex; gap:var(--sp-3); align-items:center;
+}
+.mgr-search .box {
+  flex:1; display:flex; align-items:center; gap:var(--sp-2);
+  background:var(--s2); border:1px solid var(--b1); border-radius:var(--r-sm);
+  padding:var(--sp-2) var(--sp-3);
+}
+.mgr-search .box svg { width:14px; height:14px; color:var(--t-ter); }
+.mgr-search .box input { flex:1; color:var(--t-pri); font-size:13px; }
+.mgr-search .box .kbd { font-family:var(--f-m); font-size:10px; color:var(--t-ter); border:1px solid var(--b1); padding:1px 5px; border-radius:var(--r-sm); }
+.mgr-search .filters { display:flex; gap:var(--sp-1); }
+.mgr-search .filter-chip {
+  font-family:var(--f-m); font-size:10px; letter-spacing:.1em; text-transform:uppercase;
+  padding:4px 10px; border:1px solid var(--b1); border-radius:var(--r-sm); color:var(--t-sec);
+  cursor:pointer;
+}
+.mgr-search .filter-chip.on { color:var(--ember-400); border-color:var(--ember-400); background:var(--ember-900); }
+
+.mgr-grid {
+  padding:var(--sp-6) var(--sp-8);
+  display:grid; grid-template-columns:repeat(auto-fill, minmax(340px, 1fr));
+  gap:var(--sp-4);
+}
+.asset {
+  background:var(--s2); border:1px solid var(--b1); border-radius:var(--r-lg);
+  display:flex; flex-direction:column; overflow:hidden;
+  transition:border-color var(--ease);
+}
+.asset:hover { border-color:var(--b2); }
+.asset .a-head {
+  padding:var(--sp-3) var(--sp-4);
+  display:flex; align-items:center; gap:var(--sp-3);
+  border-bottom:1px solid var(--b1);
+}
+.asset .a-head .sigil {
+  width:34px; height:34px; border-radius:var(--r-sm);
+  background:var(--bg); border:1px solid var(--b1);
+  display:flex; align-items:center; justify-content:center;
+  font-family:var(--f-d); font-weight:900; font-size:14px;
+  color:var(--ember-400);
+}
+.asset.openai .a-head .sigil  { color:var(--p-openai); }
+.asset.local  .a-head .sigil  { color:var(--p-local); }
+.asset.info .a-head .sigil    { color:var(--info); }
+.asset .a-head .meta { flex:1; min-width:0; }
+.asset .a-head .meta .n { font-weight:500; font-size:14px; display:flex; align-items:center; gap:var(--sp-2); }
+.asset .a-head .meta .src { font-family:var(--f-m); font-size:10px; color:var(--t-ter); margin-top:2px; }
+.asset .a-head .tog { margin-left:auto; }
+.asset .desc { padding:var(--sp-3) var(--sp-4); font-size:12.5px; color:var(--t-sec); line-height:1.5; flex:1; }
+.asset .foot {
+  padding:var(--sp-3) var(--sp-4); border-top:1px solid var(--b1);
+  display:flex; align-items:center; gap:var(--sp-3);
+  font-family:var(--f-m); font-size:10px; color:var(--t-ter);
+}
+.asset .foot .tags { display:flex; gap:4px; flex-wrap:wrap; }
+.asset .foot .tag { padding:1px 6px; border:1px solid var(--b1); border-radius:var(--r-sm); color:var(--t-sec); }
+.asset .foot .tag.portable { border-color:rgba(61,220,132,.22); color:var(--ok); background:rgba(61,220,132,.05); }
+.asset .foot .ml { margin-left:auto; }
+
+.tog {
+  width:32px; height:18px; border-radius:9px; background:var(--b1); position:relative; cursor:pointer;
+  transition:background var(--ease); flex-shrink:0;
+}
+.tog::after { content:''; position:absolute; top:2px; left:2px; width:14px; height:14px; background:var(--t-ter); border-radius:50%; transition:all var(--ease); }
+.tog.on { background:var(--ember-900); }
+.tog.on::after { left:16px; background:var(--ember-400); }
+
+/* =============================================================
+   VIEW 5 — PROVIDERS & USAGE
+   ============================================================= */
+.usg { flex:1; display:flex; flex-direction:column; min-height:0; overflow:auto; }
+.usg-head {
+  padding:var(--sp-6) var(--sp-8);
+  display:grid; grid-template-columns:1fr auto; gap:var(--sp-4); align-items:center;
+  border-bottom:1px solid var(--b1);
+}
+.usg-head h1 { font-family:var(--f-d); font-weight:800; font-size:28px; letter-spacing:.04em; text-transform:uppercase; }
+.usg-head p { color:var(--t-sec); font-size:13px; margin-top:4px; max-width:520px; }
+.usg-head .range {
+  display:flex; gap:0; border:1px solid var(--b1); border-radius:var(--r-sm); overflow:hidden;
+}
+.usg-head .range button {
+  padding:6px 12px; font-family:var(--f-m); font-size:10px;
+  color:var(--t-sec); letter-spacing:.12em; text-transform:uppercase;
+  border-right:1px solid var(--b1);
+}
+.usg-head .range button:last-child { border-right:0; }
+.usg-head .range button:hover { color:var(--t-pri); }
+.usg-head .range button.on { background:var(--ember-400); color:#fff; }
+
+.usg-kpis {
+  padding:var(--sp-6) var(--sp-8);
+  display:grid; grid-template-columns:repeat(4, 1fr); gap:var(--sp-4);
+}
+.kpi {
+  background:var(--s2); border:1px solid var(--b1); border-radius:var(--r-lg);
+  padding:var(--sp-5);
+  position:relative;
+}
+.kpi::before {
+  content:''; position:absolute; top:0; left:0; width:48px; height:2px; background:var(--ember-400);
+}
+.kpi.ok::before { background:var(--ok); }
+.kpi.warn::before { background:var(--warn); }
+.kpi.info::before { background:var(--info); }
+.kpi .lbl { font-family:var(--f-m); font-size:9px; color:var(--t-sec); letter-spacing:.22em; text-transform:uppercase; }
+.kpi .v { font-family:var(--f-d); font-weight:800; font-size:34px; letter-spacing:.02em; margin-top:var(--sp-2); }
+.kpi .v small { font-size:16px; color:var(--t-sec); margin-left:4px; font-family:var(--f-m); font-weight:400; }
+.kpi .delta { display:flex; align-items:center; gap:4px; font-family:var(--f-m); font-size:11px; margin-top:var(--sp-2); }
+.kpi .delta.up { color:var(--warn); }
+.kpi .delta.dn { color:var(--ok); }
+
+.usg-body {
+  display:grid; grid-template-columns:2fr 1fr; gap:var(--sp-4);
+  padding:0 var(--sp-8) var(--sp-8);
+}
+
+.chart-card {
+  background:var(--s2); border:1px solid var(--b1); border-radius:var(--r-lg); overflow:hidden;
+}
+.chart-card .c-head {
+  padding:var(--sp-4) var(--sp-5); display:flex; align-items:center; border-bottom:1px solid var(--b1);
+}
+.chart-card .c-head h2 { font-family:var(--f-d); font-weight:800; font-size:14px; letter-spacing:.12em; text-transform:uppercase; }
+.chart-card .c-head .legend { margin-left:auto; display:flex; gap:var(--sp-3); font-family:var(--f-m); font-size:10px; color:var(--t-sec); }
+.chart-card .c-head .legend .lg { display:flex; align-items:center; gap:4px; }
+.chart-card .c-head .legend .sw { width:10px; height:2px; border-radius:1px; }
+.chart-card .c-body { padding:var(--sp-5); }
+.chart-card svg { width:100%; height:240px; overflow:visible; }
+
+.breakdown {
+  background:var(--s2); border:1px solid var(--b1); border-radius:var(--r-lg);
+  display:flex; flex-direction:column;
+}
+.breakdown .c-head {
+  padding:var(--sp-4) var(--sp-5); display:flex; align-items:center; border-bottom:1px solid var(--b1);
+}
+.breakdown .c-head h2 { font-family:var(--f-d); font-weight:800; font-size:14px; letter-spacing:.12em; text-transform:uppercase; }
+.breakdown .rows { padding:var(--sp-2) 0; }
+.breakdown .row {
+  padding:var(--sp-3) var(--sp-5);
+  display:grid; grid-template-columns:auto 1fr auto; gap:var(--sp-3); align-items:center;
+  position:relative;
+}
+.breakdown .row:hover { background:var(--s3); }
+.breakdown .row .dot-l { width:8px; height:8px; border-radius:50%; }
+.breakdown .row .n { font-size:13px; font-weight:500; }
+.breakdown .row .n .sub { display:block; font-family:var(--f-m); font-size:10px; color:var(--t-ter); margin-top:2px; font-weight:400; }
+.breakdown .row .val { font-family:var(--f-d); font-weight:700; font-size:15px; text-align:right; }
+.breakdown .row .val small { display:block; font-family:var(--f-m); font-size:10px; color:var(--t-ter); font-weight:400; margin-top:2px; }
+.breakdown .bar {
+  grid-column:1/4; height:2px; margin-top:var(--sp-2); background:var(--s1); border-radius:1px; overflow:hidden;
+}
+.breakdown .bar > div { height:100%; }
+
+.usg-limits {
+  margin:0 var(--sp-8) var(--sp-8);
+  background:var(--s2); border:1px solid var(--b1); border-radius:var(--r-lg);
+}
+.usg-limits .c-head { padding:var(--sp-4) var(--sp-5); border-bottom:1px solid var(--b1); display:flex; align-items:center; gap:var(--sp-3); }
+.usg-limits .c-head h2 { font-family:var(--f-d); font-weight:800; font-size:14px; letter-spacing:.12em; text-transform:uppercase; }
+.usg-limits table { width:100%; border-collapse:collapse; }
+.usg-limits th, .usg-limits td { padding:var(--sp-3) var(--sp-5); text-align:left; }
+.usg-limits th { font-family:var(--f-m); font-size:9px; color:var(--t-sec); letter-spacing:.22em; text-transform:uppercase; border-bottom:1px solid var(--b1); }
+.usg-limits td { border-bottom:1px solid var(--b1); font-size:13px; }
+.usg-limits tr:last-child td { border-bottom:0; }
+.usg-limits td .bar-wrap { width:140px; height:4px; background:var(--s1); border-radius:2px; overflow:hidden; }
+.usg-limits td .bar-wrap .bar { height:100%; background:var(--ok); }
+.usg-limits td .bar-wrap .bar.warn { background:var(--warn); }
+.usg-limits td .bar-wrap .bar.err { background:var(--err); }
+.usg-limits td .pct { font-family:var(--f-m); font-size:11px; color:var(--t-sec); margin-left:var(--sp-3); }
+
+</style>
+</head>
+<body>
+
+<!-- =============================================================
+     MOCK NAVIGATION — chrome only, not part of the product
+     ============================================================= -->
+<nav class="mock-nav">
+  <button class="active" data-view="dash">Dashboard</button>
+  <button data-view="fresh">Session (new)</button>
+  <button data-view="sess">Session (working)</button>
+  <button data-view="mon">Agent Monitor</button>
+  <button data-view="mgr">Skills · MCP · Agents</button>
+  <button data-view="usg">Providers · Usage</button>
+</nav>
+<div class="mock-note">forge v0.2 · mock frame · keyboard: 1–5</div>
+
+<!-- Shared inline SVGs (defined once, referenced via <use>) -->
+<svg width="0" height="0" style="position:absolute">
+<defs>
+  <!-- the forge mark: hub and spokes with a hammer -->
+  <symbol id="forge-mark" viewBox="0 0 24 24">
+    <g stroke-linecap="round" stroke-linejoin="round" fill="none" stroke-width="1.5">
+      <!-- spokes -->
+      <line x1="12" y1="12" x2="12" y2="3"  stroke="#ffd166"/>
+      <line x1="12" y1="12" x2="4"  y2="7"  stroke="#ff4a12"/>
+      <line x1="12" y1="12" x2="20" y2="7"  stroke="#ff4a12"/>
+      <line x1="12" y1="12" x2="5"  y2="19" stroke="#ff7a30"/>
+      <line x1="12" y1="12" x2="19" y2="19" stroke="#ff7a30"/>
+      <!-- endpoint nodes -->
+      <circle cx="12" cy="3"  r="1.2" stroke="#ffd166" fill="#07080a"/>
+      <circle cx="4"  cy="7"  r="1.2" stroke="#ff4a12" fill="#07080a"/>
+      <circle cx="20" cy="7"  r="1.2" stroke="#ff4a12" fill="#07080a"/>
+      <circle cx="5"  cy="19" r="1.2" stroke="#ff7a30" fill="#07080a"/>
+      <circle cx="19" cy="19" r="1.2" stroke="#ff7a30" fill="#07080a"/>
+      <!-- hub + hammer -->
+      <circle cx="12" cy="12" r="3" fill="#0c1018" stroke="#1e2838"/>
+      <rect x="10.5" y="10.5" width="3" height="3" fill="#4a5668" stroke="none"/>
+      <line x1="12" y1="11.2" x2="12" y2="12.8" stroke="#ff4a12" stroke-width="0.8"/>
+    </g>
+  </symbol>
+
+  <symbol id="ic-sessions" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="1.5"/><path d="M3 9h18M7 14h3M7 16h6"/></symbol>
+  <symbol id="ic-providers" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></symbol>
+  <symbol id="ic-skill" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7v6c0 5 4 8 9 9 5-1 9-4 9-9V7l-9-5z"/></symbol>
+  <symbol id="ic-mcp" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16v5H4zM4 14h16v3H4z"/><circle cx="7" cy="9.5" r=".6" fill="currentColor"/><circle cx="7" cy="15.5" r=".6" fill="currentColor"/></symbol>
+  <symbol id="ic-agent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="9" r="3.5"/><path d="M5 20c1-3.5 4-5 7-5s6 1.5 7 5"/></symbol>
+  <symbol id="ic-usage" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18h18M6 14l4-4 3 3 5-7"/></symbol>
+  <symbol id="ic-container" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l9-4 9 4v10l-9 4-9-4z"/><path d="M3 7l9 4 9-4M12 21V11"/></symbol>
+  <symbol id="ic-config" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 3v2M12 19v2M5 12H3M21 12h-2M6 6l1.5 1.5M16.5 16.5 18 18M6 18l1.5-1.5M16.5 7.5 18 6"/></symbol>
+  <symbol id="ic-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10zM13 3v7h7"/></symbol>
+  <symbol id="ic-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></symbol>
+  <symbol id="ic-git" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="M6 8v3a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8M12 14v2"/></symbol>
+  <symbol id="ic-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></symbol>
+  <symbol id="ic-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="ic-chat" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></symbol>
+  <symbol id="ic-term" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-6-6-6M12 19h8"/></symbol>
+  <symbol id="ic-code" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6M14 4l-4 16"/></symbol>
+  <symbol id="ic-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="ic-chev-r" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></symbol>
+  <symbol id="ic-chev-d" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="ic-split" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="1"/><path d="M12 5v14"/></symbol>
+  <symbol id="ic-more" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="12" r="1.2" fill="currentColor"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/><circle cx="18" cy="12" r="1.2" fill="currentColor"/></symbol>
+  <symbol id="ic-stop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="1"/></symbol>
+  <symbol id="ic-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 16-7-5 16-4-6-7-3z"/></symbol>
+  <symbol id="ic-wrench" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 7a4 4 0 0 0-5 5L4 17l3 3 5-5a4 4 0 0 0 5-5l-2 2-3-3z"/></symbol>
+  <symbol id="ic-branch" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="18" r="2"/><circle cx="6" cy="18" r="2"/><path d="M6 8v8M18 16V9a3 3 0 0 0-3-3H8"/></symbol>
+  <symbol id="ic-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"/></symbol>
+  <symbol id="ic-arrow-tr" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7M7 7h10v10"/></symbol>
+  <symbol id="ic-arrow-br" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7l10 10M17 7v10H7"/></symbol>
+</defs>
+</svg>
+
+<!-- =============================================================
+     VIEW 1 — DASHBOARD
+     ============================================================= -->
+<section class="view active" id="v-dash">
+  <div class="title-bar">
+    <div class="traffic"><i></i><i></i><i></i></div>
+    <div class="title"><b>Forge</b> — dashboard</div>
+    <div class="right">
+      <span class="badge">2 sessions</span>
+      <span class="badge">3 providers</span>
+    </div>
+  </div>
+
+  <div class="shell">
+    <aside class="activity-bar">
+      <button class="active" title="Dashboard"><svg><use href="#ic-sessions"/></svg></button>
+      <button title="Providers"><svg><use href="#ic-providers"/></svg></button>
+      <button title="Skills"><svg><use href="#ic-skill"/></svg></button>
+      <button title="MCP"><svg><use href="#ic-mcp"/></svg></button>
+      <button title="Agents"><svg><use href="#ic-agent"/></svg></button>
+      <button title="Usage"><svg><use href="#ic-usage"/></svg></button>
+      <button title="Containers"><svg><use href="#ic-container"/></svg></button>
+      <div class="spacer"></div>
+      <button title="Settings"><svg><use href="#ic-config"/></svg></button>
+    </aside>
+
+    <div class="dash">
+      <aside class="side">
+        <div class="brand">
+          <svg class="forge-mark"><use href="#forge-mark"/></svg>
+          <div>
+            <div class="word">Forge</div>
+            <div class="tag">any ai. one editor.</div>
+          </div>
+        </div>
+        <nav>
+          <div class="group-label"><div class="label">Workspace</div></div>
+          <a class="active"><svg><use href="#ic-sessions"/></svg>Sessions<span class="count">2</span></a>
+          <a><svg><use href="#ic-folder"/></svg>Recent<span class="count">7</span></a>
+          <a><svg><use href="#ic-git"/></svg>Git<span class="count">6</span></a>
+
+          <div class="group-label"><div class="label">AI</div></div>
+          <a><svg><use href="#ic-providers"/></svg>Providers<span class="count">4</span></a>
+          <a><svg><use href="#ic-skill"/></svg>Skills<span class="count">12</span></a>
+          <a><svg><use href="#ic-mcp"/></svg>MCP servers<span class="count">6</span></a>
+          <a><svg><use href="#ic-agent"/></svg>Agents<span class="count">9</span></a>
+
+          <div class="group-label"><div class="label">System</div></div>
+          <a><svg><use href="#ic-container"/></svg>Containers<span class="count">3</span></a>
+          <a><svg><use href="#ic-usage"/></svg>Usage</a>
+          <a><svg><use href="#ic-config"/></svg>Settings</a>
+        </nav>
+      </aside>
+
+      <main class="main">
+        <header class="hero">
+          <div>
+            <h1>Welcome back.<br><em>Forge</em> something.</h1>
+            <p>Two sessions active. One agent paused awaiting approval. Anthropic and local Ollama connected — OpenAI awaiting credentials.</p>
+          </div>
+          <div class="cta">
+            <button class="btn btn-ghost">Attach to session</button>
+            <button class="btn btn-pri"><svg width="12" height="12"><use href="#ic-plus"/></svg>New session</button>
+          </div>
+        </header>
+
+        <div class="grid">
+
+          <!-- Active sessions -->
+          <div class="card col-8">
+            <div class="head">
+              <div style="display:flex; align-items:center; gap:var(--sp-3);">
+                <div class="label">Sessions</div>
+                <div style="display:flex; gap:2px; font-family:var(--f-m); font-size:9px; background:var(--s3); border-radius:var(--r-sm); padding:2px;">
+                  <span style="color:var(--t-pri); padding:2px 8px; background:var(--s2); border-radius:2px;">active · 2</span>
+                  <span style="color:var(--t-ter); padding:2px 8px;">archived · 14</span>
+                </div>
+                <span style="font-family:var(--f-m); font-size:10px; color:var(--t-ter);">2 running · 5 idle</span>
+              </div>
+              <button class="btn btn-ghost" style="padding:3px 8px; font-size:10px;">View all</button>
+            </div>
+            <div class="body sessions" style="padding:0;">
+
+              <div class="session">
+                <div class="icon"><svg width="16" height="16"><use href="#ic-wrench"/></svg></div>
+                <div class="meta">
+                  <div class="name"><span class="p-dot anthropic"></span>refactor-payment-service<span style="font-family:var(--f-m); font-size:10px; color:var(--t-ter); margin-left:6px;">#a3f1</span></div>
+                  <div class="path">~/code/acme-api · claude-sonnet-4.5 · 3 agents · 12m</div>
+                </div>
+                <div class="state run"><span class="pulse"></span>streaming</div>
+              </div>
+
+              <div class="session">
+                <div class="icon" style="color:var(--p-local);"><svg width="16" height="16"><use href="#ic-agent"/></svg></div>
+                <div class="meta">
+                  <div class="name"><span class="p-dot local"></span>doc-site-rewrite<span style="font-family:var(--f-m); font-size:10px; color:var(--t-ter); margin-left:6px;">#b8c0</span></div>
+                  <div class="path">~/code/docs-v2 · llama-3.3-70b · 1 agent · 41m</div>
+                </div>
+                <div class="state run"><span class="pulse" style="color:var(--warn);"></span>awaiting approval</div>
+              </div>
+
+              <div class="session">
+                <div class="icon" style="color:var(--ok);"><svg width="16" height="16"><use href="#ic-check"/></svg></div>
+                <div class="meta">
+                  <div class="name"><span class="p-dot anthropic"></span>test-harness-migration<span style="font-family:var(--f-m); font-size:10px; color:var(--t-ter); margin-left:6px;">#77d3</span></div>
+                  <div class="path">~/code/acme-api · 64 steps · $2.41 · 2h ago</div>
+                </div>
+                <div class="state done">done</div>
+              </div>
+
+              <div class="session">
+                <div class="icon" style="color:var(--t-ter);"><svg width="16" height="16"><use href="#ic-sessions"/></svg></div>
+                <div class="meta">
+                  <div class="name"><span class="p-dot openai"></span>sql-query-optimizer<span style="font-family:var(--f-m); font-size:10px; color:var(--t-ter); margin-left:6px;">#120e</span></div>
+                  <div class="path">~/code/analytics · gpt-4.1 · idle · yesterday</div>
+                </div>
+                <div class="state idle">idle</div>
+              </div>
+
+            </div>
+          </div>
+
+          <!-- Providers -->
+          <div class="card col-4">
+            <div class="head">
+              <div class="label">Providers</div>
+              <button class="btn btn-ghost" style="padding:3px 8px; font-size:10px;">Manage</button>
+            </div>
+            <div class="body providers" style="padding:var(--sp-3);">
+              <div class="provider">
+                <span class="dot-lg" style="background:var(--p-anthropic);"></span>
+                <div class="info"><div class="n">Anthropic</div><div class="s">sonnet-4.5 · opus-4.1</div></div>
+                <div class="ok"><span class="live-dot"></span>ready</div>
+              </div>
+              <div class="provider">
+                <span class="dot-lg" style="background:var(--p-openai);"></span>
+                <div class="info"><div class="n">OpenAI</div><div class="s">credentials expired</div></div>
+                <div class="bad"><span class="live-dot err"></span>auth</div>
+              </div>
+              <div class="provider">
+                <span class="dot-lg" style="background:var(--p-local);"></span>
+                <div class="info"><div class="n">Ollama</div><div class="s">llama-3.3 · qwen-2.5</div></div>
+                <div class="ok"><span class="live-dot"></span>ready</div>
+              </div>
+              <div class="provider">
+                <span class="dot-lg" style="background:var(--p-custom);"></span>
+                <div class="info"><div class="n">Mistral</div><div class="s">medium-2508</div></div>
+                <div class="ok"><span class="live-dot"></span>ready</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Usage -->
+          <div class="card col-6">
+            <div class="head">
+              <div class="label">Usage · last 7 days</div>
+              <div style="display:flex; gap:2px; font-family:var(--f-m); font-size:9px;">
+                <span style="color:var(--t-pri); padding:2px 6px; background:var(--s3); border-radius:var(--r-sm);">7D</span>
+                <span style="color:var(--t-ter); padding:2px 6px;">30D</span>
+                <span style="color:var(--t-ter); padding:2px 6px;">MTD</span>
+              </div>
+            </div>
+            <div class="usage-stat">
+              <div><div class="num">$<em>18.42</em></div><div class="lbl">spend</div><div class="delta up">↑ 24% vs last 7d</div></div>
+              <div><div class="num">4.2<em style="font-size:18px; margin-left:2px;">M</em></div><div class="lbl">tokens in</div><div class="delta up">↑ 18%</div></div>
+              <div><div class="num">1.1<em style="font-size:18px; margin-left:2px;">M</em></div><div class="lbl">tokens out</div><div class="delta up">↑ 31%</div></div>
+            </div>
+            <div class="spark">
+              <svg viewBox="0 0 320 60" preserveAspectRatio="none">
+                <defs>
+                  <linearGradient id="sparkFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color="#ff4a12" stop-opacity=".35"/>
+                    <stop offset="100%" stop-color="#ff4a12" stop-opacity="0"/>
+                  </linearGradient>
+                </defs>
+                <path d="M 0 45 L 40 38 L 80 42 L 120 28 L 160 32 L 200 22 L 240 26 L 280 14 L 320 18 L 320 60 L 0 60 Z" fill="url(#sparkFill)"/>
+                <path d="M 0 45 L 40 38 L 80 42 L 120 28 L 160 32 L 200 22 L 240 26 L 280 14 L 320 18" fill="none" stroke="#ff4a12" stroke-width="1.5"/>
+                <!-- day dots -->
+                <g fill="#ff4a12">
+                  <circle cx="0"   cy="45" r="2"/><circle cx="40"  cy="38" r="2"/><circle cx="80"  cy="42" r="2"/>
+                  <circle cx="120" cy="28" r="2"/><circle cx="160" cy="32" r="2"/><circle cx="200" cy="22" r="2"/>
+                  <circle cx="240" cy="26" r="2"/><circle cx="280" cy="14" r="2"/><circle cx="320" cy="18" r="2.5" stroke="#fff" stroke-width="1"/>
+                </g>
+              </svg>
+            </div>
+          </div>
+
+          <!-- Skills + MCP mini -->
+          <div class="card col-6">
+            <div class="head">
+              <div class="label">Enabled · workspace</div>
+              <span style="font-family:var(--f-m); font-size:10px; color:var(--t-ter);">acme-api</span>
+            </div>
+            <div class="mini-list">
+              <div class="row">
+                <div class="icon"><svg width="14" height="14"><use href="#ic-skill"/></svg></div>
+                <div class="name">typescript-review<span class="sub">skill · .forge/skills</span></div>
+                <div class="chip on">on</div>
+                <div class="tog on"></div>
+              </div>
+              <div class="row">
+                <div class="icon"><svg width="14" height="14"><use href="#ic-skill"/></svg></div>
+                <div class="name">postgres-schemata<span class="sub">skill · anthropic/official</span></div>
+                <div class="chip on">on</div>
+                <div class="tog on"></div>
+              </div>
+              <div class="row">
+                <div class="icon"><svg width="14" height="14"><use href="#ic-mcp"/></svg></div>
+                <div class="name">github<span class="sub">mcp · stdio · v0.9.2</span></div>
+                <div class="chip on">on</div>
+                <div class="tog on"></div>
+              </div>
+              <div class="row">
+                <div class="icon"><svg width="14" height="14"><use href="#ic-mcp"/></svg></div>
+                <div class="name">sentry<span class="sub">mcp · http · connecting…</span></div>
+                <div class="chip">off</div>
+                <div class="tog"></div>
+              </div>
+              <div class="row">
+                <div class="icon"><svg width="14" height="14"><use href="#ic-agent"/></svg></div>
+                <div class="name">refactor-bot<span class="sub">agent · process-isolated</span></div>
+                <div class="chip on">on</div>
+                <div class="tog on"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Containers -->
+          <div class="card col-12">
+            <div class="head">
+              <div style="display:flex; align-items:center; gap:var(--sp-3);">
+                <div class="label">Containers</div>
+                <span style="font-family:var(--f-m); font-size:10px; color:var(--t-ter);">3 running · 2.4 GB · podman</span>
+              </div>
+              <div style="display:flex; gap:var(--sp-1);">
+                <button class="btn btn-ghost" style="padding:3px 8px; font-size:10px;">Prune</button>
+                <button class="btn btn-ghost" style="padding:3px 8px; font-size:10px;">Logs</button>
+              </div>
+            </div>
+            <div class="body" style="padding:0;">
+              <div class="container-row">
+                <span class="live-dot"></span>
+                <div><div style="font-weight:500;">refactor-sandbox-a3f1</div><div class="id">sha256:8b9f... · mounts: ~/code/acme-api:ro</div></div>
+                <div class="img">oci.io/forge/rust-tools:0.3.1</div>
+                <div class="res">cpu 0.8 · ram 412M</div>
+                <div style="display:flex; gap:4px;"><button class="btn-ic"><svg><use href="#ic-term"/></svg></button><button class="btn-ic"><svg><use href="#ic-stop"/></svg></button></div>
+              </div>
+              <div class="container-row">
+                <span class="live-dot"></span>
+                <div><div style="font-weight:500;">docs-preview</div><div class="id">sha256:2c0e... · ports: 4173:80</div></div>
+                <div class="img">oci.io/forge/node-preview:20</div>
+                <div class="res">cpu 0.1 · ram 96M</div>
+                <div style="display:flex; gap:4px;"><button class="btn-ic"><svg><use href="#ic-term"/></svg></button><button class="btn-ic"><svg><use href="#ic-stop"/></svg></button></div>
+              </div>
+              <div class="container-row">
+                <span class="live-dot warn"></span>
+                <div><div style="font-weight:500;">pg-test-db</div><div class="id">sha256:5a1d... · idle 14m</div></div>
+                <div class="img">docker.io/library/postgres:16</div>
+                <div class="res">cpu 0.0 · ram 51M</div>
+                <div style="display:flex; gap:4px;"><button class="btn-ic"><svg><use href="#ic-term"/></svg></button><button class="btn-ic"><svg><use href="#ic-stop"/></svg></button></div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <div class="status-bar">
+    <svg><use href="#forge-mark"/></svg>
+    <span>forge</span><span class="sep">·</span>
+    <span>main</span><span class="sep">·</span>
+    <span>2 sessions</span><span class="sep">·</span>
+    <span style="color:#fff;">anthropic<span style="opacity:.7"> · sonnet-4.5</span></span>
+    <span class="sep">·</span>
+    <span>streaming</span><span class="dot"></span>
+    <span class="ml-auto group">$18.42 · 5.3M tok · 7d</span>
+    <span class="sep">·</span>
+    <span>podman up</span>
+  </div>
+</section>
+
+<!-- =============================================================
+     VIEW 2 — SESSION (fresh / first-message state)
+
+     A brand new session, just spawned from the dashboard. Default
+     layout: single full-width chat pane, empty transcript, composer
+     waiting for the first message. This is what most sessions look
+     like for their first 30 seconds — before any splits, before any
+     tool calls, before any context.
+     ============================================================= -->
+<section class="view" id="v-fresh">
+  <div class="title-bar">
+    <div class="traffic"><i></i><i></i><i></i></div>
+    <div class="title"><b>new session</b> · ~/code/acme-api · session <span style="color:var(--t-ter);">#f0b1</span></div>
+    <div class="right">
+      <span class="badge">detach</span>
+      <span class="badge">share</span>
+    </div>
+  </div>
+
+  <div class="shell">
+    <aside class="activity-bar">
+      <button title="Explorer"><svg><use href="#ic-folder"/></svg></button>
+      <button title="Search"><svg><use href="#ic-search"/></svg></button>
+      <button class="active" title="Chat"><svg><use href="#ic-chat"/></svg></button>
+      <button title="Git"><svg><use href="#ic-git"/></svg></button>
+      <button title="Agents"><svg><use href="#ic-agent"/></svg></button>
+      <button title="Skills"><svg><use href="#ic-skill"/></svg></button>
+      <button title="MCP"><svg><use href="#ic-mcp"/></svg></button>
+      <div class="spacer"></div>
+      <button title="Config"><svg><use href="#ic-config"/></svg></button>
+    </aside>
+
+    <div class="sess">
+      <!-- sidebar: minimal roster, no file tree expanded yet -->
+      <aside class="sess-side">
+        <div class="head">
+          <svg class="forge-mark"><use href="#forge-mark"/></svg>
+          <div class="name">acme-api</div>
+          <span class="live-dot" title="session running"></span>
+        </div>
+
+        <div class="section">
+          <div class="label">Files</div>
+          <button class="btn-ic" style="padding:2px;"><svg><use href="#ic-plus"/></svg></button>
+        </div>
+        <div class="tree">
+          <div class="node folder"><svg><use href="#ic-chev-r"/></svg><svg><use href="#ic-folder"/></svg>src</div>
+          <div class="node folder"><svg><use href="#ic-chev-r"/></svg><svg><use href="#ic-folder"/></svg>tests</div>
+          <div class="node"><svg><use href="#ic-file"/></svg>package.json</div>
+          <div class="node"><svg><use href="#ic-file"/></svg>tsconfig.json</div>
+          <div class="node"><svg><use href="#ic-file"/></svg>AGENTS.md</div>
+          <div class="node"><svg><use href="#ic-file"/></svg>.mcp.json</div>
+          <div class="node"><svg><use href="#ic-file"/></svg>README.md</div>
+          <div class="node"><svg><use href="#ic-file"/></svg>justfile</div>
+        </div>
+
+        <div class="roster">
+          <div class="label" style="padding:0 var(--sp-2) var(--sp-2);">Session roster</div>
+
+          <div style="font-family:var(--f-m); font-size:9px; color:var(--t-ter); letter-spacing:.2em; padding:var(--sp-1) var(--sp-2); text-transform:uppercase;">─ session-wide</div>
+          <div class="r-row"><span class="p-dot anthropic"></span><span class="lbl-s">provider</span><span class="n">sonnet-4.5</span></div>
+          <div class="r-row"><svg width="10" height="10" style="color:var(--ember-100);"><use href="#ic-container"/></svg><span class="lbl-s">sandbox</span><span class="n">process</span></div>
+
+          <div style="font-family:var(--f-m); font-size:9px; color:var(--t-ter); letter-spacing:.2em; padding:var(--sp-3) var(--sp-2) var(--sp-1); text-transform:uppercase;">─ agent · default</div>
+          <div class="r-row" style="color:var(--t-ter); font-style:italic;"><span class="lbl-s" style="color:var(--t-ter);">nothing yet</span></div>
+        </div>
+      </aside>
+
+      <!-- main canvas: a single chat pane filling the entire area -->
+      <div class="sess-main">
+        <div class="sess-tabs">
+          <div class="tab active"><svg><use href="#ic-chat"/></svg>chat</div>
+          <div class="spacer"></div>
+          <div class="split-ctrls">
+            <button title="Split right"><svg width="12" height="12"><use href="#ic-arrow-tr"/></svg></button>
+            <button title="Split down"><svg width="12" height="12"><use href="#ic-arrow-br"/></svg></button>
+            <button title="Reset layout"><svg width="12" height="12"><use href="#ic-split"/></svg></button>
+          </div>
+        </div>
+
+        <!-- no quad — just one pane, full width -->
+        <div style="flex:1; display:flex; overflow:hidden;">
+          <div class="pane" style="flex:1; display:flex; flex-direction:column;">
+            <div class="pane-head">
+              <span class="lbl-t">Chat</span>
+              <span class="name"><span class="p-dot anthropic"></span>default<span style="color:var(--t-ter);">·</span>sonnet-4.5</span>
+              <div class="right">
+                <span class="cost" style="color:var(--t-ter);"><em>in</em> 0 · <em>out</em> 0 · $0.00</span>
+                <button title="More"><svg><use href="#ic-more"/></svg></button>
+              </div>
+            </div>
+
+            <!-- empty chat body with a subtle first-session hint -->
+            <div class="chat-body" style="display:flex; align-items:center; justify-content:center; flex:1;">
+              <div style="max-width:440px; text-align:center; padding:var(--sp-6);">
+                <svg class="forge-mark" style="width:48px; height:48px; margin:0 auto var(--sp-4); display:block; opacity:.4;"><use href="#forge-mark"/></svg>
+                <h2 style="font-family:var(--f-d); font-weight:800; font-size:22px; letter-spacing:.02em; margin-bottom:var(--sp-2); color:var(--t-pri);">Ready when you are.</h2>
+                <p style="font-size:13px; color:var(--t-sec); line-height:1.55; margin-bottom:var(--sp-5);">Workspace loaded · provider connected · sandbox primed. Type below to start, or use <kbd style="font-family:var(--f-m); font-size:10px; color:var(--t-pri); background:var(--s2); border:1px solid var(--b1); padding:2px 6px; border-radius:3px;">@</kbd> to pull in files, directories, or terminal output.</p>
+
+                <!-- quick-start hints, not buttons -->
+                <div style="display:flex; flex-direction:column; gap:var(--sp-2); text-align:left; font-family:var(--f-m); font-size:11px; color:var(--t-ter); line-height:1.7;">
+                  <div><span style="color:var(--ember-300);">›</span> <span style="color:var(--t-sec);">try</span> <kbd style="font-family:var(--f-m); background:var(--s2); border:1px solid var(--b1); padding:1px 5px; border-radius:3px; color:var(--t-pri);">@README.md summarize this project</kbd></div>
+                  <div><span style="color:var(--ember-300);">›</span> <span style="color:var(--t-sec);">or</span> <kbd style="font-family:var(--f-m); background:var(--s2); border:1px solid var(--b1); padding:1px 5px; border-radius:3px; color:var(--t-pri);">/ switch agent refactor-bot</kbd></div>
+                  <div><span style="color:var(--ember-300);">›</span> <span style="color:var(--t-sec);">or</span> <kbd style="font-family:var(--f-m); background:var(--s2); border:1px solid var(--b1); padding:1px 5px; border-radius:3px; color:var(--t-pri);">⌘K</kbd> <span style="color:var(--t-sec);">for the command palette</span></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- composer, ready to receive the first message -->
+            <div class="composer">
+              <div class="ctx-chips" style="min-height:0; padding:0; display:none;"></div>
+              <div class="input-wrap">
+                <textarea placeholder="Ask, refine, or @-reference context — ⌘↵ to send" style="min-height:54px;"></textarea>
+                <div class="bottom">
+                  <div class="provider-pick"><span class="p-dot anthropic"></span><span>anthropic</span><span class="mdl">· sonnet-4.5</span></div>
+                  <span class="ghost-pill">@ for context</span>
+                  <span class="ghost-pill">/ for commands</span>
+                  <div class="send">
+                    <button class="send-btn" style="opacity:.6;">Send<span class="send-kbd">⌘↵</span></button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="status-bar">
+    <svg><use href="#forge-mark"/></svg>
+    <span>new session</span><span class="sep">·</span>
+    <span>main</span><span class="sep">·</span>
+    <span>clean</span><span class="sep">·</span>
+    <span style="color:#fff;">anthropic · sonnet-4.5</span><span class="dot"></span>
+    <span class="sep">·</span>
+    <span>idle</span>
+    <span class="ml-auto group">no activity · 0 tok</span>
+    <span class="sep">·</span>
+    <span>sandbox: process</span>
+  </div>
+</section>
+
+<!-- =============================================================
+     VIEW 3 — SESSION (working / mid-flow with split layout)
+
+     Example of what a session looks like a few minutes in: chat on
+     the left, an editor pane split to the right, a terminal below,
+     a pending approval, a running sub-agent. Layout is composable
+     via standard editor splits — not a fixed quad.
+     ============================================================= -->
+<section class="view" id="v-sess">
+  <div class="title-bar">
+    <div class="traffic"><i></i><i></i><i></i></div>
+    <div class="title"><b>refactor-payment-service</b> · ~/code/acme-api · session <span style="color:var(--t-ter);">#a3f1</span></div>
+    <div class="right">
+      <span class="badge">detach</span>
+      <span class="badge">share</span>
+    </div>
+  </div>
+
+  <div class="shell">
+    <aside class="activity-bar">
+      <button title="Explorer"><svg><use href="#ic-folder"/></svg></button>
+      <button title="Search"><svg><use href="#ic-search"/></svg></button>
+      <button class="active" title="Chat"><svg><use href="#ic-chat"/></svg></button>
+      <button title="Git"><svg><use href="#ic-git"/></svg></button>
+      <button title="Agents"><svg><use href="#ic-agent"/></svg></button>
+      <button title="Skills"><svg><use href="#ic-skill"/></svg></button>
+      <button title="MCP"><svg><use href="#ic-mcp"/></svg></button>
+      <div class="spacer"></div>
+      <button title="Config"><svg><use href="#ic-config"/></svg></button>
+    </aside>
+
+    <div class="sess">
+      <!-- sidebar: files + roster -->
+      <aside class="sess-side">
+        <div class="head">
+          <svg class="forge-mark"><use href="#forge-mark"/></svg>
+          <div class="name">acme-api</div>
+          <span class="live-dot" title="session running"></span>
+        </div>
+
+        <div class="section">
+          <div class="label">Files</div>
+          <button class="btn-ic" style="padding:2px;"><svg><use href="#ic-plus"/></svg></button>
+        </div>
+        <div class="tree">
+          <div class="node folder"><svg><use href="#ic-chev-d"/></svg><svg><use href="#ic-folder"/></svg>src</div>
+          <div class="node indent folder"><svg><use href="#ic-chev-d"/></svg><svg><use href="#ic-folder"/></svg>payments</div>
+          <div class="node indent-2"><svg><use href="#ic-file"/></svg>client.ts<span class="git-m">M</span></div>
+          <div class="node indent-2 active"><svg><use href="#ic-file"/></svg>processor.ts<span class="git-m">M</span></div>
+          <div class="node indent-2"><svg><use href="#ic-file"/></svg>types.ts</div>
+          <div class="node indent-2"><svg><use href="#ic-file"/></svg>webhook.ts<span class="git-a">A</span></div>
+          <div class="node indent folder"><svg><use href="#ic-chev-r"/></svg><svg><use href="#ic-folder"/></svg>auth</div>
+          <div class="node indent folder"><svg><use href="#ic-chev-r"/></svg><svg><use href="#ic-folder"/></svg>db</div>
+          <div class="node indent"><svg><use href="#ic-file"/></svg>index.ts</div>
+          <div class="node folder"><svg><use href="#ic-chev-r"/></svg><svg><use href="#ic-folder"/></svg>tests</div>
+          <div class="node"><svg><use href="#ic-file"/></svg>package.json</div>
+          <div class="node"><svg><use href="#ic-file"/></svg>tsconfig.json</div>
+          <div class="node"><svg><use href="#ic-file"/></svg>AGENTS.md</div>
+          <div class="node"><svg><use href="#ic-file"/></svg>.mcp.json</div>
+        </div>
+
+        <div class="roster">
+          <div class="label" style="padding:0 var(--sp-2) var(--sp-2);">Session roster</div>
+
+          <div style="font-family:var(--f-m); font-size:9px; color:var(--t-ter); letter-spacing:.2em; padding:var(--sp-1) var(--sp-2); text-transform:uppercase;">─ session-wide</div>
+          <div class="r-row"><span class="p-dot anthropic"></span><span class="lbl-s">provider</span><span class="n">sonnet-4.5</span></div>
+          <div class="r-row"><svg width="10" height="10" style="color:var(--ember-100);"><use href="#ic-container"/></svg><span class="lbl-s">sandbox</span><span class="n">process</span></div>
+
+          <div style="font-family:var(--f-m); font-size:9px; color:var(--t-ter); letter-spacing:.2em; padding:var(--sp-3) var(--sp-2) var(--sp-1); text-transform:uppercase;">─ agent · refactor-bot</div>
+          <div class="r-row"><svg width="10" height="10" style="color:var(--ok);"><use href="#ic-skill"/></svg><span class="lbl-s">skill</span><span class="n">typescript-review</span></div>
+          <div class="r-row"><svg width="10" height="10" style="color:var(--ok);"><use href="#ic-mcp"/></svg><span class="lbl-s">mcp</span><span class="n">github · sentry</span></div>
+
+          <div style="font-family:var(--f-m); font-size:9px; color:var(--t-ter); letter-spacing:.2em; padding:var(--sp-3) var(--sp-2) var(--sp-1); text-transform:uppercase;">─ provider · anthropic</div>
+          <div class="r-row"><svg width="10" height="10" style="color:var(--ok);"><use href="#ic-skill"/></svg><span class="lbl-s">skill</span><span class="n">long-context-helper</span></div>
+        </div>
+      </aside>
+
+      <!-- main canvas -->
+      <div class="sess-main">
+        <div class="sess-tabs">
+          <div class="tab"><svg><use href="#ic-chat"/></svg>chat<span class="dot">●</span></div>
+          <div class="tab active"><svg><use href="#ic-code"/></svg>processor.ts<span class="dot">●</span></div>
+          <div class="tab"><svg><use href="#ic-term"/></svg>zsh</div>
+          <div class="tab"><svg><use href="#ic-file"/></svg>client.ts</div>
+          <div class="spacer"></div>
+          <div class="split-ctrls">
+            <button title="Split right"><svg width="12" height="12"><use href="#ic-arrow-tr"/></svg></button>
+            <button title="Split down"><svg width="12" height="12"><use href="#ic-arrow-br"/></svg></button>
+            <button title="Reset layout"><svg width="12" height="12"><use href="#ic-split"/></svg></button>
+          </div>
+        </div>
+
+        <div class="quad">
+
+          <!-- TL: CHAT (spans vertical) -->
+          <div class="pane span-v">
+            <div class="pane-head">
+              <span class="lbl-t">Chat</span>
+              <span class="name"><span class="p-dot anthropic"></span>refactor-bot<span style="color:var(--t-ter);">·</span>sonnet-4.5</span>
+              <div class="right">
+                <span class="cost"><em>in</em> 48.2k · <em>out</em> 12.1k · $0.23</span>
+                <button title="More"><svg><use href="#ic-more"/></svg></button>
+              </div>
+            </div>
+
+            <div class="chat-body">
+
+              <!-- user -->
+              <div class="msg user">
+                <div class="author"><span>● you</span><span class="time">14:22:08</span></div>
+                <div class="bubble">
+                  Refactor <code>processPayment</code> in <code>@processor.ts</code> to split the validation, authorization, and capture steps into separate functions. Keep the public interface the same. Add tests for each step.
+                </div>
+              </div>
+
+              <!-- assistant -->
+              <div class="msg">
+                <div class="author"><span style="color:var(--ember-300);">● claude · sonnet-4.5</span><span class="time">14:22:11</span></div>
+                <div class="bubble">
+                  I'll read the current implementation, split it into <code>validate</code>, <code>authorize</code>, and <code>capture</code>, then add tests. Starting with a read.
+                </div>
+
+                <!-- tool call: read -->
+                <div class="tool-call open">
+                  <div class="tc-head" onclick="this.parentNode.classList.toggle('open')">
+                    <svg class="icon"><use href="#ic-wrench"/></svg>
+                    <span class="name">fs.read</span>
+                    <span class="arg">path: src/payments/processor.ts</span>
+                    <span class="dur">42ms</span>
+                    <span class="ok">✓</span>
+                    <svg class="chev" width="12" height="12"><use href="#ic-chev-r"/></svg>
+                  </div>
+                  <div class="tc-body">
+                    <div>returned 184 lines · 6.2 KB</div>
+                    <pre><span class="k">{</span>
+  <span class="s">"path"</span>: <span class="s">"src/payments/processor.ts"</span>,
+  <span class="s">"bytes"</span>: <span class="k">6214</span>,
+  <span class="s">"lines"</span>: <span class="k">184</span>
+<span class="k">}</span></pre>
+                  </div>
+                </div>
+
+                <!-- tool call: edit — awaiting approval with four-scope UI -->
+                <div class="tool-call open">
+                  <div class="tc-head" onclick="this.parentNode.classList.toggle('open')">
+                    <svg class="icon"><use href="#ic-wrench"/></svg>
+                    <span class="name">fs.edit</span>
+                    <span class="arg">processor.ts · 3 hunks · +47 / −21</span>
+                    <span class="dur" style="color:var(--warn);">awaiting approval</span>
+                    <span style="color:var(--warn);">!</span>
+                    <svg class="chev" width="12" height="12"><use href="#ic-chev-r"/></svg>
+                  </div>
+                  <div class="tc-body" style="background:rgba(255,170,51,.04); border-top-color:rgba(255,170,51,.15);">
+                    <div style="color:var(--t-sec); font-size:11px; margin-bottom:var(--sp-2);">diff preview · 3 hunks</div>
+                    <pre style="font-size:10.5px; line-height:1.55; max-height:120px; overflow:auto;"><span style="color:var(--err);">-  const result = await this.process(req);</span>
+<span style="color:var(--ok);">+  const validated = await validate(req);</span>
+<span style="color:var(--ok);">+  const authed    = await authorize(validated);</span>
+<span style="color:var(--ok);">+  const captured  = await capture(authed);</span>
+<span style="color:var(--sx-comment);">// ... 2 more hunks</span></pre>
+                    <!-- four-scope approval bar -->
+                    <div style="display:flex; gap:var(--sp-2); margin-top:var(--sp-3); padding-top:var(--sp-3); border-top:1px solid var(--b1); align-items:center;">
+                      <button class="btn btn-ghost" style="padding:6px 12px; font-size:11px;"><kbd style="font-family:var(--f-m); font-size:9px; color:var(--t-ter); background:var(--s3); padding:1px 4px; border-radius:2px; margin-right:4px;">R</kbd>Reject</button>
+                      <div style="flex:1;"></div>
+                      <div style="display:flex; align-items:center; background:var(--s3); border:1px solid var(--b1); border-radius:var(--r-sm); overflow:hidden;">
+                        <button style="padding:6px 12px; background:var(--ember-500); color:#fff; font-size:11px; font-weight:500;"><kbd style="font-family:var(--f-m); font-size:9px; background:rgba(0,0,0,.25); padding:1px 4px; border-radius:2px; margin-right:4px;">A</kbd>Approve once</button>
+                        <div style="width:1px; height:24px; background:var(--b1);"></div>
+                        <button style="padding:6px 10px; font-size:10px; color:var(--t-sec);" title="approve this tool for processor.ts this session"><kbd style="font-family:var(--f-m); font-size:9px; color:var(--t-ter); background:var(--s2); padding:1px 3px; border-radius:2px; margin-right:3px;">F</kbd>this file</button>
+                        <button style="padding:6px 10px; font-size:10px; color:var(--t-sec);" title="approve this tool for a glob pattern this session"><kbd style="font-family:var(--f-m); font-size:9px; color:var(--t-ter); background:var(--s2); padding:1px 3px; border-radius:2px; margin-right:3px;">P</kbd>pattern</button>
+                        <button style="padding:6px 10px; font-size:10px; color:var(--t-sec);" title="approve fs.edit entirely this session"><kbd style="font-family:var(--f-m); font-size:9px; color:var(--t-ter); background:var(--s2); padding:1px 3px; border-radius:2px; margin-right:3px;">T</kbd>this tool</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- sub-agent banner -->
+                <div class="subagent">
+                  <div class="sa-head">
+                    <span class="spawn">↳ spawned</span>
+                    <span class="name">test-writer</span>
+                    <div class="chips">
+                      <span class="chip">sonnet-4.5</span>
+                      <span class="chip">4 tools</span>
+                      <span class="chip run">running</span>
+                    </div>
+                  </div>
+                  <div class="sa-body">
+                    <p style="color:var(--t-pri);">Writing unit tests for validate/authorize/capture. Scope: <code style="font-family:var(--f-m); font-size:11px; background:var(--s2); padding:1px 6px; border-radius:3px;">tests/payments/</code></p>
+                    <p>• Drafted <code style="font-family:var(--f-m); font-size:11px;">validate.test.ts</code> — 8 cases · covers invalid amounts, currencies, idempotency keys<br>• Running <code style="font-family:var(--f-m); font-size:11px;">pnpm test</code> to baseline before writing authorize tests<span class="stream-cursor"></span></p>
+                  </div>
+                </div>
+
+              </div>
+
+              <!-- user -->
+              <div class="msg user">
+                <div class="author"><span>● you</span><span class="time">14:24:33</span></div>
+                <div class="bubble">Approve the edit. Use the existing <code>PaymentError</code> type instead of introducing a new one.</div>
+              </div>
+
+              <div class="msg">
+                <div class="author"><span style="color:var(--ember-300);">● claude · sonnet-4.5</span><span class="time">14:24:35</span></div>
+                <div class="bubble">
+                  Understood. Re-drafting the edit to reuse <code>PaymentError</code><span class="stream-cursor"></span>
+                </div>
+              </div>
+
+            </div>
+
+            <!-- composer -->
+            <div class="composer">
+              <div class="ctx-chips">
+                <span class="c"><svg width="10" height="10"><use href="#ic-file"/></svg>processor.ts<span class="x">×</span></span>
+                <span class="c"><svg width="10" height="10"><use href="#ic-folder"/></svg>tests/payments<span class="x">×</span></span>
+              </div>
+              <div class="input-wrap">
+                <textarea placeholder="Ask, refine, or @-reference context — Cmd+Enter to send"></textarea>
+                <div class="bottom">
+                  <div class="provider-pick"><span class="p-dot anthropic"></span><span>anthropic</span><span class="mdl">· sonnet-4.5</span></div>
+                  <span class="ghost-pill">@ for context</span>
+                  <span class="ghost-pill">/ for commands</span>
+                  <div class="send">
+                    <button class="btn btn-ghost" style="font-size:10px;">Stop</button>
+                    <button class="send-btn">Send<span class="send-kbd">⌘↵</span></button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- TR: EDITOR -->
+          <div class="pane">
+            <div class="pane-head">
+              <span class="lbl-t">Editor</span>
+              <span class="name"><svg width="11" height="11" style="color:var(--t-ter);"><use href="#ic-code"/></svg>processor.ts<span style="color:var(--warn); font-size:8px;">●</span></span>
+              <div class="right">
+                <span class="cost" style="color:var(--warn);"><em>pending</em> +47 / −21</span>
+                <button><svg><use href="#ic-more"/></svg></button>
+              </div>
+            </div>
+            <div class="editor">
+              <div class="gutter">
+                12<br>13<br>14<br>15<br>16<br>17<br>18<br>19<br>20<br>21<br>22<br>23<br>24
+              </div>
+              <div class="code"><span class="kw">export async function</span> <span class="fn">processPayment</span>(
+  <span class="nm">req</span>: <span class="ty">PaymentRequest</span>
+): <span class="ty">Promise</span>&lt;<span class="ty">PaymentResult</span>&gt; {
+<span class="hi">  <span class="kw">const</span> validated = <span class="kw">await</span> <span class="fn">validate</span>(req);</span>
+<span class="hi">  <span class="kw">const</span> authed    = <span class="kw">await</span> <span class="fn">authorize</span>(validated);</span>
+<span class="hi">  <span class="kw">const</span> captured  = <span class="kw">await</span> <span class="fn">capture</span>(authed);</span>
+  <span class="kw">return</span> captured;
+}
+
+<span class="cm">// extracted — narrow responsibility, easy to test</span>
+<span class="kw">async function</span> <span class="fn">validate</span>(
+  <span class="nm">req</span>: <span class="ty">PaymentRequest</span>
+): <span class="ty">Promise</span>&lt;<span class="ty">Validated</span>&gt; {</div>
+            </div>
+          </div>
+
+          <!-- BR: TERMINAL -->
+          <div class="pane">
+            <div class="pane-head">
+              <span class="lbl-t">Terminal</span>
+              <span class="name"><svg width="11" height="11" style="color:var(--t-ter);"><use href="#ic-term"/></svg>zsh · acme-api</span>
+              <div class="right">
+                <span class="cost"><em>pid</em> 48211</span>
+                <button><svg><use href="#ic-more"/></svg></button>
+              </div>
+            </div>
+            <div class="term">
+              <div><span class="prompt">~/code/acme-api</span> <span class="dir">main*</span> <span class="prompt">❯</span> <span class="cmd">pnpm test payments/validate</span></div>
+              <div class="dim">&gt; acme-api@0.1.0 test</div>
+              <div class="dim">&gt; vitest run tests/payments/validate.test.ts</div>
+              <div>&nbsp;</div>
+              <div><span class="ok"> PASS </span> tests/payments/validate.test.ts (8)</div>
+              <div class="dim">  ✓ rejects zero amount (2ms)</div>
+              <div class="dim">  ✓ rejects negative amount (1ms)</div>
+              <div class="dim">  ✓ rejects unsupported currency (1ms)</div>
+              <div class="dim">  ✓ requires idempotency key (1ms)</div>
+              <div class="dim">  ✓ accepts valid USD (4ms)</div>
+              <div class="dim">  ✓ accepts valid EUR with fx (3ms)</div>
+              <div class="dim">  ✓ preserves request metadata (1ms)</div>
+              <div class="dim">  ✓ throws PaymentError on shape mismatch (2ms)</div>
+              <div>&nbsp;</div>
+              <div><span class="ok">Test Files</span> 1 passed (1)</div>
+              <div><span class="ok">Tests</span>      8 passed (8)</div>
+              <div>Start at 14:24:12 · Duration 412ms</div>
+              <div>&nbsp;</div>
+              <div><span class="prompt">~/code/acme-api</span> <span class="dir">main*</span> <span class="prompt">❯</span> <span class="stream-cursor"></span></div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="status-bar">
+    <svg><use href="#forge-mark"/></svg>
+    <span>refactor-payment-service</span><span class="sep">·</span>
+    <span>main*</span><span class="sep">·</span>
+    <span>6↑ 0↓</span><span class="sep">·</span>
+    <span style="color:#fff;">anthropic · sonnet-4.5</span><span class="dot"></span>
+    <span class="sep">·</span>
+    <span>streaming</span>
+    <span class="ml-auto group">ln 16 · col 3 · ts · lsp ready</span>
+    <span class="sep">·</span>
+    <span>$0.23 · 60.3k tok</span>
+    <span class="sep">·</span>
+    <span>sandbox: process</span>
+  </div>
+</section>
+
+<!-- =============================================================
+     VIEW 3 — AGENT MONITOR
+     ============================================================= -->
+<section class="view" id="v-mon">
+  <div class="title-bar">
+    <div class="traffic"><i></i><i></i><i></i></div>
+    <div class="title"><b>agent monitor</b> · session #a3f1 · 4 agents · 1 running</div>
+    <div class="right"><span class="badge">live</span></div>
+  </div>
+
+  <div class="shell">
+    <aside class="activity-bar">
+      <button title="Dashboard"><svg><use href="#ic-sessions"/></svg></button>
+      <button title="Chat"><svg><use href="#ic-chat"/></svg></button>
+      <button class="active" title="Agents"><svg><use href="#ic-agent"/></svg></button>
+      <button title="Skills"><svg><use href="#ic-skill"/></svg></button>
+      <button title="MCP"><svg><use href="#ic-mcp"/></svg></button>
+      <button title="Containers"><svg><use href="#ic-container"/></svg></button>
+      <div class="spacer"></div>
+      <button title="Config"><svg><use href="#ic-config"/></svg></button>
+    </aside>
+
+    <div class="mon">
+      <!-- left: agent list -->
+      <div class="mon-list">
+        <div class="head">
+          <h2>Agents</h2>
+          <button class="btn-ic"><svg><use href="#ic-plus"/></svg></button>
+        </div>
+
+        <div class="rows">
+          <div class="mon-agent">
+            <div class="top">
+              <span class="p-dot anthropic"></span>
+              <div style="flex:1;">
+                <div class="name">refactor-bot</div>
+                <div class="sub">orchestrator · 12/18 steps</div>
+              </div>
+              <span style="font-family:var(--f-m); font-size:10px; color:var(--t-ter);">#a3f1</span>
+            </div>
+            <div class="bar-wrap"><div class="bar run" style="width:67%;"></div></div>
+            <div class="meta">
+              <span class="state run">● running</span>
+              <span>12m</span>
+              <span>$0.23</span>
+              <span style="margin-left:auto;">sonnet-4.5</span>
+            </div>
+          </div>
+
+          <div class="mon-agent active">
+            <div class="top">
+              <span class="p-dot anthropic"></span>
+              <div style="flex:1;">
+                <div class="name">test-writer</div>
+                <div class="sub">sub-agent · 6/11 steps</div>
+              </div>
+              <span style="font-family:var(--f-m); font-size:10px; color:var(--t-ter);">#a3f1.1</span>
+            </div>
+            <div class="bar-wrap"><div class="bar run" style="width:55%;"></div></div>
+            <div class="meta">
+              <span class="state run">● running</span>
+              <span>3m</span>
+              <span>$0.09</span>
+              <span style="margin-left:auto;">sonnet-4.5</span>
+            </div>
+          </div>
+
+          <div class="mon-agent">
+            <div class="top">
+              <span class="p-dot local"></span>
+              <div style="flex:1;">
+                <div class="name">lint-fixer</div>
+                <div class="sub">worker · completed</div>
+              </div>
+              <span style="font-family:var(--f-m); font-size:10px; color:var(--t-ter);">#a3f1.2</span>
+            </div>
+            <div class="bar-wrap"><div class="bar done" style="width:100%;"></div></div>
+            <div class="meta">
+              <span class="state done">● done</span>
+              <span>48s</span>
+              <span>—</span>
+              <span style="margin-left:auto;">llama-3.3</span>
+            </div>
+          </div>
+
+          <div class="mon-agent">
+            <div class="top">
+              <span class="p-dot anthropic"></span>
+              <div style="flex:1;">
+                <div class="name">doc-updater</div>
+                <div class="sub">queued</div>
+              </div>
+              <span style="font-family:var(--f-m); font-size:10px; color:var(--t-ter);">#a3f1.3</span>
+            </div>
+            <div class="bar-wrap"><div class="bar queue" style="width:0%;"></div></div>
+            <div class="meta">
+              <span class="state queue">○ queued</span>
+              <span>—</span>
+              <span>—</span>
+              <span style="margin-left:auto;">haiku-4.5</span>
+            </div>
+          </div>
+
+          <div class="mon-agent">
+            <div class="top">
+              <span class="p-dot openai"></span>
+              <div style="flex:1;">
+                <div class="name">schema-migrator</div>
+                <div class="sub">failed on step 4</div>
+              </div>
+              <span style="font-family:var(--f-m); font-size:10px; color:var(--t-ter);">#77d3.0</span>
+            </div>
+            <div class="bar-wrap"><div class="bar err" style="width:33%;"></div></div>
+            <div class="meta">
+              <span class="state err">● error</span>
+              <span>2m</span>
+              <span>$0.04</span>
+              <span style="margin-left:auto;">gpt-4.1</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- middle: trace -->
+      <div class="mon-trace">
+        <div class="head">
+          <span class="p-dot anthropic" style="width:10px; height:10px;"></span>
+          <div class="h-name">test-writer</div>
+          <span class="id">#a3f1.1</span>
+          <span class="chip">running · step 6 of 11</span>
+          <button class="btn btn-ghost" style="font-size:10px;">Pause</button>
+          <button class="btn btn-sec" style="font-size:10px;">Kill</button>
+        </div>
+        <div class="tb">
+          <span><b>3m 42s</b> elapsed</span>
+          <span class="sep">·</span>
+          <span>input <b>28.4k</b> tok</span>
+          <span class="sep">·</span>
+          <span>output <b>6.8k</b> tok</span>
+          <span class="sep">·</span>
+          <span>cost <b>$0.09</b></span>
+          <span class="sep">·</span>
+          <span>model <b>claude-sonnet-4.5</b></span>
+          <span class="sep">·</span>
+          <span>tools <b>4 / 6</b></span>
+          <span class="sep">·</span>
+          <span>spawned by <b>refactor-bot</b></span>
+        </div>
+        <div class="body">
+
+          <div class="step done">
+            <span class="dot"></span><span class="rail"></span>
+            <div class="content">
+              <div class="title">
+                <span class="kind spawn">spawn</span>
+                <span>received from refactor-bot</span>
+                <span class="ts">14:21:47</span>
+                <span class="dur">—</span>
+              </div>
+              <div class="desc">System prompt: "Write unit tests for validate, authorize, and capture. Scope to tests/payments/."</div>
+            </div>
+          </div>
+
+          <div class="step done">
+            <span class="dot"></span><span class="rail"></span>
+            <div class="content">
+              <div class="title">
+                <span class="kind think">think</span>
+                <span>planning test matrix</span>
+                <span class="ts">14:21:51</span>
+                <span class="dur">2.1s</span>
+              </div>
+              <div class="desc">Identified 8 validate cases, 6 authorize cases, 5 capture cases. Will use existing vitest setup.</div>
+            </div>
+          </div>
+
+          <div class="step done">
+            <span class="dot"></span><span class="rail"></span>
+            <div class="content">
+              <div class="title">
+                <span class="kind tool">tool</span>
+                <span>fs.read <code style="font-family:var(--f-m); color:var(--t-sec);">src/payments/processor.ts</code></span>
+                <span class="ts">14:21:54</span>
+                <span class="dur">38ms</span>
+              </div>
+              <div class="preview">184 lines · 6.2 KB · sha256:af31c...</div>
+            </div>
+          </div>
+
+          <div class="step done">
+            <span class="dot"></span><span class="rail"></span>
+            <div class="content">
+              <div class="title">
+                <span class="kind tool">tool</span>
+                <span>fs.read <code style="font-family:var(--f-m); color:var(--t-sec);">tests/setup.ts</code></span>
+                <span class="ts">14:21:54</span>
+                <span class="dur">14ms</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="step done">
+            <span class="dot"></span><span class="rail"></span>
+            <div class="content">
+              <div class="title">
+                <span class="kind tool">tool</span>
+                <span>fs.write <code style="font-family:var(--f-m); color:var(--t-sec);">tests/payments/validate.test.ts</code></span>
+                <span class="ts">14:22:58</span>
+                <span class="dur">0.8s</span>
+              </div>
+              <div class="desc">Wrote 132 lines · 8 test cases</div>
+              <div class="preview">describe('validate', () =&gt; { it('rejects zero amount', ...) // ... }</div>
+            </div>
+          </div>
+
+          <div class="step done">
+            <span class="dot"></span><span class="rail"></span>
+            <div class="content">
+              <div class="title">
+                <span class="kind mcp">mcp</span>
+                <span>github.list_issues <code style="font-family:var(--f-m); color:var(--t-sec);">label:payments</code></span>
+                <span class="ts">14:23:14</span>
+                <span class="dur">240ms</span>
+              </div>
+              <div class="desc">Checking known edge cases from issue tracker</div>
+              <div class="preview">4 open issues · #812 idempotency race · #798 fx rounding · #774 currency aliases · #730 webhook duplicates</div>
+            </div>
+          </div>
+
+          <div class="step run">
+            <span class="dot"></span><span class="rail"></span>
+            <div class="content">
+              <div class="title">
+                <span class="kind tool">tool</span>
+                <span>shell.exec <code style="font-family:var(--f-m); color:var(--t-sec);">pnpm test payments/validate</code></span>
+                <span class="ts">14:24:12</span>
+                <span class="dur">running · 18s<span class="stream-cursor"></span></span>
+              </div>
+              <div class="desc">Baselining before writing authorize tests. Sandbox: process isolation.</div>
+            </div>
+          </div>
+
+          <div class="step">
+            <span class="dot"></span><span class="rail"></span>
+            <div class="content">
+              <div class="title">
+                <span class="kind think" style="color:var(--t-ter); border-color:var(--b1);">upcoming</span>
+                <span style="color:var(--t-ter);">write authorize.test.ts — 6 cases</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="step">
+            <span class="dot"></span><span class="rail"></span>
+            <div class="content">
+              <div class="title">
+                <span class="kind think" style="color:var(--t-ter); border-color:var(--b1);">upcoming</span>
+                <span style="color:var(--t-ter);">write capture.test.ts — 5 cases</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="step">
+            <span class="dot"></span>
+            <div class="content">
+              <div class="title">
+                <span class="kind think" style="color:var(--t-ter); border-color:var(--b1);">upcoming</span>
+                <span style="color:var(--t-ter);">final: run full suite, report back to orchestrator</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- right: inspector -->
+      <aside class="mon-inspect">
+        <h3>Inspector</h3>
+
+        <div class="sec">
+          <h4>Definition</h4>
+          <div class="kv">
+            <div class="k">name</div><div class="v">test-writer</div>
+            <div class="k">source</div><div class="v" style="font-family:var(--f-m);">AGENTS.md #L112</div>
+            <div class="k">provider</div><div class="v">anthropic</div>
+            <div class="k">model</div><div class="v">sonnet-4.5</div>
+            <div class="k">isolation</div><div class="v" style="color:var(--ember-200);">process</div>
+            <div class="k">max tokens</div><div class="v">8000</div>
+          </div>
+        </div>
+
+        <div class="sec">
+          <h4>Allowed tools</h4>
+          <div class="pill-list">
+            <span class="pill">fs.read</span>
+            <span class="pill">fs.write</span>
+            <span class="pill">shell.exec</span>
+            <span class="pill">mcp:github</span>
+          </div>
+        </div>
+
+        <div class="sec">
+          <h4>Allowed paths</h4>
+          <div class="pill-list">
+            <span class="pill" style="font-family:var(--f-m);">./src</span>
+            <span class="pill" style="font-family:var(--f-m);">./tests/**</span>
+          </div>
+        </div>
+
+        <div class="sec">
+          <h4>Resource usage</h4>
+          <div class="kv">
+            <div class="k">cpu</div><div class="v">0.42 cores</div>
+            <div class="k">rss</div><div class="v">218 MB</div>
+            <div class="k">fd open</div><div class="v">37</div>
+            <div class="k">net connections</div><div class="v">2</div>
+          </div>
+        </div>
+
+        <div class="sec">
+          <h4>Actions</h4>
+          <div style="display:flex; flex-direction:column; gap:var(--sp-2);">
+            <button class="btn btn-ghost" style="justify-content:center;">Pause agent</button>
+            <button class="btn btn-sec"   style="justify-content:center;">Interrupt + refine</button>
+            <button class="btn btn-ghost" style="justify-content:center;">Export transcript</button>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <div class="status-bar">
+    <svg><use href="#forge-mark"/></svg>
+    <span>agent monitor</span><span class="sep">·</span>
+    <span>4 agents</span><span class="sep">·</span>
+    <span>1 running</span><span class="sep">·</span>
+    <span style="color:#fff;">anthropic · sonnet-4.5</span><span class="dot"></span>
+    <span class="sep">·</span>
+    <span>streaming</span>
+    <span class="ml-auto group">session $0.36 · 103k tok</span>
+    <span class="sep">·</span>
+    <span>sandbox: process</span>
+  </div>
+</section>
+
+<!-- =============================================================
+     VIEW 4 — SKILLS / MCP / AGENTS MANAGER
+     ============================================================= -->
+<section class="view" id="v-mgr">
+  <div class="title-bar">
+    <div class="traffic"><i></i><i></i><i></i></div>
+    <div class="title"><b>catalog</b> · skills · mcp servers · agents</div>
+    <div class="right"><span class="badge">27 assets</span></div>
+  </div>
+
+  <div class="shell">
+    <aside class="activity-bar">
+      <button title="Dashboard"><svg><use href="#ic-sessions"/></svg></button>
+      <button title="Providers"><svg><use href="#ic-providers"/></svg></button>
+      <button class="active" title="Skills"><svg><use href="#ic-skill"/></svg></button>
+      <button title="MCP"><svg><use href="#ic-mcp"/></svg></button>
+      <button title="Agents"><svg><use href="#ic-agent"/></svg></button>
+      <button title="Usage"><svg><use href="#ic-usage"/></svg></button>
+      <div class="spacer"></div>
+      <button title="Config"><svg><use href="#ic-config"/></svg></button>
+    </aside>
+
+    <div class="mgr">
+      <aside class="mgr-side">
+        <div class="title"><h1>Catalog</h1></div>
+        <div class="tabs">
+          <div class="tab"><svg><use href="#ic-skill"/></svg>Skills<span class="n">12</span></div>
+          <div class="tab active"><svg><use href="#ic-mcp"/></svg>MCP<span class="n">9</span></div>
+          <div class="tab"><svg><use href="#ic-agent"/></svg>Agents<span class="n">6</span></div>
+          <div class="tab" style="margin-top:var(--sp-4); border-top:1px solid var(--b1); padding-top:var(--sp-4);"><svg><use href="#ic-folder"/></svg>Workspace</div>
+          <div class="tab"><svg><use href="#ic-config"/></svg>User global</div>
+        </div>
+      </aside>
+
+      <main class="mgr-main">
+        <header class="mgr-head">
+          <div>
+            <h1>MCP servers</h1>
+            <p>External tools and data sources declared in <code style="font-family:var(--f-m); font-size:12px; color:var(--t-sec); background:var(--s2); padding:1px 6px; border-radius:3px; border:1px solid var(--b1);">.mcp.json</code>. Forge manages lifecycle, health checks, and sandboxing.</p>
+          </div>
+          <div class="right">
+            <button class="btn btn-ghost">Import</button>
+            <button class="btn btn-pri"><svg width="12" height="12"><use href="#ic-plus"/></svg>Add server</button>
+          </div>
+        </header>
+
+        <div class="mgr-search">
+          <div class="box">
+            <svg><use href="#ic-search"/></svg>
+            <input placeholder="Search 9 MCP servers…" value="">
+            <span class="kbd">⌘K</span>
+          </div>
+          <div class="filters">
+            <span class="filter-chip on">All</span>
+            <span class="filter-chip">Enabled</span>
+            <span class="filter-chip">Workspace</span>
+            <span class="filter-chip">User</span>
+            <span class="filter-chip">stdio</span>
+            <span class="filter-chip">http</span>
+          </div>
+        </div>
+
+        <div class="mgr-grid">
+
+          <div class="asset">
+            <div class="a-head">
+              <div class="sigil">GH</div>
+              <div class="meta">
+                <div class="n">github<span class="live-dot" style="margin-left:6px;"></span></div>
+                <div class="src">workspace · stdio · v0.9.2 · modelcontextprotocol.io/servers/github</div>
+              </div>
+              <div class="tog on"></div>
+            </div>
+            <div class="desc">Repositories, issues, PRs, and code search. Read-only by default; write tools require approval.</div>
+            <div class="foot">
+              <div class="tags"><span class="tag">17 tools</span><span class="tag">oauth</span><span class="tag portable">portable</span></div>
+              <span class="ml">17ms p50</span>
+            </div>
+          </div>
+
+          <div class="asset info">
+            <div class="a-head">
+              <div class="sigil" style="color:var(--info);">SE</div>
+              <div class="meta">
+                <div class="n">sentry<span class="live-dot warn" style="margin-left:6px;"></span></div>
+                <div class="src">workspace · http · connecting…</div>
+              </div>
+              <div class="tog"></div>
+            </div>
+            <div class="desc">Error tracking, release health, and issue triage. Scoped to project <code style="font-family:var(--f-m); font-size:11px;">acme-api</code>.</div>
+            <div class="foot">
+              <div class="tags"><span class="tag">9 tools</span><span class="tag">api key</span><span class="tag portable">portable</span></div>
+              <span class="ml" style="color:var(--warn);">reconnecting · 3s</span>
+            </div>
+          </div>
+
+          <div class="asset">
+            <div class="a-head">
+              <div class="sigil">PG</div>
+              <div class="meta">
+                <div class="n">postgres<span class="live-dot" style="margin-left:6px;"></span></div>
+                <div class="src">workspace · stdio · v0.2.0 · readonly://localhost:5432</div>
+              </div>
+              <div class="tog on"></div>
+            </div>
+            <div class="desc">Query the local development database. Read-only role; schema introspection and explain plans allowed.</div>
+            <div class="foot">
+              <div class="tags"><span class="tag">5 tools</span><span class="tag">readonly</span><span class="tag">local</span><span class="tag portable">portable</span></div>
+              <span class="ml">4ms p50</span>
+            </div>
+          </div>
+
+          <div class="asset local">
+            <div class="a-head">
+              <div class="sigil" style="color:var(--p-local);">FS</div>
+              <div class="meta">
+                <div class="n">filesystem<span class="live-dot" style="margin-left:6px;"></span></div>
+                <div class="src">workspace · stdio · scope: ~/code/acme-api</div>
+              </div>
+              <div class="tog on"></div>
+            </div>
+            <div class="desc">Scoped filesystem access for agents outside the session cwd. Writes staged for approval.</div>
+            <div class="foot">
+              <div class="tags"><span class="tag">6 tools</span><span class="tag">scoped</span></div>
+              <span class="ml">—</span>
+            </div>
+          </div>
+
+          <div class="asset openai">
+            <div class="a-head">
+              <div class="sigil" style="color:var(--p-openai);">LI</div>
+              <div class="meta">
+                <div class="n">linear</div>
+                <div class="src">user · http · api.linear.app/mcp</div>
+              </div>
+              <div class="tog"></div>
+            </div>
+            <div class="desc">Issue tracker integration. Create, update, and query tickets across workspaces.</div>
+            <div class="foot">
+              <div class="tags"><span class="tag">12 tools</span><span class="tag">oauth</span></div>
+              <span class="ml" style="color:var(--t-ter);">disabled</span>
+            </div>
+          </div>
+
+          <div class="asset">
+            <div class="a-head">
+              <div class="sigil">SL</div>
+              <div class="meta">
+                <div class="n">slack</div>
+                <div class="src">user · stdio · v1.4.0</div>
+              </div>
+              <div class="tog"></div>
+            </div>
+            <div class="desc">Post to channels and search message history. Write actions require per-call approval.</div>
+            <div class="foot">
+              <div class="tags"><span class="tag">8 tools</span><span class="tag">oauth</span></div>
+              <span class="ml" style="color:var(--t-ter);">disabled</span>
+            </div>
+          </div>
+
+          <div class="asset">
+            <div class="a-head">
+              <div class="sigil" style="color:var(--err);">FI</div>
+              <div class="meta">
+                <div class="n">figma<span class="live-dot err" style="margin-left:6px;"></span></div>
+                <div class="src">user · http · auth failed</div>
+              </div>
+              <div class="tog"></div>
+            </div>
+            <div class="desc">Read design files and export assets. Token expired — re-authenticate to restore.</div>
+            <div class="foot">
+              <div class="tags"><span class="tag">7 tools</span><span class="tag">oauth</span></div>
+              <span class="ml" style="color:var(--err);">401 · reauth</span>
+            </div>
+          </div>
+
+          <div class="asset">
+            <div class="a-head">
+              <div class="sigil">PL</div>
+              <div class="meta">
+                <div class="n">playwright<span class="live-dot" style="margin-left:6px;"></span></div>
+                <div class="src">workspace · stdio · chromium-131</div>
+              </div>
+              <div class="tog on"></div>
+            </div>
+            <div class="desc">Browser automation: navigate, click, screenshot, and extract. Sandboxed in container.</div>
+            <div class="foot">
+              <div class="tags"><span class="tag">14 tools</span><span class="tag">container</span></div>
+              <span class="ml">310ms p50</span>
+            </div>
+          </div>
+
+          <div class="asset info">
+            <div class="a-head">
+              <div class="sigil" style="color:var(--info);">FE</div>
+              <div class="meta">
+                <div class="n">fetch</div>
+                <div class="src">user · stdio · v0.1.4</div>
+              </div>
+              <div class="tog on"></div>
+            </div>
+            <div class="desc">HTTP GET with content extraction. Built-in robots.txt respect and per-host rate limits.</div>
+            <div class="foot">
+              <div class="tags"><span class="tag">2 tools</span><span class="tag">rate-limited</span></div>
+              <span class="ml">—</span>
+            </div>
+          </div>
+
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <div class="status-bar">
+    <svg><use href="#forge-mark"/></svg>
+    <span>catalog</span><span class="sep">·</span>
+    <span>mcp</span><span class="sep">·</span>
+    <span>9 servers</span><span class="sep">·</span>
+    <span>5 enabled</span>
+    <span class="ml-auto group">workspace: acme-api · .mcp.json</span>
+    <span class="sep">·</span>
+    <span>$18.42 · 5.3M tok · 7d</span>
+  </div>
+</section>
+
+<!-- =============================================================
+     VIEW 5 — PROVIDERS & USAGE
+     ============================================================= -->
+<section class="view" id="v-usg">
+  <div class="title-bar">
+    <div class="traffic"><i></i><i></i><i></i></div>
+    <div class="title"><b>usage</b> · current billing period · sep 1 – oct 14</div>
+    <div class="right"><span class="badge">live</span></div>
+  </div>
+
+  <div class="shell">
+    <aside class="activity-bar">
+      <button title="Dashboard"><svg><use href="#ic-sessions"/></svg></button>
+      <button title="Providers"><svg><use href="#ic-providers"/></svg></button>
+      <button title="Skills"><svg><use href="#ic-skill"/></svg></button>
+      <button title="MCP"><svg><use href="#ic-mcp"/></svg></button>
+      <button title="Agents"><svg><use href="#ic-agent"/></svg></button>
+      <button class="active" title="Usage"><svg><use href="#ic-usage"/></svg></button>
+      <div class="spacer"></div>
+      <button title="Config"><svg><use href="#ic-config"/></svg></button>
+    </aside>
+
+    <div class="usg">
+      <header class="usg-head">
+        <div>
+          <h1>Providers &amp; usage</h1>
+          <p>Token spend across providers, workspaces, and agents. All data is local; providers are queried only for their own usage endpoints.</p>
+        </div>
+        <div class="range">
+          <button>24H</button>
+          <button class="on">7D</button>
+          <button>30D</button>
+          <button>MTD</button>
+          <button>ALL</button>
+        </div>
+      </header>
+
+      <!-- KPIs -->
+      <div class="usg-kpis">
+        <div class="kpi">
+          <div class="lbl">Spend · 7d</div>
+          <div class="v">$<span>18.42</span></div>
+          <div class="delta up">▲ $3.58 vs prior 7d · +24%</div>
+        </div>
+        <div class="kpi info">
+          <div class="lbl">Tokens · in</div>
+          <div class="v">4.2<small>M</small></div>
+          <div class="delta up">▲ 640k · +18%</div>
+        </div>
+        <div class="kpi ok">
+          <div class="lbl">Tokens · out</div>
+          <div class="v">1.1<small>M</small></div>
+          <div class="delta up">▲ 270k · +31%</div>
+        </div>
+        <div class="kpi warn">
+          <div class="lbl">Sessions · 7d</div>
+          <div class="v">47</div>
+          <div class="delta dn">▼ 3 vs prior · −6%</div>
+        </div>
+      </div>
+
+      <!-- Chart + breakdown -->
+      <div class="usg-body">
+        <div class="chart-card">
+          <div class="c-head">
+            <h2>Spend by provider</h2>
+            <div class="legend">
+              <div class="lg"><span class="sw" style="background:var(--p-anthropic);"></span>anthropic</div>
+              <div class="lg"><span class="sw" style="background:var(--p-openai);"></span>openai</div>
+              <div class="lg"><span class="sw" style="background:var(--p-local);"></span>local</div>
+              <div class="lg"><span class="sw" style="background:var(--p-custom);"></span>mistral</div>
+            </div>
+          </div>
+          <div class="c-body">
+            <svg viewBox="0 0 640 240" preserveAspectRatio="none">
+              <!-- grid lines -->
+              <g stroke="#1c2230" stroke-width="1">
+                <line x1="0" y1="48"  x2="640" y2="48"/>
+                <line x1="0" y1="96"  x2="640" y2="96"/>
+                <line x1="0" y1="144" x2="640" y2="144"/>
+                <line x1="0" y1="192" x2="640" y2="192"/>
+              </g>
+              <!-- y-axis labels -->
+              <g fill="#3a4558" font-family="Fira Code" font-size="9" letter-spacing="0.1em">
+                <text x="0" y="46">$6</text>
+                <text x="0" y="94">$4</text>
+                <text x="0" y="142">$2</text>
+                <text x="0" y="190">$0</text>
+              </g>
+              <!-- bars: 7 days × 4 providers, stacked -->
+              <g>
+                <!-- day 1 -->
+                <g transform="translate(56,0)"><rect x="-15" y="172" width="30" height="20" fill="#ff4a12"/><rect x="-15" y="162" width="30" height="10" fill="#ffaa33"/><rect x="-15" y="156" width="30" height="6" fill="#7aaaff"/></g>
+                <!-- day 2 -->
+                <g transform="translate(138,0)"><rect x="-15" y="148" width="30" height="44" fill="#ff4a12"/><rect x="-15" y="136" width="30" height="12" fill="#ffaa33"/><rect x="-15" y="130" width="30" height="6" fill="#7aaaff"/></g>
+                <!-- day 3 -->
+                <g transform="translate(220,0)"><rect x="-15" y="158" width="30" height="34" fill="#ff4a12"/><rect x="-15" y="150" width="30" height="8" fill="#ffaa33"/><rect x="-15" y="144" width="30" height="6" fill="#7aaaff"/><rect x="-15" y="140" width="30" height="4" fill="#8a9aac"/></g>
+                <!-- day 4 -->
+                <g transform="translate(302,0)"><rect x="-15" y="116" width="30" height="76" fill="#ff4a12"/><rect x="-15" y="104" width="30" height="12" fill="#ffaa33"/><rect x="-15" y="96"  width="30" height="8" fill="#7aaaff"/></g>
+                <!-- day 5 -->
+                <g transform="translate(384,0)"><rect x="-15" y="132" width="30" height="60" fill="#ff4a12"/><rect x="-15" y="118" width="30" height="14" fill="#ffaa33"/><rect x="-15" y="110" width="30" height="8" fill="#7aaaff"/></g>
+                <!-- day 6 -->
+                <g transform="translate(466,0)"><rect x="-15" y="98"  width="30" height="94" fill="#ff4a12"/><rect x="-15" y="84"  width="30" height="14" fill="#ffaa33"/><rect x="-15" y="76"  width="30" height="8" fill="#7aaaff"/><rect x="-15" y="72"  width="30" height="4" fill="#8a9aac"/></g>
+                <!-- day 7 today -->
+                <g transform="translate(548,0)"><rect x="-15" y="64"  width="30" height="128" fill="#ff4a12"/><rect x="-15" y="50"  width="30" height="14" fill="#ffaa33"/><rect x="-15" y="42"  width="30" height="8" fill="#7aaaff"/></g>
+              </g>
+              <!-- x labels -->
+              <g fill="#3a4558" font-family="Fira Code" font-size="9" letter-spacing="0.1em">
+                <text x="56"  y="214" text-anchor="middle">MON</text>
+                <text x="138" y="214" text-anchor="middle">TUE</text>
+                <text x="220" y="214" text-anchor="middle">WED</text>
+                <text x="302" y="214" text-anchor="middle">THU</text>
+                <text x="384" y="214" text-anchor="middle">FRI</text>
+                <text x="466" y="214" text-anchor="middle">SAT</text>
+                <text x="548" y="214" text-anchor="middle" fill="#eae6de">TODAY</text>
+              </g>
+              <!-- today highlight -->
+              <rect x="533" y="0" width="30" height="200" fill="#ff4a12" fill-opacity="0.04"/>
+              <line x1="533" y1="0" x2="533" y2="200" stroke="#ff4a12" stroke-width="1" stroke-dasharray="2,3" stroke-opacity="0.35"/>
+            </svg>
+          </div>
+        </div>
+
+        <div class="breakdown">
+          <div class="c-head">
+            <h2>By provider</h2>
+          </div>
+          <div class="rows">
+            <div class="row">
+              <span class="dot-l" style="background:var(--p-anthropic);"></span>
+              <div class="n">Anthropic<span class="sub">sonnet-4.5 · opus-4.1</span></div>
+              <div class="val">$14.82<small>80.4%</small></div>
+              <div class="bar"><div style="background:var(--p-anthropic); width:80%;"></div></div>
+            </div>
+            <div class="row">
+              <span class="dot-l" style="background:var(--p-openai);"></span>
+              <div class="n">OpenAI<span class="sub">gpt-4.1</span></div>
+              <div class="val">$2.14<small>11.6%</small></div>
+              <div class="bar"><div style="background:var(--p-openai); width:12%;"></div></div>
+            </div>
+            <div class="row">
+              <span class="dot-l" style="background:var(--p-local);"></span>
+              <div class="n">Ollama <span style="font-family:var(--f-m); font-size:9px; color:var(--ok); padding:1px 6px; border:1px solid var(--ok-bd); border-radius:3px; margin-left:4px; background:var(--ok-bg);">LOCAL</span><span class="sub">llama-3.3-70b</span></div>
+              <div class="val">$0.00<small>3.1M tok</small></div>
+              <div class="bar"><div style="background:var(--p-local); width:100%;"></div></div>
+            </div>
+            <div class="row">
+              <span class="dot-l" style="background:var(--p-custom);"></span>
+              <div class="n">Mistral<span class="sub">medium-2508</span></div>
+              <div class="val">$1.46<small>7.9%</small></div>
+              <div class="bar"><div style="background:var(--p-custom); width:8%;"></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- limits table -->
+      <div class="usg-limits">
+        <div class="c-head">
+          <h2>Limits &amp; quotas</h2>
+          <span style="font-family:var(--f-m); font-size:10px; color:var(--t-ter);">based on provider api response · refreshes every 60s</span>
+        </div>
+        <table>
+          <thead>
+            <tr><th>Provider</th><th>Model</th><th>Tokens (in) · 7d</th><th>Daily quota</th><th>Rate limit</th><th>Cost · 7d</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><span class="p-dot anthropic"></span> Anthropic</td>
+              <td style="font-family:var(--f-m); font-size:12px;">sonnet-4.5</td>
+              <td style="font-family:var(--f-m); font-size:12px;">3.1M</td>
+              <td><div style="display:flex; align-items:center;"><div class="bar-wrap"><div class="bar" style="width:52%;"></div></div><span class="pct">52%</span></div></td>
+              <td style="font-family:var(--f-m); font-size:12px; color:var(--t-sec);">50 rpm · 40k tpm</td>
+              <td style="font-family:var(--f-m); font-size:12px;">$12.48</td>
+            </tr>
+            <tr>
+              <td><span class="p-dot anthropic"></span> Anthropic</td>
+              <td style="font-family:var(--f-m); font-size:12px;">opus-4.1</td>
+              <td style="font-family:var(--f-m); font-size:12px;">210k</td>
+              <td><div style="display:flex; align-items:center;"><div class="bar-wrap"><div class="bar warn" style="width:78%;"></div></div><span class="pct">78%</span></div></td>
+              <td style="font-family:var(--f-m); font-size:12px; color:var(--t-sec);">25 rpm · 20k tpm</td>
+              <td style="font-family:var(--f-m); font-size:12px;">$2.34</td>
+            </tr>
+            <tr>
+              <td><span class="p-dot openai"></span> OpenAI</td>
+              <td style="font-family:var(--f-m); font-size:12px;">gpt-4.1</td>
+              <td style="font-family:var(--f-m); font-size:12px;">480k</td>
+              <td><div style="display:flex; align-items:center;"><div class="bar-wrap"><div class="bar" style="width:24%;"></div></div><span class="pct">24%</span></div></td>
+              <td style="font-family:var(--f-m); font-size:12px; color:var(--err);">auth expired</td>
+              <td style="font-family:var(--f-m); font-size:12px;">$2.14</td>
+            </tr>
+            <tr>
+              <td><span class="p-dot local"></span> Ollama</td>
+              <td style="font-family:var(--f-m); font-size:12px;">llama-3.3-70b</td>
+              <td style="font-family:var(--f-m); font-size:12px;">3.1M</td>
+              <td style="font-family:var(--f-m); font-size:12px; color:var(--t-ter);">unmetered</td>
+              <td style="font-family:var(--f-m); font-size:12px; color:var(--t-sec);">local · 1 gpu</td>
+              <td style="font-family:var(--f-m); font-size:12px; color:var(--ok);">$0.00</td>
+            </tr>
+            <tr>
+              <td><span class="p-dot custom"></span> Mistral</td>
+              <td style="font-family:var(--f-m); font-size:12px;">medium-2508</td>
+              <td style="font-family:var(--f-m); font-size:12px;">320k</td>
+              <td><div style="display:flex; align-items:center;"><div class="bar-wrap"><div class="bar" style="width:14%;"></div></div><span class="pct">14%</span></div></td>
+              <td style="font-family:var(--f-m); font-size:12px; color:var(--t-sec);">30 rpm · 30k tpm</td>
+              <td style="font-family:var(--f-m); font-size:12px;">$1.46</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="status-bar">
+    <svg><use href="#forge-mark"/></svg>
+    <span>usage</span><span class="sep">·</span>
+    <span>last 7 days</span><span class="sep">·</span>
+    <span style="color:#fff;">4 providers · 3 live · 1 auth</span>
+    <span class="ml-auto group">$18.42 spent · $0.00 local · 5.3M tok</span>
+    <span class="sep">·</span>
+    <span>billing period ends oct 31</span>
+  </div>
+</section>
+
+<script>
+// view switching
+const views = document.querySelectorAll('.view');
+const navButtons = document.querySelectorAll('.mock-nav button');
+function show(id) {
+  views.forEach(v => v.classList.toggle('active', v.id === 'v-' + id));
+  navButtons.forEach(b => b.classList.toggle('active', b.dataset.view === id));
+}
+navButtons.forEach(b => b.addEventListener('click', () => show(b.dataset.view)));
+// keyboard 1–6
+const order = ['dash','fresh','sess','mon','mgr','usg'];
+document.addEventListener('keydown', e => {
+  const n = parseInt(e.key);
+  if (n >= 1 && n <= 6) show(order[n-1]);
+});
+</script>
+
+</body>
+</html>

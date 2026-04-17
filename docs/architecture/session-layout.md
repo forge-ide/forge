@@ -1,0 +1,101 @@
+# Session Layout
+
+> Extracted from CONCEPT.md — pane types, layout rules, and CLI surface for sessions
+
+---
+
+## 4. Session layout
+
+Sessions use standard editor layout semantics. There is no fixed layout; users compose panes like any modern editor.
+
+### 4.1 Pane types
+
+| Pane type | Purpose |
+|---|---|
+| **Chat** | Agent conversation. Streaming, tool calls inline, sub-agent banners, `@`-context. |
+| **Terminal** | Shell emulation via Ghostty's VT library. Shared or agent-controlled. |
+| **Editor** | Buffer on disk or in memory. Monaco in a webview (see §7). |
+
+Files is **not** a pane type. The file tree lives in the sidebar slot (part of the shell), toggleable from the activity bar with `Cmd/Ctrl+Shift+E` to reveal. It never takes a main-pane slot.
+
+### 4.2 Layout rules
+- Standard splits: single, horizontal, vertical, grid
+- No hard cap on pane count — users split as needed
+- Any pane can hold chat, terminal, or editor; pane type is not fixed at creation
+- Panes can be resized; minimum width 320px (below that, pane header collapses to icons)
+- Drag any pane to any edge of another pane to re-dock (including effectively sidebar-sized positions)
+- Layouts persist per-workspace in `.forge/layouts.json`
+
+### 4.3 Default layout
+A new session opens with **a single chat pane** filling the main area. When the user opens a file (from the files sidebar, `@`-ref click, or a tool call that reads/edits one), an editor pane opens via a sensible split — first file splits right; subsequent files become tabs in that editor pane.
+
+### 4.4 Pane chrome rules (from DESIGN.md)
+- Every pane header shows its active provider dot where applicable
+- Panes are always labeled; no anonymous panes
+- Pane-local actions live in the pane header
+- Streaming state belongs to the chat pane; other panes never show the ember streaming cursor
+
+---
+
+## 5. CLI surface
+
+Sessions are independently invokable. This is non-negotiable — it's what makes Forge different from a chat app, and what makes headless/CI use possible.
+
+### 5.1 Session lifecycle
+
+```
+forge session new agent <name>    [--workspace PATH] [--ephemeral]
+forge session new provider <spec> [--workspace PATH] [--ephemeral]
+forge session list                [--archived] [--all]
+forge session attach <id>         # reactivates archived sessions on demand
+forge session tail <id>           # streaming transcript to stdout
+forge session kill <id>
+forge session export <id>         [--format jsonl|md]
+```
+
+### 5.2 Headless execution
+
+```
+forge run agent <name>    [--input -|PATH] [--output -|PATH]
+forge run provider <spec> [--input -|PATH] [--output -|PATH]
+```
+
+One-shot runs. Creates an ephemeral session by default, streams events to stdout, exits with the session's exit code. Enables CI use, shell piping, cron jobs. The subcommand grammar matches `forge session new` intentionally — `agent <name>` and `provider <spec>` mean the same thing in both places.
+
+### 5.3 Workspace entry point
+
+```
+forge open <path>
+```
+
+GUI-coupled. Opens the workspace in a session window. If a session already exists in that workspace, attaches to the most recent active one. If none, prompts in-GUI to create one. Distinct from `forge session new` because it has GUI semantics and reuse behavior.
+
+### 5.4 Catalog management
+
+```
+forge skill    list | install <git-url|path> | update <name> | enable | disable
+forge mcp      list | test <name> | restart <name> | import [--from vscode|cursor|...]
+forge provider list | login <id> | logout <id>
+forge container list | exec <id> | rm <id>
+```
+
+`forge mcp import` is a one-shot migration utility: reads another tool's MCP config (VS Code, Cursor, Claude Desktop, Continue, Kiro, Codex) and converts it to the universal `.mcp.json` schema.
+
+### 5.5 Session persistence
+
+Sessions have a **persistence mode**:
+- `persist` (default) — on end, the session is automatically archived. Transcript preserved. Reactivatable via `forge session attach`.
+- `ephemeral` — on end, the process is killed and all data is purged from disk.
+
+Controlled by `sessions.persistence` in user config, overridable per-workspace, or per-session via `--ephemeral` at start. `forge run` sessions are ephemeral by default.
+
+Active session count is soft-limited (default 10, configurable via `sessions.active_limit`). Archived sessions have no limit. Dashboard session list defaults to active; archived accessible via filter. Creating a new session when at the active limit prompts the user to archive the oldest, cancel, or raise the limit.
+
+### 5.6 Credentials
+
+```
+forge provider login <id>    # reads API key from stdin
+forge provider logout <id>
+```
+
+Stdin-only in v1. Browser-OAuth flow deferred to v1.1. Forge also reads standard environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) as a fallback for users who already have these in their shell.

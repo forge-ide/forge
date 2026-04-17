@@ -1,0 +1,25 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Node / frontend
+.pnpm-store/
+
+# Tauri
+src-tauri/target/
+
+# Generated
+web/packages/ipc/src/generated/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env / secrets
+.env
+.env.*

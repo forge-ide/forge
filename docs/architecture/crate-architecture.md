@@ -1,0 +1,306 @@
+# Crate Architecture
+
+> Extracted from IMPLEMENTATION.md §3 — all 12 crates with full responsibility breakdown, key types, and dependencies
+
+---
+
+## 3. Crate architecture
+
+### 3.1 `forge-core`
+
+The canonical types and shared utilities. Everything depends on this; it depends on nothing Forge-specific.
+
+**Responsibilities.**
+- Core types: `WorkspaceId`, `SessionId`, `AgentId`, `ProviderId`, `ToolCallId`, `MessageId`, `AgentInstanceId`
+- `Config` loading (`~/.config/forge/config.toml`, `.agents/*.md` frontmatter, `.mcp.json`, `~/.mcp.json`, `AGENTS.md` workspace instructions)
+- `Error` type (anyhow+thiserror hybrid: `ForgeError`)
+- Event model (the append-only log): `Event`, `EventKind`, `Transcript`
+- Credential storage trait + OS implementations (`security-framework`, `secret-service`)
+- Path utilities: workspace root detection, `.forge/` management, gitignore scoping, `.forge/.gitignore` auto-init
+
+**Key types (abbreviated).**
+```rust
+pub struct SessionId(pub [u8; 8]);          // displayed as hex like #a3f1b2c4
+
+pub enum SessionPersistence { Persist, Ephemeral }
+pub enum SessionState { Active, Archived, Ended }
+
+pub enum RosterScope {
+    SessionWide,
+    Agent(AgentId),
+    Provider(ProviderId),
+}
+
+pub enum RosterEntry {
+    Provider { id: ProviderId, model: Option<String> },
+    Skill { id: SkillId },
+    Mcp { id: McpId },
+    Agent { id: AgentId, background: bool },
+}
+
+pub struct ScopedRosterEntry {
+    pub scope: RosterScope,
+    pub entry: RosterEntry,
+}
+
+pub enum Event {
+    SessionStarted { at: DateTime<Utc>, workspace: PathBuf, agent: Option<AgentId>, persistence: SessionPersistence },
+    UserMessage { id: MessageId, at: DateTime<Utc>, text: String, context: Vec<ContextRef>, branch_parent: Option<MessageId> },
+    AssistantMessage { id: MessageId, provider: ProviderId, model: String, at: DateTime<Utc>, stream_finalised: bool, text: String, branch_parent: Option<MessageId>, branch_variant_index: u32 },
+    AssistantDelta { id: MessageId, at: DateTime<Utc>, delta: String },
+    BranchSelected { parent: MessageId, selected: MessageId },
+    ToolCallStarted { id: ToolCallId, msg: MessageId, tool: String, args: Value, at: DateTime<Utc>, parallel_group: Option<u32> },
+    ToolCallApprovalRequested { id: ToolCallId, preview: ApprovalPreview },
+    ToolCallApproved { id: ToolCallId, by: ApprovalSource, scope: ApprovalScope, at: DateTime<Utc> },
+    ToolCallRejected { id: ToolCallId, reason: Option<String> },
+    ToolCallCompleted { id: ToolCallId, result: Value, duration_ms: u64, at: DateTime<Utc> },
+    SubAgentSpawned { parent: AgentInstanceId, child: AgentInstanceId, from_msg: MessageId },
+    BackgroundAgentStarted { id: AgentInstanceId, agent: AgentId, at: DateTime<Utc> },
+    BackgroundAgentCompleted { id: AgentInstanceId, at: DateTime<Utc> },
+    UsageTick { provider: ProviderId, model: String, tokens_in: u64, tokens_out: u64, cost_usd: f64, scope: RosterScope },
+    ContextCompacted { at: DateTime<Utc>, summarized_turns: u32, summary_msg_id: MessageId, trigger: CompactTrigger },
+    SessionEnded { at: DateTime<Utc>, reason: EndReason, archived: bool },
+}
+
+pub enum ApprovalScope { Once, ThisFile, ThisPattern(String), ThisTool }
+pub enum CompactTrigger { AutoAt98Pct, UserRequested }
+```
+
+**Key trait.**
+```rust
+pub trait Credentials: Send + Sync {
+    async fn get(&self, provider: &ProviderId) -> Result<Option<Secret<String>>, ForgeError>;
+    async fn set(&self, provider: &ProviderId, value: Secret<String>) -> Result<(), ForgeError>;
+    async fn remove(&self, provider: &ProviderId) -> Result<(), ForgeError>;
+}
+```
+
+**External deps.** `serde`, `serde_json`, `tokio`, `chrono`, `thiserror`, `anyhow`, `ts-rs` (for TS type generation), `secrecy` (for `Secret<T>`), `toml`, `gray_matter` (YAML frontmatter parsing).
+
+---
+
+### 3.2 `forge-providers`
+
+The provider trait and built-in implementations.
+
+**Trait.**
+```rust
+#[async_trait]
+pub trait Provider: Send + Sync {
+    fn id(&self) -> ProviderId;
+    fn display_name(&self) -> &str;
+    fn accent_color(&self) -> &'static str;   // hex from DESIGN.md
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError>;
+    async fn chat(
+        &self,
+        req: ChatRequest,
+        cancel: CancellationToken,
+    ) -> Result<BoxStream<'static, Result<ChatChunk, ProviderError>>, ProviderError>;
+    async fn usage_summary(&self, range: UsageRange) -> Result<UsageSummary, ProviderError>;
+}
+```
+
+**Implementations in v1.**
+- `AnthropicProvider` (SSE)
+- `OpenAIProvider` (SSE, works for any OpenAI-compatible endpoint including Mistral, Groq, etc.)
+- `OllamaProvider` (local, OpenAI-compat)
+- `CustomOpenAIProvider` (user-configured base URL)
+
+**Shape of `ChatRequest`.** Provider-agnostic. Internal. Translated to provider-specific requests inside each impl. Uses our own `Message`/`Tool`/`ContextBlock` types, not any provider's SDK types. Includes `parallel_tool_calls_allowed: bool` (true for read-only tool sets).
+
+**Streaming.**
+- Every provider returns `BoxStream<Result<ChatChunk, _>>`
+- `ChatChunk` variants: `TextDelta(String)`, `ToolCallStart { id, name, args }`, `ToolCallArgsDelta { id, delta }`, `ToolCallFinished { id }`, `UsageDelta { in, out }`, `Done { stop_reason }`
+- Providers normalize their SSE formats into these chunks
+
+**Cost calculation.** Each provider ships a `prices.toml` table shipped in `forge-providers/data/prices.toml`. Cost per 1M input / output tokens per model. Updated via version upgrades (no hot-update in v1).
+
+**External deps.** `reqwest` (streaming), `eventsource-stream`, `async-trait`, `futures`, `tokio`.
+
+---
+
+### 3.3 `forge-mcp`
+
+MCP client and server lifecycle manager.
+
+**Responsibilities.**
+- Parse `.mcp.json` (workspace) and `~/.mcp.json` (user) using the universal `mcpServers` schema
+- Import conversion for other tool formats (`forge mcp import --from ...`)
+- Spawn servers: stdio transport (subprocess pipes) or http transport
+- Health-check (periodic `tools/list` ping, 30s cadence)
+- Restart policy: exponential backoff, max 5 tries per 10 minutes, then manual
+- Expose MCP tools to sessions via a uniform `Tool` shape (matching provider-agnostic tool format)
+- Surface connection state changes as events
+- Classify tools as read-only or mutating via MCP `readOnly` hint (default: mutating when unset)
+
+**API.**
+```rust
+pub struct McpManager { /* ... */ }
+
+impl McpManager {
+    pub async fn load(scope: Scope) -> Result<Self, ForgeError>;
+    pub async fn start(&self, id: &McpId) -> Result<(), ForgeError>;
+    pub async fn stop(&self, id: &McpId) -> Result<(), ForgeError>;
+    pub async fn call(&self, id: &McpId, tool: &str, args: Value) -> Result<Value, ForgeError>;
+    pub fn state_stream(&self) -> BoxStream<'static, McpStateEvent>;
+    pub fn list(&self) -> Vec<McpServerInfo>;
+    pub fn import(source: ImportSource, dest_scope: Scope) -> Result<ImportReport, ForgeError>;
+}
+
+pub enum ImportSource { VSCode, Cursor, ClaudeDesktop, Continue, Kiro, Codex }
+```
+
+**Transport.**
+- stdio: `tokio::process::Command` + line-delimited JSON-RPC
+- http: `reqwest` long-poll or SSE depending on server
+
+**External deps.** `rmcp` (official MCP SDK), `tokio::process`, `reqwest`.
+
+---
+
+### 3.4 `forge-agents`
+
+Agent definitions and orchestration.
+
+**Responsibilities.**
+- Parse `.agents/*.md` and `~/.agents/*.md` (frontmatter + prose) into `AgentDef` — workspace wins on name collision
+- Parse `AGENTS.md` (workspace) and inject into every agent's system prompt
+- Instantiate `AgentInstance` — the live running version
+- Orchestration: spawn sub-agents, route tool calls, manage the per-agent event stream
+- Manage background agents: user-initiated top-level agents running alongside the active chat
+- Enforce `allowed_tools`, `allowed_paths`, `isolation` levels
+- Cross-session memory (opt-in): read/write `~/.config/forge/memory/<agent>.md`, inject into system prompt when enabled
+
+**Key types.**
+```rust
+pub struct AgentDef {
+    pub id: AgentId,
+    pub name: String,
+    pub provider: ProviderId,
+    pub model: Option<String>,
+    pub system_prompt: String,
+    pub allowed_tools: Vec<ToolPattern>,
+    pub allowed_paths: Vec<PathPattern>,
+    pub allowed_mcp: Vec<McpId>,
+    pub isolation: Isolation,
+    pub max_tokens: u32,
+    pub approval_timeout_sec: Option<u32>,
+}
+
+pub enum Isolation {
+    Trusted,                         // only valid for built-in skills
+    Process,                         // default for user-defined
+    Container(ContainerSpec),
+}
+
+pub struct AgentInstance {
+    pub id: AgentInstanceId,
+    pub def: AgentDef,
+    pub parent: Option<AgentInstanceId>,
+    pub is_background: bool,
+    pub state: AgentState,
+    // internal: event tx, tool call dispatcher, sandbox handle
+}
+```
+
+**Isolation validation.** At parse time, reject any user-defined `.agents/*.md` that declares `isolation: trusted` with a clear error: "trusted isolation is reserved for built-in skills." Only `Process` and `Container(_)` are valid for user-authored agents.
+
+**Sub-agent spawning.**
+When an agent requests `agent.spawn(name, message)`, the orchestrator:
+1. Checks the parent's `allowed_tools` for `agent.spawn:*`
+2. Loads the named agent def
+3. Validates the child's isolation (still user-agent constrained — Level 0 unavailable)
+4. Instantiates in the same session, emits `SubAgentSpawned` event
+5. Sub-agent is isolated per its *own* `isolation` level, not the parent's
+
+**Background agents.** Top-level agents started by the user via `forge run` or the UI's "start background" action. `BackgroundAgentStarted` event emitted; agent runs alongside any active user chat. Completion notifies per `notifications.bg_agents` setting.
+
+---
+
+### 3.5 `forge-session`
+
+The session process binary — `forged` — the heart of Forge.
+
+**Entrypoint.**
+```rust
+// crates/forge-session/src/main.rs
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+    let mut session = Session::new(args).await?;
+    session.listen_on(uds_path(&session.id())).await?;
+    session.run().await
+}
+```
+
+**Responsibilities.**
+- Own the session's event log (append to `.forge/sessions/<id>/events.jsonl`, prepended with schema header)
+- Write session metadata to `.forge/sessions/<id>/meta.toml`
+- Host the agent orchestrator
+- Host the tool dispatcher (fs, shell, agent.spawn, mcp.*)
+- Expose an IPC server over a Unix domain socket at `$XDG_RUNTIME_DIR/forge/sessions/<id>.sock` (macOS: `/tmp/forge-<uid>/sessions/<id>.sock`)
+- Handle approval prompts (by emitting an event and waiting for an `ApproveToolCall` command)
+- Track usage counters in-memory, flush to monthly aggregate on session end (strategy TBD per CONCEPT.md §13)
+- Execute parallel reads; serialize writes/exec
+- Perform context compaction at 98% or on explicit user request
+- On end: archive (move to `.forge/sessions/archived/<id>/` if persist) or purge (if ephemeral)
+
+**State machine.**
+```
+  [Spawned] ─> [Initializing] ─> [Ready]
+                                    │
+                                    ▼
+  ┌─────────────── [Running] ─┐
+  │                            │
+  ▼                            ▼
+[PausedForApproval]         [Idle]
+  │                            │
+  └──────────> (resume) ───────┘
+                               │
+                               ▼
+                        [Draining] ─> [Stopped] ─> {Archived | Purged}
+```
+
+**Client connections.**
+- Multiple clients (GUI instances, `forge session tail`, `forge session attach`) can connect simultaneously
+- Each client gets a full event replay on connect, then live events
+- Commands from any connected client are accepted (but approval prompts show *who* approved)
+
+---
+
+### 3.6 `forge-oci`
+
+Container lifecycle.
+
+**Scope.** Shell to `podman` (preferred) or `docker` — *not* embed a runtime in v1. We generate OCI runtime specs using `oci-spec-rs` but hand them to an external runtime.
+
+**API.**
+```rust
+pub trait ContainerRuntime: Send + Sync {
+    async fn pull(&self, image: &ImageRef) -> Result<(), OciError>;
+    async fn create(&self, spec: Spec) -> Result<ContainerHandle, OciError>;
+    async fn start(&self, handle: &ContainerHandle) -> Result<(), OciError>;
+    async fn exec(&self, handle: &ContainerHandle, argv: Vec<String>) -> Result<ExecResult, OciError>;
+    async fn stop(&self, handle: &ContainerHandle) -> Result<(), OciError>;
+    async fn remove(&self, handle: &ContainerHandle) -> Result<(), OciError>;
+    async fn stats(&self, handle: &ContainerHandle) -> Result<Stats, OciError>;
+}
+
+pub struct PodmanRuntime { /* ... */ }
+pub struct DockerRuntime { /* fallback */ }
+```
+
+**First-run check.** On first container use, verify podman (or docker) is installed. If not, show a dashboard banner with install instructions for the user's OS. Do not bundle the runtime in v1.
+
+---
+
+### 3.7 `forge-fs`, `forge-lsp`, `forge-term`, `forge-ipc`, `forge-cli`, `forge-shell`
+
+Briefly:
+
+- **forge-fs** — scoped FS ops with path validation, diff generation (using `similar` crate), patch application, glob matching for approval patterns. All writes go through here; the session dispatcher refuses direct writes.
+- **forge-lsp** — LSP server bootstrap: downloads and updates the 16 default servers on first use of their language. The actual LSP client runs in the webview via `monaco-languageclient` (see §9), so this crate is a *management* layer — it doesn't proxy LSP messages.
+- **forge-term** — ghostty-vt integration. Wraps the VT state machine; renders to a byte stream exposed over IPC.
+- **forge-ipc** — the shared type definitions and framing for *both* the Tauri ↔ webview boundary and the shell ↔ session UDS boundary. Pure types + `ts-rs` derives. No runtime code.
+- **forge-cli** — `clap`-based CLI binary. Reuses `forge-core` heavily. Thin. Subcommand grammar matches CONCEPT.md §5.
+- **forge-shell** — Tauri binary. Registers Tauri commands (see §4.1), hosts the webview, orchestrates the IPC dance between user, UDS connections, and webview.
