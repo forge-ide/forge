@@ -73,7 +73,10 @@ impl EventLog {
                 }
             })
         };
-        Self { writer: shared, flush_task: flush_handle }
+        Self {
+            writer: shared,
+            flush_task: flush_handle,
+        }
     }
 
     pub async fn append(&mut self, event: &Event) -> Result<()> {
