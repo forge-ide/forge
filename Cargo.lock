@@ -228,6 +228,8 @@ dependencies = [
  "chrono",
  "forge-core",
  "forge-ipc",
+ "forge-providers",
+ "futures",
  "serde_json",
  "tempfile",
  "tokio",

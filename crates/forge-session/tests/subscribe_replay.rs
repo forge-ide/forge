@@ -1,5 +1,6 @@
 use forge_core::{types::SessionPersistence, Event};
 use forge_ipc::{ClientInfo, Hello, IpcEvent, IpcMessage, Subscribe, PROTO_VERSION};
+use forge_providers::MockProvider;
 use forge_session::{server::serve_with_session, session::Session};
 use std::{path::PathBuf, sync::Arc};
 use tempfile::TempDir;
@@ -55,11 +56,12 @@ async fn subscribe_mid_stream_receives_historical_then_live_events() {
     session.emit(session_started_event()).await.unwrap(); // seq 2
     session.emit(session_started_event()).await.unwrap(); // seq 3
 
-    // Start server
+    // Start server (provider unused in this test)
     let server_session = Arc::clone(&session);
     let server_sock = sock_path.clone();
+    let provider = Arc::new(MockProvider::with_default_path());
     tokio::spawn(async move {
-        serve_with_session(&server_sock, server_session)
+        serve_with_session(&server_sock, server_session, provider)
             .await
             .unwrap();
     });

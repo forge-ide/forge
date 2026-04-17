@@ -17,6 +17,31 @@ pub enum IpcMessage {
     HelloAck(HelloAck),
     Subscribe(Subscribe),
     Event(IpcEvent),
+    SendUserMessage(SendUserMessage),
+    ToolCallApproved(ToolCallApproved),
+    ToolCallRejected(ToolCallRejected),
+}
+
+/// Client → session: send a user message to start a new turn.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SendUserMessage {
+    pub text: String,
+}
+
+/// Client → session: approve a pending tool call.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ToolCallApproved {
+    /// The ToolCallId to approve.
+    pub id: String,
+    /// Approval scope: "Once" | "ThisFile" | "ThisPattern" | "ThisTool".
+    pub scope: String,
+}
+
+/// Client → session: reject a pending tool call.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ToolCallRejected {
+    pub id: String,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
