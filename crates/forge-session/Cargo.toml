@@ -24,4 +24,8 @@ tokio = { version = "1", features = ["net", "io-util", "fs", "rt-multi-thread", 
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { version = "1", features = ["rt", "macros", "time", "net"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "net", "process"] }
+
+[[test]]
+name = "headless_session_basic"
+path = "tests/headless_session/basic.rs"
