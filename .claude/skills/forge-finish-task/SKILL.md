@@ -39,7 +39,7 @@ Prompt template:
   If any item is NOT FOUND, stop and report — do not guess.
 ```
 
-**If any item comes back NOT FOUND:** implement the missing items, then spawn a fresh-context DoD subagent and repeat this step. Loop until every checkbox comes back VERIFIED. Each iteration must use a new subagent with no memory of prior runs.
+**If any item comes back NOT FOUND:** implement the missing items, re-run the build verification from step 3, then spawn a fresh-context DoD subagent and repeat this step. Loop until every checkbox comes back VERIFIED. Each iteration must use a new subagent with no memory of prior runs.
 
 3. **Verify the build**
 
@@ -70,7 +70,7 @@ Prompt template:
   4. Report only HIGH-confidence findings. Skip style nitpicks.
 ```
 
-**If the reviewer raises any HIGH-confidence finding:** fix all findings, then spawn a fresh-context code-reviewer subagent and repeat this step. Loop until the reviewer reports no HIGH-confidence findings. Each iteration must use a new subagent with no memory of prior runs. Do not push code with known issues.
+**If the reviewer raises any HIGH-confidence finding:** fix all findings, re-run the build verification from step 3, then spawn a fresh-context code-reviewer subagent and repeat this step. Loop until the reviewer reports no HIGH-confidence findings. Each iteration must use a new subagent with no memory of prior runs. Do not push code with known issues.
 
 5. **Create and push the feature branch**
 
