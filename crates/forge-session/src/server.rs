@@ -140,7 +140,10 @@ async fn handle_connection<P: Provider + 'static>(
                         let provider = Arc::clone(&provider);
                         let approvals = Arc::clone(&pending_approvals);
                         tokio::spawn(async move {
-                            if let Err(e) = run_turn(session, provider, m.text, approvals).await {
+                            // TODO(F-013): thread AgentDef.allowed_paths once agent
+                            // context is passed through the server connection.
+                            // Using ["**"] (allow all) until then.
+                            if let Err(e) = run_turn(session, provider, m.text, approvals, vec!["**".to_string()]).await {
                                 eprintln!("turn error: {e}");
                             }
                         });
