@@ -4,6 +4,12 @@ Forge is a native desktop workshop for agentic work: Rust + Tauri shell, SolidJS
 
 ---
 
+## Task tracking
+
+Tasks are tracked as GitHub Issues on [forge-ide/forge](https://github.com/forge-ide/forge/issues). Before starting work, check the open issues. Milestones map to phases (Phase 0–4). Use `gh issue list --repo forge-ide/forge` to query current tasks.
+
+---
+
 ## Mental model
 
 - Think in **sessions**, not files. Every AI action is an event appended to an immutable log.
