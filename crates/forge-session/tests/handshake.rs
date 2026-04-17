@@ -23,7 +23,7 @@ async fn handshake_succeeds_with_valid_proto() {
 
     let server_path = path.clone();
     tokio::spawn(async move {
-        serve(&server_path).await.unwrap();
+        serve(&server_path, false).await.unwrap();
     });
 
     let mut stream = connect_with_retry(&path).await;
@@ -53,7 +53,7 @@ async fn unknown_proto_rejected() {
 
     let server_path = path.clone();
     tokio::spawn(async move {
-        serve(&server_path).await.unwrap();
+        serve(&server_path, false).await.unwrap();
     });
 
     let mut stream = connect_with_retry(&path).await;
@@ -82,7 +82,7 @@ async fn garbage_frame_rejected() {
 
     let server_path = path.clone();
     tokio::spawn(async move {
-        serve(&server_path).await.unwrap();
+        serve(&server_path, false).await.unwrap();
     });
 
     let mut stream = connect_with_retry(&path).await;

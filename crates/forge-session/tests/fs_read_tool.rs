@@ -77,7 +77,7 @@ async fn fs_read_tool_returns_content_bytes_sha256() {
     let server_provider = Arc::clone(&provider);
     let server_sock = sock_path.clone();
     tokio::spawn(async move {
-        serve_with_session(&server_sock, server_session, server_provider)
+        serve_with_session(&server_sock, server_session, server_provider, false)
             .await
             .unwrap();
     });

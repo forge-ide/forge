@@ -4,10 +4,13 @@ use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let auto_approve = args.iter().any(|a| a == "--auto-approve-unsafe");
+
     let session_id = forge_core::SessionId::new();
     let socket_path = resolve_socket_path(&session_id.to_string());
     eprintln!("forged: listening on {}", socket_path.display());
-    serve(&socket_path).await
+    serve(&socket_path, auto_approve).await
 }
 
 fn resolve_socket_path(session_id: &str) -> PathBuf {
