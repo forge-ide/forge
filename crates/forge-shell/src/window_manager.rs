@@ -58,13 +58,21 @@ impl<R: Runtime> WindowManager<R> {
     }
 }
 
-/// Entry point invoked from `main`. Builds the Tauri app and opens the
-/// Dashboard on setup.
+/// Entry point invoked from `main`. Builds the Tauri app, registers the
+/// session IPC bridge + dashboard commands, and opens the Dashboard on setup.
 pub fn run() -> Result<()> {
     tauri::Builder::default()
         .manage(ProviderStatusCache::new(CACHE_TTL))
-        .invoke_handler(tauri::generate_handler![dashboard::provider_status])
+        .invoke_handler(tauri::generate_handler![
+            dashboard::provider_status,
+            crate::ipc::session_hello,
+            crate::ipc::session_subscribe,
+            crate::ipc::session_send_message,
+            crate::ipc::session_approve_tool,
+            crate::ipc::session_reject_tool,
+        ])
         .setup(|app| {
+            crate::ipc::manage_bridge(&app.handle().clone());
             let manager = WindowManager::new(app.handle().clone());
             manager.open_dashboard()?;
             Ok(())

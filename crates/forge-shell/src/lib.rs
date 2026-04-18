@@ -10,8 +10,11 @@
 //! that `window_spec` can be unit-tested on hosts without WebKitGTK via
 //! `cargo test -p forge-shell --no-default-features`.
 
+pub mod bridge;
 pub mod dashboard;
 pub mod window_spec;
 
+#[cfg(feature = "webview")]
+pub mod ipc;
 #[cfg(feature = "webview")]
 pub mod window_manager;
