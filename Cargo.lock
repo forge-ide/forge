@@ -1077,9 +1077,15 @@ name = "forge-shell"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
+ "forge-providers",
  "png",
+ "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
+ "tokio",
+ "wiremock",
 ]
 
 [[package]]

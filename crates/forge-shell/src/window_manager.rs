@@ -8,6 +8,7 @@
 use anyhow::{Context, Result};
 use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
+use crate::dashboard::{self, ProviderStatusCache, CACHE_TTL};
 use crate::window_spec::WindowSpec;
 
 /// Opens and manages Forge windows on a live `AppHandle`.
@@ -61,6 +62,8 @@ impl<R: Runtime> WindowManager<R> {
 /// Dashboard on setup.
 pub fn run() -> Result<()> {
     tauri::Builder::default()
+        .manage(ProviderStatusCache::new(CACHE_TTL))
+        .invoke_handler(tauri::generate_handler![dashboard::provider_status])
         .setup(|app| {
             let manager = WindowManager::new(app.handle().clone());
             manager.open_dashboard()?;
