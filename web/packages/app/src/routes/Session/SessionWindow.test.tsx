@@ -23,6 +23,7 @@ vi.mock('@tauri-apps/api/window', () => ({
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { SessionWindow } from './SessionWindow';
 import { resetSessionEventStore } from '../../stores/session';
+import { resetMessagesStore } from '../../stores/messages';
 
 const helloAck = {
   session_id: 'abc123',
@@ -49,6 +50,7 @@ describe('SessionWindow', () => {
     unlistenMock.mockReset();
     closeMock.mockReset();
     resetSessionEventStore();
+    resetMessagesStore();
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === 'session_hello') return helloAck;
       return undefined;
@@ -137,5 +139,37 @@ describe('SessionWindow', () => {
     const { findByTestId } = renderAt('/session/abc123');
     const chatPane = await findByTestId('chat-pane');
     expect(chatPane.textContent).toContain('CHAT');
+  });
+
+  it('routes Rust-shaped session:event payloads through the adapter into the chat pane', async () => {
+    let captured: ((ev: { payload: unknown }) => void) | null = null;
+    listenMock.mockImplementation(async (_name: string, handler: (ev: { payload: unknown }) => void) => {
+      captured = handler;
+      return unlistenMock;
+    });
+
+    const { findByTestId } = renderAt('/session/abc123');
+    await findByTestId('chat-pane');
+    await waitFor(() => expect(captured).not.toBeNull());
+
+    // Fire a real Rust-shaped user_message event — the adapter must rename
+    // id → message_id and discriminate on kind so the store renders it.
+    captured!({
+      payload: {
+        session_id: 'abc123',
+        seq: 1,
+        event: {
+          type: 'user_message',
+          id: 'u-wire-1',
+          at: '2026-04-18T10:00:00Z',
+          text: 'hello from the wire',
+          context: [],
+          branch_parent: null,
+        },
+      },
+    });
+
+    const list = await findByTestId('message-list');
+    await waitFor(() => expect(list.textContent).toContain('hello from the wire'));
   });
 });

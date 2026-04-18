@@ -16,7 +16,11 @@ export type SessionEvent =
   | { kind: 'AssistantMessage'; text: string; message_id: string }
   | { kind: 'AssistantDelta'; delta: string; message_id: string }
   | { kind: 'ToolCallStarted'; tool_call_id: string; tool_name: string; args_json: string; batch_id?: string }
-  | { kind: 'ToolCallApprovalRequested'; tool_call_id: string; tool_name: string; args_json: string; preview: ApprovalPreview }
+  // tool_name/args_json are optional — the Rust wire event carries only id+preview,
+  // and the approval always follows a ToolCallStarted, so the store normally
+  // transitions an existing placeholder. They remain for the fallback branch
+  // (placeholder missing) used by the pre-wire unit tests.
+  | { kind: 'ToolCallApprovalRequested'; tool_call_id: string; tool_name?: string; args_json?: string; preview: ApprovalPreview }
   | { kind: 'ToolCallCompleted'; tool_call_id: string; result_summary: string }
   | { kind: 'ToolCallFailed'; tool_call_id: string; error: string }
   | { kind: 'Error'; message: string }
@@ -184,12 +188,15 @@ export function pushEvent(sessionId: SessionId, event: SessionEvent): void {
             turn.status = 'awaiting-approval';
             turn.preview = event.preview;
           } else {
-            // No prior ToolCallStarted — push a fresh placeholder.
+            // No prior ToolCallStarted — push a fresh placeholder. In the
+            // Rust wire path this branch is unreachable (approval always
+            // follows a started event), so tool_name/args_json fall back to
+            // safe defaults when the event omits them.
             state.turns.push({
               type: 'tool_placeholder',
               tool_call_id: event.tool_call_id,
-              tool_name: event.tool_name,
-              args_json: event.args_json,
+              tool_name: event.tool_name ?? 'unknown',
+              args_json: event.args_json ?? '{}',
               status: 'awaiting-approval',
               started_at: Date.now(),
               preview: event.preview,
