@@ -1,6 +1,6 @@
 ---
 name: forge-complete-task
-description: Use when picking up and completing a Forge task end-to-end — chains task claiming, TDD implementation, and PR submission
+description: Use when picking up and completing a Forge task end-to-end — chains task claiming, TDD implementation, and PR submission. Accepts an optional F-### argument to target a specific task instead of picking one from the backlog.
 ---
 
 # forge-complete-task
@@ -9,13 +9,25 @@ description: Use when picking up and completing a Forge task end-to-end — chai
 
 End-to-end Forge task workflow. Three phases in strict order: **claim → implement → submit**. The main context is a coordination layer — delegate every discrete unit of work to subagents. Do not explore, search, or implement inline.
 
+## Arguments
+
+| Argument | Form | Meaning |
+|----------|------|---------|
+| Task identifier (optional) | `F-###` (e.g. `F-035`) | Skip backlog selection and claim this specific task |
+
+If no argument is provided, fall back to the normal backlog-picking flow in `forge-start-task`.
+
 ## Phase 1: Claim
 
 Invoke `forge-start-task`. Complete all steps before writing any code:
 - Sync main with upstream
-- Pick an unclaimed issue
+- Select the issue (see below)
 - Create feature branch
 - Read and record the full Definition of Done
+
+**Issue selection:**
+- **If an `F-###` argument was provided:** skip the backlog listing/picking steps. Resolve the F-number to its GitHub issue number via `gh issue list --repo forge-ide/forge --state open --search "F-### in:title" --json number,title`. If it is already labelled `status: in-progress` or `status: code-review`, stop and confirm with the user before continuing. Then run the claim, branch, and read steps from `forge-start-task` against that issue.
+- **If no argument was provided:** run `forge-start-task` as written — list, pick an unclaimed issue, claim, branch, read.
 
 **Gate:** Do not begin Phase 2 until you have the DoD checkboxes in hand.
 
@@ -67,3 +79,4 @@ Steps delegated inside `forge-finish-task`:
 | Pushing before build/review pass | `forge-finish-task` gates the push |
 | Re-claiming a new issue after gaps found | Loop Phase 2 → Phase 3 only |
 | Inlining DoD or code-review checks | Let `forge-finish-task` spawn those subagents |
+| Claiming an `F-###` already in-progress without asking | Confirm with the user before taking over |
