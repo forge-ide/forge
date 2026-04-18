@@ -16,19 +16,19 @@ import {
 import './ChatPane.css';
 
 // ---------------------------------------------------------------------------
-// ToolCallPlaceholder — stub replaced in F-026
+// ToolCallCard — inline tool call card (F-026)
 // ---------------------------------------------------------------------------
 
-const ToolCallPlaceholder: Component<{ turn: Extract<ChatTurn, { type: 'tool_placeholder' }> }> = (props) => (
+const ToolCallCard: Component<{ turn: Extract<ChatTurn, { type: 'tool_placeholder' }> }> = (props) => (
   <div
     class="tool-placeholder"
-    data-testid={`tool-placeholder-${props.turn.tool_call_id}`}
-    classList={{ 'tool-placeholder--completed': props.turn.completed }}
+    data-testid={`tool-call-card-${props.turn.tool_call_id}`}
+    classList={{ 'tool-placeholder--completed': props.turn.status === 'completed' }}
   >
     <span class="tool-placeholder__icon" aria-hidden="true">⚙</span>
     <span class="tool-placeholder__name">{props.turn.tool_name}</span>
     <span class="tool-placeholder__status">
-      {props.turn.completed ? 'completed' : 'running'}
+      {props.turn.status}
     </span>
   </div>
 );
@@ -193,7 +193,7 @@ export const ChatPane: Component = () => {
               case 'assistant':
                 return <AssistantBubble turn={turn} />;
               case 'tool_placeholder':
-                return <ToolCallPlaceholder turn={turn} />;
+                return <ToolCallCard turn={turn} />;
               case 'error':
                 return <ErrorTurn turn={turn} />;
             }

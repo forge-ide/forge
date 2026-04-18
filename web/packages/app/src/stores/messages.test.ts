@@ -85,7 +85,7 @@ describe('messages store', () => {
   });
 
   describe('ToolCallStarted / ToolCallCompleted events', () => {
-    it('appends a tool placeholder on ToolCallStarted', () => {
+    it('appends a tool placeholder with status in-progress on ToolCallStarted', () => {
       pushEvent(SID, {
         kind: 'ToolCallStarted',
         tool_call_id: 'tc-1',
@@ -98,11 +98,76 @@ describe('messages store', () => {
         type: 'tool_placeholder',
         tool_call_id: 'tc-1',
         tool_name: 'fs.read',
-        completed: false,
+        status: 'in-progress',
       });
     });
 
-    it('marks the placeholder completed on ToolCallCompleted', () => {
+    it('preserves args_json on the turn', () => {
+      pushEvent(SID, {
+        kind: 'ToolCallStarted',
+        tool_call_id: 'tc-1',
+        tool_name: 'fs.read',
+        args_json: '{"path":"/foo"}',
+      });
+      const state = getMessagesState(SID);
+      expect(state.turns[0]).toMatchObject({
+        type: 'tool_placeholder',
+        args_json: '{"path":"/foo"}',
+      });
+    });
+
+    it('preserves batch_id on the turn when provided', () => {
+      pushEvent(SID, {
+        kind: 'ToolCallStarted',
+        tool_call_id: 'tc-1',
+        tool_name: 'fs.read',
+        args_json: '{}',
+        batch_id: 'batch-42',
+      });
+      const state = getMessagesState(SID);
+      expect(state.turns[0]).toMatchObject({
+        type: 'tool_placeholder',
+        batch_id: 'batch-42',
+      });
+    });
+
+    it('records started_at as a number on ToolCallStarted', () => {
+      const before = Date.now();
+      pushEvent(SID, {
+        kind: 'ToolCallStarted',
+        tool_call_id: 'tc-1',
+        tool_name: 'fs.read',
+        args_json: '{}',
+      });
+      const after = Date.now();
+      const state = getMessagesState(SID);
+      const turn = state.turns[0] as { started_at: number };
+      expect(typeof turn.started_at).toBe('number');
+      expect(turn.started_at).toBeGreaterThanOrEqual(before);
+      expect(turn.started_at).toBeLessThanOrEqual(after);
+    });
+
+    it('marks status completed and stores result_summary on ToolCallCompleted', () => {
+      pushEvent(SID, {
+        kind: 'ToolCallStarted',
+        tool_call_id: 'tc-2',
+        tool_name: 'fs.write',
+        args_json: '{}',
+      });
+      pushEvent(SID, {
+        kind: 'ToolCallCompleted',
+        tool_call_id: 'tc-2',
+        result_summary: 'wrote 42 bytes',
+      });
+      const state = getMessagesState(SID);
+      expect(state.turns[0]).toMatchObject({
+        type: 'tool_placeholder',
+        status: 'completed',
+        result_summary: 'wrote 42 bytes',
+      });
+    });
+
+    it('computes a non-negative duration_ms on ToolCallCompleted', () => {
       pushEvent(SID, {
         kind: 'ToolCallStarted',
         tool_call_id: 'tc-2',
@@ -115,10 +180,47 @@ describe('messages store', () => {
         result_summary: 'ok',
       });
       const state = getMessagesState(SID);
+      const turn = state.turns[0] as { duration_ms?: number };
+      expect(typeof turn.duration_ms).toBe('number');
+      expect(turn.duration_ms).toBeGreaterThanOrEqual(0);
+    });
+
+    it('sets status errored and stores error on ToolCallFailed', () => {
+      pushEvent(SID, {
+        kind: 'ToolCallStarted',
+        tool_call_id: 'tc-3',
+        tool_name: 'shell.exec',
+        args_json: '{"cmd":"rm -rf /"}',
+      });
+      pushEvent(SID, {
+        kind: 'ToolCallFailed',
+        tool_call_id: 'tc-3',
+        error: 'permission denied',
+      });
+      const state = getMessagesState(SID);
       expect(state.turns[0]).toMatchObject({
         type: 'tool_placeholder',
-        completed: true,
+        status: 'errored',
+        error: 'permission denied',
       });
+    });
+
+    it('computes a non-negative duration_ms on ToolCallFailed', () => {
+      pushEvent(SID, {
+        kind: 'ToolCallStarted',
+        tool_call_id: 'tc-3',
+        tool_name: 'shell.exec',
+        args_json: '{}',
+      });
+      pushEvent(SID, {
+        kind: 'ToolCallFailed',
+        tool_call_id: 'tc-3',
+        error: 'timeout',
+      });
+      const state = getMessagesState(SID);
+      const turn = state.turns[0] as { duration_ms?: number };
+      expect(typeof turn.duration_ms).toBe('number');
+      expect(turn.duration_ms).toBeGreaterThanOrEqual(0);
     });
   });
 
