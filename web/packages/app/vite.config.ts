@@ -20,6 +20,9 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: ['./src/test-setup.ts'],
+    // Playwright specs live in tests/phase1/ and use @playwright/test —
+    // keep vitest off them; they run via `pnpm run test:e2e`.
+    exclude: ['node_modules', 'dist', 'tests/**'],
     server: {
       deps: {
         inline: [/solid-js/, /@solidjs\/router/, /@solidjs\/testing-library/],

@@ -12,7 +12,8 @@ import {
   setSessionEvents,
   setSessions,
 } from '../../stores/session';
-import { pushEvent, type SessionEvent } from '../../stores/messages';
+import { pushEvent } from '../../stores/messages';
+import { fromRustEvent } from '../../ipc/events';
 import { PaneHeader } from './PaneHeader';
 import { ChatPane } from './ChatPane';
 import './SessionWindow.css';
@@ -49,7 +50,11 @@ export const SessionWindow: Component = () => {
           lastEvent: payload.event,
         });
         // Route typed events to the messages store for ChatPane rendering.
-        pushEvent(payload.session_id, payload.event as SessionEvent);
+        // `payload.event` is the Rust-serialized `forge_core::Event` shape
+        // (`{"type":"user_message",…}`); fromRustEvent adapts it to the
+        // store's discriminated union. Non-renderable variants return null.
+        const storeEvent = fromRustEvent(payload.event);
+        if (storeEvent) pushEvent(payload.session_id, storeEvent);
       });
       if (mounted) {
         unlisten = listener;
