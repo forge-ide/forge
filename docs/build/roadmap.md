@@ -18,10 +18,10 @@ The sequencing that builds toward v1.0. Milestones are outcome-based.
 - **Ships**: a CLI-only preview; no GUI.
 
 ### Phase 1 — Single provider, minimal GUI (weeks 3–6)
-**Outcome.** A user can open Forge, start a session, chat with Anthropic, and see tool calls.
-- `forge-providers::AnthropicProvider` with SSE streaming
+**Outcome.** A user can open Forge, start a session, chat with a local Ollama model, and see tool calls. No credentials required (deferred to Phase 3).
+- `forge-providers::OllamaProvider` with streaming chat (NDJSON over HTTP `/api/chat`, model discovery via `/api/tags`)
 - `forge-shell` Tauri bin + webview bootstrap (Solid app)
-- Dashboard view (sessions list + providers) — both active and archived filters
+- Dashboard view (sessions list + Ollama daemon status) — both active and archived filters
 - Session window with single chat pane (layout system exists but splits come later)
 - Tool call cards, four-scope inline approval UI
 - File read/write tool implementations, process isolation level 1
@@ -41,11 +41,12 @@ The sequencing that builds toward v1.0. Milestones are outcome-based.
 - Re-run (Replace variant; Branch variant scaffolded per SPECS.md §15)
 
 ### Phase 3 — Breadth (weeks 11–14)
-**Outcome.** Multi-provider, skills, catalog, usage, containers.
-- OpenAI, Ollama, custom OpenAI-compat providers
+**Outcome.** Multi-provider with credential management, skills, catalog, usage, containers.
+- Anthropic, OpenAI, custom OpenAI-compat providers (SSE streaming, tool use)
+- Credential management (per-provider API keys via OS keyring, Dashboard credential prompts, credential rotation)
 - Skills loader (agentskills.io format, `forge skill install` from Git URL + local path)
 - Catalog view (skills/MCP/agents manager with scope-aware entries)
-- Usage view with charts, limits table, and cross-workspace aggregation (strategy decided here)
+- Usage view with charts, limits table, and cross-workspace aggregation
 - `forge-oci` container support; Level 2 sandbox
 - Context compaction (auto at 98%, user-invoked anytime)
 - Parallel read-only tool calls

@@ -16,7 +16,10 @@ pub async fn ensure_gitignore(workspace_root: &Path) -> Result<()> {
         .open(&gi)
         .await
     {
-        Ok(mut f) => f.write_all(b"*\n").await?,
+        Ok(mut f) => {
+            f.write_all(b"*\n").await?;
+            f.flush().await?;
+        }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e.into()),
     }
