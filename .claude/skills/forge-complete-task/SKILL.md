@@ -24,12 +24,18 @@ Invoke `forge-start-task`. Complete all steps before writing any code:
 - Select the issue (see below)
 - Create feature branch
 - Read and record the full Definition of Done
+- Run pre-work validation (draft plan, resolve info gaps, refine DoD if needed)
 
 **Issue selection:**
 - **If an `F-###` argument was provided:** skip the backlog listing/picking steps. Resolve the F-number to its GitHub issue number via `gh issue list --repo forge-ide/forge --state open --search "F-### in:title" --json number,title`. If it is already labelled `status: in-progress` or `status: code-review`, stop and confirm with the user before continuing. Then run the claim, branch, and read steps from `forge-start-task` against that issue.
 - **If no argument was provided:** run `forge-start-task` as written — list, pick an unclaimed issue, claim, branch, read.
 
-**Gate:** Do not begin Phase 2 until you have the DoD checkboxes in hand.
+**Phase 1 outputs (carry forward to Phase 2):**
+- Final DoD checkboxes (post-refinement, if any)
+- Implementation plan scaffold (files, test strategy, key decisions)
+- Resolved answers to any clarifying questions asked
+
+**Gate:** Do not begin Phase 2 until the DoD is finalized **and** the plan scaffold + resolved gaps are recorded.
 
 ## Phase 2: Implement
 
@@ -38,6 +44,8 @@ Invoke `forge-start-task`. Complete all steps before writing any code:
 If the DoD involves a UI view, pane, component, or interaction pattern, invoke `frontend-design:frontend-design` before writing any code. Use it to establish purpose, aesthetic direction, and key interaction states. Skip this if the task is purely backend.
 
 Invoke `superpowers:test-driven-development` for every change. No exceptions.
+
+**Hand TDD the Phase 1 context explicitly:** the finalized DoD, the implementation plan scaffold, and the resolved answers to any clarifying questions. TDD should treat the plan as the starting shape (files, test strategy, key decisions) — not re-derive it — and drive each RED test from a DoD checkbox.
 
 - RED: write a failing test for each DoD behavior (delegate test runs to Bash, keep results terse)
 - GREEN: minimal code to pass
