@@ -28,6 +28,32 @@ import './ChatPane.css';
 // ToolCallCard — inline tool call card with optional approval prompt (F-026/F-027)
 // ---------------------------------------------------------------------------
 
+/**
+ * One-line arg summary for the collapsed tool-call card (F-041). Path-taking
+ * tools (fs.read / fs.write / fs.edit / shell.exec) render their `path` whole;
+ * anything else gets `JSON.stringify(args)` capped near 60 chars with an
+ * ellipsis. Unparseable args_json returns null — the component skips the span
+ * via `<Show>`, so malformed payloads never crash the card.
+ */
+function summarizeArgs(argsJson: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(argsJson);
+  } catch {
+    return null;
+  }
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    const path = (parsed as Record<string, unknown>)['path'];
+    if (typeof path === 'string' && path.length > 0) {
+      return path;
+    }
+  }
+  const stringified = JSON.stringify(parsed);
+  if (stringified === undefined) return null;
+  const MAX = 60;
+  return stringified.length > MAX ? stringified.slice(0, MAX - 1) + '…' : stringified;
+}
+
 const ToolCallCard: Component<{ turn: Extract<ChatTurn, { type: 'tool_placeholder' }> }> = (
   props,
 ) => {
@@ -130,6 +156,19 @@ const ToolCallCard: Component<{ turn: Extract<ChatTurn, { type: 'tool_placeholde
           ⚙
         </span>
         <span class="tool-placeholder__name">{props.turn.tool_name}</span>
+
+        {/* One-line arg summary — path for path-taking tools, otherwise a
+            short stringified JSON. Skipped when args_json is unparseable. */}
+        <Show when={summarizeArgs(props.turn.args_json)}>
+          {(summary) => (
+            <span
+              class="tool-placeholder__args"
+              data-testid={`tool-call-args-${props.turn.tool_call_id}`}
+            >
+              {summary()}
+            </span>
+          )}
+        </Show>
 
         {/* Whitelisted pill when auto-approved */}
         <Show when={whitelistKey() !== null && whitelistLabel() !== null}>
