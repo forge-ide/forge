@@ -13,25 +13,156 @@ import {
   setAwaitingResponse,
   type ChatTurn,
 } from '../../stores/messages';
+import {
+  getApprovalWhitelist,
+  addWhitelistEntry,
+  revokeWhitelistEntry,
+  matchWhitelistKey,
+} from '../../stores/approvals';
+import { ApprovalPrompt } from '../../components/ApprovalPrompt/ApprovalPrompt';
+import { WhitelistedPill } from '../../components/ApprovalPrompt/WhitelistedPill';
+import type { ApprovalScope } from '@forge/ipc';
 import './ChatPane.css';
 
 // ---------------------------------------------------------------------------
-// ToolCallCard — inline tool call card (F-026)
+// ToolCallCard — inline tool call card with optional approval prompt (F-026/F-027)
 // ---------------------------------------------------------------------------
 
-const ToolCallCard: Component<{ turn: Extract<ChatTurn, { type: 'tool_placeholder' }> }> = (props) => (
-  <div
-    class="tool-placeholder"
-    data-testid={`tool-call-card-${props.turn.tool_call_id}`}
-    classList={{ 'tool-placeholder--completed': props.turn.status === 'completed' }}
-  >
-    <span class="tool-placeholder__icon" aria-hidden="true">⚙</span>
-    <span class="tool-placeholder__name">{props.turn.tool_name}</span>
-    <span class="tool-placeholder__status">
-      {props.turn.status}
-    </span>
-  </div>
-);
+const ToolCallCard: Component<{ turn: Extract<ChatTurn, { type: 'tool_placeholder' }> }> = (
+  props,
+) => {
+  let cardRef: HTMLDivElement | undefined;
+  const sessionId = () => activeSessionId();
+
+  // Check whitelist on each render
+  const whitelistKey = createMemo(() => {
+    const id = sessionId();
+    if (!id) return null;
+    if (props.turn.status !== 'awaiting-approval') return null;
+    let path = '';
+    try {
+      const args = JSON.parse(props.turn.args_json) as Record<string, unknown>;
+      if (typeof args['path'] === 'string') path = args['path'];
+    } catch {
+      // ignore
+    }
+    const wl = getApprovalWhitelist(id);
+    const keys = new Set(Object.keys(wl.entries));
+    return matchWhitelistKey(keys, props.turn.tool_name, path);
+  });
+
+  const whitelistLabel = createMemo(() => {
+    const id = sessionId();
+    const key = whitelistKey();
+    if (!id || !key) return null;
+    return getApprovalWhitelist(id).entries[key] ?? null;
+  });
+
+  // Auto-approve when whitelist matches
+  createEffect(() => {
+    const id = sessionId();
+    const key = whitelistKey();
+    if (!id || !key || props.turn.status !== 'awaiting-approval') return;
+    void invoke('session_approve_tool', {
+      sessionId: id,
+      toolCallId: props.turn.tool_call_id,
+      // Derive scope from key prefix
+      scope: key.startsWith('tool:')
+        ? ('ThisTool' as ApprovalScope)
+        : key.startsWith('pattern:')
+          ? ('ThisPattern' as ApprovalScope)
+          : ('ThisFile' as ApprovalScope),
+    });
+  });
+
+  const handleApprove = (scope: ApprovalScope, pattern?: string) => {
+    const id = sessionId();
+    if (!id) return;
+
+    // Record whitelist for scopes > Once
+    if (scope !== 'Once') {
+      let path = '';
+      try {
+        const args = JSON.parse(props.turn.args_json) as Record<string, unknown>;
+        if (typeof args['path'] === 'string') path = args['path'];
+      } catch {
+        // ignore
+      }
+      addWhitelistEntry(id, scope, props.turn.tool_name, path, pattern);
+    }
+
+    void invoke('session_approve_tool', {
+      sessionId: id,
+      toolCallId: props.turn.tool_call_id,
+      scope,
+    });
+  };
+
+  const handleReject = () => {
+    const id = sessionId();
+    if (!id) return;
+    void invoke('session_reject_tool', {
+      sessionId: id,
+      toolCallId: props.turn.tool_call_id,
+    });
+  };
+
+  const handleRevoke = () => {
+    const id = sessionId();
+    const key = whitelistKey();
+    if (!id || !key) return;
+    revokeWhitelistEntry(id, key);
+  };
+
+  return (
+    <div
+      class="tool-placeholder"
+      data-testid={`tool-call-card-${props.turn.tool_call_id}`}
+      classList={{
+        'tool-placeholder--completed': props.turn.status === 'completed',
+        'tool-placeholder--awaiting': props.turn.status === 'awaiting-approval',
+      }}
+      tabIndex={props.turn.status === 'awaiting-approval' ? 0 : undefined}
+      ref={cardRef}
+    >
+      <div class="tool-placeholder__header">
+        <span class="tool-placeholder__icon" aria-hidden="true">
+          ⚙
+        </span>
+        <span class="tool-placeholder__name">{props.turn.tool_name}</span>
+
+        {/* Whitelisted pill when auto-approved */}
+        <Show when={whitelistKey() !== null && whitelistLabel() !== null}>
+          <WhitelistedPill label={whitelistLabel()!} onRevoke={handleRevoke} />
+        </Show>
+
+        {/* Status label (hidden when awaiting — prompt fills that role) */}
+        <Show when={props.turn.status !== 'awaiting-approval' || whitelistKey() !== null}>
+          <span class="tool-placeholder__status">{props.turn.status}</span>
+        </Show>
+      </div>
+
+      {/* Inline approval prompt */}
+      <Show
+        when={
+          props.turn.status === 'awaiting-approval' &&
+          props.turn.preview !== undefined &&
+          whitelistKey() === null
+        }
+      >
+        <ApprovalPrompt
+          toolCallId={props.turn.tool_call_id}
+          toolName={props.turn.tool_name}
+          argsJson={props.turn.args_json}
+          preview={props.turn.preview!}
+          containerRef={cardRef!}
+          onApprove={handleApprove}
+          onReject={handleReject}
+        />
+      </Show>
+    </div>
+  );
+};
 
 // ---------------------------------------------------------------------------
 // Message turn renderers
@@ -44,7 +175,9 @@ const UserBubble: Component<{ turn: Extract<ChatTurn, { type: 'user' }> }> = (pr
   </article>
 );
 
-const AssistantBubble: Component<{ turn: Extract<ChatTurn, { type: 'assistant' }> }> = (props) => (
+const AssistantBubble: Component<{ turn: Extract<ChatTurn, { type: 'assistant' }> }> = (
+  props,
+) => (
   <article class="turn turn--assistant">
     <header class="turn__author">● assistant</header>
     <p class="turn__body">
@@ -169,7 +302,11 @@ export const ChatPane: Component = () => {
       <span class="chat-pane__type-label">CHAT</span>
       {/* Streaming indicator shown while awaiting a response */}
       <Show when={state().awaitingResponse}>
-        <div class="chat-pane__streaming-indicator" data-testid="streaming-indicator" aria-live="polite">
+        <div
+          class="chat-pane__streaming-indicator"
+          data-testid="streaming-indicator"
+          aria-live="polite"
+        >
           <span class="streaming-cursor" aria-hidden="true" />
           <span>Awaiting response…</span>
         </div>

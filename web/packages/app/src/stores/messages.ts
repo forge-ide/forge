@@ -5,11 +5,18 @@ import type { SessionId } from '@forge/ipc';
 // Event shapes arriving from the IPC bridge (session:event payload)
 // ---------------------------------------------------------------------------
 
+/** Preview data from the shell for a pending tool call approval. */
+export interface ApprovalPreview {
+  /** Human-readable description of what the tool call will do. */
+  description: string;
+}
+
 export type SessionEvent =
   | { kind: 'UserMessage'; text: string; message_id: string }
   | { kind: 'AssistantMessage'; text: string; message_id: string }
   | { kind: 'AssistantDelta'; delta: string; message_id: string }
   | { kind: 'ToolCallStarted'; tool_call_id: string; tool_name: string; args_json: string; batch_id?: string }
+  | { kind: 'ToolCallApprovalRequested'; tool_call_id: string; tool_name: string; args_json: string; preview: ApprovalPreview }
   | { kind: 'ToolCallCompleted'; tool_call_id: string; result_summary: string }
   | { kind: 'ToolCallFailed'; tool_call_id: string; error: string }
   | { kind: 'Error'; message: string }
@@ -36,6 +43,8 @@ export type ChatTurn =
       duration_ms?: number;
       result_summary?: string;
       error?: string;
+      /** Populated when status is 'awaiting-approval'. */
+      preview?: ApprovalPreview;
     }
   | { type: 'error'; message: string };
 
@@ -156,6 +165,36 @@ export function pushEvent(sessionId: SessionId, event: SessionEvent): void {
             status: 'in-progress',
             started_at: Date.now(),
           });
+        }),
+      );
+      break;
+    }
+
+    case 'ToolCallApprovalRequested': {
+      setMessagesStore(
+        produce((s) => {
+          const state = s[sessionId]!;
+          // If there's already a tool_placeholder for this call (from ToolCallStarted),
+          // transition it to awaiting-approval and attach the preview.
+          const idx = state.turns.findIndex(
+            (t) => t.type === 'tool_placeholder' && t.tool_call_id === event.tool_call_id,
+          );
+          if (idx >= 0) {
+            const turn = state.turns[idx] as Extract<ChatTurn, { type: 'tool_placeholder' }>;
+            turn.status = 'awaiting-approval';
+            turn.preview = event.preview;
+          } else {
+            // No prior ToolCallStarted — push a fresh placeholder.
+            state.turns.push({
+              type: 'tool_placeholder',
+              tool_call_id: event.tool_call_id,
+              tool_name: event.tool_name,
+              args_json: event.args_json,
+              status: 'awaiting-approval',
+              started_at: Date.now(),
+              preview: event.preview,
+            });
+          }
         }),
       );
       break;

@@ -15,13 +15,16 @@ import {
   resetMessagesStore,
 } from '../../stores/messages';
 import { setActiveSessionId } from '../../stores/session';
+import { resetApprovalsStore } from '../../stores/approvals';
 import { ChatPane } from './ChatPane';
 
 const SID = 'session-chat-test' as SessionId;
 
 beforeEach(() => {
   invokeMock.mockReset();
+  invokeMock.mockResolvedValue(undefined);
   resetMessagesStore();
+  resetApprovalsStore();
   setActiveSessionId(SID);
 });
 
@@ -185,5 +188,211 @@ describe('Auto-scroll behavior', () => {
 
     // After a delta, the list should be pinned to bottom (scrollTop === scrollHeight)
     expect(list.scrollTop).toBe(500);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Inline approval prompt (F-027)
+// ---------------------------------------------------------------------------
+
+describe('Inline approval prompt', () => {
+  const PREVIEW = { description: 'Edit file /src/foo.ts: 3 hunks, +47 -21' };
+  const FS_EDIT_ARGS = JSON.stringify({ path: '/src/foo.ts', patch: '...' });
+
+  it('renders the approval prompt when ToolCallApprovalRequested arrives', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-ap-1',
+      tool_name: 'fs.edit',
+      args_json: FS_EDIT_ARGS,
+      preview: PREVIEW,
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('approval-prompt')).toBeInTheDocument();
+  });
+
+  it('displays preview description inside the prompt', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-ap-2',
+      tool_name: 'fs.edit',
+      args_json: FS_EDIT_ARGS,
+      preview: PREVIEW,
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('approval-preview')).toHaveTextContent('Edit file /src/foo.ts');
+  });
+
+  it('invokes session_approve_tool with Once when approve is clicked', async () => {
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-ap-3',
+      tool_name: 'fs.edit',
+      args_json: FS_EDIT_ARGS,
+      preview: PREVIEW,
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('approve-once-btn'));
+    expect(invokeMock).toHaveBeenCalledWith('session_approve_tool', {
+      sessionId: SID,
+      toolCallId: 'tc-ap-3',
+      scope: 'Once',
+    });
+  });
+
+  it('invokes session_reject_tool when reject is clicked', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-ap-4',
+      tool_name: 'fs.edit',
+      args_json: FS_EDIT_ARGS,
+      preview: PREVIEW,
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('reject-btn'));
+    expect(invokeMock).toHaveBeenCalledWith('session_reject_tool', {
+      sessionId: SID,
+      toolCallId: 'tc-ap-4',
+    });
+  });
+
+  it('invokes session_approve_tool with ThisFile from scope menu', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-ap-5',
+      tool_name: 'fs.edit',
+      args_json: FS_EDIT_ARGS,
+      preview: PREVIEW,
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('approve-dropdown-btn'));
+    fireEvent.click(getByTestId('scope-file-btn'));
+    expect(invokeMock).toHaveBeenCalledWith('session_approve_tool', {
+      sessionId: SID,
+      toolCallId: 'tc-ap-5',
+      scope: 'ThisFile',
+    });
+  });
+
+  it('invokes session_approve_tool with ThisTool from scope menu', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-ap-6',
+      tool_name: 'fs.edit',
+      args_json: FS_EDIT_ARGS,
+      preview: PREVIEW,
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('approve-dropdown-btn'));
+    fireEvent.click(getByTestId('scope-tool-btn'));
+    expect(invokeMock).toHaveBeenCalledWith('session_approve_tool', {
+      sessionId: SID,
+      toolCallId: 'tc-ap-6',
+      scope: 'ThisTool',
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Whitelist auto-approve + pill rendering (F-027)
+// ---------------------------------------------------------------------------
+
+describe('Whitelist auto-approve', () => {
+  const PREVIEW = { description: 'Edit file /src/foo.ts' };
+  const FS_EDIT_ARGS = JSON.stringify({ path: '/src/foo.ts', patch: '...' });
+
+  it('shows whitelisted pill when ThisFile scope was granted for same path', async () => {
+    // First render — approve ThisFile scope
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-wl-1',
+      tool_name: 'fs.edit',
+      args_json: FS_EDIT_ARGS,
+      preview: PREVIEW,
+    });
+    const { getByTestId, unmount } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('approve-dropdown-btn'));
+    fireEvent.click(getByTestId('scope-file-btn'));
+    unmount();
+
+    // Reset message store but keep approvals store so whitelist persists
+    resetMessagesStore();
+
+    // Second call — same tool + path, should show whitelisted pill
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-wl-2',
+      tool_name: 'fs.edit',
+      args_json: FS_EDIT_ARGS,
+      preview: PREVIEW,
+    });
+    const { getAllByTestId } = render(() => <ChatPane />);
+    const pills = getAllByTestId('whitelisted-pill');
+    expect(pills).toHaveLength(1);
+    expect(pills[0]).toHaveTextContent('whitelisted · this file');
+  });
+
+  it('auto-invokes session_approve_tool for whitelisted match', async () => {
+    // First render — approve ThisTool scope
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-wl-auto-1',
+      tool_name: 'fs.edit',
+      args_json: FS_EDIT_ARGS,
+      preview: PREVIEW,
+    });
+    const { getByTestId, unmount } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('approve-dropdown-btn'));
+    fireEvent.click(getByTestId('scope-tool-btn'));
+    unmount();
+
+    // Reset messages but keep approvals whitelist
+    resetMessagesStore();
+    invokeMock.mockClear();
+
+    // Second call — same tool, auto-approve effect fires on mount
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-wl-auto-2',
+      tool_name: 'fs.edit',
+      args_json: FS_EDIT_ARGS,
+      preview: PREVIEW,
+    });
+    render(() => <ChatPane />);
+    expect(invokeMock).toHaveBeenCalledWith('session_approve_tool', expect.objectContaining({
+      toolCallId: 'tc-wl-auto-2',
+      scope: 'ThisTool',
+    }));
+  });
+
+  it('hides approval prompt and shows pill when auto-approved', async () => {
+    // First render — approve ThisFile scope
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-wl-hide-1',
+      tool_name: 'fs.edit',
+      args_json: FS_EDIT_ARGS,
+      preview: PREVIEW,
+    });
+    const { getByTestId, unmount } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('approve-dropdown-btn'));
+    fireEvent.click(getByTestId('scope-file-btn'));
+    unmount();
+
+    // Reset messages but keep approvals whitelist
+    resetMessagesStore();
+
+    // Second call — pill shown, no approval-prompt
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-wl-hide-2',
+      tool_name: 'fs.edit',
+      args_json: FS_EDIT_ARGS,
+      preview: PREVIEW,
+    });
+    const { queryByTestId, getAllByTestId } = render(() => <ChatPane />);
+    expect(queryByTestId('approval-prompt')).not.toBeInTheDocument();
+    const pills = getAllByTestId('whitelisted-pill');
+    expect(pills).toHaveLength(1);
   });
 });
