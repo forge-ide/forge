@@ -1078,12 +1078,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "forge-core",
+ "forge-ipc",
  "forge-providers",
+ "forge-session",
  "png",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
+ "tempfile",
  "tokio",
  "wiremock",
 ]

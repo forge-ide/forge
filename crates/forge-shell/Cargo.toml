@@ -19,14 +19,18 @@ tauri-build = { version = "2", features = [], optional = true }
 [dependencies]
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
+forge-ipc = { path = "../forge-ipc" }
 forge-providers = { path = "../forge-providers" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", optional = true }
-tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
+tokio = { version = "1", features = ["net", "io-util", "sync", "time", "rt", "rt-multi-thread", "macros"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+forge-core = { path = "../forge-core" }
+forge-session = { path = "../forge-session" }
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "time"] }
 wiremock = "0.6"
 
 [features]
@@ -36,3 +40,7 @@ wiremock = "0.6"
 # host without WebKitGTK installed.
 default = ["webview"]
 webview = ["dep:tauri", "dep:tauri-build", "dep:png"]
+# Opt-in feature that activates Tauri's `test` helpers so integration tests
+# can use `tauri::test::mock_builder`. Implies `webview`. Not on by default
+# so production builds don't pull test scaffolding.
+webview-test = ["webview", "tauri?/test"]
