@@ -162,6 +162,30 @@ describe('Composer disabled state', () => {
     expect(textarea).not.toBeDisabled();
   });
 
+  // F-040: the AssistantDelta handler clears `awaitingResponse` to false on the
+  // first token, so a predicate based only on awaitingResponse re-enables the
+  // composer mid-stream. The composer must stay disabled until the stream
+  // finalises (streamingMessageId !== null), then re-enable on the final.
+  it('stays disabled across awaiting → delta → final, then re-enables', () => {
+    setAwaitingResponse(SID, true);
+    const { getByTestId } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+    expect(textarea).toBeDisabled();
+
+    // First delta arrives — `awaitingResponse` flips to false in the store,
+    // but `streamingMessageId` is set; composer must STILL be disabled.
+    pushEvent(SID, { kind: 'AssistantDelta', delta: 'Hi', message_id: 'turn-1' });
+    expect(textarea).toBeDisabled();
+
+    // Mid-stream delta — still disabled.
+    pushEvent(SID, { kind: 'AssistantDelta', delta: ' there.', message_id: 'turn-1' });
+    expect(textarea).toBeDisabled();
+
+    // Stream finalises — composer re-enables.
+    pushEvent(SID, { kind: 'AssistantMessage', text: 'Hi there.', message_id: 'turn-1' });
+    expect(textarea).not.toBeDisabled();
+  });
+
   it('shows a streaming indicator while awaiting response', () => {
     setAwaitingResponse(SID, true);
     const { getByTestId } = render(() => <ChatPane />);

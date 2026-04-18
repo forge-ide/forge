@@ -338,8 +338,15 @@ export const ChatPane: Component = () => {
         </For>
       </div>
 
-      {/* Composer */}
-      <Composer disabled={state().awaitingResponse} onSend={handleSend} />
+      {/* Composer — disabled while we are awaiting the first token OR a
+          stream is in flight. The store clears `awaitingResponse` on the
+          first AssistantDelta but leaves `streamingMessageId` set until
+          AssistantMessage(stream_finalised: true), so both must read
+          falsy before the composer re-enables. */}
+      <Composer
+        disabled={state().awaitingResponse || state().streamingMessageId !== null}
+        onSend={handleSend}
+      />
     </section>
   );
 };

@@ -66,11 +66,34 @@ test.describe('UAT-05 — Chat pane streaming & composer', () => {
     await expect(page.getByTestId('message-list')).toContainText('Hi there.');
   });
 
-  test('composer stays disabled through the stream, re-enables on final', async () => {
-    test.skip(
-      true,
-      'Tracked separately as F-040 (#76): composer re-enables mid-stream because AssistantDelta clears awaitingResponse.',
+  test('composer stays disabled through the stream, re-enables on final (F-040)', async ({
+    tauri,
+    page,
+  }) => {
+    await mountSession(page, tauri);
+
+    // Send a user message via the composer so the store sets awaitingResponse=true.
+    const composer = page.getByTestId('composer-textarea');
+    await composer.click();
+    await composer.type('hello');
+    await composer.press('Enter');
+    await expect(composer).toBeDisabled();
+
+    // First delta arrives — store clears awaitingResponse but sets
+    // streamingMessageId. Composer must STILL be disabled.
+    await tauri.emit('session:event', assistantDelta(SESSION_ID, 'turn-1', 'Hi'));
+    await expect(composer).toBeDisabled();
+
+    // Mid-stream — still disabled.
+    await tauri.emit('session:event', assistantDelta(SESSION_ID, 'turn-1', ' there.'));
+    await expect(composer).toBeDisabled();
+
+    // Stream finalises — composer re-enables.
+    await tauri.emit(
+      'session:event',
+      assistantMessageFinal(SESSION_ID, 'turn-1', 'Hi there.'),
     );
+    await expect(composer).toBeEnabled();
   });
 
   test('auto-scroll pin releases on user scroll-up, re-engages on scroll-bottom', async ({
