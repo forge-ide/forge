@@ -8,7 +8,7 @@
 
 The sequencing that builds toward v1.0. Milestones are outcome-based.
 
-### Phase 0 — Foundations (weeks 1–2)
+### Phase 0 — Foundations (weeks 1–2) ✅ Complete
 **Outcome.** A new user can run `forge session new` and get a working session process with IPC.
 - Repo scaffold, workspace, CI, rustfmt/clippy baselines
 - `forge-core`, `forge-ipc` skeletons with `ts-rs` working
