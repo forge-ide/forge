@@ -6,7 +6,6 @@ macro_rules! id_type {
     ($(#[$attr:meta])* $name:ident) => {
         $(#[$attr])*
         #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
-        #[serde(transparent)]
         #[ts(export, export_to = "../../../web/packages/ipc/src/generated/", type = "string")]
         pub struct $name(String);
 
