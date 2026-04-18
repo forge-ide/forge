@@ -37,12 +37,15 @@ pub async fn serve(path: &Path, auto_approve: bool, ephemeral: bool) -> Result<(
     let log_path = event_log_path(&SessionId::new().to_string(), None);
     let session = Arc::new(Session::create(log_path).await?);
     let provider = Arc::new(MockProvider::with_default_path());
-    serve_with_session(path, session, provider, auto_approve, ephemeral, None).await
+    serve_with_session(path, session, provider, auto_approve, ephemeral, None, None).await
 }
 
 /// Start a session server with an explicit provider.
 ///
 /// `workspace` is reported back to clients via `HelloAck.workspace` (empty when `None`).
+/// `session_id` is reported back to clients via `HelloAck.session_id` and identifies
+/// this daemon's persistent session; when `None`, a fresh id is generated for the lifetime
+/// of this server (so all connections to the same server still see the same value).
 pub async fn serve_with_session<P: Provider + 'static>(
     path: &Path,
     session: Arc<Session>,
@@ -50,6 +53,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
     auto_approve: bool,
     ephemeral: bool,
     workspace: Option<PathBuf>,
+    session_id: Option<String>,
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -63,11 +67,21 @@ pub async fn serve_with_session<P: Provider + 'static>(
             .map(|w| w.display().to_string())
             .unwrap_or_default(),
     );
+    let session_id = Arc::new(session_id.unwrap_or_else(|| SessionId::new().to_string()));
 
     if ephemeral {
         // Accept exactly one connection, serve it to completion, then exit.
         let (stream, _) = listener.accept().await?;
-        return handle_connection(stream, session, provider, auto_approve, true, workspace).await;
+        return handle_connection(
+            stream,
+            session,
+            provider,
+            auto_approve,
+            true,
+            workspace,
+            session_id,
+        )
+        .await;
     }
 
     loop {
@@ -75,9 +89,18 @@ pub async fn serve_with_session<P: Provider + 'static>(
         let session = Arc::clone(&session);
         let provider = Arc::clone(&provider);
         let workspace = Arc::clone(&workspace);
+        let session_id = Arc::clone(&session_id);
         tokio::spawn(async move {
-            if let Err(e) =
-                handle_connection(stream, session, provider, auto_approve, false, workspace).await
+            if let Err(e) = handle_connection(
+                stream,
+                session,
+                provider,
+                auto_approve,
+                false,
+                workspace,
+                session_id,
+            )
+            .await
             {
                 eprintln!("connection error: {e}");
             }
@@ -92,6 +115,7 @@ async fn handle_connection<P: Provider + 'static>(
     auto_approve: bool,
     ephemeral: bool,
     workspace: Arc<String>,
+    session_id: Arc<String>,
 ) -> Result<()> {
     // ── Handshake ──────────────────────────────────────────────────────────────
     let msg = forge_ipc::read_frame(&mut stream).await?;
@@ -103,7 +127,7 @@ async fn handle_connection<P: Provider + 'static>(
     }
 
     let ack = IpcMessage::HelloAck(HelloAck {
-        session_id: SessionId::new().to_string(),
+        session_id: (*session_id).clone(),
         workspace: (*workspace).clone(),
         started_at: chrono::Utc::now().to_rfc3339(),
         event_seq: session.current_seq().await,

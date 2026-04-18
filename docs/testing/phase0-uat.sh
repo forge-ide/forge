@@ -526,9 +526,9 @@ fi
 if run_test UAT-09; then
 header "UAT-09: Event log durability"
 # When forged is started with --workspace, events.jsonl lives under
-# <workspace>/.forge/sessions/<persistent_session_id>/events.jsonl, where
-# persistent_session_id is the daemon's session id (the .sock basename),
-# NOT HelloAck.session_id (which is a fresh per-connection id).
+# <workspace>/.forge/sessions/<session_id>/events.jsonl. The session id is
+# stable for the daemon's lifetime and matches both the .sock basename and
+# HelloAck.session_id (per F-035).
 EVENTS_JSONL="$WORKSPACE/.forge/sessions/${ACTIVE_SESSION_ID}/events.jsonl"
 # Wait for flush (background task flushes within 50ms)
 sleep 0.2

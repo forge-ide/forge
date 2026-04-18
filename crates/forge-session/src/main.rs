@@ -20,10 +20,14 @@ async fn main() -> Result<()> {
     let socket_path = std::env::var("FORGE_SOCKET_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| resolve_socket_path(&session_id));
+    // Normalize FORGE_WORKSPACE to an absolute path so HelloAck.workspace is
+    // portable for clients (which may have a different CWD than the daemon).
+    // std::path::absolute does not require the path to exist, unlike canonicalize.
     let workspace = std::env::var("FORGE_WORKSPACE")
         .ok()
         .filter(|s| !s.is_empty())
-        .map(PathBuf::from);
+        .map(PathBuf::from)
+        .map(|p| std::path::absolute(&p).unwrap_or(p));
     eprintln!("forged: listening on {}", socket_path.display());
 
     let log_path = event_log_path(&session_id, workspace.as_deref());
@@ -48,6 +52,7 @@ async fn main() -> Result<()> {
         auto_approve,
         ephemeral,
         workspace,
+        Some(session_id),
     )
     .await
 }

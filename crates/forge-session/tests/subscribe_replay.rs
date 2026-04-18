@@ -61,9 +61,17 @@ async fn subscribe_mid_stream_receives_historical_then_live_events() {
     let server_sock = sock_path.clone();
     let provider = Arc::new(MockProvider::with_default_path());
     tokio::spawn(async move {
-        serve_with_session(&server_sock, server_session, provider, false, false, None)
-            .await
-            .unwrap();
+        serve_with_session(
+            &server_sock,
+            server_session,
+            provider,
+            false,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
     });
 
     let mut stream = connect_with_retry(&sock_path).await;

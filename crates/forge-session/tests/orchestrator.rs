@@ -97,6 +97,7 @@ async fn full_turn_with_tool_call_emits_correct_event_sequence() {
             false,
             false,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -256,6 +257,7 @@ async fn approval_gate_fires_and_blocks_until_client_approves() {
             false,
             false,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -343,6 +345,7 @@ async fn auto_approve_skips_approval_gate_and_emits_auto_approved() {
             server_provider,
             true,
             false,
+            None,
             None,
         )
         .await
@@ -471,6 +474,7 @@ async fn tool_result_fed_back_to_provider_in_continuation() {
             server_provider,
             false,
             false,
+            None,
             None,
         )
         .await
