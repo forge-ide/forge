@@ -261,6 +261,36 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shell_exec_dispatch_works_inside_outer_tokio_runtime() {
+        // Regression: Tool::invoke is called from async context in run_turn.
+        // The implementation must not panic attempting to nest runtimes.
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut d = ToolDispatcher::new();
+        d.register(Box::new(ShellExecTool)).unwrap();
+
+        let ctx = ToolCtx {
+            allowed_paths: vec![],
+            workspace_root: Some(dir.path().to_path_buf()),
+            child_registry: Some(crate::sandbox::ChildRegistry::new()),
+        };
+
+        // Run dispatch on a blocking task so we're inside the runtime but
+        // block_in_place is permitted.
+        let result = d
+            .dispatch(
+                "shell.exec",
+                &json!({"command": "/bin/sh", "args": ["-c", "echo from-async"], "timeout_ms": 5000}),
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result["exit_code"].as_i64(), Some(0), "result: {result}");
+        assert_eq!(result["stdout"].as_str().unwrap().trim(), "from-async");
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn shell_exec_dispatch_clears_daemon_env_by_default() {
         let dir = tempfile::tempdir().unwrap();

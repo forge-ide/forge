@@ -80,8 +80,10 @@ pub async fn serve_with_session<P: Provider + 'static>(
 
     if ephemeral {
         // Accept exactly one connection, serve it to completion, then exit.
+        // `handle_connection` performs the session-scoped process-group
+        // cleanup in its ephemeral branch.
         let (stream, _) = listener.accept().await?;
-        let result = handle_connection(
+        return handle_connection(
             stream,
             session,
             provider,
@@ -91,12 +93,9 @@ pub async fn serve_with_session<P: Provider + 'static>(
             session_id,
             socket_path,
             workspace_path,
-            child_registry.clone(),
+            child_registry,
         )
         .await;
-        // Kill any straggler process groups tracked by the session.
-        child_registry.kill_all();
-        return result;
     }
 
     loop {
@@ -286,13 +285,14 @@ async fn handle_connection<P: Provider + 'static>(
         }
     }
 
-    // On connection end, kill any still-live sandboxed process groups tracked
-    // by the session. In ephemeral mode this is the last thing that runs
-    // before the daemon exits; in multi-conn mode shared state is per-conn,
-    // so kill is scoped to what was spawned for this connection.
-    child_registry.kill_all();
-
+    // In ephemeral mode the daemon exits after this connection, so we kill
+    // any still-live sandboxed process groups here. For long-running
+    // sessions, per-connection cleanup is handled by `SandboxedChild::drop`
+    // (which both killpg's and deregisters from the shared registry);
+    // the final `kill_all` runs when the daemon itself shuts down.
     if ephemeral {
+        child_registry.kill_all();
+
         if let Some(session_dir) = session.log_path.parent() {
             if let Err(e) =
                 archive_or_purge(session_dir, SessionPersistence::Ephemeral, &socket_path).await

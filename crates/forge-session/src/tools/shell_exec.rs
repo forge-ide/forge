@@ -117,17 +117,10 @@ fn run_linux(args: &serde_json::Value, ctx: &ToolCtx) -> serde_json::Value {
         sb.with_registry(registry.clone());
     }
 
-    // shell.exec is invoked from the sync Tool::invoke path; run a scoped
-    // tokio runtime for the single spawn/wait.
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => return serde_json::json!({ "error": format!("tokio runtime: {e}") }),
-    };
-
-    rt.block_on(async move {
+    // `Tool::invoke` is synchronous but is called from inside an async
+    // context in `run_turn`. If we are on a multi-threaded runtime we can
+    // block_in_place; otherwise fall back to a fresh current-thread runtime.
+    let fut = async move {
         let sandboxed = match sb.spawn() {
             Ok(c) => c,
             Err(e) => return serde_json::json!({ "error": format!("spawn: {e}") }),
@@ -179,5 +172,19 @@ fn run_linux(args: &serde_json::Value, ctx: &ToolCtx) -> serde_json::Value {
             Ok((Err(e), _, _)) => serde_json::json!({ "error": format!("wait: {e}") }),
             Err(_) => serde_json::json!({ "error": format!("timeout after {timeout_ms}ms") }),
         }
-    })
+    };
+
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
+        Err(_) => {
+            // No outer runtime (e.g. sync unit tests) — build a throwaway one.
+            match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt.block_on(fut),
+                Err(e) => serde_json::json!({ "error": format!("tokio runtime: {e}") }),
+            }
+        }
+    }
 }
