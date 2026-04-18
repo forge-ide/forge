@@ -3,12 +3,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
-use forge_core::{read_since, SessionId};
+use forge_core::{read_since, SessionId, SessionPersistence};
 use forge_ipc::{HelloAck, IpcEvent, IpcMessage, PROTO_VERSION, SCHEMA_VERSION};
 use forge_providers::{MockProvider, Provider};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, Mutex};
 
+use crate::archive::archive_or_purge;
 use crate::orchestrator::{run_turn, PendingApprovals};
 use crate::session::Session;
 
@@ -69,6 +70,8 @@ pub async fn serve_with_session<P: Provider + 'static>(
     );
     let session_id = Arc::new(session_id.unwrap_or_else(|| SessionId::new().to_string()));
 
+    let socket_path = Arc::new(path.to_path_buf());
+
     if ephemeral {
         // Accept exactly one connection, serve it to completion, then exit.
         let (stream, _) = listener.accept().await?;
@@ -80,6 +83,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
             true,
             workspace,
             session_id,
+            socket_path,
         )
         .await;
     }
@@ -90,6 +94,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
         let provider = Arc::clone(&provider);
         let workspace = Arc::clone(&workspace);
         let session_id = Arc::clone(&session_id);
+        let socket_path = Arc::clone(&socket_path);
         tokio::spawn(async move {
             if let Err(e) = handle_connection(
                 stream,
@@ -99,6 +104,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
                 false,
                 workspace,
                 session_id,
+                socket_path,
             )
             .await
             {
@@ -108,6 +114,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection<P: Provider + 'static>(
     mut stream: UnixStream,
     session: Arc<Session>,
@@ -116,6 +123,7 @@ async fn handle_connection<P: Provider + 'static>(
     ephemeral: bool,
     workspace: Arc<String>,
     session_id: Arc<String>,
+    socket_path: Arc<PathBuf>,
 ) -> Result<()> {
     // ── Handshake ──────────────────────────────────────────────────────────────
     let msg = forge_ipc::read_frame(&mut stream).await?;
@@ -246,6 +254,16 @@ async fn handle_connection<P: Provider + 'static>(
                     Some(_) => {} // ignore other messages
                     None => break,
                 }
+            }
+        }
+    }
+
+    if ephemeral {
+        if let Some(session_dir) = session.log_path.parent() {
+            if let Err(e) =
+                archive_or_purge(session_dir, SessionPersistence::Ephemeral, &socket_path).await
+            {
+                eprintln!("archive_or_purge failed: {e}");
             }
         }
     }

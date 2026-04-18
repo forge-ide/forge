@@ -458,6 +458,7 @@ dependencies = [
  "forge-ipc",
  "forge-providers",
  "futures",
+ "libc",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",

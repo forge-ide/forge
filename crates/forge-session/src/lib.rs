@@ -1,3 +1,4 @@
+pub mod archive;
 pub mod orchestrator;
 pub mod server;
 pub mod session;
