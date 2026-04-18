@@ -1097,6 +1097,7 @@ dependencies = [
  "forge-providers",
  "futures",
  "libc",
+ "reqwest 0.12.28",
  "serde_json",
  "similar",
  "tempfile",

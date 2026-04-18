@@ -1,13 +1,20 @@
 # Phase 1 User Acceptance Test Plan
 
 **Scope:** Phase 1: Single Provider + GUI — Dashboard, Session window, chat pane, tool calls, four-scope approval, Ollama provider, archive-on-end.
-**Outcome gate:** A user can launch Forge, open a session from the Dashboard, exchange messages (with streaming), trigger a tool call, approve it inline, and see the result rendered in the chat pane. See the **Known gap** note below for the provider wired into the session daemon.
+**Outcome gate:** A user can launch Forge, open a session from the Dashboard, exchange messages (with streaming) against either MockProvider or a real local Ollama model, trigger a tool call, approve it inline, and see the result rendered in the chat pane.
 
 ---
 
-## Known gap before reading further
+## Provider selection
 
-The Phase 1 milestone description states "chat with a local Ollama model." The `OllamaProvider` crate (F-021) and the Dashboard provider status card (F-023) are in place, but `crates/forge-session/src/main.rs:38-45` still hardcodes `MockProvider`. End-to-end chat-with-Ollama through a running session is therefore **not wired** as of the current head. This plan treats the shippable outcome gate as the **UI / session / tool-call / approval pipeline driven by `MockProvider`** (UAT-01a), and verifies the Ollama provider's real user surface (the Dashboard status card) separately (UAT-01b). A real-Ollama chat UAT is documented as UAT-01c but marked **Blocked** until the session provider selector lands — that's either a Phase 1 cleanup ticket or a Phase 3 item to triage before declaring Phase 1 complete.
+`forged` selects its provider from (in precedence order) the `--provider <spec>` CLI flag, the `FORGE_PROVIDER` env var, or — when neither is set — defaults to `MockProvider`. Spec grammar:
+
+| Spec | Effect |
+|------|--------|
+| `mock` | MockProvider (uses `FORGE_MOCK_SEQUENCE_FILE` if set, else default path) |
+| `ollama:<model>` | OllamaProvider against `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`) using the named model, e.g. `ollama:qwen2.5:0.5b` |
+
+UAT-01a runs against MockProvider by default; UAT-01c runs the same flow against a real local Ollama. See `phase1-uat-setup.md` for the harness env vars.
 
 ---
 
@@ -91,10 +98,35 @@ echo "hello from forge phase1 UAT" > "$WS/readable.txt"
 
 ---
 
-## UAT-01c: Real-Ollama chat round-trip — BLOCKED
+## UAT-01c: Real-Ollama chat round-trip
 
-**Scope:** Session-level `OllamaProvider` wiring — the milestone's original outcome statement.
-**Status:** **Blocked** pending session daemon provider selection. `crates/forge-session/src/main.rs` hardcodes `MockProvider`; `forge session new provider ollama` is parsed by the CLI but not honored by `forged`. This UAT is held here for reference once the wiring lands.
+**Scope:** Session-level `OllamaProvider` wiring — the milestone's original outcome statement (F-038).
+**Vehicle:** Same scenario as UAT-01a, with `--provider ollama:<model>` (or `FORGE_PROVIDER=ollama:<model>`) instead of MockProvider scripts.
+
+Preparation:
+
+```bash
+# Verify the model is pulled.
+ollama pull qwen2.5:0.5b
+curl -s http://127.0.0.1:11434/api/tags | jq -r '.models[].name'   # should include qwen2.5:0.5b
+
+# Launch a session against real Ollama.
+forge session new agent test-agent --workspace "$WS" --provider ollama:qwen2.5:0.5b
+```
+
+| Step | Action | Expected |
+|------|--------|----------|
+| 1 | Run UAT-01a's script with the agent's `--provider` flag set to `ollama:qwen2.5:0.5b` | Session starts; `forged` constructs `OllamaProvider` not `MockProvider` |
+| 2 | Send a prompt | Tokens stream in from the real Ollama daemon (non-deterministic content; non-empty stream) |
+| 3 | Watch for tool calls | Phase 1 mock agents don't emit tool calls; for real tool flows use a model and prompt that intentionally invoke `fs.read` etc. — out of scope here |
+
+**Failure criteria:** session ends with an Ollama connection error despite the daemon being reachable, or `MockProvider` stub responses appear instead of real model output.
+
+The wiring is also exercised by an automated `#[ignore]`-gated integration test:
+```bash
+cargo test -p forge-session --test provider_selection -- --ignored
+```
+which sends a real prompt against `qwen2.5:0.5b` and asserts a non-empty assistant delta.
 
 Suggested follow-up ticket: "forged: select provider based on session meta (`MockProvider | OllamaProvider`)". Rerun UAT-01a's script against a real Ollama-backed session once that ships.
 
@@ -290,8 +322,8 @@ Suggested follow-up ticket: "forged: select provider based on session meta (`Moc
 **Scope:** IPC bridge + provider + chat pane resilience.
 **Vehicle:** Playwright + real Ollama (variant A) and signal-kill (variant B).
 
-**Variant A — Ollama crash mid-stream (BLOCKED with UAT-01c):**
-Requires session-level Ollama wiring (see gap note above). Held for reference once the wiring lands. Until then, rely on UAT-12 Variant B plus the OllamaProvider unit tests for HTTP error mapping (`cargo test -p forge-providers ollama`).
+**Variant A — Ollama crash mid-stream:**
+Requires session started against real Ollama (`--provider ollama:<model>` per the Provider selection section above).
 
 | Step | Action | Expected |
 |------|--------|----------|
@@ -355,8 +387,8 @@ UAT-01a (MockProvider outcome gate), UAT-01b (Ollama card smoke), UAT-02 (sessio
 **Stability bar — required before Phase 2 starts:**
 UAT-03 (cache + unreachable), UAT-04, UAT-06, UAT-10, UAT-11, UAT-12, UAT-13.
 
-**Decision required before declaring Phase 1 complete:**
-UAT-01c (real-Ollama chat) is blocked by missing session provider wiring. Either open a follow-up Phase 1 cleanup ticket to wire `OllamaProvider` into `forged`, or update the Phase 1 milestone description to match what shipped ("chat with a scripted mock provider; Ollama exposed via the Dashboard card only") and move real-Ollama chat to Phase 3 alongside credential management.
+**Real-Ollama bar:**
+UAT-01c is unblocked as of F-038 — `forged` selects its provider from `--provider <spec>` / `FORGE_PROVIDER`, so `forge session new agent test-agent --provider ollama:qwen2.5:0.5b` flows through `OllamaProvider`. The wiring is also exercised by an `#[ignore]`-gated integration test (`cargo test -p forge-session --test provider_selection -- --ignored`) so CI can opt in when an Ollama instance is available.
 
 ---
 
