@@ -67,11 +67,11 @@
 
 **Bottom bar.**
 - Left: provider pill (clickable, opens selector §8), then `@ for context`, `/ for commands` ghost pills
-- Right: `Stop` (ghost), `Send ⌘↵` (primary, ember)
+- Right: `Stop` (ghost), `Send ↵` (primary, ember)
 
-**Keyboard.**
-- `Enter`: newline
-- `Cmd/Ctrl+Enter`: send
+**Keyboard.** Option B: bare Enter sends; modifier+Enter inserts a newline.
+- `Enter`: send
+- `Shift+Enter` / `Ctrl+Enter` / `Cmd+Enter`: newline
 - `@`: opens context picker
 - `/`: opens command palette filtered to session commands
 - `Esc` while streaming: stop (same as Stop button)

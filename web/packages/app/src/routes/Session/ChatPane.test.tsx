@@ -1,0 +1,189 @@
+import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { render, fireEvent } from '@solidjs/testing-library';
+import type { SessionId } from '@forge/ipc';
+
+// --- Mocks (hoisted so vi.mock works) ---
+const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
+
+vi.mock('../../lib/tauri', () => ({ invoke: invokeMock }));
+vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }));
+
+// --- Store imports (after mocks) ---
+import {
+  pushEvent,
+  setAwaitingResponse,
+  resetMessagesStore,
+} from '../../stores/messages';
+import { setActiveSessionId } from '../../stores/session';
+import { ChatPane } from './ChatPane';
+
+const SID = 'session-chat-test' as SessionId;
+
+beforeEach(() => {
+  invokeMock.mockReset();
+  resetMessagesStore();
+  setActiveSessionId(SID);
+});
+
+describe('ChatPane rendering', () => {
+  it('renders the message list container', () => {
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('message-list')).toBeInTheDocument();
+  });
+
+  it('renders the composer textarea', () => {
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('composer-textarea')).toBeInTheDocument();
+  });
+
+  it('renders a user message turn', () => {
+    pushEvent(SID, { kind: 'UserMessage', text: 'Hello world', message_id: 'u1' });
+    const { getByText } = render(() => <ChatPane />);
+    expect(getByText('Hello world')).toBeInTheDocument();
+  });
+
+  it('renders an assistant message turn', () => {
+    pushEvent(SID, { kind: 'AssistantMessage', text: 'Hi there', message_id: 'a1' });
+    const { getByText } = render(() => <ChatPane />);
+    expect(getByText('Hi there')).toBeInTheDocument();
+  });
+
+  it('renders a streaming assistant turn with blinking cursor', () => {
+    pushEvent(SID, { kind: 'AssistantDelta', delta: 'Typing...', message_id: 'a2' });
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('streaming-cursor')).toBeInTheDocument();
+  });
+
+  it('does not render streaming cursor on completed messages', () => {
+    pushEvent(SID, { kind: 'AssistantMessage', text: 'Done', message_id: 'a3' });
+    const { queryByTestId } = render(() => <ChatPane />);
+    expect(queryByTestId('streaming-cursor')).not.toBeInTheDocument();
+  });
+
+  it('renders a tool call placeholder', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-1',
+      tool_name: 'fs.read',
+      args_json: '{}',
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('tool-placeholder-tc-1')).toBeInTheDocument();
+  });
+
+  it('renders an error turn inline', () => {
+    pushEvent(SID, { kind: 'Error', message: 'ECONNREFUSED 127.0.0.1:11434' });
+    const { getByText } = render(() => <ChatPane />);
+    expect(getByText(/ECONNREFUSED/)).toBeInTheDocument();
+  });
+});
+
+describe('Composer keyboard behavior (Option B)', () => {
+  it('sends message on Enter key', async () => {
+    invokeMock.mockResolvedValue(undefined);
+    const { getByTestId } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+
+    fireEvent.input(textarea, { target: { value: 'send this' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter', shiftKey: false, ctrlKey: false, metaKey: false });
+
+    expect(invokeMock).toHaveBeenCalledWith('session_send_message', {
+      sessionId: SID,
+      text: 'send this',
+    });
+  });
+
+  it('inserts newline on Shift+Enter instead of sending', () => {
+    const { getByTestId } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+
+    fireEvent.input(textarea, { target: { value: 'line1' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter', shiftKey: true });
+
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it('inserts newline on Ctrl+Enter instead of sending', () => {
+    const { getByTestId } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+
+    fireEvent.input(textarea, { target: { value: 'line1' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter', ctrlKey: true });
+
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it('inserts newline on Cmd+Enter instead of sending', () => {
+    const { getByTestId } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+
+    fireEvent.input(textarea, { target: { value: 'line1' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter', metaKey: true });
+
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it('clears the textarea after sending', async () => {
+    invokeMock.mockResolvedValue(undefined);
+    const { getByTestId } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+
+    fireEvent.input(textarea, { target: { value: 'hello' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false, ctrlKey: false, metaKey: false });
+
+    expect(textarea.value).toBe('');
+  });
+
+  it('does not send an empty message', () => {
+    const { getByTestId } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false, ctrlKey: false, metaKey: false });
+
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('Composer disabled state', () => {
+  it('disables the textarea while awaiting response', () => {
+    setAwaitingResponse(SID, true);
+    const { getByTestId } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+    expect(textarea).toBeDisabled();
+  });
+
+  it('enables the textarea when not awaiting', () => {
+    setAwaitingResponse(SID, false);
+    const { getByTestId } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+    expect(textarea).not.toBeDisabled();
+  });
+
+  it('shows a streaming indicator while awaiting response', () => {
+    setAwaitingResponse(SID, true);
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('streaming-indicator')).toBeInTheDocument();
+  });
+});
+
+describe('Auto-scroll behavior', () => {
+  it('message list has data-autoscroll attribute for pinning', () => {
+    const { getByTestId } = render(() => <ChatPane />);
+    const list = getByTestId('message-list');
+    expect(list).toHaveAttribute('data-autoscroll');
+  });
+
+  it('scrolls to bottom when a new streaming delta arrives', () => {
+    const { getByTestId } = render(() => <ChatPane />);
+    const list = getByTestId('message-list');
+
+    // Mock scrollTop/scrollHeight so we can verify scrollTop was set
+    Object.defineProperty(list, 'scrollHeight', { value: 500, configurable: true });
+    Object.defineProperty(list, 'clientHeight', { value: 200, configurable: true });
+
+    pushEvent(SID, { kind: 'AssistantDelta', delta: 'streaming text', message_id: 'stream-1' });
+
+    // After a delta, the list should be pinned to bottom (scrollTop === scrollHeight)
+    expect(list.scrollTop).toBe(500);
+  });
+});

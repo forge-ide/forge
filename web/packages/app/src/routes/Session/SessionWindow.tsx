@@ -12,6 +12,7 @@ import {
   setSessionEvents,
   setSessions,
 } from '../../stores/session';
+import { pushEvent, type SessionEvent } from '../../stores/messages';
 import { PaneHeader } from './PaneHeader';
 import { ChatPane } from './ChatPane';
 import './SessionWindow.css';
@@ -27,6 +28,7 @@ export const SessionWindow: Component = () => {
   const sessionId = () => params.id as SessionId;
 
   let unlisten: (() => void) | null = null;
+  let mounted = true;
 
   onMount(() => {
     const id = sessionId();
@@ -40,17 +42,26 @@ export const SessionWindow: Component = () => {
       } catch (err) {
         console.error('session_hello/subscribe failed', err);
       }
-      unlisten = await onSessionEvent((payload) => {
+      const listener = await onSessionEvent((payload) => {
         if (payload.session_id !== id) return;
         setSessionEvents(payload.session_id, {
           lastSeq: payload.seq,
           lastEvent: payload.event,
         });
+        // Route typed events to the messages store for ChatPane rendering.
+        pushEvent(payload.session_id, payload.event as SessionEvent);
       });
+      if (mounted) {
+        unlisten = listener;
+      } else {
+        // Component unmounted before the async setup completed — detach immediately.
+        listener();
+      }
     })();
   });
 
   onCleanup(() => {
+    mounted = false;
     if (unlisten) {
       unlisten();
       unlisten = null;
