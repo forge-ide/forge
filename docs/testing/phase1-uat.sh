@@ -139,7 +139,9 @@ uat_09() {
     fail "UAT-09 archived log missing schema header (got: $first_line)"
     return
   fi
-  if ! grep -q 'state = "archived"' "$WORKSPACE/.forge/sessions/archived/$sid/meta.toml" 2>/dev/null; then
+  # SessionState serializes PascalCase (no #[serde(rename_all)]); meta.toml
+  # records `state = "Archived"`.
+  if ! grep -q 'state = "Archived"' "$WORKSPACE/.forge/sessions/archived/$sid/meta.toml" 2>/dev/null; then
     fail "UAT-09 meta.toml not rewritten"
     return
   fi
