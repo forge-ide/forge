@@ -1,7 +1,7 @@
 use anyhow::Result;
 use forge_providers::MockProvider;
 use forge_session::{
-    server::{serve, serve_with_session},
+    server::{event_log_path, serve_with_session},
     session::Session,
 };
 use std::path::PathBuf;
@@ -20,23 +20,41 @@ async fn main() -> Result<()> {
     let socket_path = std::env::var("FORGE_SOCKET_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| resolve_socket_path(&session_id));
+    // Normalize FORGE_WORKSPACE to an absolute path so HelloAck.workspace is
+    // portable for clients (which may have a different CWD than the daemon).
+    // std::path::absolute does not require the path to exist, unlike canonicalize.
+    let workspace = std::env::var("FORGE_WORKSPACE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .map(|p| std::path::absolute(&p).unwrap_or(p));
     eprintln!("forged: listening on {}", socket_path.display());
+
+    let log_path = event_log_path(&session_id, workspace.as_deref());
 
     // FORGE_MOCK_SEQUENCE_FILE points to a JSON array of NDJSON scripts.
     // Each element is used in order as the response for successive provider calls.
     // Used by integration tests to inject scripted multi-turn responses.
-    if let Ok(seq_file) = std::env::var("FORGE_MOCK_SEQUENCE_FILE") {
-        let content = tokio::fs::read_to_string(&seq_file).await?;
-        let scripts: Vec<String> = serde_json::from_str(&content)?;
-        let log_path = std::env::temp_dir()
-            .join(format!("forge-session-{session_id}"))
-            .join("events.jsonl");
-        let session = Arc::new(Session::create(log_path).await?);
-        let provider = Arc::new(MockProvider::from_responses(scripts)?);
-        serve_with_session(&socket_path, session, provider, auto_approve, ephemeral).await
-    } else {
-        serve(&socket_path, auto_approve, ephemeral).await
-    }
+    let provider: Arc<MockProvider> =
+        if let Ok(seq_file) = std::env::var("FORGE_MOCK_SEQUENCE_FILE") {
+            let content = tokio::fs::read_to_string(&seq_file).await?;
+            let scripts: Vec<String> = serde_json::from_str(&content)?;
+            Arc::new(MockProvider::from_responses(scripts)?)
+        } else {
+            Arc::new(MockProvider::with_default_path())
+        };
+
+    let session = Arc::new(Session::create(log_path).await?);
+    serve_with_session(
+        &socket_path,
+        session,
+        provider,
+        auto_approve,
+        ephemeral,
+        workspace,
+        Some(session_id),
+    )
+    .await
 }
 
 fn resolve_socket_path(session_id: &str) -> PathBuf {
