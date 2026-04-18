@@ -29,3 +29,7 @@ tokio = { version = "1", features = ["rt", "macros", "time", "net", "process"] }
 [[test]]
 name = "headless_session_basic"
 path = "tests/headless_session/basic.rs"
+
+[[test]]
+name = "session_ended"
+path = "tests/session_ended.rs"

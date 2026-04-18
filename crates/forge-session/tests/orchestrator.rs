@@ -90,7 +90,7 @@ async fn full_turn_with_tool_call_emits_correct_event_sequence() {
     let server_provider = Arc::clone(&provider);
     let server_sock = sock_path.clone();
     tokio::spawn(async move {
-        serve_with_session(&server_sock, server_session, server_provider, false)
+        serve_with_session(&server_sock, server_session, server_provider, false, false)
             .await
             .unwrap();
     });
@@ -242,7 +242,7 @@ async fn approval_gate_fires_and_blocks_until_client_approves() {
     let server_provider = Arc::clone(&provider);
     let server_sock = sock_path.clone();
     tokio::spawn(async move {
-        serve_with_session(&server_sock, server_session, server_provider, false)
+        serve_with_session(&server_sock, server_session, server_provider, false, false)
             .await
             .unwrap();
     });
@@ -323,7 +323,7 @@ async fn auto_approve_skips_approval_gate_and_emits_auto_approved() {
     let server_provider = Arc::clone(&provider);
     let server_sock = sock_path.clone();
     tokio::spawn(async move {
-        serve_with_session(&server_sock, server_session, server_provider, true)
+        serve_with_session(&server_sock, server_session, server_provider, true, false)
             .await
             .unwrap();
     });
@@ -444,7 +444,7 @@ async fn tool_result_fed_back_to_provider_in_continuation() {
     let server_provider = Arc::clone(&provider);
     let server_sock = sock_path.clone();
     tokio::spawn(async move {
-        serve_with_session(&server_sock, server_session, server_provider, false)
+        serve_with_session(&server_sock, server_session, server_provider, false, false)
             .await
             .unwrap();
     });
