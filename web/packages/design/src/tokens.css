@@ -1,0 +1,84 @@
+/* Design tokens — single source of CSS custom properties.
+ * Mirrored from docs/design/token-reference.md and enforced by scripts/check-tokens.mjs.
+ * Do not edit without updating the reference doc in the same change. */
+:root {
+  /* Ember brand scale */
+  --color-ember-900: #2a0800;
+  --color-ember-500: #cc3a00;
+  --color-ember-400: #ff4a12;   /* primary brand */
+  --color-ember-300: #ff7a30;
+  --color-ember-200: #ffaa33;
+  --color-ember-100: #ffd166;
+
+  /* Iron surface scale */
+  --color-bg:         #07080a;
+  --color-surface-1:  #0d0f13;
+  --color-surface-2:  #13161d;
+  --color-surface-3:  #181c26;
+  --color-border-1:   #1c2230;
+  --color-border-2:   #252f3e;
+
+  /* Text */
+  --color-text-primary:   #eae6de;
+  --color-text-secondary: #8a9aac;
+  --color-text-tertiary:  #3a4558;
+  --color-text-disabled:  #252f3e;
+  --color-text-ember:     #ff4a12;
+  --color-text-link:      #7aaaff;
+
+  /* Semantic */
+  --color-success:   #3ddc84;
+  --color-warning:   #ffaa33;
+  --color-error:     #ff4a12;
+  --color-info:      #7aaaff;
+
+  /* Semantic backgrounds */
+  --color-success-bg: rgba(61,220,132,0.07);
+  --color-warning-bg: rgba(255,170,51,0.07);
+  --color-error-bg:   rgba(255,74,18,0.07);
+  --color-info-bg:    rgba(122,170,255,0.07);
+
+  /* Semantic borders */
+  --color-success-border: rgba(61,220,132,0.22);
+  --color-warning-border: rgba(255,170,51,0.22);
+  --color-error-border:   rgba(255,74,18,0.22);
+  --color-info-border:    rgba(122,170,255,0.22);
+
+  /* Syntax */
+  --color-syntax-kw:      #ff7a30;
+  --color-syntax-fn:      #ffd166;
+  --color-syntax-str:     #3ddc84;
+  --color-syntax-type:    #7a9fff;
+  --color-syntax-num:     #ff9966;
+  --color-syntax-comment: #3a4558;
+
+  /* Spacing */
+  --sp-1:  4px;
+  --sp-2:  8px;
+  --sp-3:  12px;
+  --sp-4:  16px;
+  --sp-5:  20px;
+  --sp-6:  24px;
+  --sp-8:  32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+
+  /* Radii */
+  --r-sm: 3px;
+  --r-md: 5px;
+  --r-lg: 8px;
+
+  /* Transitions */
+  --ease: 0.15s ease;
+
+  /* Typography */
+  --font-display: 'Barlow Condensed', sans-serif;
+  --font-body:    'Barlow', sans-serif;
+  --font-mono:    'Fira Code', monospace;
+
+  /* Provider accent colors */
+  --color-provider-anthropic: #ff4a12;
+  --color-provider-openai:    #ffaa33;
+  --color-provider-local:     #7aaaff;
+  --color-provider-custom:    #8a9aac;
+}

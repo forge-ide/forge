@@ -4,6 +4,10 @@ target/
 
 # Node / frontend
 .pnpm-store/
+node_modules/
+web/**/dist/
+web/**/.vite/
+*.tsbuildinfo
 
 # Tauri
 src-tauri/target/
