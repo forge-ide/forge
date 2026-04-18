@@ -60,7 +60,7 @@ describe('ChatPane rendering', () => {
     expect(queryByTestId('streaming-cursor')).not.toBeInTheDocument();
   });
 
-  it('renders a tool call placeholder', () => {
+  it('renders a tool call card', () => {
     pushEvent(SID, {
       kind: 'ToolCallStarted',
       tool_call_id: 'tc-1',
@@ -68,7 +68,7 @@ describe('ChatPane rendering', () => {
       args_json: '{}',
     });
     const { getByTestId } = render(() => <ChatPane />);
-    expect(getByTestId('tool-placeholder-tc-1')).toBeInTheDocument();
+    expect(getByTestId('tool-call-card-tc-1')).toBeInTheDocument();
   });
 
   it('renders an error turn inline', () => {

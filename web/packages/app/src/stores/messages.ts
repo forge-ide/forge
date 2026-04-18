@@ -9,8 +9,9 @@ export type SessionEvent =
   | { kind: 'UserMessage'; text: string; message_id: string }
   | { kind: 'AssistantMessage'; text: string; message_id: string }
   | { kind: 'AssistantDelta'; delta: string; message_id: string }
-  | { kind: 'ToolCallStarted'; tool_call_id: string; tool_name: string; args_json: string }
+  | { kind: 'ToolCallStarted'; tool_call_id: string; tool_name: string; args_json: string; batch_id?: string }
   | { kind: 'ToolCallCompleted'; tool_call_id: string; result_summary: string }
+  | { kind: 'ToolCallFailed'; tool_call_id: string; error: string }
   | { kind: 'Error'; message: string }
   | { kind: 'StreamingStarted' }
   | { kind: 'StreamingStopped' };
@@ -19,10 +20,23 @@ export type SessionEvent =
 // Chat turn shapes (derived, used for rendering)
 // ---------------------------------------------------------------------------
 
+export type ToolCallStatus = 'in-progress' | 'awaiting-approval' | 'completed' | 'errored';
+
 export type ChatTurn =
   | { type: 'user'; text: string; message_id: string }
   | { type: 'assistant'; text: string; message_id: string; isStreaming: boolean }
-  | { type: 'tool_placeholder'; tool_call_id: string; tool_name: string; completed: boolean }
+  | {
+      type: 'tool_placeholder';
+      tool_call_id: string;
+      tool_name: string;
+      args_json: string;
+      batch_id?: string;
+      status: ToolCallStatus;
+      started_at: number;
+      duration_ms?: number;
+      result_summary?: string;
+      error?: string;
+    }
   | { type: 'error'; message: string };
 
 // ---------------------------------------------------------------------------
@@ -137,7 +151,10 @@ export function pushEvent(sessionId: SessionId, event: SessionEvent): void {
             type: 'tool_placeholder',
             tool_call_id: event.tool_call_id,
             tool_name: event.tool_name,
-            completed: false,
+            args_json: event.args_json,
+            ...(event.batch_id !== undefined ? { batch_id: event.batch_id } : {}),
+            status: 'in-progress',
+            started_at: Date.now(),
           });
         }),
       );
@@ -152,7 +169,28 @@ export function pushEvent(sessionId: SessionId, event: SessionEvent): void {
             (t) => t.type === 'tool_placeholder' && t.tool_call_id === event.tool_call_id,
           );
           if (idx >= 0) {
-            (state.turns[idx] as { type: 'tool_placeholder'; completed: boolean }).completed = true;
+            const turn = state.turns[idx] as Extract<ChatTurn, { type: 'tool_placeholder' }>;
+            turn.status = 'completed';
+            turn.result_summary = event.result_summary;
+            turn.duration_ms = Date.now() - turn.started_at;
+          }
+        }),
+      );
+      break;
+    }
+
+    case 'ToolCallFailed': {
+      setMessagesStore(
+        produce((s) => {
+          const state = s[sessionId]!;
+          const idx = state.turns.findIndex(
+            (t) => t.type === 'tool_placeholder' && t.tool_call_id === event.tool_call_id,
+          );
+          if (idx >= 0) {
+            const turn = state.turns[idx] as Extract<ChatTurn, { type: 'tool_placeholder' }>;
+            turn.status = 'errored';
+            turn.error = event.error;
+            turn.duration_ms = Date.now() - turn.started_at;
           }
         }),
       );
