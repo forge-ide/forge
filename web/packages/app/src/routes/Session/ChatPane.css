@@ -151,12 +151,26 @@
 }
 
 .tool-placeholder__name {
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   color: var(--color-text-primary);
+}
+
+/* F-041: one-line arg summary sits between the tool name and the status,
+   takes the remaining space, and truncates with an ellipsis when narrower
+   than the content. Muted so the tool name stays the primary read. */
+.tool-placeholder__args {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
 }
 
 .tool-placeholder__status {
   color: var(--color-text-tertiary);
+  flex: 0 0 auto;
 }
 
 /* -------------------------------------------------------------------------

@@ -38,8 +38,9 @@ test.describe('UAT-06 — tool call card', () => {
 
     await expect(page.getByTestId('tool-call-card-tc-1')).toBeVisible();
     await expect(page.getByTestId('tool-call-card-tc-1')).toContainText('fs.read');
-    // The one-line path arg is tracked separately as F-041 (#77); the
-    // F-037 adapter PR only delivers the event; header arg rendering follows.
+    // F-041: the collapsed card header also shows a one-line path summary
+    // next to the tool name.
+    await expect(page.getByTestId('tool-call-card-tc-1')).toContainText('readable.txt');
   });
 
   test('expand/collapse toggle persists while window is open', async () => {

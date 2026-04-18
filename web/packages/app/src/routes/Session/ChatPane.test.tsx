@@ -74,6 +74,51 @@ describe('ChatPane rendering', () => {
     expect(getByTestId('tool-call-card-tc-1')).toBeInTheDocument();
   });
 
+  // F-041: collapsed tool call card renders a one-line arg summary to the
+  // right of the tool name. Path-taking tools show the path; other tools
+  // show a short stringified JSON; unparseable args render no summary.
+  it('renders the path as the arg summary when args_json has a path field', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-path',
+      tool_name: 'fs.read',
+      args_json: JSON.stringify({ path: 'readable.txt' }),
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    const card = getByTestId('tool-call-card-tc-path');
+    expect(card).toHaveTextContent('readable.txt');
+  });
+
+  it('falls back to stringified args truncated to ~60 chars when no path field', () => {
+    const bigArgs = { query: 'x'.repeat(120), scope: 'everything' };
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-nopath',
+      tool_name: 'search',
+      args_json: JSON.stringify(bigArgs),
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    const card = getByTestId('tool-call-card-tc-nopath');
+    // Contains the leading tokens of the stringified JSON…
+    expect(card).toHaveTextContent('"query"');
+    // …but is bounded by the ~60-char cap, not the full 100+ char payload.
+    expect(card.textContent ?? '').not.toContain('x'.repeat(80));
+  });
+
+  it('omits the arg summary span when args_json is unparseable', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-bad',
+      tool_name: 'broken',
+      args_json: '{ this is not json',
+    });
+    const { getByTestId, queryByTestId } = render(() => <ChatPane />);
+    // Card still renders — the invalid JSON must not crash the component.
+    expect(getByTestId('tool-call-card-tc-bad')).toBeInTheDocument();
+    // No args span.
+    expect(queryByTestId('tool-call-args-tc-bad')).not.toBeInTheDocument();
+  });
+
   it('renders an error turn inline', () => {
     pushEvent(SID, { kind: 'Error', message: 'ECONNREFUSED 127.0.0.1:11434' });
     const { getByText } = render(() => <ChatPane />);
