@@ -228,6 +228,7 @@ async fn run_agent(name: &str, input_source: &str) -> Result<()> {
         .arg("--agent")
         .arg(name)
         .arg("--auto-approve-unsafe")
+        .arg("--ephemeral")
         .env("FORGE_SESSION_ID", session_id.to_string())
         .env("FORGE_SOCKET_PATH", sock.to_str().unwrap_or(""))
         .spawn()?;

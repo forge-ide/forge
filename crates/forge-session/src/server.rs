@@ -13,13 +13,13 @@ use crate::orchestrator::{run_turn, PendingApprovals};
 use crate::session::Session;
 
 /// Start a session server using the default `MockProvider`.
-pub async fn serve(path: &Path, auto_approve: bool) -> Result<()> {
+pub async fn serve(path: &Path, auto_approve: bool, ephemeral: bool) -> Result<()> {
     let log_path = std::env::temp_dir()
         .join(format!("forge-session-{}", SessionId::new()))
         .join("events.jsonl");
     let session = Arc::new(Session::create(log_path).await?);
     let provider = Arc::new(MockProvider::with_default_path());
-    serve_with_session(path, session, provider, auto_approve).await
+    serve_with_session(path, session, provider, auto_approve, ephemeral).await
 }
 
 /// Start a session server with an explicit provider.
@@ -28,6 +28,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
     session: Arc<Session>,
     provider: Arc<P>,
     auto_approve: bool,
+    ephemeral: bool,
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -36,12 +37,20 @@ pub async fn serve_with_session<P: Provider + 'static>(
         tokio::fs::remove_file(path).await?;
     }
     let listener = UnixListener::bind(path)?;
+
+    if ephemeral {
+        // Accept exactly one connection, serve it to completion, then exit.
+        let (stream, _) = listener.accept().await?;
+        return handle_connection(stream, session, provider, auto_approve, true).await;
+    }
+
     loop {
         let (stream, _) = listener.accept().await?;
         let session = Arc::clone(&session);
         let provider = Arc::clone(&provider);
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, session, provider, auto_approve).await {
+            if let Err(e) = handle_connection(stream, session, provider, auto_approve, false).await
+            {
                 eprintln!("connection error: {e}");
             }
         });
@@ -53,6 +62,7 @@ async fn handle_connection<P: Provider + 'static>(
     session: Arc<Session>,
     provider: Arc<P>,
     auto_approve: bool,
+    ephemeral: bool,
 ) -> Result<()> {
     // ── Handshake ──────────────────────────────────────────────────────────────
     let msg = forge_ipc::read_frame(&mut stream).await?;
@@ -118,12 +128,16 @@ async fn handle_connection<P: Provider + 'static>(
             result = live_rx.recv() => {
                 match result {
                     Ok((seq, event)) if seq > last_sent => {
+                        let is_session_ended = matches!(event, forge_core::Event::SessionEnded { .. });
                         let frame = IpcMessage::Event(IpcEvent {
                             seq,
                             event: serde_json::to_value(&event)?,
                         });
                         forge_ipc::write_frame(&mut writer, &frame).await?;
                         last_sent = seq;
+                        if is_session_ended {
+                            break;
+                        }
                     }
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -145,8 +159,22 @@ async fn handle_connection<P: Provider + 'static>(
                             // TODO(F-013): thread AgentDef.allowed_paths once agent
                             // context is passed through the server connection.
                             // Using ["**"] (allow all) until then.
-                            if let Err(e) = run_turn(session, provider, m.text, approvals, vec!["**".to_string()], auto_approve).await {
+                            let result = run_turn(Arc::clone(&session), provider, m.text, approvals, vec!["**".to_string()], auto_approve).await;
+                            if let Err(e) = &result {
                                 eprintln!("turn error: {e}");
+                            }
+                            if ephemeral {
+                                let reason = match result {
+                                    Ok(()) => forge_core::EndReason::Completed,
+                                    Err(e) => forge_core::EndReason::Error(e.to_string()),
+                                };
+                                if let Err(e) = session.emit(forge_core::Event::SessionEnded {
+                                    at: chrono::Utc::now(),
+                                    reason,
+                                    archived: false,
+                                }).await {
+                                    eprintln!("failed to emit SessionEnded: {e}");
+                                }
                             }
                         });
                     }

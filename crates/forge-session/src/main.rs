@@ -11,6 +11,7 @@ use std::sync::Arc;
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let auto_approve = args.iter().any(|a| a == "--auto-approve-unsafe");
+    let ephemeral = args.iter().any(|a| a == "--ephemeral");
 
     // Allow the CLI to pre-assign the session ID and socket path so it can
     // print the path before forged starts and can track it for `session kill`.
@@ -32,9 +33,9 @@ async fn main() -> Result<()> {
             .join("events.jsonl");
         let session = Arc::new(Session::create(log_path).await?);
         let provider = Arc::new(MockProvider::from_responses(scripts)?);
-        serve_with_session(&socket_path, session, provider, auto_approve).await
+        serve_with_session(&socket_path, session, provider, auto_approve, ephemeral).await
     } else {
-        serve(&socket_path, auto_approve).await
+        serve(&socket_path, auto_approve, ephemeral).await
     }
 }
 
