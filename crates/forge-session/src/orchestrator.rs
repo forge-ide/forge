@@ -2,19 +2,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use forge_fs::read_file;
-
 use anyhow::Result;
 use chrono::Utc;
 use forge_core::{
     ids::{MessageId, ProviderId, ToolCallId},
-    ApprovalPreview, ApprovalScope, ApprovalSource, Event,
+    ApprovalScope, ApprovalSource, Event,
 };
 use forge_providers::{ChatBlock, ChatChunk, ChatMessage, ChatRequest, ChatRole, Provider};
 use futures::StreamExt;
 use tokio::sync::{oneshot, Mutex};
 
 use crate::session::Session;
+use crate::tools::{FsReadTool, ToolCtx, ToolDispatcher, ToolError};
 
 /// Pending tool call approvals: maps ToolCallId → sender for the approval result.
 pub type PendingApprovals = Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>;
@@ -55,13 +54,20 @@ pub async fn run_turn<P: Provider>(
         }],
     };
 
+    let mut dispatcher = ToolDispatcher::new();
+    dispatcher
+        .register(Box::new(FsReadTool))
+        .expect("fs.read must register on a fresh dispatcher");
+    let ctx = ToolCtx { allowed_paths };
+
     run_request_loop(
         session,
         provider,
         initial_req,
         msg_id,
         pending_approvals,
-        allowed_paths,
+        &dispatcher,
+        &ctx,
         auto_approve,
     )
     .await
@@ -71,13 +77,15 @@ pub async fn run_turn<P: Provider>(
 /// On tool calls: waits for approval, executes stub, appends result to the
 /// next request, and continues until the provider returns `Done` with no
 /// pending tool calls.
+#[allow(clippy::too_many_arguments)]
 async fn run_request_loop<P: Provider>(
     session: Arc<Session>,
     provider: Arc<P>,
     mut req: ChatRequest,
     msg_id: MessageId,
     pending_approvals: PendingApprovals,
-    allowed_paths: Vec<String>,
+    dispatcher: &ToolDispatcher,
+    ctx: &ToolCtx,
     auto_approve: bool,
 ) -> Result<()> {
     // Fixed provider/model identifiers for the mock provider.
@@ -136,73 +144,76 @@ async fn run_request_loop<P: Provider>(
                         })
                         .await?;
 
-                    if auto_approve {
-                        // --auto-approve-unsafe: skip the approval gate entirely.
-                        session
-                            .emit(Event::ToolCallApproved {
-                                id: call_id.clone(),
-                                by: ApprovalSource::Auto,
-                                scope: ApprovalScope::Once,
-                                at: Utc::now(),
-                            })
-                            .await?;
-                    } else {
-                        // Approval gate: register oneshot before emitting the event
-                        // so the connection handler can resolve it immediately on receipt.
-                        let (tx, rx) = oneshot::channel::<bool>();
-                        pending_approvals
-                            .lock()
-                            .await
-                            .insert(call_id.to_string(), tx);
-
-                        session
-                            .emit(Event::ToolCallApprovalRequested {
-                                id: call_id.clone(),
-                                preview: ApprovalPreview {
-                                    description: format!("Run tool '{name}'?"),
-                                },
-                            })
-                            .await?;
-
-                        let approved = rx.await.unwrap_or(false);
-
-                        if !approved {
-                            session
-                                .emit(Event::ToolCallRejected {
-                                    id: call_id,
-                                    reason: Some("rejected by client".to_string()),
-                                })
-                                .await?;
-                            // Finalise the open AssistantMessage so the session log
-                            // is never left with a dangling un-finalised message.
-                            session
-                                .emit(Event::AssistantMessage {
-                                    id: msg_id.clone(),
-                                    provider: provider_id.clone(),
-                                    model: model.clone(),
-                                    at: Utc::now(),
-                                    stream_finalised: true,
-                                    text: assistant_text.clone(),
-                                    branch_parent: None,
-                                    branch_variant_index: 0,
-                                })
-                                .await?;
-                            return Ok(());
-                        }
-
-                        session
-                            .emit(Event::ToolCallApproved {
-                                id: call_id.clone(),
-                                by: ApprovalSource::User,
-                                scope: ApprovalScope::Once,
-                                at: Utc::now(),
-                            })
-                            .await?;
-                    }
-
-                    // Execute the tool.
                     let started = Instant::now();
-                    let result = dispatch_tool(&name, &args, &allowed_paths);
+                    let tool = dispatcher.get(&name);
+
+                    let result = match tool {
+                        Ok(tool) => {
+                            if auto_approve {
+                                session
+                                    .emit(Event::ToolCallApproved {
+                                        id: call_id.clone(),
+                                        by: ApprovalSource::Auto,
+                                        scope: ApprovalScope::Once,
+                                        at: Utc::now(),
+                                    })
+                                    .await?;
+                            } else {
+                                let (tx, rx) = oneshot::channel::<bool>();
+                                pending_approvals
+                                    .lock()
+                                    .await
+                                    .insert(call_id.to_string(), tx);
+
+                                session
+                                    .emit(Event::ToolCallApprovalRequested {
+                                        id: call_id.clone(),
+                                        preview: tool.approval_preview(&args),
+                                    })
+                                    .await?;
+
+                                let approved = rx.await.unwrap_or(false);
+
+                                if !approved {
+                                    session
+                                        .emit(Event::ToolCallRejected {
+                                            id: call_id,
+                                            reason: Some("rejected by client".to_string()),
+                                        })
+                                        .await?;
+                                    session
+                                        .emit(Event::AssistantMessage {
+                                            id: msg_id.clone(),
+                                            provider: provider_id.clone(),
+                                            model: model.clone(),
+                                            at: Utc::now(),
+                                            stream_finalised: true,
+                                            text: assistant_text.clone(),
+                                            branch_parent: None,
+                                            branch_variant_index: 0,
+                                        })
+                                        .await?;
+                                    return Ok(());
+                                }
+
+                                session
+                                    .emit(Event::ToolCallApproved {
+                                        id: call_id.clone(),
+                                        by: ApprovalSource::User,
+                                        scope: ApprovalScope::Once,
+                                        at: Utc::now(),
+                                    })
+                                    .await?;
+                            }
+
+                            tool.invoke(&args, ctx)
+                        }
+                        Err(ToolError::UnknownTool(n)) => {
+                            serde_json::json!({ "error": format!("unknown tool '{n}'") })
+                        }
+                        Err(e) => serde_json::json!({ "error": e.to_string() }),
+                    };
+
                     let duration_ms = started.elapsed().as_millis() as u64;
 
                     session
@@ -280,26 +291,5 @@ async fn run_request_loop<P: Provider>(
             role: ChatRole::User,
             content: tr_blocks,
         });
-    }
-}
-
-fn dispatch_tool(
-    name: &str,
-    args: &serde_json::Value,
-    allowed_paths: &[String],
-) -> serde_json::Value {
-    match name {
-        "fs.read" => {
-            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            match read_file(path, allowed_paths) {
-                Ok(r) => serde_json::json!({
-                    "content": r.content,
-                    "bytes": r.bytes,
-                    "sha256": r.sha256,
-                }),
-                Err(e) => serde_json::json!({ "error": e.to_string() }),
-            }
-        }
-        _ => serde_json::json!({ "content": "stub tool result" }),
     }
 }
