@@ -1,0 +1,202 @@
+/* ---------------------------------------------------------------------------
+   ApprovalPrompt — inline approval UI inside tool call cards
+   --------------------------------------------------------------------------- */
+
+.approval-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-3) 0 0;
+}
+
+/* -------------------------------------------------------------------------
+   Preview
+   ---------------------------------------------------------------------- */
+
+.approval-prompt__preview {
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--r-sm);
+  background: var(--color-warning-bg);
+  overflow: hidden;
+}
+
+.approval-prompt__preview-text {
+  margin: 0;
+  padding: var(--sp-3) var(--sp-4);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+/* -------------------------------------------------------------------------
+   Pattern editor
+   ---------------------------------------------------------------------- */
+
+.approval-prompt__pattern-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.approval-prompt__pattern-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--color-text-secondary);
+}
+
+.approval-prompt__pattern-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.approval-prompt__pattern-input {
+  flex: 1 1 auto;
+  padding: var(--sp-1) var(--sp-2);
+  background: var(--color-surface-3);
+  border: 1px solid var(--color-border-2);
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-primary);
+  outline: none;
+}
+
+.approval-prompt__pattern-input:focus {
+  border-color: var(--color-ember-400);
+}
+
+/* -------------------------------------------------------------------------
+   Actions row
+   ---------------------------------------------------------------------- */
+
+.approval-prompt__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.approval-prompt__approve-group {
+  display: flex;
+  align-items: center;
+  position: relative;
+}
+
+/* -------------------------------------------------------------------------
+   Buttons
+   ---------------------------------------------------------------------- */
+
+.approval-prompt__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+  transition: var(--ease);
+  line-height: 1;
+}
+
+.approval-prompt__btn--ghost {
+  background: transparent;
+  border: 1px solid var(--color-border-2);
+  color: var(--color-text-secondary);
+}
+
+.approval-prompt__btn--ghost:hover {
+  border-color: var(--color-text-secondary);
+  color: var(--color-text-primary);
+}
+
+.approval-prompt__btn--primary {
+  background: var(--color-ember-400);
+  border: 1px solid var(--color-ember-400);
+  color: var(--color-text-primary);
+}
+
+.approval-prompt__btn--primary:hover {
+  background: var(--color-ember-300);
+  border-color: var(--color-ember-300);
+}
+
+.approval-prompt__btn--primary:active {
+  background: var(--color-ember-500);
+  border-color: var(--color-ember-500);
+}
+
+/* Split-button seam between Approve and ▾ */
+.approval-prompt__approve-group .approval-prompt__btn--primary:first-child {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  border-right-color: var(--color-ember-500);
+}
+
+.approval-prompt__dropdown-toggle {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  padding-left: var(--sp-2);
+  padding-right: var(--sp-2);
+  font-size: 9px;
+}
+
+/* -------------------------------------------------------------------------
+   Keyboard hint badges
+   ---------------------------------------------------------------------- */
+
+.approval-prompt__kbd {
+  display: inline-block;
+  padding: 0 var(--sp-1);
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  opacity: 0.6;
+  line-height: 1.4;
+}
+
+/* -------------------------------------------------------------------------
+   Scope dropdown menu
+   ---------------------------------------------------------------------- */
+
+.approval-prompt__menu {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  right: 0;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border-2);
+  border-radius: var(--r-sm);
+  min-width: 160px;
+  z-index: 100;
+  overflow: hidden;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.approval-prompt__menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  background: transparent;
+  border: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-primary);
+  cursor: pointer;
+  text-align: left;
+  transition: var(--ease);
+}
+
+.approval-prompt__menu-item:hover {
+  background: var(--color-surface-3);
+  color: var(--color-ember-300);
+}

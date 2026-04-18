@@ -224,6 +224,82 @@ describe('messages store', () => {
     });
   });
 
+  describe('ToolCallApprovalRequested events', () => {
+    it('transitions an existing placeholder to awaiting-approval', () => {
+      pushEvent(SID, {
+        kind: 'ToolCallStarted',
+        tool_call_id: 'tc-approval',
+        tool_name: 'fs.edit',
+        args_json: '{"path":"/src/foo.ts"}',
+      });
+      pushEvent(SID, {
+        kind: 'ToolCallApprovalRequested',
+        tool_call_id: 'tc-approval',
+        tool_name: 'fs.edit',
+        args_json: '{"path":"/src/foo.ts"}',
+        preview: { description: 'Edit file /src/foo.ts: 2 hunks' },
+      });
+      const state = getMessagesState(SID);
+      expect(state.turns).toHaveLength(1);
+      expect(state.turns[0]).toMatchObject({
+        type: 'tool_placeholder',
+        tool_call_id: 'tc-approval',
+        status: 'awaiting-approval',
+        preview: { description: 'Edit file /src/foo.ts: 2 hunks' },
+      });
+    });
+
+    it('creates a fresh placeholder when no prior ToolCallStarted', () => {
+      pushEvent(SID, {
+        kind: 'ToolCallApprovalRequested',
+        tool_call_id: 'tc-fresh',
+        tool_name: 'fs.write',
+        args_json: '{"path":"/src/bar.ts"}',
+        preview: { description: 'Write file /src/bar.ts' },
+      });
+      const state = getMessagesState(SID);
+      expect(state.turns).toHaveLength(1);
+      expect(state.turns[0]).toMatchObject({
+        type: 'tool_placeholder',
+        tool_call_id: 'tc-fresh',
+        tool_name: 'fs.write',
+        status: 'awaiting-approval',
+        preview: { description: 'Write file /src/bar.ts' },
+      });
+    });
+
+    it('attaches the preview description to the turn', () => {
+      pushEvent(SID, {
+        kind: 'ToolCallApprovalRequested',
+        tool_call_id: 'tc-preview',
+        tool_name: 'shell.exec',
+        args_json: '{}',
+        preview: { description: 'Run: /bin/sh -c echo hi (cwd /workspace)' },
+      });
+      const state = getMessagesState(SID);
+      const turn = state.turns[0] as { preview?: { description: string } };
+      expect(turn.preview?.description).toBe('Run: /bin/sh -c echo hi (cwd /workspace)');
+    });
+
+    it('does not duplicate turns if both ToolCallStarted and ApprovalRequested arrive', () => {
+      pushEvent(SID, {
+        kind: 'ToolCallStarted',
+        tool_call_id: 'tc-dup',
+        tool_name: 'fs.edit',
+        args_json: '{}',
+      });
+      pushEvent(SID, {
+        kind: 'ToolCallApprovalRequested',
+        tool_call_id: 'tc-dup',
+        tool_name: 'fs.edit',
+        args_json: '{}',
+        preview: { description: 'Edit' },
+      });
+      const state = getMessagesState(SID);
+      expect(state.turns).toHaveLength(1);
+    });
+  });
+
   describe('Error events', () => {
     it('appends an error turn', () => {
       pushEvent(SID, { kind: 'Error', message: 'ECONNREFUSED 127.0.0.1:11434' });
