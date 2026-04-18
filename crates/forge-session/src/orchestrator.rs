@@ -13,7 +13,7 @@ use futures::StreamExt;
 use tokio::sync::{oneshot, Mutex};
 
 use crate::session::Session;
-use crate::tools::{FsReadTool, ToolCtx, ToolDispatcher, ToolError};
+use crate::tools::{FsEditTool, FsReadTool, FsWriteTool, ToolCtx, ToolDispatcher, ToolError};
 
 /// Pending tool call approvals: maps ToolCallId → sender for the approval result.
 pub type PendingApprovals = Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>;
@@ -58,6 +58,12 @@ pub async fn run_turn<P: Provider>(
     dispatcher
         .register(Box::new(FsReadTool))
         .expect("fs.read must register on a fresh dispatcher");
+    dispatcher
+        .register(Box::new(FsWriteTool))
+        .expect("fs.write must register on a fresh dispatcher");
+    dispatcher
+        .register(Box::new(FsEditTool))
+        .expect("fs.edit must register on a fresh dispatcher");
     let ctx = ToolCtx { allowed_paths };
 
     run_request_loop(

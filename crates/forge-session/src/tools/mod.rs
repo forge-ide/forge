@@ -2,9 +2,13 @@
 
 use forge_core::ApprovalPreview;
 
+pub mod fs_edit;
 pub mod fs_read;
+pub mod fs_write;
 
+pub use fs_edit::FsEditTool;
 pub use fs_read::FsReadTool;
+pub use fs_write::FsWriteTool;
 
 pub struct ToolCtx {
     pub allowed_paths: Vec<String>,
@@ -128,6 +132,71 @@ mod tests {
         let d = ToolDispatcher::new();
         let err = d.dispatch("nope", &json!({}), &empty_ctx()).unwrap_err();
         assert_eq!(err, ToolError::UnknownTool("nope".to_string()));
+    }
+
+    #[test]
+    fn fs_write_dispatch_writes_file_and_previews_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("out.txt");
+        let canonical_parent = std::fs::canonicalize(dir.path()).unwrap();
+        let allowed = format!("{}/**", canonical_parent.to_str().unwrap());
+
+        let mut d = ToolDispatcher::new();
+        d.register(Box::new(FsWriteTool)).unwrap();
+
+        let ctx = ToolCtx {
+            allowed_paths: vec![allowed],
+        };
+        let result = d
+            .dispatch(
+                "fs.write",
+                &json!({"path": target.to_str().unwrap(), "content": "hi"}),
+                &ctx,
+            )
+            .unwrap();
+        assert_eq!(result["ok"].as_bool(), Some(true));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "hi");
+
+        let preview = d
+            .get("fs.write")
+            .unwrap()
+            .approval_preview(&json!({"path": target.to_str().unwrap(), "content": "hi"}));
+        assert!(preview.description.contains("Write file"));
+    }
+
+    #[test]
+    fn fs_edit_dispatch_applies_patch_and_previews_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("src.txt");
+        std::fs::write(&target, "alpha\nbeta\n").unwrap();
+        let canonical_parent = std::fs::canonicalize(dir.path()).unwrap();
+        let allowed = format!("{}/**", canonical_parent.to_str().unwrap());
+
+        let patch = similar::TextDiff::from_lines("alpha\nbeta\n", "alpha\nBETA\n")
+            .unified_diff()
+            .to_string();
+
+        let mut d = ToolDispatcher::new();
+        d.register(Box::new(FsEditTool)).unwrap();
+
+        let ctx = ToolCtx {
+            allowed_paths: vec![allowed],
+        };
+        let result = d
+            .dispatch(
+                "fs.edit",
+                &json!({"path": target.to_str().unwrap(), "patch": patch}),
+                &ctx,
+            )
+            .unwrap();
+        assert_eq!(result["ok"].as_bool(), Some(true));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "alpha\nBETA\n");
+
+        let preview = d
+            .get("fs.edit")
+            .unwrap()
+            .approval_preview(&json!({"path": target.to_str().unwrap(), "patch": patch}));
+        assert!(preview.description.contains("Edit file"));
     }
 
     #[test]
