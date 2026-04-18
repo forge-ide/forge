@@ -3,10 +3,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
-use forge_core::{read_since, SessionId, SessionPersistence};
+use chrono::Utc;
+use forge_core::{
+    meta::{write_meta, SessionMeta},
+    read_since, SessionId, SessionPersistence, SessionState, WorkspaceId,
+};
 use forge_ipc::{HelloAck, IpcEvent, IpcMessage, PROTO_VERSION, SCHEMA_VERSION};
 use forge_providers::{MockProvider, Provider};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{broadcast, Mutex};
 
 use crate::archive::archive_or_purge;
@@ -98,34 +103,99 @@ pub async fn serve_with_session<P: Provider + 'static>(
         .await;
     }
 
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let session = Arc::clone(&session);
-        let provider = Arc::clone(&provider);
-        let workspace = Arc::clone(&workspace);
-        let session_id = Arc::clone(&session_id);
-        let socket_path = Arc::clone(&socket_path);
-        let workspace_path = workspace_path.clone();
-        let child_registry = child_registry.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(
-                stream,
-                session,
-                provider,
-                auto_approve,
-                false,
-                workspace,
-                session_id,
-                socket_path,
-                workspace_path,
-                child_registry,
-            )
-            .await
-            {
-                eprintln!("connection error: {e}");
-            }
-        });
+    // Persistent mode: write the initial meta.toml so `archive_or_purge`'s
+    // `update_meta_to_archived` call has something to update on shutdown.
+    // F-031's archive feature only updates an existing meta file; without
+    // this write, the archived directory ships with no meta.toml at all.
+    if let Some(session_dir) = session.log_path.parent() {
+        let meta_path = session_dir.join("meta.toml");
+        let meta = SessionMeta {
+            id: SessionId::from_string((*session_id).clone()),
+            // TODO: derive workspace_id from the workspace path so sessions
+            // sharing a workspace correlate. Today no production code groups
+            // on workspace_id (dashboard reads `workspace` string), so a
+            // synthetic per-session id is acceptable as a placeholder.
+            workspace_id: WorkspaceId::new(),
+            name: format!("session-{}", *session_id),
+            agent: None,
+            provider_id: None,
+            model: None,
+            state: SessionState::Active,
+            persistence: SessionPersistence::Persist,
+            started_at: Utc::now(),
+            ended_at: None,
+            tokens_in: 0,
+            tokens_out: 0,
+            cost_usd: 0.0,
+            pid: std::process::id(),
+            socket_path: (*socket_path).clone(),
+        };
+        write_meta(&meta_path, &meta).await?;
     }
+
+    // Persistent mode: race the accept loop against SIGTERM/SIGINT so the
+    // daemon can run `archive_or_purge` on its own session dir before exit.
+    // Without this, `forge session kill` SIGTERMs an unhandled signal and
+    // the live session dir is left behind under `sessions/<id>/`.
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+
+    loop {
+        tokio::select! {
+            accept = listener.accept() => {
+                let (stream, _) = accept?;
+                let session = Arc::clone(&session);
+                let provider = Arc::clone(&provider);
+                let workspace = Arc::clone(&workspace);
+                let session_id = Arc::clone(&session_id);
+                let socket_path = Arc::clone(&socket_path);
+                let workspace_path = workspace_path.clone();
+                let child_registry = child_registry.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handle_connection(
+                        stream,
+                        session,
+                        provider,
+                        auto_approve,
+                        false,
+                        workspace,
+                        session_id,
+                        socket_path,
+                        workspace_path,
+                        child_registry,
+                    )
+                    .await
+                    {
+                        eprintln!("connection error: {e}");
+                    }
+                });
+            }
+            _ = sigterm.recv() => break,
+            _ = sigint.recv() => break,
+        }
+    }
+
+    // Graceful shutdown for persistent mode: kill any sandboxed children,
+    // then archive the session dir + remove the socket. Errors propagate so
+    // `forged` exits non-zero on archive failure (so callers like a future
+    // `forge session kill --wait` can surface the failure).
+    //
+    // In-flight `tokio::spawn`'d connection tasks (above) are not joined —
+    // they're orphaned and the runtime drops them on process exit. On the
+    // normal (same-filesystem) archive path, `rename` preserves open file
+    // descriptors so any late EventLog write still lands on the correct
+    // inode; meta.toml writes are atomic via temp+rename in
+    // `forge_core::meta::write_meta`, so a torn-meta hazard is not possible.
+    // The EXDEV fallback in `archive_or_purge` (cross-filesystem copy +
+    // remove_dir_all) is theoretically unreachable here because the source
+    // and destination both live under `<workspace>/.forge/sessions/`. If
+    // shutdown ever needs to await in-flight turns, replace the spawn with
+    // a JoinSet drained here with a timeout.
+    child_registry.kill_all();
+    if let Some(session_dir) = session.log_path.parent() {
+        archive_or_purge(session_dir, SessionPersistence::Persist, &socket_path).await?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

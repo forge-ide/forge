@@ -14,6 +14,13 @@ macro_rules! id_type {
                 let bytes: [u8; 8] = rand::thread_rng().gen();
                 Self(bytes.iter().map(|b| format!("{b:02x}")).collect())
             }
+
+            /// Wrap an existing string as this id type. Use when the id was
+            /// generated elsewhere (e.g. read from env, a meta file, or a
+            /// client message) and the wire shape is just a string.
+            pub fn from_string(s: String) -> Self {
+                Self(s)
+            }
         }
 
         impl Default for $name {

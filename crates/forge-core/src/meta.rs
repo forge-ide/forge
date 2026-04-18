@@ -33,7 +33,20 @@ pub async fn write_meta(path: &Path, meta: &SessionMeta) -> Result<()> {
         tokio::fs::create_dir_all(parent).await?;
     }
     let contents = toml::to_string(meta).map_err(|e| anyhow::anyhow!(e))?;
-    tokio::fs::write(path, contents).await?;
+    // Atomic write: stage in a sibling temp file then rename in. A plain
+    // `write` is truncate-then-write, so a concurrent reader (e.g. the
+    // dashboard polling meta.toml) can otherwise observe a zero-byte or
+    // half-written file. The rename is atomic on the same filesystem.
+    let tmp = match path.file_name() {
+        Some(name) => {
+            let mut tmp_name = name.to_os_string();
+            tmp_name.push(".tmp");
+            path.with_file_name(tmp_name)
+        }
+        None => path.with_extension("toml.tmp"),
+    };
+    tokio::fs::write(&tmp, &contents).await?;
+    tokio::fs::rename(&tmp, path).await?;
     Ok(())
 }
 
