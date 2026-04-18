@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -12,23 +12,44 @@ use tokio::sync::{broadcast, Mutex};
 use crate::orchestrator::{run_turn, PendingApprovals};
 use crate::session::Session;
 
+/// Resolves the events.jsonl path for a daemon session.
+///
+/// When `workspace` is provided, the log lives under
+/// `<workspace>/.forge/sessions/<session_id>/events.jsonl`, which causes
+/// `forge_core::workspace::ensure_gitignore` to bootstrap the workspace's
+/// `.forge/.gitignore` on first session. Otherwise falls back to
+/// `<temp_dir>/forge-session-<session_id>/events.jsonl` for tests and ad-hoc runs.
+pub fn event_log_path(session_id: &str, workspace: Option<&Path>) -> PathBuf {
+    match workspace {
+        Some(ws) => ws
+            .join(".forge")
+            .join("sessions")
+            .join(session_id)
+            .join("events.jsonl"),
+        None => std::env::temp_dir()
+            .join(format!("forge-session-{session_id}"))
+            .join("events.jsonl"),
+    }
+}
+
 /// Start a session server using the default `MockProvider`.
 pub async fn serve(path: &Path, auto_approve: bool, ephemeral: bool) -> Result<()> {
-    let log_path = std::env::temp_dir()
-        .join(format!("forge-session-{}", SessionId::new()))
-        .join("events.jsonl");
+    let log_path = event_log_path(&SessionId::new().to_string(), None);
     let session = Arc::new(Session::create(log_path).await?);
     let provider = Arc::new(MockProvider::with_default_path());
-    serve_with_session(path, session, provider, auto_approve, ephemeral).await
+    serve_with_session(path, session, provider, auto_approve, ephemeral, None).await
 }
 
 /// Start a session server with an explicit provider.
+///
+/// `workspace` is reported back to clients via `HelloAck.workspace` (empty when `None`).
 pub async fn serve_with_session<P: Provider + 'static>(
     path: &Path,
     session: Arc<Session>,
     provider: Arc<P>,
     auto_approve: bool,
     ephemeral: bool,
+    workspace: Option<PathBuf>,
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -37,19 +58,26 @@ pub async fn serve_with_session<P: Provider + 'static>(
         tokio::fs::remove_file(path).await?;
     }
     let listener = UnixListener::bind(path)?;
+    let workspace = Arc::new(
+        workspace
+            .map(|w| w.display().to_string())
+            .unwrap_or_default(),
+    );
 
     if ephemeral {
         // Accept exactly one connection, serve it to completion, then exit.
         let (stream, _) = listener.accept().await?;
-        return handle_connection(stream, session, provider, auto_approve, true).await;
+        return handle_connection(stream, session, provider, auto_approve, true, workspace).await;
     }
 
     loop {
         let (stream, _) = listener.accept().await?;
         let session = Arc::clone(&session);
         let provider = Arc::clone(&provider);
+        let workspace = Arc::clone(&workspace);
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, session, provider, auto_approve, false).await
+            if let Err(e) =
+                handle_connection(stream, session, provider, auto_approve, false, workspace).await
             {
                 eprintln!("connection error: {e}");
             }
@@ -63,6 +91,7 @@ async fn handle_connection<P: Provider + 'static>(
     provider: Arc<P>,
     auto_approve: bool,
     ephemeral: bool,
+    workspace: Arc<String>,
 ) -> Result<()> {
     // ── Handshake ──────────────────────────────────────────────────────────────
     let msg = forge_ipc::read_frame(&mut stream).await?;
@@ -75,7 +104,7 @@ async fn handle_connection<P: Provider + 'static>(
 
     let ack = IpcMessage::HelloAck(HelloAck {
         session_id: SessionId::new().to_string(),
-        workspace: String::new(),
+        workspace: (*workspace).clone(),
         started_at: chrono::Utc::now().to_rfc3339(),
         event_seq: session.current_seq().await,
         schema_version: SCHEMA_VERSION,
@@ -156,9 +185,6 @@ async fn handle_connection<P: Provider + 'static>(
                         let provider = Arc::clone(&provider);
                         let approvals = Arc::clone(&pending_approvals);
                         tokio::spawn(async move {
-                            // TODO(F-013): thread AgentDef.allowed_paths once agent
-                            // context is passed through the server connection.
-                            // Using ["**"] (allow all) until then.
                             let result = run_turn(Arc::clone(&session), provider, m.text, approvals, vec!["**".to_string()], auto_approve).await;
                             if let Err(e) = &result {
                                 eprintln!("turn error: {e}");
@@ -201,4 +227,25 @@ async fn handle_connection<P: Provider + 'static>(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_log_path_uses_workspace_when_set() {
+        let ws = Path::new("/tmp/ws");
+        let p = event_log_path("abc123", Some(ws));
+        assert_eq!(p, Path::new("/tmp/ws/.forge/sessions/abc123/events.jsonl"));
+    }
+
+    #[test]
+    fn event_log_path_falls_back_to_temp_when_unset() {
+        let p = event_log_path("abc123", None);
+        let expected = std::env::temp_dir()
+            .join("forge-session-abc123")
+            .join("events.jsonl");
+        assert_eq!(p, expected);
+    }
 }

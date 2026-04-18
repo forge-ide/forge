@@ -77,9 +77,16 @@ async fn fs_read_tool_returns_content_bytes_sha256() {
     let server_provider = Arc::clone(&provider);
     let server_sock = sock_path.clone();
     tokio::spawn(async move {
-        serve_with_session(&server_sock, server_session, server_provider, false, false)
-            .await
-            .unwrap();
+        serve_with_session(
+            &server_sock,
+            server_session,
+            server_provider,
+            false,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
     });
 
     let mut stream = connect_with_retry(&sock_path).await;
