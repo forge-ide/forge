@@ -43,8 +43,11 @@ async fn session_new(kind: SessionNewKind) -> Result<()> {
         .env("FORGE_WORKSPACE", workspace.to_str().unwrap_or(""));
 
     match &kind {
-        SessionNewKind::Agent { name, .. } => {
+        SessionNewKind::Agent { name, provider, .. } => {
             cmd.arg("--agent").arg(name);
+            if let Some(spec) = provider {
+                cmd.arg("--provider").arg(spec);
+            }
         }
         SessionNewKind::Provider { spec, .. } => {
             cmd.arg("--provider").arg(spec);

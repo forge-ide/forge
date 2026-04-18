@@ -20,7 +20,10 @@ fn parse_session_new_agent_with_workspace() {
     let Commands::Session {
         cmd:
             SessionCommands::New {
-                kind: SessionNewKind::Agent { name, workspace },
+                kind:
+                    SessionNewKind::Agent {
+                        name, workspace, ..
+                    },
             },
     } = cli.command
     else {
@@ -37,7 +40,10 @@ fn parse_session_new_agent_without_workspace() {
     let Commands::Session {
         cmd:
             SessionCommands::New {
-                kind: SessionNewKind::Agent { name, workspace },
+                kind:
+                    SessionNewKind::Agent {
+                        name, workspace, ..
+                    },
             },
     } = cli.command
     else {
@@ -45,6 +51,30 @@ fn parse_session_new_agent_without_workspace() {
     };
     assert_eq!(name, "helper");
     assert!(workspace.is_none());
+}
+
+#[test]
+fn parse_session_new_agent_with_provider_flag() {
+    let cli = Cli::try_parse_from([
+        "forge",
+        "session",
+        "new",
+        "agent",
+        "code-review",
+        "--provider",
+        "ollama:qwen2.5:0.5b",
+    ])
+    .expect("should parse");
+    let Commands::Session {
+        cmd:
+            SessionCommands::New {
+                kind: SessionNewKind::Agent { provider, .. },
+            },
+    } = cli.command
+    else {
+        panic!("wrong command shape");
+    };
+    assert_eq!(provider, Some("ollama:qwen2.5:0.5b".to_string()));
 }
 
 #[test]

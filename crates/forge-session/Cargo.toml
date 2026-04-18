@@ -25,6 +25,7 @@ thiserror = "1"
 tokio = { version = "1", features = ["net", "io-util", "fs", "rt-multi-thread", "macros", "sync", "process", "time", "signal"] }
 
 [dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 similar = "2"
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "time", "net", "process"] }
@@ -44,3 +45,7 @@ path = "tests/archive.rs"
 [[test]]
 name = "archive_shutdown"
 path = "tests/archive_shutdown.rs"
+
+[[test]]
+name = "provider_selection"
+path = "tests/provider_selection.rs"
