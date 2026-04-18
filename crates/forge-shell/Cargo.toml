@@ -2,3 +2,28 @@
 name = "forge-shell"
 version = "0.1.0"
 edition = "2021"
+
+[lib]
+name = "forge_shell"
+path = "src/lib.rs"
+
+[[bin]]
+name = "forge-shell"
+path = "src/main.rs"
+required-features = ["webview"]
+
+[build-dependencies]
+png = { version = "0.17", optional = true }
+tauri-build = { version = "2", features = [], optional = true }
+
+[dependencies]
+anyhow = "1"
+tauri = { version = "2", optional = true }
+
+[features]
+# `webview` pulls the full Tauri 2 runtime (wry + webkit2gtk on Linux).
+# Enabled by default so `cargo build` and CI produce a runnable binary.
+# Disable with `--no-default-features` to run pure-Rust unit tests on a
+# host without WebKitGTK installed.
+default = ["webview"]
+webview = ["dep:tauri", "dep:tauri-build", "dep:png"]
