@@ -11,6 +11,7 @@ use tokio::sync::{broadcast, Mutex};
 
 use crate::archive::archive_or_purge;
 use crate::orchestrator::{run_turn, PendingApprovals};
+use crate::sandbox::ChildRegistry;
 use crate::session::Session;
 
 /// Resolves the events.jsonl path for a daemon session.
@@ -63,6 +64,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
         tokio::fs::remove_file(path).await?;
     }
     let listener = UnixListener::bind(path)?;
+    let workspace_path: Option<PathBuf> = workspace.clone();
     let workspace = Arc::new(
         workspace
             .map(|w| w.display().to_string())
@@ -71,9 +73,15 @@ pub async fn serve_with_session<P: Provider + 'static>(
     let session_id = Arc::new(session_id.unwrap_or_else(|| SessionId::new().to_string()));
 
     let socket_path = Arc::new(path.to_path_buf());
+    // Session-scoped registry of sandboxed child process groups. Killed on
+    // session shutdown so tool subprocesses (e.g. `shell.exec`) cannot outlive
+    // the daemon.
+    let child_registry = ChildRegistry::new();
 
     if ephemeral {
         // Accept exactly one connection, serve it to completion, then exit.
+        // `handle_connection` performs the session-scoped process-group
+        // cleanup in its ephemeral branch.
         let (stream, _) = listener.accept().await?;
         return handle_connection(
             stream,
@@ -84,6 +92,8 @@ pub async fn serve_with_session<P: Provider + 'static>(
             workspace,
             session_id,
             socket_path,
+            workspace_path,
+            child_registry,
         )
         .await;
     }
@@ -95,6 +105,8 @@ pub async fn serve_with_session<P: Provider + 'static>(
         let workspace = Arc::clone(&workspace);
         let session_id = Arc::clone(&session_id);
         let socket_path = Arc::clone(&socket_path);
+        let workspace_path = workspace_path.clone();
+        let child_registry = child_registry.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_connection(
                 stream,
@@ -105,6 +117,8 @@ pub async fn serve_with_session<P: Provider + 'static>(
                 workspace,
                 session_id,
                 socket_path,
+                workspace_path,
+                child_registry,
             )
             .await
             {
@@ -124,6 +138,8 @@ async fn handle_connection<P: Provider + 'static>(
     workspace: Arc<String>,
     session_id: Arc<String>,
     socket_path: Arc<PathBuf>,
+    workspace_path: Option<PathBuf>,
+    child_registry: ChildRegistry,
 ) -> Result<()> {
     // ── Handshake ──────────────────────────────────────────────────────────────
     let msg = forge_ipc::read_frame(&mut stream).await?;
@@ -216,8 +232,19 @@ async fn handle_connection<P: Provider + 'static>(
                         let session = Arc::clone(&session);
                         let provider = Arc::clone(&provider);
                         let approvals = Arc::clone(&pending_approvals);
+                        let workspace_path = workspace_path.clone();
+                        let child_registry = child_registry.clone();
                         tokio::spawn(async move {
-                            let result = run_turn(Arc::clone(&session), provider, m.text, approvals, vec!["**".to_string()], auto_approve).await;
+                            let result = run_turn(
+                                Arc::clone(&session),
+                                provider,
+                                m.text,
+                                approvals,
+                                vec!["**".to_string()],
+                                auto_approve,
+                                workspace_path,
+                                Some(child_registry),
+                            ).await;
                             if let Err(e) = &result {
                                 eprintln!("turn error: {e}");
                             }
@@ -258,7 +285,14 @@ async fn handle_connection<P: Provider + 'static>(
         }
     }
 
+    // In ephemeral mode the daemon exits after this connection, so we kill
+    // any still-live sandboxed process groups here. For long-running
+    // sessions, per-connection cleanup is handled by `SandboxedChild::drop`
+    // (which both killpg's and deregisters from the shared registry);
+    // the final `kill_all` runs when the daemon itself shuts down.
     if ephemeral {
+        child_registry.kill_all();
+
         if let Some(session_dir) = session.log_path.parent() {
             if let Err(e) =
                 archive_or_purge(session_dir, SessionPersistence::Ephemeral, &socket_path).await

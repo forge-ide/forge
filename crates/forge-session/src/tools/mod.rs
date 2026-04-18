@@ -1,17 +1,26 @@
 //! Tool dispatch: name → handler routing for orchestrator tool calls.
 
+use crate::sandbox::ChildRegistry;
 use forge_core::ApprovalPreview;
 
 pub mod fs_edit;
 pub mod fs_read;
 pub mod fs_write;
+pub mod shell_exec;
 
 pub use fs_edit::FsEditTool;
 pub use fs_read::FsReadTool;
 pub use fs_write::FsWriteTool;
+pub use shell_exec::ShellExecTool;
 
+#[derive(Default)]
 pub struct ToolCtx {
     pub allowed_paths: Vec<String>,
+    /// Workspace root for tools that spawn subprocesses (e.g. `shell.exec`).
+    pub workspace_root: Option<std::path::PathBuf>,
+    /// Registry of live sandboxed children — populated for tools that spawn
+    /// processes so session shutdown can kill them.
+    pub child_registry: Option<ChildRegistry>,
 }
 
 pub trait Tool: Send + Sync {
@@ -91,9 +100,7 @@ mod tests {
     }
 
     fn empty_ctx() -> ToolCtx {
-        ToolCtx {
-            allowed_paths: vec![],
-        }
+        ToolCtx::default()
     }
 
     #[test]
@@ -146,6 +153,7 @@ mod tests {
 
         let ctx = ToolCtx {
             allowed_paths: vec![allowed],
+            ..ToolCtx::default()
         };
         let result = d
             .dispatch(
@@ -181,6 +189,7 @@ mod tests {
 
         let ctx = ToolCtx {
             allowed_paths: vec![allowed],
+            ..ToolCtx::default()
         };
         let result = d
             .dispatch(
@@ -213,11 +222,101 @@ mod tests {
 
         let ctx = ToolCtx {
             allowed_paths: vec![allowed],
+            ..ToolCtx::default()
         };
         let result = d.dispatch("fs.read", &json!({"path": path}), &ctx).unwrap();
 
         assert_eq!(result["content"].as_str().unwrap(), body);
         assert_eq!(result["bytes"].as_u64().unwrap(), body.len() as u64);
         assert_eq!(result["sha256"].as_str().unwrap().len(), 64);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shell_exec_dispatch_runs_command_and_captures_stdout() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut d = ToolDispatcher::new();
+        d.register(Box::new(ShellExecTool)).unwrap();
+
+        let ctx = ToolCtx {
+            allowed_paths: vec![],
+            workspace_root: Some(dir.path().to_path_buf()),
+            child_registry: Some(crate::sandbox::ChildRegistry::new()),
+        };
+        let result = d
+            .dispatch(
+                "shell.exec",
+                &json!({"command": "/bin/sh", "args": ["-c", "echo hello-sandbox"], "timeout_ms": 5000}),
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result["exit_code"].as_i64(), Some(0), "result: {result}");
+        assert_eq!(
+            result["stdout"].as_str().unwrap().trim(),
+            "hello-sandbox",
+            "result: {result}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shell_exec_dispatch_works_inside_outer_tokio_runtime() {
+        // Regression: Tool::invoke is called from async context in run_turn.
+        // The implementation must not panic attempting to nest runtimes.
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut d = ToolDispatcher::new();
+        d.register(Box::new(ShellExecTool)).unwrap();
+
+        let ctx = ToolCtx {
+            allowed_paths: vec![],
+            workspace_root: Some(dir.path().to_path_buf()),
+            child_registry: Some(crate::sandbox::ChildRegistry::new()),
+        };
+
+        // Run dispatch on a blocking task so we're inside the runtime but
+        // block_in_place is permitted.
+        let result = d
+            .dispatch(
+                "shell.exec",
+                &json!({"command": "/bin/sh", "args": ["-c", "echo from-async"], "timeout_ms": 5000}),
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result["exit_code"].as_i64(), Some(0), "result: {result}");
+        assert_eq!(result["stdout"].as_str().unwrap().trim(), "from-async");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shell_exec_dispatch_clears_daemon_env_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("FORGE_SHELL_EXEC_CANARY", "nope");
+
+        let mut d = ToolDispatcher::new();
+        d.register(Box::new(ShellExecTool)).unwrap();
+
+        let ctx = ToolCtx {
+            allowed_paths: vec![],
+            workspace_root: Some(dir.path().to_path_buf()),
+            child_registry: Some(crate::sandbox::ChildRegistry::new()),
+        };
+        let result = d
+            .dispatch(
+                "shell.exec",
+                &json!({"command": "/usr/bin/env", "timeout_ms": 5000}),
+                &ctx,
+            )
+            .unwrap();
+        std::env::remove_var("FORGE_SHELL_EXEC_CANARY");
+
+        let stdout = result["stdout"].as_str().unwrap_or_default();
+        assert!(
+            !stdout.contains("FORGE_SHELL_EXEC_CANARY"),
+            "daemon env leaked into shell.exec:\n{stdout}"
+        );
     }
 }

@@ -12,8 +12,11 @@ use forge_providers::{ChatBlock, ChatChunk, ChatMessage, ChatRequest, ChatRole, 
 use futures::StreamExt;
 use tokio::sync::{oneshot, Mutex};
 
+use crate::sandbox::ChildRegistry;
 use crate::session::Session;
-use crate::tools::{FsEditTool, FsReadTool, FsWriteTool, ToolCtx, ToolDispatcher, ToolError};
+use crate::tools::{
+    FsEditTool, FsReadTool, FsWriteTool, ShellExecTool, ToolCtx, ToolDispatcher, ToolError,
+};
 
 /// Pending tool call approvals: maps ToolCallId → sender for the approval result.
 pub type PendingApprovals = Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>;
@@ -26,6 +29,7 @@ pub type PendingApprovals = Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>;
 /// Tool calls block until the client sends `ToolCallApproved` / `ToolCallRejected`
 /// through `pending_approvals`. `allowed_paths` is the set of glob patterns the
 /// agent is permitted to access via `fs.read`.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_turn<P: Provider>(
     session: Arc<Session>,
     provider: Arc<P>,
@@ -33,6 +37,8 @@ pub async fn run_turn<P: Provider>(
     pending_approvals: PendingApprovals,
     allowed_paths: Vec<String>,
     auto_approve: bool,
+    workspace_root: Option<std::path::PathBuf>,
+    child_registry: Option<ChildRegistry>,
 ) -> Result<()> {
     let msg_id = MessageId::new();
 
@@ -64,7 +70,14 @@ pub async fn run_turn<P: Provider>(
     dispatcher
         .register(Box::new(FsEditTool))
         .expect("fs.edit must register on a fresh dispatcher");
-    let ctx = ToolCtx { allowed_paths };
+    dispatcher
+        .register(Box::new(ShellExecTool))
+        .expect("shell.exec must register on a fresh dispatcher");
+    let ctx = ToolCtx {
+        allowed_paths,
+        workspace_root,
+        child_registry,
+    };
 
     run_request_loop(
         session,
