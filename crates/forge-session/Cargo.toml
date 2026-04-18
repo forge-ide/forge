@@ -24,6 +24,7 @@ thiserror = "1"
 tokio = { version = "1", features = ["net", "io-util", "fs", "rt-multi-thread", "macros", "sync"] }
 
 [dev-dependencies]
+similar = "2"
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "time", "net", "process"] }
 
