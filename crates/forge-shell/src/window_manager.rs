@@ -65,6 +65,8 @@ pub fn run() -> Result<()> {
         .manage(ProviderStatusCache::new(CACHE_TTL))
         .invoke_handler(tauri::generate_handler![
             dashboard::provider_status,
+            crate::dashboard_sessions::session_list,
+            crate::dashboard_sessions::open_session,
             crate::ipc::session_hello,
             crate::ipc::session_subscribe,
             crate::ipc::session_send_message,
