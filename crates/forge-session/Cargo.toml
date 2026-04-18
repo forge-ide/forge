@@ -19,6 +19,7 @@ forge-fs = { path = "../forge-fs" }
 forge-ipc = { path = "../forge-ipc" }
 forge-providers = { path = "../forge-providers" }
 futures = "0.3"
+libc = "0.2"
 serde_json = "1"
 thiserror = "1"
 tokio = { version = "1", features = ["net", "io-util", "fs", "rt-multi-thread", "macros", "sync"] }
@@ -35,3 +36,11 @@ path = "tests/headless_session/basic.rs"
 [[test]]
 name = "session_ended"
 path = "tests/session_ended.rs"
+
+[[test]]
+name = "archive"
+path = "tests/archive.rs"
+
+[[test]]
+name = "archive_shutdown"
+path = "tests/archive_shutdown.rs"

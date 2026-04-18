@@ -460,6 +460,7 @@ dependencies = [
  "forge-ipc",
  "forge-providers",
  "futures",
+ "libc",
  "serde_json",
  "similar",
  "tempfile",
