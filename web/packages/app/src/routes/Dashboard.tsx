@@ -1,5 +1,6 @@
 import type { Component } from 'solid-js';
 import { ProviderPanel } from './Dashboard/ProviderPanel';
+import { SessionsPanel } from './Dashboard/SessionsPanel';
 import './Dashboard.css';
 
 export const Dashboard: Component = () => {
@@ -7,6 +8,7 @@ export const Dashboard: Component = () => {
     <main class="dashboard">
       <h1 class="dashboard__title">Forge — Dashboard</h1>
       <ProviderPanel />
+      <SessionsPanel />
     </main>
   );
 };
