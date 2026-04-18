@@ -1,0 +1,26 @@
+.chat-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 320px;
+  padding: var(--sp-5);
+  gap: var(--sp-4);
+  background: var(--color-surface-1);
+  color: var(--color-text-primary);
+}
+
+.chat-pane__type-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-text-tertiary);
+}
+
+.chat-pane__placeholder {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-family: var(--font-body);
+  font-size: 13.5px;
+  line-height: 1.55;
+}

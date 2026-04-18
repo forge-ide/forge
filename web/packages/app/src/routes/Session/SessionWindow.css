@@ -1,0 +1,23 @@
+.session-window {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: var(--color-bg);
+  color: var(--color-text-primary);
+  font-family: var(--font-body);
+}
+
+.session-window__pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 320px;
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border-1);
+}
+
+.session-window__pane-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
