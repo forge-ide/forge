@@ -6,6 +6,8 @@ use forge_core::Result;
 use futures::stream::BoxStream;
 use serde::Deserialize;
 
+pub mod ollama;
+
 // ── Chat domain types ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
