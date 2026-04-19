@@ -12,15 +12,34 @@ use std::sync::{Arc, Mutex};
 
 /// Resource limits applied to sandboxed children via `setrlimit(2)`.
 ///
-/// Defaults: 30 s of CPU time, 512 MiB of address space. These are conservative
-/// values intended for short-lived tool invocations; callers should override
-/// via [`SandboxedCommand::with_config`] for workloads that need more.
+/// Defaults are conservative values intended for short-lived tool invocations;
+/// callers should override via [`SandboxedCommand::with_config`] for workloads
+/// that need more:
+///
+/// - `cpu_seconds`: 30 s of CPU time (SIGXCPU on overflow).
+/// - `address_space_bytes`: 512 MiB of virtual memory.
+/// - `max_processes`: 4096 processes for the calling uid (blocks fork-bombs).
+/// - `max_open_files`: 256 file descriptors (blocks fd-exhaustion).
+/// - `max_file_size_bytes`: 100 MiB per file written (SIGXFSZ on overflow;
+///   blocks cat-to-disk attacks).
 #[derive(Debug, Clone, Copy)]
 pub struct SandboxConfig {
     /// `RLIMIT_CPU` soft limit in seconds. Exceeding this sends `SIGXCPU`.
     pub cpu_seconds: u64,
     /// `RLIMIT_AS` soft limit in bytes (address space ceiling).
     pub address_space_bytes: u64,
+    /// `RLIMIT_NPROC` soft limit — **maximum processes for the calling
+    /// real-uid**, not per-sandbox. Because Forge's daemon typically shares
+    /// its uid with the user's desktop session (or CI's test harness), this
+    /// cap is tuned to stop fork bombs — which saturate any cap within
+    /// milliseconds — while leaving enough headroom for the uid's baseline
+    /// process count. Per-sandbox isolation would require cgroups and is
+    /// tracked as follow-up work in the F-055 finding.
+    pub max_processes: u64,
+    /// `RLIMIT_NOFILE` soft limit — max open file descriptors.
+    pub max_open_files: u64,
+    /// `RLIMIT_FSIZE` soft limit in bytes. Writes past this cap raise `SIGXFSZ`.
+    pub max_file_size_bytes: u64,
 }
 
 impl Default for SandboxConfig {
@@ -28,6 +47,12 @@ impl Default for SandboxConfig {
         Self {
             cpu_seconds: 30,
             address_space_bytes: 512 * 1024 * 1024,
+            // 4096 is the audit's fork-bomb-prevention intent with enough
+            // headroom for a realistic shared-uid process table. See the
+            // F-055 doc comment on `max_processes` above.
+            max_processes: 4096,
+            max_open_files: 256,
+            max_file_size_bytes: 100 * 1024 * 1024,
         }
     }
 }
@@ -148,6 +173,9 @@ mod imp {
             // setrlimit values are captured into the closure.
             let cpu_seconds = config.cpu_seconds;
             let address_space_bytes = config.address_space_bytes;
+            let max_processes = config.max_processes;
+            let max_open_files = config.max_open_files;
+            let max_file_size_bytes = config.max_file_size_bytes;
             // SAFETY: `pre_exec` runs between fork and exec. We only call
             // async-signal-safe libc functions (`setsid`, `setrlimit`) and
             // never touch Rust allocation or locks.
@@ -158,6 +186,9 @@ mod imp {
                     }
                     apply_rlimit(libc::RLIMIT_CPU, cpu_seconds)?;
                     apply_rlimit(libc::RLIMIT_AS, address_space_bytes)?;
+                    apply_rlimit(libc::RLIMIT_NPROC, max_processes)?;
+                    apply_rlimit(libc::RLIMIT_NOFILE, max_open_files)?;
+                    apply_rlimit(libc::RLIMIT_FSIZE, max_file_size_bytes)?;
                     Ok(())
                 });
             }
@@ -312,6 +343,18 @@ mod tests {
     use std::time::Duration;
     use tokio::io::AsyncReadExt;
     use tokio::process::Command as TokioCommand;
+
+    #[test]
+    fn default_config_includes_nproc_nofile_fsize() {
+        let cfg = SandboxConfig::default();
+        assert_eq!(cfg.max_processes, 4096, "RLIMIT_NPROC default");
+        assert_eq!(cfg.max_open_files, 256, "RLIMIT_NOFILE default");
+        assert_eq!(
+            cfg.max_file_size_bytes,
+            100 * 1024 * 1024,
+            "RLIMIT_FSIZE default (100 MiB)"
+        );
+    }
 
     #[tokio::test]
     async fn env_whitelist_excludes_secret_but_keeps_path() {
@@ -476,6 +519,94 @@ mod tests {
             "expected SIGKILL, got {status:?}"
         );
         assert!(!process_alive(pgid));
+    }
+
+    #[tokio::test]
+    async fn rlimits_bound_child_via_setrlimit() {
+        // Regression for F-055: the sandbox must call setrlimit for
+        // NPROC / NOFILE / FSIZE so a single approved tool call cannot
+        // fork-bomb, exhaust fds, or fill the disk. We probe the
+        // kernel-visible limits from inside the sandbox — `ulimit`
+        // reads the post-setrlimit values, giving us direct evidence
+        // that `pre_exec` actually applied them.
+        //
+        // If any of the three `apply_rlimit` calls regress out of
+        // `pre_exec`, this test fails: the child's `ulimit` will
+        // instead report the daemon-inherited defaults.
+        //
+        // We intentionally do not drive a *behavioral* fork-bomb /
+        // fd-exhaustion / write-overflow test here. RLIMIT_NPROC is
+        // per-RUID rather than per-sandbox, so behavioral coverage
+        // would be flaky under `cargo test`'s parallel harness and
+        // shell-variant-dependent. The kernel enforces the bounds
+        // automatically once setrlimit has run; this test is the
+        // load-bearing one.
+        let tmp = tempfile::tempdir().unwrap();
+        // Probe values are deliberately distinct from Default so the test
+        // would fail if pre_exec stopped applying setrlimit. NPROC stays
+        // above typical CI-runner-uid process counts while distinct from
+        // the default 4096.
+        //
+        // Read rlimits via /proc/self/limits rather than `ulimit` — the
+        // latter varies across shells (Ubuntu's /bin/sh = dash) and has
+        // produced inconsistent output on GHA runners. /proc/self/limits
+        // is kernel-rendered, shell-independent.
+        let config = SandboxConfig {
+            max_processes: 8192,
+            max_open_files: 42,
+            max_file_size_bytes: 4096,
+            ..SandboxConfig::default()
+        };
+        let mut sb = SandboxedCommand::with_config("/bin/sh", tmp.path(), config);
+        sb.command_mut()
+            .arg("-c")
+            .arg("cat /proc/self/limits")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+
+        let mut child = sb.spawn().unwrap().into_child();
+        let mut stdout = child.stdout.take().unwrap();
+        let mut out = String::new();
+        stdout.read_to_string(&mut out).await.unwrap();
+        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .expect("child hung")
+            .unwrap();
+        assert!(status.success(), "cat exited non-zero: {status:?}");
+
+        // /proc/self/limits has the shape:
+        //   Limit                     Soft Limit           Hard Limit           Units
+        //   Max processes             8192                 8192                 processes
+        //   Max open files            42                   42                   files
+        //   Max file size             4096                 4096                 bytes
+        // (plus other rows we don't care about)
+        let soft_limit_for = |name: &str| -> Option<String> {
+            out.lines().find(|l| l.starts_with(name)).and_then(|l| {
+                // Fields after the name are whitespace-separated. Soft = idx 0
+                // in the remainder; but `name` itself contains spaces (e.g.
+                // "Max processes"), so split on whitespace and take column 2.
+                let cols: Vec<&str> = l.split_whitespace().collect();
+                // ["Max", "processes", "<soft>", "<hard>", "<units>"]
+                let word_count = name.split_whitespace().count();
+                cols.get(word_count).map(|s| s.to_string())
+            })
+        };
+
+        assert_eq!(
+            soft_limit_for("Max processes").as_deref(),
+            Some("8192"),
+            "RLIMIT_NPROC not applied: {out}"
+        );
+        assert_eq!(
+            soft_limit_for("Max open files").as_deref(),
+            Some("42"),
+            "RLIMIT_NOFILE not applied: {out}"
+        );
+        assert_eq!(
+            soft_limit_for("Max file size").as_deref(),
+            Some("4096"),
+            "RLIMIT_FSIZE not applied: {out}"
+        );
     }
 
     fn process_alive(pid: i32) -> bool {
