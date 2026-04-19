@@ -1,18 +1,14 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { invokeMock, listenMock } = vi.hoisted(() => ({
-  invokeMock: vi.fn(),
+const { listenMock } = vi.hoisted(() => ({
   listenMock: vi.fn(),
-}));
-
-vi.mock('@tauri-apps/api/core', () => ({
-  invoke: invokeMock,
 }));
 
 vi.mock('@tauri-apps/api/event', () => ({
   listen: listenMock,
 }));
 
+import { setInvokeForTesting } from '../lib/tauri';
 import {
   sessionHello,
   sessionSubscribe,
@@ -24,9 +20,16 @@ import {
 } from './session';
 
 describe('session ipc wrappers', () => {
+  let invokeMock: ReturnType<typeof vi.fn>;
+
   beforeEach(() => {
-    invokeMock.mockReset();
+    invokeMock = vi.fn();
+    setInvokeForTesting(invokeMock as never);
     listenMock.mockReset();
+  });
+
+  afterEach(() => {
+    setInvokeForTesting(null);
   });
 
   it('sessionHello invokes `session_hello` with sessionId only', async () => {
@@ -119,5 +122,81 @@ describe('session ipc wrappers', () => {
 
     expect(handler).toHaveBeenCalledWith(payload);
     expect(off).toBe(unlisten);
+  });
+});
+
+// F-073: the test seam contract — `setInvokeForTesting()` must intercept
+// commands routed through the typed helpers in `ipc/session.ts`. This guards
+// against regressions where a helper bypasses the wrapper by importing
+// `invoke` directly from the underlying Tauri API.
+describe('setInvokeForTesting intercepts ipc/session commands', () => {
+  afterEach(() => {
+    setInvokeForTesting(null);
+  });
+
+  it('routes sessionHello through the wrapper seam', async () => {
+    const spy = vi.fn().mockResolvedValue({
+      session_id: 'seam',
+      workspace: '/ws',
+      started_at: '2026-04-19T00:00:00Z',
+      event_seq: 0,
+      schema_version: 1,
+    });
+    setInvokeForTesting(spy as never);
+
+    await sessionHello('seam');
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith('session_hello', { sessionId: 'seam' });
+  });
+
+  it('routes sessionSubscribe through the wrapper seam', async () => {
+    const spy = vi.fn().mockResolvedValue(undefined);
+    setInvokeForTesting(spy as never);
+
+    await sessionSubscribe('seam', 7);
+
+    expect(spy).toHaveBeenCalledWith('session_subscribe', {
+      sessionId: 'seam',
+      since: 7,
+    });
+  });
+
+  it('routes sessionSendMessage through the wrapper seam', async () => {
+    const spy = vi.fn().mockResolvedValue(undefined);
+    setInvokeForTesting(spy as never);
+
+    await sessionSendMessage('seam', 'hi');
+
+    expect(spy).toHaveBeenCalledWith('session_send_message', {
+      sessionId: 'seam',
+      text: 'hi',
+    });
+  });
+
+  it('routes sessionApproveTool through the wrapper seam', async () => {
+    const spy = vi.fn().mockResolvedValue(undefined);
+    setInvokeForTesting(spy as never);
+
+    await sessionApproveTool('seam', 'tc-1', 'ThisFile');
+
+    expect(spy).toHaveBeenCalledWith('session_approve_tool', {
+      sessionId: 'seam',
+      toolCallId: 'tc-1',
+      scope: 'ThisFile',
+    });
+  });
+
+  it('routes sessionRejectTool through the wrapper seam', async () => {
+    const spy = vi.fn().mockResolvedValue(undefined);
+    setInvokeForTesting(spy as never);
+
+    await sessionRejectTool('seam', 'tc-2', 'no');
+
+    expect(spy).toHaveBeenCalledWith('session_reject_tool', {
+      sessionId: 'seam',
+      toolCallId: 'tc-2',
+      reason: 'no',
+    });
   });
 });

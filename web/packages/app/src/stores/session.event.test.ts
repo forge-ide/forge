@@ -8,9 +8,6 @@ const { listenMock, unlistenMock } = vi.hoisted(() => ({
 vi.mock('@tauri-apps/api/event', () => ({
   listen: listenMock,
 }));
-vi.mock('@tauri-apps/api/core', () => ({
-  invoke: vi.fn(),
-}));
 
 import type { SessionId } from '@forge/ipc';
 import {
