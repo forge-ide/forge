@@ -125,6 +125,11 @@
   transform: translateY(1px);
 }
 
+.provider-panel__btn:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
+}
+
 .provider-panel__btn--ghost {
   border-color: var(--color-border-1);
   text-align: left;
