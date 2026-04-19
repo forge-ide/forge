@@ -1,17 +1,59 @@
 //! Ollama provider — NDJSON streaming against a local Ollama daemon.
 //!
 //! No credentials; the daemon is expected at `http://127.0.0.1:11434` by default.
+//!
+//! # Streaming bounds
+//!
+//! A local squatter on port 11434 (race at startup, Ollama crash, malicious
+//! binary) controls the byte stream we consume. The decoder is hardened with
+//! three independent bounds — per-line byte cap, inter-chunk idle timeout, and
+//! overall wall-clock timeout — any of which terminates the stream with a
+//! typed [`ChatChunk::Error`] rather than panicking or growing unbounded.
 
-use crate::{ChatChunk, ChatMessage, ChatRequest, Provider};
+use std::time::Duration;
+
+use crate::{ChatChunk, ChatMessage, ChatRequest, Provider, StreamErrorKind};
 use forge_core::Result;
 use futures::stream::{BoxStream, StreamExt};
 
 pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434";
 
+/// Per-line NDJSON byte cap (1 MiB). Real Ollama chunks are <100 KB.
+pub const DEFAULT_MAX_LINE_BYTES: usize = 1 << 20;
+/// Wall-clock gap between consecutive chunks. 30 s is generous for local
+/// models but still bounds half-open and slow-drip peers.
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Wall-clock cap on the entire stream. 10 min accommodates slow local
+/// inference; pathological runs can be re-attempted by the user.
+pub const DEFAULT_WALL_CLOCK_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Bounds that make the NDJSON decoder DoS-resistant against a hostile peer.
+#[derive(Debug, Clone, Copy)]
+pub struct StreamConfig {
+    pub max_line_bytes: usize,
+    pub idle_timeout: Duration,
+    pub wall_clock_timeout: Duration,
+}
+
+impl StreamConfig {
+    pub const DEFAULT: StreamConfig = StreamConfig {
+        max_line_bytes: DEFAULT_MAX_LINE_BYTES,
+        idle_timeout: DEFAULT_IDLE_TIMEOUT,
+        wall_clock_timeout: DEFAULT_WALL_CLOCK_TIMEOUT,
+    };
+}
+
+impl Default for StreamConfig {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 pub struct OllamaProvider {
     base_url: String,
     model: String,
     client: reqwest::Client,
+    stream_cfg: StreamConfig,
 }
 
 impl OllamaProvider {
@@ -20,11 +62,28 @@ impl OllamaProvider {
             base_url: base_url.into(),
             model: model.into(),
             client: reqwest::Client::new(),
+            stream_cfg: StreamConfig::DEFAULT,
         }
     }
 
     pub fn with_default_url(model: impl Into<String>) -> Self {
         Self::new(DEFAULT_BASE_URL, model)
+    }
+
+    /// Construct a provider with explicit streaming bounds. Primarily a test
+    /// affordance; production code should use [`OllamaProvider::new`].
+    #[doc(hidden)]
+    pub fn with_config(
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+        stream_cfg: StreamConfig,
+    ) -> Self {
+        Self {
+            base_url: base_url.into(),
+            model: model.into(),
+            client: reqwest::Client::new(),
+            stream_cfg,
+        }
     }
 
     pub async fn list_models(&self) -> Result<Vec<String>> {
@@ -77,6 +136,7 @@ impl Provider for OllamaProvider {
             "stream": true,
         });
         let client = self.client.clone();
+        let cfg = self.stream_cfg;
 
         async move {
             let resp = client
@@ -94,59 +154,130 @@ impl Provider for OllamaProvider {
                 );
             }
 
-            let byte_stream = resp.bytes_stream();
-
-            // Buffered NDJSON decoder: accumulate bytes, flush complete lines per chunk.
-            let state = (
-                byte_stream,
-                String::new(),
-                std::collections::VecDeque::<ChatChunk>::new(),
-                false,
-            );
-            let chunk_stream = futures::stream::unfold(
-                state,
-                |(mut bytes, mut buf, mut pending, mut upstream_done)| async move {
-                    loop {
-                        if let Some(chunk) = pending.pop_front() {
-                            return Some((chunk, (bytes, buf, pending, upstream_done)));
-                        }
-
-                        if upstream_done {
-                            // Flush any trailing partial line as a final parse attempt.
-                            if !buf.is_empty() {
-                                let line = std::mem::take(&mut buf);
-                                if let Some(c) = parse_line(line.trim()) {
-                                    return Some((c, (bytes, buf, pending, upstream_done)));
-                                }
-                            }
-                            return None;
-                        }
-
-                        match bytes.next().await {
-                            Some(Ok(b)) => {
-                                buf.push_str(&String::from_utf8_lossy(&b));
-                                while let Some(pos) = buf.find('\n') {
-                                    let line: String = buf.drain(..=pos).collect();
-                                    let trimmed = line.trim();
-                                    if trimmed.is_empty() {
-                                        continue;
-                                    }
-                                    if let Some(c) = parse_line(trimmed) {
-                                        pending.push_back(c);
-                                    }
-                                }
-                            }
-                            Some(Err(_)) | None => {
-                                upstream_done = true;
-                            }
-                        }
-                    }
-                },
-            );
-
-            Ok(Box::pin(chunk_stream) as BoxStream<'static, ChatChunk>)
+            Ok(decode_ndjson_stream(resp.bytes_stream(), cfg))
         }
     }
+}
+
+/// Decode a byte stream of NDJSON into [`ChatChunk`]s under the configured
+/// bounds. Terminal failures (cap exceeded, idle/wall-clock elapsed, transport
+/// error) surface as a single [`ChatChunk::Error`] and close the stream. This
+/// helper is factored out to keep the `chat()` body readable and to give
+/// future changes (e.g. F-046's reqwest client timeouts) a single seam to
+/// extend without reshaping the decoder.
+fn decode_ndjson_stream<S, E>(byte_stream: S, cfg: StreamConfig) -> BoxStream<'static, ChatChunk>
+where
+    S: futures::Stream<Item = std::result::Result<bytes::Bytes, E>> + Send + 'static,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    use tokio_util::codec::{FramedRead, LinesCodec};
+    use tokio_util::io::StreamReader;
+
+    // Adapt reqwest's `bytes_stream()` to an `AsyncRead`, then decode bounded
+    // NDJSON lines. `LinesCodec::new_with_max_length` returns
+    // `MaxLineLengthExceeded` cleanly instead of growing the buffer past the cap.
+    // `reqwest::Response::bytes_stream()` is `!Unpin`, so pin the adapter chain
+    // once here; `FramedRead` requires `AsyncRead + Unpin`.
+    let pinned = Box::pin(byte_stream.map(|r| r.map_err(std::io::Error::other)));
+    let reader = StreamReader::new(pinned);
+    let framed = FramedRead::new(reader, LinesCodec::new_with_max_length(cfg.max_line_bytes));
+
+    let deadline = tokio::time::Instant::now() + cfg.wall_clock_timeout;
+    let state = (framed, cfg, deadline, false);
+
+    let chunks = futures::stream::unfold(
+        state,
+        |(mut framed, cfg, deadline, mut terminated)| async move {
+            if terminated {
+                return None;
+            }
+
+            loop {
+                let now = tokio::time::Instant::now();
+                if now >= deadline {
+                    terminated = true;
+                    return Some((
+                        ChatChunk::Error {
+                            kind: StreamErrorKind::WallClockTimeout,
+                            message: format!(
+                                "ollama stream exceeded wall-clock budget of {:?}",
+                                cfg.wall_clock_timeout
+                            ),
+                        },
+                        (framed, cfg, deadline, terminated),
+                    ));
+                }
+
+                // Idle timeout between consecutive lines. Whichever expires
+                // first — the idle window or the wall-clock deadline — wins.
+                let idle = cfg.idle_timeout.min(deadline - now);
+                match tokio::time::timeout(idle, framed.next()).await {
+                    Err(_) => {
+                        terminated = true;
+                        let kind = if tokio::time::Instant::now() >= deadline {
+                            StreamErrorKind::WallClockTimeout
+                        } else {
+                            StreamErrorKind::IdleTimeout
+                        };
+                        let message = match kind {
+                            StreamErrorKind::WallClockTimeout => format!(
+                                "ollama stream exceeded wall-clock budget of {:?}",
+                                cfg.wall_clock_timeout
+                            ),
+                            _ => format!("ollama stream idle for more than {:?}", cfg.idle_timeout),
+                        };
+                        return Some((
+                            ChatChunk::Error { kind, message },
+                            (framed, cfg, deadline, terminated),
+                        ));
+                    }
+                    Ok(None) => return None,
+                    Ok(Some(Err(e))) => {
+                        // Decoder errors are terminal — critically,
+                        // `MaxLineLengthExceeded` must NOT be swallowed; that
+                        // would let `FramedRead` keep reading-and-discarding
+                        // bytes from a hostile peer until a newline finally
+                        // arrives. Emit the typed error and stop.
+                        use tokio_util::codec::LinesCodecError;
+                        let (kind, message) = match e {
+                            LinesCodecError::MaxLineLengthExceeded => (
+                                StreamErrorKind::LineTooLong,
+                                format!(
+                                    "ollama NDJSON line exceeded cap of {} bytes",
+                                    cfg.max_line_bytes
+                                ),
+                            ),
+                            LinesCodecError::Io(err) => (
+                                StreamErrorKind::Transport,
+                                format!("ollama stream transport error: {err}"),
+                            ),
+                        };
+                        terminated = true;
+                        return Some((
+                            ChatChunk::Error { kind, message },
+                            (framed, cfg, deadline, terminated),
+                        ));
+                    }
+                    Ok(Some(Ok(line))) => {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        if let Some(chunk) = parse_line(trimmed) {
+                            return Some((chunk, (framed, cfg, deadline, terminated)));
+                        }
+                        // Unparseable but valid-shaped line — keep reading.
+                        continue;
+                    }
+                }
+            }
+        },
+    );
+
+    // `.fuse()` turns polls-after-`None` into more `None`s instead of the
+    // `unfold` panic, which matters for callers that poll once more after
+    // the terminal error chunk.
+    Box::pin(chunks.fuse())
 }
 
 fn truncate(s: &str, max: usize) -> String {

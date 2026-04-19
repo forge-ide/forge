@@ -1,7 +1,11 @@
 //! Integration tests for `OllamaProvider` using a mocked `reqwest` server.
 
-use forge_providers::ollama::OllamaProvider;
-use forge_providers::{ChatBlock, ChatChunk, ChatMessage, ChatRequest, ChatRole, Provider};
+use std::time::Duration;
+
+use forge_providers::ollama::{OllamaProvider, StreamConfig};
+use forge_providers::{
+    ChatBlock, ChatChunk, ChatMessage, ChatRequest, ChatRole, Provider, StreamErrorKind,
+};
 use futures::StreamExt;
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -93,6 +97,159 @@ async fn chat_maps_http_errors() {
         msg.contains("model not found"),
         "error should include body: {msg}"
     );
+}
+
+/// A peer that refuses to emit a newline must not grow the decoder buffer
+/// without bound; the stream must terminate with a typed error.
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_oversized_line_yields_typed_error_and_terminates() {
+    let server = MockServer::start().await;
+
+    // 10 MiB of non-newline bytes (matches the issue reproduction); the
+    // decoder must not accumulate past its cap, which in this test is 64 KiB.
+    let oversized: String = "A".repeat(10 * 1024 * 1024);
+
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(oversized))
+        .mount(&server)
+        .await;
+
+    // Sub-default line cap keeps the test fast without changing default semantics.
+    let cfg = StreamConfig {
+        max_line_bytes: 64 * 1024,
+        idle_timeout: Duration::from_secs(5),
+        wall_clock_timeout: Duration::from_secs(30),
+    };
+    let provider = OllamaProvider::with_config(server.uri(), "llama3", cfg);
+    let req = ChatRequest {
+        system: None,
+        messages: vec![user_msg("hi")],
+    };
+    let mut stream = provider.chat(req).await.expect("chat call succeeds");
+
+    let mut chunks = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        chunks.push(chunk);
+    }
+
+    let last = chunks.last().expect("at least one chunk (the error)");
+    assert!(
+        matches!(
+            last,
+            ChatChunk::Error {
+                kind: StreamErrorKind::LineTooLong,
+                ..
+            }
+        ),
+        "expected terminal LineTooLong error, got: {chunks:?}"
+    );
+    // Stream is closed after the error.
+    assert!(
+        stream.next().await.is_none(),
+        "stream must terminate after a fatal error"
+    );
+}
+
+/// A peer that opens a response, emits one line, then stalls forever must be
+/// cut by the per-chunk idle timer, not block the session indefinitely.
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_idle_timeout_yields_typed_error_and_terminates() {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    // Bind a raw TCP server we fully control (wiremock can't stall mid-stream).
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    // Accept one connection, send headers + one NDJSON line, then hold the
+    // socket open without writing anything further.
+    let server_task = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+
+        // Drain enough of the request to let the client's send() complete.
+        let mut buf = [0u8; 4096];
+        let mut total = Vec::new();
+        loop {
+            let n = match tokio::time::timeout(
+                Duration::from_millis(500),
+                tokio::io::AsyncReadExt::read(&mut sock, &mut buf),
+            )
+            .await
+            {
+                Ok(Ok(0)) | Err(_) => break,
+                Ok(Ok(n)) => n,
+                Ok(Err(_)) => break,
+            };
+            total.extend_from_slice(&buf[..n]);
+            if total.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+
+        let headers = b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n";
+        sock.write_all(headers).await.unwrap();
+
+        // First (and only) NDJSON chunk: one short line followed by \n.
+        let ndjson = br#"{"message":{"role":"assistant","content":"hi"},"done":false}"#;
+        let chunk_header = format!("{:x}\r\n", ndjson.len() + 1);
+        sock.write_all(chunk_header.as_bytes()).await.unwrap();
+        sock.write_all(ndjson).await.unwrap();
+        sock.write_all(b"\n\r\n").await.unwrap();
+        sock.flush().await.unwrap();
+
+        // Hold the socket open indefinitely — never send another chunk.
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        drop(sock);
+    });
+
+    let cfg = StreamConfig {
+        max_line_bytes: 1 << 20,
+        idle_timeout: Duration::from_millis(150),
+        wall_clock_timeout: Duration::from_secs(30),
+    };
+    let provider = OllamaProvider::with_config(format!("http://{addr}"), "llama3", cfg);
+    let req = ChatRequest {
+        system: None,
+        messages: vec![user_msg("hi")],
+    };
+
+    // The chat() call itself must not hang after headers arrive.
+    let stream_fut = provider.chat(req);
+    let mut stream = tokio::time::timeout(Duration::from_secs(5), stream_fut)
+        .await
+        .expect("chat() must not hang after headers arrive")
+        .expect("chat call succeeds");
+
+    let collect_fut = async {
+        let mut chunks = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            chunks.push(chunk);
+        }
+        chunks
+    };
+    let chunks = tokio::time::timeout(Duration::from_secs(5), collect_fut)
+        .await
+        .expect("stream must terminate via idle timeout, not hang");
+
+    // First chunk is the real text delta; last must be the typed idle-timeout error.
+    assert!(
+        matches!(&chunks[0], ChatChunk::TextDelta(s) if s == "hi"),
+        "first chunk should be the real delta, got: {chunks:?}"
+    );
+    let last = chunks.last().unwrap();
+    assert!(
+        matches!(
+            last,
+            ChatChunk::Error {
+                kind: StreamErrorKind::IdleTimeout,
+                ..
+            }
+        ),
+        "expected terminal IdleTimeout error, got: {chunks:?}"
+    );
+
+    server_task.abort();
 }
 
 #[tokio::test(flavor = "multi_thread")]

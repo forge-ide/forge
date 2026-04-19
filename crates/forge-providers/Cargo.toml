@@ -5,16 +5,18 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
+bytes = "1"
 dirs = "6.0.0"
 forge-core = { path = "../forge-core" }
 futures = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["fs", "rt", "macros"] }
+tokio = { version = "1", features = ["fs", "rt", "macros", "time"] }
+tokio-util = { version = "0.7", features = ["codec", "io"] }
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time"] }
 futures = "0.3"
 wiremock = "0.6"
