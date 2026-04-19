@@ -42,4 +42,16 @@ pub enum SessionError {
     /// the operator rather than silently retrying.
     #[error("event log flush failed: {0}")]
     EventLogFlush(#[source] ForgeError),
+
+    /// F-077: the per-session aggregate byte budget tracked by
+    /// [`crate::byte_budget::ByteBudget`] was exhausted at the
+    /// `ToolDispatcher` boundary. The tool was **not** executed; the
+    /// caller should surface this as a final-turn outcome rather than
+    /// retrying. Inner fields carry the consumed and limit byte counts
+    /// so an operator parsing `Display` can quote the breach precisely
+    /// (the per-op caps in `forge-fs` / `forge-providers` use distinct
+    /// error shapes; collapsing them here would erase the aggregate
+    /// vs. per-op distinction documented in `docs/dev/security.md`).
+    #[error("session byte budget exceeded: {consumed}/{limit} bytes")]
+    ByteBudgetExceeded { consumed: u64, limit: u64 },
 }

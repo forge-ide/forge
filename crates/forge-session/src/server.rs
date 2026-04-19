@@ -216,6 +216,11 @@ pub async fn serve_with_session<P: Provider + 'static>(
     // session shutdown so tool subprocesses (e.g. `shell.exec`) cannot outlive
     // the daemon.
     let child_registry = ChildRegistry::new();
+    // F-077: per-session aggregate byte budget. One `ByteBudget` is shared
+    // across every `run_turn` invocation in this session so chained tool
+    // calls collectively decrement against the same ceiling. Default is
+    // 500 MiB (`ByteBudget::default`); see `docs/dev/security.md`.
+    let byte_budget = Arc::new(crate::byte_budget::ByteBudget::default());
 
     if ephemeral {
         // Accept exactly one connection, serve it to completion, then exit.
@@ -234,6 +239,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
             workspace_path,
             allowed_paths,
             child_registry,
+            byte_budget,
         )
         .await;
     }
@@ -287,6 +293,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
                 let workspace_path = workspace_path.clone();
                 let allowed_paths = Arc::clone(&allowed_paths);
                 let child_registry = child_registry.clone();
+                let byte_budget = Arc::clone(&byte_budget);
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(
                         stream,
@@ -300,6 +307,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
                         workspace_path,
                         allowed_paths,
                         child_registry,
+                        byte_budget,
                     )
                     .await
                     {
@@ -348,6 +356,7 @@ async fn handle_connection<P: Provider + 'static>(
     workspace_path: Option<PathBuf>,
     allowed_paths: Arc<Vec<String>>,
     child_registry: ChildRegistry,
+    byte_budget: Arc<crate::byte_budget::ByteBudget>,
 ) -> Result<()> {
     // ── Handshake ──────────────────────────────────────────────────────────────
     let msg = forge_ipc::read_frame(&mut stream).await?;
@@ -443,6 +452,7 @@ async fn handle_connection<P: Provider + 'static>(
                         let workspace_path = workspace_path.clone();
                         let allowed_paths = Arc::clone(&allowed_paths);
                         let child_registry = child_registry.clone();
+                        let byte_budget = Arc::clone(&byte_budget);
                         tokio::spawn(async move {
                             let result = run_turn(
                                 Arc::clone(&session),
@@ -453,6 +463,7 @@ async fn handle_connection<P: Provider + 'static>(
                                 auto_approve,
                                 workspace_path,
                                 Some(child_registry),
+                                Some(byte_budget),
                             ).await;
                             if let Err(e) = &result {
                                 eprintln!("turn error: {e}");

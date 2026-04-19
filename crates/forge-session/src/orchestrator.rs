@@ -12,6 +12,7 @@ use forge_providers::{ChatBlock, ChatChunk, ChatMessage, ChatRequest, ChatRole, 
 use futures::StreamExt;
 use tokio::sync::{oneshot, Mutex};
 
+use crate::byte_budget::ByteBudget;
 use crate::sandbox::ChildRegistry;
 use crate::session::Session;
 use crate::tools::{
@@ -49,6 +50,7 @@ pub async fn run_turn<P: Provider>(
     auto_approve: bool,
     workspace_root: Option<std::path::PathBuf>,
     child_registry: Option<ChildRegistry>,
+    byte_budget: Option<Arc<ByteBudget>>,
 ) -> Result<()> {
     let msg_id = MessageId::new();
 
@@ -87,6 +89,7 @@ pub async fn run_turn<P: Provider>(
         allowed_paths,
         workspace_root,
         child_registry,
+        byte_budget,
     };
 
     run_request_loop(

@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod byte_budget;
 pub mod error;
 pub mod orchestrator;
 pub mod pid_file;

@@ -49,11 +49,38 @@ Notable directives:
 
 If a future feature embeds a third-party renderer (e.g. a Markdown sandbox iframe, a remote LSP UI, or a model-hosted preview), expect to add a narrow `frame-src` allow-list and likely a `connect-src` host. Update both `tauri.conf.json` and `index.html` in the same change and re-run the Playwright harness — silently mismatched policies were the entire premise of H9.
 
+## DoS ceilings (F-077)
+
+Forge layers several byte-size and resource caps to bound any single tool call's memory cost. Each cap is correct in isolation; the table below makes the **unit** of each cap explicit so an operator can reason about the worst-case in-memory footprint of a session without cross-referencing seven files.
+
+| Cap | Unit | Default | Source | Protects against |
+|---|---|---|---|---|
+| `forge_fs::Limits::max_read_bytes` | per-`fs.read` call | 10 MiB | `crates/forge-fs/src/limits.rs` | one `fs.read` blowing up the daemon's heap on a giant log/blob |
+| `forge_fs::Limits::max_write_bytes` | per-`fs.write` / per-`fs.edit` call | 10 MiB | `crates/forge-fs/src/limits.rs` | one tool-issued write filling the disk or RAM |
+| `forge_providers::ollama::DEFAULT_MAX_LINE_BYTES` | per-NDJSON-line on the SSE/JSON stream | 1 MiB | `crates/forge-providers/src/ollama.rs` | a malformed/giant JSON event from a malicious or buggy provider |
+| `list_models` body cap | per-HTTP-response from `/api/tags` | 1 MiB | `crates/forge-providers/src/ollama.rs` | a model registry handshake returning a multi-GiB body |
+| `forge_core::event_log::MAX_LINE_BYTES` | per-line in the on-disk session log | 4 MiB | `crates/forge-core/src/event_log.rs`, `transcript.rs` | log replay loading a single oversized event into memory |
+| `RLIMIT_FSIZE` | per-`shell.exec` child process | 100 MiB | `crates/forge-session/src/sandbox.rs` (`SandboxConfig`) | "cat to disk" attacks (kernel raises SIGXFSZ at the limit) |
+| `RLIMIT_NOFILE` | per-`shell.exec` child process | 256 fds | `crates/forge-session/src/sandbox.rs` (`SandboxConfig`) | fd-table exhaustion inside a sandboxed tool |
+| `RLIMIT_AS` / `RLIMIT_CPU` / `RLIMIT_NPROC` | per-`shell.exec` child process | see "Sandbox resource limits" above | `crates/forge-session/src/sandbox.rs` | covered in the dedicated sandbox section |
+| **`ByteBudget`** | **per session, aggregate across every tool call** | **500 MiB** | `crates/forge-session/src/byte_budget.rs` | **chained-tool exhaustion (e.g. 1000× `fs.read` of small files summing past per-op caps)** |
+
+The numeric values differ on purpose. The `forge-fs` 10 MiB cap is sized for "agents reading source / config / lockfiles" without tripping on a `pnpm-lock.yaml` or a generated SQL dump. The provider 1 MiB / 4 MiB caps are sized for "one chat-turn payload" — multi-megabyte single events are a strong signal of attacker-shaped input. The sandbox 100 MiB FSIZE matches the largest legitimate compiler / archiver output a tool might write to disk in one invocation. The aggregate 500 MiB session ceiling is sized for "an agent doing real work over a multi-hour session" without forcing operators to retune for every workflow class.
+
+### Aggregate session budget (`ByteBudget`)
+
+Per-op caps do not compose into an aggregate ceiling: an LLM that has been adversarially prompted (or compromised) can issue many within-cap calls and exhaust host memory without tripping any single cap. F-077 closes that gap with `crates/forge-session/src/byte_budget.rs::ByteBudget` — a session-scoped `AtomicU64` counter shared across every `run_turn` invocation and gated at the `ToolDispatcher` boundary (so all four current tools — `fs.read`, `fs.write`, `fs.edit`, `shell.exec` — and any future tool routes through the same gate).
+
+**Enforcement is post-decrement.** The dispatcher executes the tool, charges the budget by the bytes the result occupies (`content` for `fs.read`; `stdout` + `stderr` for `shell.exec`; the JSON envelope length for write-style results that carry no payload), then refuses the **next** call with `{"error": "session byte budget exceeded: <consumed>/<limit> bytes"}` once `consumed >= limit`. A single op that overshoots the cap is allowed to complete — the next call is refused. This is intentional: `shell.exec` cannot pre-declare its stdout volume until the child exits, and forcing every tool to reserve up front would either (a) over-charge by the per-op maximum or (b) require speculative two-phase APIs that complicate every future tool. The single-op overshoot is bounded by the per-op caps already documented above.
+
+The typed `SessionError::ByteBudgetExceeded { consumed, limit }` variant carries the breach values for top-level callers; the dispatcher itself surfaces the error inside the tool result envelope so the assistant turn fails cleanly without blowing up the orchestrator. Enforcement is synchronous at dispatch; **no discrete `BudgetExhausted` event is emitted** — the tool-result error already carries the signal and adding a parallel event-schema variant would force every consumer (UI, dashboard, log replay) to handle the same condition twice.
+
+The 500 MiB default lives in `ByteBudget::DEFAULT_BUDGET_BYTES`. Every new tool MUST route through `ToolDispatcher::dispatch` (do not call `Tool::invoke` directly from production code paths) so the gate is automatic.
+
 ## Operator runbook cross-reference
 
 - Full Phase 1 threat models, exploit walk-throughs, and audit evidence: [`docs/audits/phase-1/`](../audits/phase-1/) — start with `REPORT.md`, then individual `H#.md` / `M#.md` / `L#.md` findings. These files are immutable snapshots; they are not updated as code evolves.
 - Tracking issues for follow-up hardening:
-  - [F-077](https://github.com/forge-ide/forge/issues/150) — DoS ceiling semantics + per-session aggregate byte budget (current per-message NDJSON cap is documented but the aggregate is not yet enforced).
   - [F-078](https://github.com/forge-ide/forge/issues/151) — `RLIMIT_NPROC` uid-wide caveat above + cgroup-based per-sandbox PID limit.
 
 # Supply-chain security
