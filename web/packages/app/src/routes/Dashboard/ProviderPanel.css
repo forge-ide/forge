@@ -138,7 +138,7 @@
 .provider-panel__btn--primary {
   background: var(--color-ember-400);
   border-color: var(--color-ember-400);
-  color: #fff;
+  color: var(--color-text-inverted);
 }
 
 .provider-panel__unreachable {

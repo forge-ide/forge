@@ -59,8 +59,9 @@
 
 .approval-prompt__pattern-label {
   font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.08em;
+  font-size: 9px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
   color: var(--color-text-secondary);
 }
 
@@ -173,7 +174,6 @@
   border-bottom-left-radius: 0;
   padding-left: var(--sp-2);
   padding-right: var(--sp-2);
-  font-size: 9px;
 }
 
 /* -------------------------------------------------------------------------
