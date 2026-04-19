@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use forge_core::Event;
+use forge_core::{ApprovalScope, Event};
 use forge_providers::MockProvider;
 use forge_session::server::serve_with_session;
 use forge_session::session::Session;
@@ -139,7 +139,7 @@ async fn approve_tool_proxies_to_daemon() {
         .expect("subscribe");
 
     bridge
-        .approve_tool("approve-session", "call-123".into(), "Once".into())
+        .approve_tool("approve-session", "call-123".into(), ApprovalScope::Once)
         .await
         .expect("approve_tool writes frame");
 

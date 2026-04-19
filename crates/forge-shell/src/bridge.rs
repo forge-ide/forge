@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
+use forge_core::ApprovalScope;
 use forge_ipc::{
     read_frame, write_frame, ClientInfo, Hello, HelloAck, IpcMessage, SendUserMessage, Subscribe,
     ToolCallApproved, ToolCallRejected, PROTO_VERSION,
@@ -197,9 +198,20 @@ impl SessionBridge {
         write_frame(&mut *writer, &frame).await
     }
 
-    pub async fn approve_tool(&self, session_id: &str, id: String, scope: String) -> Result<()> {
+    pub async fn approve_tool(
+        &self,
+        session_id: &str,
+        id: String,
+        scope: ApprovalScope,
+    ) -> Result<()> {
         let writer = self.writer_for(session_id).await?;
         let mut writer = writer.lock().await;
+        // F-069 / L5 (T7): the Tauri command layer is the trust boundary — it
+        // accepts a typed `ApprovalScope` only. The wire shape in
+        // `forge_ipc::ToolCallApproved` still carries `scope: String` so the
+        // forge-session daemon's deserializer keeps working unchanged while
+        // F-053 (M7) — the complementary server-side fix — is still pending.
+        let scope = scope_to_wire(&scope);
         let frame = IpcMessage::ToolCallApproved(ToolCallApproved { id, scope });
         write_frame(&mut *writer, &frame).await
     }
@@ -223,6 +235,21 @@ impl SessionBridge {
             .ok_or_else(|| anyhow!("no active connection for session {session_id}"))?;
         Ok(Arc::clone(&conn.writer))
     }
+}
+
+/// F-069 / L5 (T7): map a typed [`ApprovalScope`] to the short PascalCase
+/// string that `forge_ipc::ToolCallApproved.scope` (and the existing daemon
+/// parser via F-053) expects. Kept explicit — not derived through
+/// `serde_json::to_value` — so the wire strings stay grep-able and any
+/// future variant addition forces a compile error here.
+fn scope_to_wire(scope: &ApprovalScope) -> String {
+    match scope {
+        ApprovalScope::Once => "Once",
+        ApprovalScope::ThisFile => "ThisFile",
+        ApprovalScope::ThisPattern => "ThisPattern",
+        ApprovalScope::ThisTool => "ThisTool",
+    }
+    .to_string()
 }
 
 async fn pump_events(mut reader: OwnedReadHalf, session_id: String, sink: Arc<dyn EventSink>) {
