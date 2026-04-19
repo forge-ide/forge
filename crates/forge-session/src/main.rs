@@ -1,6 +1,7 @@
 use anyhow::Result;
 use forge_providers::{ollama::OllamaProvider, MockProvider};
 use forge_session::{
+    pid_file::OwnedPidFile,
     provider_spec::{parse_provider_spec, ProviderKind},
     server::{event_log_path, serve_with_session},
     session::Session,
@@ -35,6 +36,22 @@ async fn main() -> Result<()> {
         .map(PathBuf::from)
         .map(|p| std::path::absolute(&p).unwrap_or(p));
     eprintln!("forged: listening on {}", socket_path.display());
+
+    // F-049: persistent-mode forged owns the pid-file lifecycle. Created
+    // with O_EXCL so a leftover file from a prior crash is not clobbered;
+    // removed on drop (SIGTERM, SIGINT, or any exit path) so stale pid
+    // files don't outlive the process. Ephemeral mode has no external
+    // `session_kill` caller and so does not need a pid file.
+    // Held in a binding that must outlive `serve_with_session`.
+    let _pid_guard = if !ephemeral {
+        std::env::var("FORGE_PID_FILE")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|p| OwnedPidFile::create(PathBuf::from(p)))
+            .transpose()?
+    } else {
+        None
+    };
 
     let log_path = event_log_path(&session_id, workspace.as_deref());
     let session = Arc::new(Session::create(log_path).await?);

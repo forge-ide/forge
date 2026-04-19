@@ -1093,6 +1093,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "forge-cli",
  "forge-core",
  "forge-fs",
  "forge-ipc",

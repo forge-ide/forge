@@ -38,9 +38,15 @@ async fn session_new(kind: SessionNewKind) -> Result<()> {
 
     let forged = find_forged_binary()?;
     let mut cmd = std::process::Command::new(&forged);
+    // F-049: forged owns the pid-file lifecycle. The CLI tells the daemon
+    // where to write it (atomic O_EXCL, removed on clean exit); the CLI
+    // no longer touches the file itself. This eliminates the window where
+    // the CLI had recorded a pid before forged had fully started, and
+    // guarantees removal on daemon-initiated exit.
     cmd.env("FORGE_SESSION_ID", session_id.to_string())
         .env("FORGE_SOCKET_PATH", sock.to_str().unwrap_or(""))
-        .env("FORGE_WORKSPACE", workspace.to_str().unwrap_or(""));
+        .env("FORGE_WORKSPACE", workspace.to_str().unwrap_or(""))
+        .env("FORGE_PID_FILE", pid_file.to_str().unwrap_or(""));
 
     match &kind {
         SessionNewKind::Agent { name, provider, .. } => {
@@ -58,13 +64,11 @@ async fn session_new(kind: SessionNewKind) -> Result<()> {
     // the child is not killed when this handle is dropped; forged lives on
     // independently and is adopted by init once `forge` exits.
     let child = cmd.spawn()?;
-    let pid = child.id();
     // Explicitly leak the handle — we want forged to run independently.
     std::mem::forget(child);
 
-    tokio::fs::write(&pid_file, pid.to_string()).await?;
-
-    // Wait for socket to appear.
+    // Wait for socket to appear (which confirms forged is up and the pid
+    // file is already written — see forge-session/src/main.rs).
     wait_for_socket(&sock).await?;
 
     println!("session {} started at {}", session_id, sock.display());
@@ -182,23 +186,17 @@ async fn session_tail(id: &str) -> Result<()> {
 
 async fn session_kill(id: &str) -> Result<()> {
     let pid_file = forge_cli::socket::pid_path(id);
-    let raw = tokio::fs::read_to_string(&pid_file)
-        .await
-        .map_err(|_| anyhow::anyhow!("no pid file for session {id} — is it running?"))?;
-    let pid = forge_cli::socket::parse_session_pid(&raw)
-        .map_err(|e| anyhow::anyhow!("invalid pid file for session {id}: {e}"))?;
-
-    // SAFETY: pid has been validated as > 0 by `parse_session_pid`, so it
-    // cannot select the caller's process group (pid == 0), every signalable
-    // process (pid == -1), or a process group (pid < -1). SIGTERM is a valid
-    // signal number.
-    let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
-    if rc != 0 {
-        let err = std::io::Error::last_os_error();
-        anyhow::bail!("kill({pid}, SIGTERM) failed: {err}");
-    }
-
-    let _ = tokio::fs::remove_file(&pid_file).await;
+    // F-049: race-free kill via start-time verification + pidfd_send_signal.
+    // `kill_session_from_pid_file` reads the two-line record (pid + start-time),
+    // re-reads `/proc/<pid>/stat` to confirm the PID hasn't been recycled,
+    // and signals via `pidfd_open`/`pidfd_send_signal` (so even a process
+    // exiting between start-time check and delivery cannot cause SIGTERM
+    // to be delivered to a reused PID).
+    //
+    // Pid-file removal is owned by `forged` itself (see F-049 pid_file
+    // module); we do not remove it here.
+    let (pid, _start_time) = forge_cli::socket::kill_session_from_pid_file(&pid_file)
+        .map_err(|e| anyhow::anyhow!("cannot kill session {id}: {e}"))?;
     println!("sent SIGTERM to session {id} (pid {pid})");
     Ok(())
 }
@@ -221,12 +219,16 @@ async fn run_agent(name: &str, input_source: &str) -> Result<()> {
 
     let session_id = forge_core::SessionId::new();
     let sock = forge_cli::socket::socket_path(&session_id.to_string());
-    let pid_file = forge_cli::socket::pid_path(&session_id.to_string());
 
     if let Some(parent) = sock.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
 
+    // F-049: ephemeral `forge run agent` waits on the child handle
+    // directly (see `child.wait()` below), so there is no external
+    // `session_kill` consumer for its pid file. Skip writing one rather
+    // than leave a legacy single-line pid file that cannot pass the
+    // two-line validation in `session_kill`.
     let forged = find_forged_binary()?;
     let mut child = tokio::process::Command::new(&forged)
         .arg("--agent")
@@ -236,9 +238,6 @@ async fn run_agent(name: &str, input_source: &str) -> Result<()> {
         .env("FORGE_SESSION_ID", session_id.to_string())
         .env("FORGE_SOCKET_PATH", sock.to_str().unwrap_or(""))
         .spawn()?;
-
-    let pid_contents = forge_cli::socket::pid_file_contents(child.id())?;
-    tokio::fs::write(&pid_file, &pid_contents).await?;
 
     wait_for_socket(&sock).await?;
 
@@ -290,7 +289,6 @@ async fn run_agent(name: &str, input_source: &str) -> Result<()> {
     }
 
     // Await the forged process; prefer its OS exit code, fall back to event-derived code.
-    let _ = tokio::fs::remove_file(&pid_file).await;
     let process_exit_code = child
         .wait()
         .await
