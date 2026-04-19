@@ -544,10 +544,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         // Probe values are deliberately distinct from Default so the test
         // would fail if pre_exec stopped applying setrlimit. NPROC stays
-        // above typical CI-runner-uid process counts (GHA's `runner` uid
-        // easily sits >100 processes at test time, so a value like 17
-        // would starve fork in the spawned shell). 8192 is well above
-        // that while distinct from the default 4096.
+        // above typical CI-runner-uid process counts while distinct from
+        // the default 4096.
+        //
+        // Read rlimits via /proc/self/limits rather than `ulimit` — the
+        // latter varies across shells (Ubuntu's /bin/sh = dash) and has
+        // produced inconsistent output on GHA runners. /proc/self/limits
+        // is kernel-rendered, shell-independent.
         let config = SandboxConfig {
             max_processes: 8192,
             max_open_files: 42,
@@ -557,8 +560,7 @@ mod tests {
         let mut sb = SandboxedCommand::with_config("/bin/sh", tmp.path(), config);
         sb.command_mut()
             .arg("-c")
-            // -u: max user processes; -n: max open files; -f: max file size (blocks).
-            .arg("ulimit -u; ulimit -n; ulimit -f")
+            .arg("cat /proc/self/limits")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
 
@@ -570,14 +572,43 @@ mod tests {
             .await
             .expect("child hung")
             .unwrap();
-        assert!(status.success(), "ulimit exited non-zero: {status:?}");
+        assert!(status.success(), "cat exited non-zero: {status:?}");
 
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 3, "expected 3 ulimit lines, got: {out:?}");
-        assert_eq!(lines[0].trim(), "8192", "RLIMIT_NPROC not applied: {out:?}");
-        assert_eq!(lines[1].trim(), "42", "RLIMIT_NOFILE not applied: {out:?}");
-        // `ulimit -f` reports in 512-byte blocks; 4096 / 512 = 8.
-        assert_eq!(lines[2].trim(), "8", "RLIMIT_FSIZE not applied: {out:?}");
+        // /proc/self/limits has the shape:
+        //   Limit                     Soft Limit           Hard Limit           Units
+        //   Max processes             8192                 8192                 processes
+        //   Max open files            42                   42                   files
+        //   Max file size             4096                 4096                 bytes
+        // (plus other rows we don't care about)
+        let soft_limit_for = |name: &str| -> Option<String> {
+            out.lines()
+                .find(|l| l.starts_with(name))
+                .and_then(|l| {
+                    // Fields after the name are whitespace-separated. Soft = idx 0
+                    // in the remainder; but `name` itself contains spaces (e.g.
+                    // "Max processes"), so split on whitespace and take column 2.
+                    let cols: Vec<&str> = l.split_whitespace().collect();
+                    // ["Max", "processes", "<soft>", "<hard>", "<units>"]
+                    let word_count = name.split_whitespace().count();
+                    cols.get(word_count).map(|s| s.to_string())
+                })
+        };
+
+        assert_eq!(
+            soft_limit_for("Max processes").as_deref(),
+            Some("8192"),
+            "RLIMIT_NPROC not applied: {out}"
+        );
+        assert_eq!(
+            soft_limit_for("Max open files").as_deref(),
+            Some("42"),
+            "RLIMIT_NOFILE not applied: {out}"
+        );
+        assert_eq!(
+            soft_limit_for("Max file size").as_deref(),
+            Some("4096"),
+            "RLIMIT_FSIZE not applied: {out}"
+        );
     }
 
     fn process_alive(pid: i32) -> bool {
