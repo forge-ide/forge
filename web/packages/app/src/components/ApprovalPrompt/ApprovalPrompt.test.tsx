@@ -110,6 +110,71 @@ describe('ApprovalPrompt rendering', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Accessibility — interruptive announcement (F-088)
+// ---------------------------------------------------------------------------
+
+describe('ApprovalPrompt accessibility', () => {
+  it('marks the root with role="alertdialog" and aria-live="assertive"', () => {
+    const { getByTestId } = renderPrompt();
+    const root = getByTestId('approval-prompt');
+    expect(root).toHaveAttribute('role', 'alertdialog');
+    expect(root).toHaveAttribute('aria-live', 'assertive');
+  });
+
+  it('aria-labelledby resolves to a visible non-empty title', () => {
+    const { getByTestId } = renderPrompt();
+    const root = getByTestId('approval-prompt');
+    const labelledBy = root.getAttribute('aria-labelledby');
+    expect(labelledBy).toBeTruthy();
+    const title = document.getElementById(labelledBy as string);
+    expect(title).not.toBeNull();
+    expect(title?.textContent?.trim()).toBeTruthy();
+  });
+
+  it('uses a unique title id per toolCallId so multiple prompts can coexist', () => {
+    const containerA = makeContainer();
+    const containerB = makeContainer();
+    render(
+      () => (
+        <ApprovalPrompt
+          toolCallId="tc-A"
+          toolName="fs.edit"
+          argsJson={FS_EDIT_ARGS}
+          preview={PREVIEW}
+          containerRef={containerA}
+          onApprove={vi.fn()}
+          onReject={vi.fn()}
+        />
+      ),
+      { container: containerA },
+    );
+    render(
+      () => (
+        <ApprovalPrompt
+          toolCallId="tc-B"
+          toolName="fs.edit"
+          argsJson={FS_EDIT_ARGS}
+          preview={PREVIEW}
+          containerRef={containerB}
+          onApprove={vi.fn()}
+          onReject={vi.fn()}
+        />
+      ),
+      { container: containerB },
+    );
+    const idA = containerA
+      .querySelector('[data-testid="approval-prompt"]')
+      ?.getAttribute('aria-labelledby');
+    const idB = containerB
+      .querySelector('[data-testid="approval-prompt"]')
+      ?.getAttribute('aria-labelledby');
+    expect(idA).toBeTruthy();
+    expect(idB).toBeTruthy();
+    expect(idA).not.toBe(idB);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Scope selection via buttons
 // ---------------------------------------------------------------------------
 
