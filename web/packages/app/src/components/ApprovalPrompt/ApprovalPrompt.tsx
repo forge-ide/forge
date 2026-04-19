@@ -51,6 +51,17 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
   const [patternMode, setPatternMode] = createSignal(false);
   const [pattern, setPattern] = createSignal('');
 
+  // Capture the element that had focus before this prompt mounted so we can
+  // restore focus to it on dismiss. Read synchronously during component setup,
+  // before onMount runs and steals focus into the prompt.
+  const previouslyFocused =
+    typeof document !== 'undefined'
+      ? (document.activeElement as HTMLElement | null)
+      : null;
+
+  // Root element of the prompt — used as the focus-trap boundary.
+  let rootRef: HTMLDivElement | undefined;
+
   const path = () => extractPath(props.argsJson);
   const showFileScopes = () => isFileTool(props.toolName) && path() !== '';
 
@@ -66,8 +77,36 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
     props.onApprove(scope, pat);
   };
 
+  // Focusable elements within the prompt root, in DOM order. Used by the
+  // focus trap to compute boundaries.
+  const focusableElements = (): HTMLElement[] => {
+    if (!rootRef) return [];
+    return Array.from(
+      rootRef.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    );
+  };
+
   const handleKeyDown = (e: KeyboardEvent) => {
-    // Don't intercept if user is editing pattern input
+    // Focus trap — keep Tab navigation within the prompt regardless of mode.
+    if (e.key === 'Tab') {
+      const focusables = focusableElements();
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (!first || !last) return;
+      const active = document.activeElement as HTMLElement | null;
+      if (e.shiftKey && active === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+      return;
+    }
+
+    // Don't intercept other shortcuts if user is editing pattern input
     if (patternMode()) {
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -75,7 +114,10 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
       }
       return;
     }
-    if (e.key === 'r' || e.key === 'R') {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      props.onReject();
+    } else if (e.key === 'r' || e.key === 'R') {
       e.preventDefault();
       props.onReject();
     } else if (e.key === 'a' || e.key === 'A' || e.key === 'Enter') {
@@ -95,16 +137,28 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
 
   onMount(() => {
     props.containerRef.addEventListener('keydown', handleKeyDown);
+    // Initial focus → primary Approve button (default action per spec §10.2).
+    const primary = rootRef?.querySelector<HTMLElement>(
+      '[data-testid="approve-once-btn"]',
+    );
+    primary?.focus();
   });
 
   onCleanup(() => {
     props.containerRef.removeEventListener('keydown', handleKeyDown);
+    // Restore focus to the element that had it before the prompt opened.
+    // Defensive: the previous element may have been removed from the DOM.
+    const prev = previouslyFocused;
+    if (prev && typeof prev.focus === 'function' && prev.isConnected) {
+      prev.focus();
+    }
   });
 
   const titleId = () => `approval-prompt-title-${props.toolCallId}`;
 
   return (
     <div
+      ref={rootRef}
       class="approval-prompt"
       data-testid="approval-prompt"
       role="alertdialog"
