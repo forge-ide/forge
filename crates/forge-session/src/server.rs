@@ -454,13 +454,13 @@ mod tests {
     // `vec![]` is only safe if the enforcement layer it feeds actually denies
     // on empty. Likewise a workspace of `/tmp/ws` must not match `/etc/passwd`.
     //
-    // `forge_fs::read_file` returns `anyhow::Result`, so we assert on the
-    // error message produced by `validate_against_globs`'s `bail!` rather than
-    // on a typed variant.
+    // `forge_fs::read_file` returns `Result<_, FsError>` (F-061); we assert
+    // on the `Display` rendering of the typed `NotAllowed` variant, which
+    // still formats as "…not allowed by allowed_paths".
     #[test]
     fn fs_read_etc_passwd_denied_when_no_workspace() {
         let allowed = compute_allowed_paths(None);
-        let err = forge_fs::read_file("/etc/passwd", &allowed)
+        let err = forge_fs::read_file("/etc/passwd", &allowed, &forge_fs::Limits::default())
             .expect_err("reading /etc/passwd without a workspace must fail");
         let msg = format!("{err:#}");
         assert!(
@@ -479,7 +479,7 @@ mod tests {
             !allowed.is_empty(),
             "workspace present → allow-list should not be empty"
         );
-        let err = forge_fs::read_file("/etc/passwd", &allowed)
+        let err = forge_fs::read_file("/etc/passwd", &allowed, &forge_fs::Limits::default())
             .expect_err("reading /etc/passwd with a scoped workspace must fail");
         let msg = format!("{err:#}");
         assert!(

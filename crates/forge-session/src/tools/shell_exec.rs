@@ -120,15 +120,24 @@ fn run_linux(args: &serde_json::Value, ctx: &ToolCtx) -> serde_json::Value {
     // `Tool::invoke` is synchronous but is called from inside an async
     // context in `run_turn`. If we are on a multi-threaded runtime we can
     // block_in_place; otherwise fall back to a fresh current-thread runtime.
+    //
+    // F-047 / H6: the `SandboxedChild` wrapper MUST stay live across the
+    // timeout. Calling `.into_child()` here would set `released = true` and
+    // remove the pgid from the session's `ChildRegistry`, so a timeout (or
+    // task cancellation / panic) drop of the `tokio::process::Child` alone
+    // would orphan the process group — the whole point of Level-1 isolation
+    // defeated. Keeping `sandboxed` in scope guarantees `Drop::killpg` runs
+    // on every exit path and the registry entry is cleaned up.
     let fut = async move {
-        let sandboxed = match sb.spawn() {
+        let mut sandboxed = match sb.spawn() {
             Ok(c) => c,
             Err(e) => return serde_json::json!({ "error": format!("spawn: {e}") }),
         };
-        let mut child = sandboxed.into_child();
 
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
+        // Take the stdout / stderr pipes by value so the concurrent reader
+        // futures can own them; we only need `&mut Child` for `wait()`.
+        let stdout = sandboxed.as_child_mut().stdout.take();
+        let stderr = sandboxed.as_child_mut().stderr.take();
 
         let stdout_fut = async move {
             match stdout {
@@ -153,8 +162,11 @@ fn run_linux(args: &serde_json::Value, ctx: &ToolCtx) -> serde_json::Value {
             }
         };
 
-        let wait_fut = async move { child.wait().await };
-        let combined = async move { tokio::join!(wait_fut, stdout_fut, stderr_fut) };
+        // Run wait + stdout + stderr concurrently so the child cannot block
+        // on full pipe buffers while we wait on exit. `sandboxed` stays
+        // borrowed by `as_child_mut()` only for the duration of the join.
+        let combined =
+            async { tokio::join!(sandboxed.as_child_mut().wait(), stdout_fut, stderr_fut,) };
 
         match tokio::time::timeout(Duration::from_millis(timeout_ms), combined).await {
             Ok((Ok(status), stdout, stderr)) => {
@@ -172,6 +184,9 @@ fn run_linux(args: &serde_json::Value, ctx: &ToolCtx) -> serde_json::Value {
             Ok((Err(e), _, _)) => serde_json::json!({ "error": format!("wait: {e}") }),
             Err(_) => serde_json::json!({ "error": format!("timeout after {timeout_ms}ms") }),
         }
+        // `sandboxed` drops here — on both success (drop is idempotent;
+        // killpg on an already-reaped pgid returns ESRCH) and on timeout
+        // (drop sends SIGKILL to the pgid and removes it from the registry).
     };
 
     match tokio::runtime::Handle::try_current() {
