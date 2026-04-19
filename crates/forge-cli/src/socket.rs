@@ -60,6 +60,250 @@ pub fn pid_file_contents(pid: Option<u32>) -> anyhow::Result<String> {
     Ok(pid.to_string())
 }
 
+/// Format a session pid-file record as `"<pid>\n<start_time>\n"`.
+///
+/// Two-line format pairs the pid with the daemon's start-time (from
+/// `/proc/<pid>/stat` field 22) so `session_kill` can detect kernel PID
+/// reuse before signaling: if the recorded start-time differs from the
+/// current `/proc/<pid>/stat` reading, the pid has been recycled and we
+/// refuse to signal.
+pub fn format_pid_file_record(pid: libc::pid_t, start_time: u64) -> String {
+    format!("{pid}\n{start_time}\n")
+}
+
+/// Parse a two-line pid-file record written by `format_pid_file_record`.
+///
+/// Returns `(pid, start_time)`. Refuses single-line files (legacy one-line
+/// format) so `session_kill` cannot silently skip the identity check.
+pub fn parse_pid_file_record(raw: &str) -> anyhow::Result<(libc::pid_t, u64)> {
+    let mut lines = raw.lines();
+    let pid_line = lines
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("pid file is empty"))?;
+    let start_line = lines.next().ok_or_else(|| {
+        anyhow::anyhow!("pid file missing start-time line (expected two-line format)")
+    })?;
+    let pid: libc::pid_t = pid_line
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid pid in pid file: {:?}", pid_line))?;
+    anyhow::ensure!(pid > 0, "refusing to signal non-positive pid {pid}");
+    let start_time: u64 = start_line
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid start-time in pid file: {:?}", start_line))?;
+    Ok((pid, start_time))
+}
+
+/// Extract field 22 (`starttime`) from a `/proc/<pid>/stat` line.
+///
+/// Field 2 (`comm`) is parenthesised and may contain arbitrary characters,
+/// including spaces and `(`/`)`. We locate the comm terminator by finding
+/// the **last** `)` in the line, then count space-separated fields from
+/// there: field 3 is at index 0 after the split, so `starttime` (field 22)
+/// lands at index 19.
+#[cfg(target_os = "linux")]
+pub fn parse_proc_stat_starttime(line: &str) -> anyhow::Result<u64> {
+    let close = line
+        .rfind(')')
+        .ok_or_else(|| anyhow::anyhow!("malformed /proc/<pid>/stat: no closing paren"))?;
+    let tail = &line[close + 1..];
+    // Fields 3..=N, space-separated; starttime is field 22 -> index 19.
+    let st = tail
+        .split_ascii_whitespace()
+        .nth(19)
+        .ok_or_else(|| anyhow::anyhow!("malformed /proc/<pid>/stat: not enough fields"))?;
+    st.parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("invalid starttime field in /proc/<pid>/stat: {st:?}"))
+}
+
+/// Read `/proc/self/stat`'s field 22 for an arbitrary `pid`.
+///
+/// Returns an error whose message mentions "stale" when `/proc/<pid>/stat`
+/// is missing (kernel PID no longer allocated) so callers can distinguish
+/// daemon-already-exited from pid-reuse mismatches.
+#[cfg(target_os = "linux")]
+pub fn read_process_starttime(pid: libc::pid_t) -> anyhow::Result<u64> {
+    let path = format!("/proc/{pid}/stat");
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::bail!("stale pid file: no such process {pid} (/proc/{pid}/stat missing)");
+        }
+        Err(e) => anyhow::bail!("failed to read /proc/{pid}/stat: {e}"),
+    };
+    parse_proc_stat_starttime(&contents)
+}
+
+/// Confirm the process currently holding `pid` is the same one whose
+/// start-time is `recorded_start_time`. If `/proc/<pid>/stat` is missing,
+/// the daemon has already exited — report stale. If start-time differs,
+/// the kernel has reused the PID for an unrelated process — refuse.
+#[cfg(target_os = "linux")]
+pub fn verify_kill_target(pid: libc::pid_t, recorded_start_time: u64) -> anyhow::Result<()> {
+    let current =
+        read_process_starttime(pid).map_err(|e| anyhow::anyhow!("{e}; session is not running"))?;
+    anyhow::ensure!(
+        current == recorded_start_time,
+        "refusing to signal pid {pid}: PID reuse detected \
+         (recorded start-time {recorded_start_time}, current {current})"
+    );
+    Ok(())
+}
+
+/// Race-free SIGTERM delivery via `pidfd_open` + `pidfd_send_signal`.
+///
+/// Between `pidfd_open` and `pidfd_send_signal`, the kernel guarantees the
+/// fd resolves to the process we opened it for — even if that process has
+/// since exited and its PID has been reused. This closes the narrow
+/// open→signal window; caller is responsible for the broader pid-file
+/// identity check (see `verify_kill_target`).
+#[cfg(target_os = "linux")]
+pub fn pidfd_send_sigterm(pid: libc::pid_t) -> anyhow::Result<()> {
+    let pidfd = pidfd_open(pid)?;
+    pidfd_send_sigterm_via_fd(pid, &pidfd)
+}
+
+/// Open a pidfd for `pid`. Caller owns the fd and must keep it alive to
+/// anchor the kernel identity guarantee for any subsequent operation.
+#[cfg(target_os = "linux")]
+fn pidfd_open(pid: libc::pid_t) -> anyhow::Result<OwnedPidFd> {
+    // SAFETY: `libc::syscall` is FFI; arguments are simple integers.
+    // `pidfd_open(pid, 0)` returns a new fd on success and -1 on error
+    // (errno set); the caller supplies `pid > 0` (enforced by our pid
+    // parsers) so we cannot accidentally select a process group.
+    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0 as libc::c_uint) };
+    if raw < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ESRCH) {
+            anyhow::bail!("pidfd_open({pid}): no such process (ESRCH); pid is stale");
+        }
+        anyhow::bail!("pidfd_open({pid}) failed: {err}");
+    }
+    // SAFETY: `raw` is a valid fd we just opened; ownership transfers.
+    Ok(unsafe { OwnedPidFd::from_raw(raw as libc::c_int) })
+}
+
+#[cfg(target_os = "linux")]
+fn pidfd_send_sigterm_via_fd(pid: libc::pid_t, pidfd: &OwnedPidFd) -> anyhow::Result<()> {
+    // SAFETY: `pidfd` is a valid pidfd; `siginfo` is null per the syscall
+    // contract to use the default action (sender context). `flags` is 0.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            pidfd.as_raw(),
+            libc::SIGTERM,
+            std::ptr::null::<libc::siginfo_t>(),
+            0 as libc::c_uint,
+        )
+    };
+    if rc < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ESRCH) {
+            anyhow::bail!(
+                "pidfd_send_signal({pid}, SIGTERM): process exited between \
+                 pidfd_open and signal; no signal delivered (ESRCH)"
+            );
+        }
+        anyhow::bail!("pidfd_send_signal({pid}, SIGTERM) failed: {err}");
+    }
+    Ok(())
+}
+
+/// Owned `pidfd` that closes on drop. Small local wrapper to keep the
+/// single-call-site simple without pulling in `OwnedFd` conversions.
+#[cfg(target_os = "linux")]
+struct OwnedPidFd {
+    fd: libc::c_int,
+}
+
+#[cfg(target_os = "linux")]
+impl OwnedPidFd {
+    /// # Safety
+    /// `fd` must be a valid open file descriptor owned by the caller;
+    /// ownership transfers to the returned wrapper.
+    unsafe fn from_raw(fd: libc::c_int) -> Self {
+        Self { fd }
+    }
+
+    fn as_raw(&self) -> libc::c_int {
+        self.fd
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for OwnedPidFd {
+    fn drop(&mut self) {
+        // SAFETY: `self.fd` is a valid fd we own.
+        unsafe {
+            libc::close(self.fd);
+        }
+    }
+}
+
+/// Read a session pid file, confirm PID has not been reused, and deliver
+/// SIGTERM via `pidfd_send_signal`. Returns the `(pid, start_time)` that
+/// were signaled so callers can log. Does **not** remove the pid file;
+/// the daemon owns its pid-file lifecycle (see F-049).
+///
+/// Race-freedom proof sketch (three windows):
+///   1. **pid-file-write → pid-file-read** (seconds to days): closed by
+///      the recorded start-time in the pid file — if forged has exited
+///      and the kernel has reused the pid, `/proc/<pid>/stat` field 22
+///      will not match, and we refuse.
+///   2. **start-time-check → pidfd_open** (microseconds): closed by
+///      opening the pidfd **first** and re-reading `/proc/<pid>/stat`
+///      after. Once pidfd_open succeeds, the kernel pins the identity
+///      of the process behind the fd; any subsequent `/proc/<pid>/stat`
+///      read observes that same process (or `ESRCH` if it has since
+///      exited, which `read_process_starttime` surfaces as "stale").
+///   3. **pidfd_open → pidfd_send_signal** (microseconds): closed by
+///      the kernel; the fd resolves to the original opened process
+///      regardless of pid reuse.
+#[cfg(target_os = "linux")]
+pub fn kill_session_from_pid_file(
+    pid_file: &std::path::Path,
+) -> anyhow::Result<(libc::pid_t, u64)> {
+    let raw = std::fs::read_to_string(pid_file)
+        .map_err(|e| anyhow::anyhow!("cannot read pid file {}: {e}", pid_file.display()))?;
+    let (pid, recorded_start_time) = parse_pid_file_record(&raw)?;
+    // Open pidfd FIRST so the kernel anchors the identity of the process
+    // we are about to inspect. Any subsequent /proc/<pid>/stat read —
+    // used here to verify start-time — sees the pinned process (or
+    // ESRCH, which we surface as stale).
+    let pidfd = pidfd_open(pid).map_err(|e| anyhow::anyhow!("{e}; session is not running"))?;
+    let current_start_time =
+        read_process_starttime(pid).map_err(|e| anyhow::anyhow!("{e}; session is not running"))?;
+    anyhow::ensure!(
+        current_start_time == recorded_start_time,
+        "refusing to signal pid {pid}: PID reuse detected \
+         (recorded start-time {recorded_start_time}, current {current_start_time})"
+    );
+    pidfd_send_sigterm_via_fd(pid, &pidfd)?;
+    Ok((pid, recorded_start_time))
+}
+
+/// Non-Linux stub for `kill_session_from_pid_file`. The race-free kill path
+/// relies on `pidfd_open` and `/proc/<pid>/stat`, both Linux-only. On other
+/// platforms we refuse to fall back to raw `libc::kill` (which F-049 removes
+/// precisely because it SIGTERMs a reused PID), so the function exists but
+/// returns a typed error — preserving the safety invariant without breaking
+/// workspace builds on macOS/Windows.
+///
+/// Follow-up work: implement `kqueue` `EVFILT_PROC` (macOS) or Win32 handle
+/// equivalent (Windows). See the H2 finding's "References" section.
+#[cfg(not(target_os = "linux"))]
+pub fn kill_session_from_pid_file(
+    _pid_file: &std::path::Path,
+) -> anyhow::Result<(libc::pid_t, u64)> {
+    anyhow::bail!(
+        "session_kill is only race-free on Linux (pidfd_open + /proc/<pid>/stat). \
+         macOS/Windows would need kqueue EVFILT_PROC or a Win32 handle-based \
+         equivalent; tracked as a follow-up to F-049. Terminate the daemon \
+         manually on this platform (e.g. Activity Monitor / Task Manager)."
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +410,219 @@ mod tests {
     fn pid_file_contents_rejects_zero_defensively() {
         let err = pid_file_contents(Some(0)).expect_err("pid 0 must be rejected");
         assert!(err.to_string().contains("non-positive"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_proc_stat_starttime_handles_plain_comm() {
+        let line = "1234 (forged) S 1 1234 1234 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 98765 0 0 0 0 0";
+        let st = parse_proc_stat_starttime(line).expect("parses");
+        assert_eq!(st, 98765);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_proc_stat_starttime_handles_comm_with_spaces_and_parens() {
+        // field 2 contains spaces AND nested parens, so naive whitespace-splits fail.
+        let line = "4242 (weird (comm) name) S 1 4242 4242 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 555555 0 0 0 0 0";
+        let st = parse_proc_stat_starttime(line).expect("parses comm with parens");
+        assert_eq!(st, 555555);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_proc_stat_starttime_rejects_missing_close_paren() {
+        let line = "1234 (forged S 1";
+        assert!(parse_proc_stat_starttime(line).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_proc_stat_starttime_rejects_truncated_after_paren() {
+        let line = "1234 (forged) S 1 1234 1234";
+        assert!(parse_proc_stat_starttime(line).is_err());
+    }
+
+    #[test]
+    fn pid_file_record_round_trip() {
+        let raw = format_pid_file_record(4242, 98765);
+        let (pid, st) = parse_pid_file_record(&raw).expect("parses");
+        assert_eq!(pid, 4242);
+        assert_eq!(st, 98765);
+    }
+
+    #[test]
+    fn parse_pid_file_record_rejects_single_line() {
+        // Old one-line format must be rejected so we don't silently skip the
+        // start-time identity check.
+        let err = parse_pid_file_record("4242\n").expect_err("single line must fail");
+        assert!(err.to_string().to_lowercase().contains("start"));
+    }
+
+    #[test]
+    fn parse_pid_file_record_rejects_non_positive_pid() {
+        let err = parse_pid_file_record("0\n12345\n").expect_err("pid 0 must fail");
+        assert!(err.to_string().contains("non-positive"));
+    }
+
+    #[test]
+    fn parse_pid_file_record_rejects_garbage_starttime() {
+        let err = parse_pid_file_record("42\nnot-a-number\n").expect_err("bad st must fail");
+        assert!(err.to_string().to_lowercase().contains("start"));
+    }
+
+    #[test]
+    fn format_pid_file_record_is_two_newline_terminated_lines() {
+        let s = format_pid_file_record(7, 9);
+        assert_eq!(s, "7\n9\n");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn read_process_starttime_for_self_matches_two_reads() {
+        // Start-time is monotonic per process; reading twice must match.
+        let pid = unsafe { libc::getpid() };
+        let a = read_process_starttime(pid).expect("should read self starttime");
+        let b = read_process_starttime(pid).expect("should read self starttime second time");
+        assert_eq!(a, b);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn read_process_starttime_for_nonexistent_pid_reports_stale() {
+        // PID 0x7fffffff is effectively unused; a fresh read must fail as stale.
+        let err =
+            read_process_starttime(i32::MAX).expect_err("unused pid should not yield starttime");
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("stale") || msg.contains("no such"),
+            "expected stale/no-such-process error, got: {msg}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn verify_kill_target_refuses_when_starttime_mismatches() {
+        // Simulate PID reuse: live pid = our own, but recorded start-time is bogus.
+        let pid = unsafe { libc::getpid() };
+        let err = verify_kill_target(pid, 1).expect_err("mismatched start-time must refuse");
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("reuse") || msg.contains("mismatch") || msg.contains("recycled"),
+            "expected pid-reuse error, got: {msg}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn verify_kill_target_accepts_matching_starttime() {
+        let pid = unsafe { libc::getpid() };
+        let st = read_process_starttime(pid).expect("self starttime");
+        verify_kill_target(pid, st).expect("matching start-time must succeed");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pidfd_send_sigterm_to_nonexistent_pid_fails() {
+        // Delivery path must error, not silently succeed, for a pid with no
+        // live process. (i32::MAX is effectively unused.)
+        let err = pidfd_send_sigterm(i32::MAX).expect_err("pidfd_open on dead pid must fail");
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("no such") || msg.contains("stale") || msg.contains("esrch"),
+            "expected ESRCH-like error, got: {msg}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kill_session_from_pid_file_refuses_when_starttime_bogus() {
+        // DoD item 3: "kill-scenario where pid is reused between write and
+        // kill does not signal the reused process". Simulate reuse by
+        // writing the pid of this test process paired with a bogus
+        // start-time, then asserting the helper refuses without delivering
+        // SIGTERM.
+        //
+        // If the helper were buggy and actually signaled our own pid with
+        // SIGTERM, the test harness would be killed before reaching any
+        // assertion, so a mere `is_err()` passing is itself evidence of
+        // non-delivery.
+        use tempfile::TempDir;
+        let td = TempDir::new().expect("tempdir");
+        let pid_file = td.path().join("session.pid");
+        let my_pid = unsafe { libc::getpid() };
+        // Bogus start-time (legitimate start-times are monotonic clock ticks;
+        // 1 is well below any real /proc/self/stat value for a live process).
+        std::fs::write(&pid_file, format_pid_file_record(my_pid, 1)).expect("write");
+
+        let err = kill_session_from_pid_file(&pid_file)
+            .expect_err("bogus recorded start-time must cause refusal");
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("reuse") || msg.contains("mismatch") || msg.contains("recycled"),
+            "expected pid-reuse error, got: {msg}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kill_session_from_pid_file_refuses_when_pid_gone() {
+        use tempfile::TempDir;
+        let td = TempDir::new().expect("tempdir");
+        let pid_file = td.path().join("session.pid");
+        std::fs::write(&pid_file, format_pid_file_record(i32::MAX, 12345)).expect("write");
+        let err = kill_session_from_pid_file(&pid_file).expect_err("absent pid must fail");
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("stale") || msg.contains("not running") || msg.contains("no such"),
+            "expected stale error, got: {msg}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kill_session_from_pid_file_refuses_legacy_one_line_format() {
+        // Old pid files (pre-F-049) must not be silently accepted; if we
+        // accepted single-line format, `session_kill` would skip the
+        // start-time identity check and revert to the original TOCTOU.
+        use tempfile::TempDir;
+        let td = TempDir::new().expect("tempdir");
+        let pid_file = td.path().join("session.pid");
+        let my_pid = unsafe { libc::getpid() };
+        std::fs::write(&pid_file, format!("{my_pid}\n")).expect("write");
+        let err = kill_session_from_pid_file(&pid_file)
+            .expect_err("legacy single-line format must be rejected");
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("start"),
+            "expected start-time / format error, got: {msg}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pidfd_send_sigterm_to_live_child_delivers_signal() {
+        // Race-free delivery: spawn `sleep 30`, send SIGTERM via pidfd, wait.
+        use std::process::Command;
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id() as libc::pid_t;
+        pidfd_send_sigterm(pid).expect("pidfd signal delivery should succeed");
+        let status = child.wait().expect("wait sleep child");
+        assert!(!status.success(), "sleep should have been killed");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn verify_kill_target_reports_stale_when_pid_gone() {
+        // Unused high PID -> error, but specifically stale (not mismatch).
+        let err = verify_kill_target(i32::MAX, 12345).expect_err("nonexistent pid must fail");
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("stale") || msg.contains("no such") || msg.contains("not running"),
+            "expected stale error, got: {msg}"
+        );
     }
 }
