@@ -108,6 +108,10 @@ mod tests {
     #[test]
     fn session_id_is_64_bits_of_hex() {
         let id = SessionId::new();
-        assert_eq!(id.to_string().len(), 16, "SessionId must remain 16 hex chars to match F-057/F-063 validators");
+        assert_eq!(
+            id.to_string().len(),
+            16,
+            "SessionId must remain 16 hex chars to match F-057/F-063 validators"
+        );
     }
 }
