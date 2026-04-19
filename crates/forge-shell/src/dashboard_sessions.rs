@@ -254,6 +254,103 @@ pub fn default_workspaces_toml() -> PathBuf {
     base.join("forge").join("workspaces.toml")
 }
 
+/// F-063 (M11 / T5): structured error returned when `open_session` is
+/// called with an id that does not match the canonical `SessionId` wire
+/// shape. Surfaced as a plain `String` so it matches the existing
+/// `Err(String)` wire shape of every `#[tauri::command]`.
+///
+/// Only consumed by the `webview`-gated `open_session`; the
+/// `cfg_attr(..., allow(dead_code))` keeps `--no-default-features` builds
+/// (which still compile the validator helper for its unit tests) clean.
+#[cfg_attr(not(feature = "webview"), allow(dead_code))]
+pub(crate) const INVALID_SESSION_ID_ERROR: &str = "invalid session id";
+
+/// Strict gate over the `id` argument to `open_session`. Matches exactly
+/// the output of `forge_core::SessionId::new()` — 16 lowercase hex chars,
+/// no separators — and rejects everything else.
+///
+/// F-063 (M11 / T5): the window label `session-{id}` is consumed by
+/// Tauri's capability matcher (`session-*` glob in
+/// `src-tauri/capabilities/default.json`). Without validation an id like
+/// `../foo` or one containing NUL / whitespace would still match the glob
+/// while producing a label with unexpected semantics. Keeping this helper
+/// in terms of the canonical `SessionId` wire shape means a future format
+/// change has exactly one place to update.
+///
+/// Under `--no-default-features` the webview command is not compiled, so
+/// the helper is only exercised by its own unit tests — the
+/// `cfg_attr(..., allow(dead_code))` silences the resulting dead-code
+/// warning without hiding real unused-code regressions under
+/// `--features webview`.
+#[cfg_attr(not(feature = "webview"), allow(dead_code))]
+fn is_valid_session_id(id: &str) -> bool {
+    id.len() == 16 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+#[cfg(test)]
+mod session_id_validation_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_16_hex_lowercase_is_valid() {
+        assert!(is_valid_session_id("deadbeefcafebabe"));
+        assert!(is_valid_session_id("0123456789abcdef"));
+    }
+
+    #[test]
+    fn empty_is_invalid() {
+        assert!(!is_valid_session_id(""));
+    }
+
+    #[test]
+    fn shorter_than_16_is_invalid() {
+        assert!(!is_valid_session_id("deadbeefcafebab")); // 15
+    }
+
+    #[test]
+    fn longer_than_16_is_invalid() {
+        assert!(!is_valid_session_id("deadbeefcafebabe0")); // 17
+    }
+
+    #[test]
+    fn uppercase_hex_is_invalid() {
+        // SessionId::new() emits lowercase only; be strict.
+        assert!(!is_valid_session_id("DEADBEEFCAFEBABE"));
+    }
+
+    #[test]
+    fn dashes_are_invalid() {
+        // SessionId::new() never produces separators; reject to match the
+        // authoritative wire shape.
+        assert!(!is_valid_session_id("dead-beef-cafe-ba"));
+    }
+
+    #[test]
+    fn non_hex_chars_are_invalid() {
+        assert!(!is_valid_session_id("zzzzzzzzzzzzzzzz"));
+        assert!(!is_valid_session_id("deadbeefcafebabg"));
+    }
+
+    #[test]
+    fn path_traversal_is_invalid() {
+        assert!(!is_valid_session_id("../something"));
+        assert!(!is_valid_session_id("..cafebabe0000000"));
+    }
+
+    #[test]
+    fn whitespace_is_invalid() {
+        assert!(!is_valid_session_id("deadbeef cafebabe"));
+        assert!(!is_valid_session_id(" deadbeefcafebabe"));
+        assert!(!is_valid_session_id("deadbeefcafebabe "));
+        assert!(!is_valid_session_id("deadbeef\ncafebabe"));
+    }
+
+    #[test]
+    fn nul_byte_is_invalid() {
+        assert!(!is_valid_session_id("deadbeef\0cafebabe"));
+    }
+}
+
 /// Tauri command: return the sessions panel's data for the Dashboard.
 #[cfg(feature = "webview")]
 #[tauri::command]
@@ -268,6 +365,11 @@ pub async fn session_list<R: tauri::Runtime>(
 
 /// Tauri command: open (or focus) the Session window for `id`. Delegates to
 /// the F-019 `WindowManager`.
+///
+/// **F-063 (M11 / T5):** `id` is validated against the canonical
+/// `SessionId` wire shape *before* the label is built. The capability
+/// file's `session-*` glob would otherwise match labels such as
+/// `session-../foo` produced from a path-traversal id.
 #[cfg(feature = "webview")]
 #[tauri::command]
 pub async fn open_session<R: tauri::Runtime>(
@@ -276,6 +378,9 @@ pub async fn open_session<R: tauri::Runtime>(
     id: String,
 ) -> Result<(), String> {
     crate::ipc::require_window_label(&webview, "dashboard")?;
+    if !is_valid_session_id(&id) {
+        return Err(INVALID_SESSION_ID_ERROR.to_string());
+    }
     crate::window_manager::WindowManager::new(app)
         .open_session(&id)
         .map(|_| ())
