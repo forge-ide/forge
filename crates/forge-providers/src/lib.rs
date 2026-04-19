@@ -10,21 +10,55 @@ pub mod ollama;
 
 // ── Chat domain types ─────────────────────────────────────────────────────────
 
+/// A single request to a chat [`Provider`]: an optional system prompt plus
+/// the conversation history the provider should respond to.
+///
+/// Sampling parameters (temperature, max-tokens, stop sequences) are not
+/// modelled here — providers either default them or read them from
+/// provider-specific configuration. Callers that need provider-specific
+/// knobs should wrap or extend this type at the provider boundary rather
+/// than overload it with optional fields that no provider honours.
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
+    /// Optional system prompt. Providers handle it in role-specific ways:
+    /// e.g. Anthropic hoists it to a top-level `system` field, Ollama
+    /// prepends it to the message stream. `None` means "no system prompt".
     pub system: Option<String>,
+    /// Conversation history in chronological order. Typically alternates
+    /// [`ChatRole::User`] and [`ChatRole::Assistant`], though providers
+    /// vary in how strictly they enforce that.
     pub messages: Vec<ChatMessage>,
 }
 
+/// One message in a chat conversation, tagged with the role that produced
+/// it and carrying one or more content blocks.
+///
+/// Splitting content into a `Vec<ChatBlock>` (rather than a flat string)
+/// lets a single message interleave text, tool calls, and tool results
+/// — which matches how modern provider APIs frame multi-part turns.
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
+    /// Who produced this message.
     pub role: ChatRole,
+    /// The message body, as an ordered sequence of content blocks.
+    /// See [`ChatBlock`] for the variants (text, tool calls, tool results).
     pub content: Vec<ChatBlock>,
 }
 
+/// The role a [`ChatMessage`] was produced by.
+///
+/// Only `User` and `Assistant` are modelled. System prompts live on
+/// [`ChatRequest::system`], not as a role. Tool interactions are not a
+/// distinct role either — they ride inside an assistant or user message
+/// as [`ChatBlock::ToolCall`] / [`ChatBlock::ToolResult`] content blocks.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatRole {
+    /// A message authored by the human (or upstream caller acting on the
+    /// human's behalf). Carries the user's prompt and any tool results
+    /// being fed back into the conversation.
     User,
+    /// A message authored by the model. Carries the model's textual reply
+    /// and any tool calls it has decided to invoke.
     Assistant,
 }
 
