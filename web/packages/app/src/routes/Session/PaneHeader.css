@@ -61,3 +61,8 @@
   border-color: var(--color-border-2);
   border-radius: var(--r-sm);
 }
+
+.pane-header__close:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
+}
