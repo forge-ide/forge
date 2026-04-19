@@ -1,7 +1,30 @@
 use std::path::PathBuf;
 
+/// Return `true` iff `s` matches the canonical `SessionId` wire format:
+/// exactly 16 lowercase hex characters (8 random bytes rendered as `{:02x}`
+/// in `forge_core::SessionId::new`).
+///
+/// This is the single chokepoint the CLI uses to refuse attacker-controlled
+/// session ids before they reach path-building functions. A canonical id
+/// cannot contain `/`, `.`, `..`, NUL, whitespace, or any character with
+/// filesystem meaning, so validation here is sufficient to block the
+/// `../../tmp/evil` style path-traversal identified in F-057 (T12a).
+pub fn session_id_is_valid(s: &str) -> bool {
+    s.len() == 16 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// Resolve the Unix socket path for a session, using the same logic as `forged`.
 pub fn socket_path(session_id: &str) -> PathBuf {
+    // Defense-in-depth for F-057 (T12a): the CLI's clap `value_parser`
+    // already rejects malformed ids, but any future caller that constructs
+    // a session id from a non-CLI source (env var, IPC message, disk) must
+    // not be able to smuggle path-traversal through here silently. Debug
+    // builds panic loudly; release builds still honour the upstream
+    // `value_parser` contract.
+    debug_assert!(
+        session_id_is_valid(session_id),
+        "socket_path: session_id_is_valid({session_id:?}) == false"
+    );
     let base = std::env::var("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
@@ -25,6 +48,14 @@ pub fn sessions_socket_dir() -> PathBuf {
 
 /// Resolve the PID file path for a session.
 pub fn pid_path(session_id: &str) -> PathBuf {
+    // Defense-in-depth for F-057 (T12a): same rationale as `socket_path`.
+    // `socket_path` below will also debug-assert, but stating the invariant
+    // explicitly here keeps the failure message attached to the function
+    // the caller actually invoked.
+    debug_assert!(
+        session_id_is_valid(session_id),
+        "pid_path: session_id_is_valid({session_id:?}) == false"
+    );
     socket_path(session_id).with_extension("pid")
 }
 
@@ -309,6 +340,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn session_id_is_valid_accepts_canonical_16_char_lowercase_hex() {
+        assert!(session_id_is_valid("deadbeefcafebabe"));
+        assert!(session_id_is_valid("0123456789abcdef"));
+    }
+
+    #[test]
+    fn session_id_is_valid_rejects_path_traversal() {
+        assert!(!session_id_is_valid("../../tmp/x"));
+        assert!(!session_id_is_valid("../etc/passwd"));
+        assert!(!session_id_is_valid("."));
+        assert!(!session_id_is_valid(".."));
+        assert!(!session_id_is_valid("/absolute/path"));
+    }
+
+    #[test]
+    fn session_id_is_valid_rejects_uppercase() {
+        // SessionId::new() emits lowercase hex via {:02x}; any uppercase id
+        // cannot have come from the canonical generator and must be refused
+        // so the validator has a single normal form.
+        assert!(!session_id_is_valid("DEADBEEFCAFEBABE"));
+        assert!(!session_id_is_valid("DeadBeefCafeBabe"));
+    }
+
+    #[test]
+    fn session_id_is_valid_rejects_wrong_length() {
+        assert!(!session_id_is_valid(""));
+        assert!(!session_id_is_valid("abc"));
+        // 15 chars
+        assert!(!session_id_is_valid("deadbeefcafebab"));
+        // 17 chars
+        assert!(!session_id_is_valid("deadbeefcafebabe0"));
+        // 32 chars (uuid-like length)
+        assert!(!session_id_is_valid("deadbeefcafebabedeadbeefcafebabe"));
+    }
+
+    #[test]
+    fn session_id_is_valid_rejects_non_hex() {
+        assert!(!session_id_is_valid("deadbeefcafebabg")); // 'g'
+        assert!(!session_id_is_valid("deadbeef cafebabe")); // space
+        assert!(!session_id_is_valid("deadbeef-cafebabe")); // dash
+        assert!(!session_id_is_valid("deadbeef.cafebabe")); // dot
+        assert!(!session_id_is_valid("deadbeef\u{00}bedbabe")); // NUL
+    }
+
+    #[test]
+    fn session_id_is_valid_accepts_all_freshly_generated_ids() {
+        // Round-trip property: whatever SessionId::new() emits must pass the
+        // validator. If we ever widen the generator to, say, 32 hex chars,
+        // this test will fail loudly and force the validator to be updated.
+        for _ in 0..32 {
+            let id = forge_core::SessionId::new().to_string();
+            assert!(
+                session_id_is_valid(&id),
+                "freshly-generated SessionId must be valid: {id:?}"
+            );
+        }
+    }
+
+    #[test]
     fn socket_path_uses_xdg_runtime_dir() {
         // Temporarily set XDG_RUNTIME_DIR to a known value.
         // Use a fixed path so the test is deterministic.
@@ -328,12 +418,29 @@ mod tests {
 
     #[test]
     fn pid_path_has_pid_extension() {
-        let path = pid_path("abc123");
+        let path = pid_path("abc123def4560000");
         assert!(
-            path.to_string_lossy().ends_with("abc123.pid"),
+            path.to_string_lossy().ends_with("abc123def4560000.pid"),
             "expected .pid extension: {}",
             path.display()
         );
+    }
+
+    /// Defense-in-depth: if clap's `value_parser` is ever bypassed (e.g. a
+    /// future caller constructs a session id from a different source and
+    /// forgets to validate), the path-builders must still refuse.
+    #[test]
+    #[should_panic(expected = "session_id_is_valid")]
+    #[cfg(debug_assertions)]
+    fn pid_path_debug_asserts_valid_session_id() {
+        let _ = pid_path("../../tmp/x");
+    }
+
+    #[test]
+    #[should_panic(expected = "session_id_is_valid")]
+    #[cfg(debug_assertions)]
+    fn socket_path_debug_asserts_valid_session_id() {
+        let _ = socket_path("../../tmp/x");
     }
 
     #[test]

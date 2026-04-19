@@ -4,6 +4,28 @@ pub mod socket;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+/// Clap `value_parser` for `<session-id>` arguments.
+///
+/// Enforces the canonical `SessionId` wire format (`^[0-9a-f]{16}$`) *at
+/// parse time* — before any command body runs — so attacker-controlled ids
+/// like `../../tmp/evil` can never reach `socket::pid_path` or
+/// `socket::socket_path`. See F-057 (T12a, path-traversal vector for raw-PID
+/// SIGTERM).
+///
+/// Returning `Err(String)` here produces a typed clap error message of the
+/// form `invalid value '<id>' for '<session-id>': ...`, which is what the
+/// DoD calls a "typed validation error".
+fn parse_session_id(raw: &str) -> Result<String, String> {
+    if socket::session_id_is_valid(raw) {
+        Ok(raw.to_string())
+    } else {
+        Err(format!(
+            "session id must be 16 lowercase hex characters (got {:?})",
+            raw
+        ))
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "forge", about = "Forge IDE command-line interface")]
 pub struct Cli {
@@ -36,12 +58,14 @@ pub enum SessionCommands {
     List,
     /// Stream events from a session to stdout.
     Tail {
-        /// Session ID to tail.
+        /// Session ID to tail (16 lowercase hex characters).
+        #[arg(value_parser = parse_session_id)]
         id: String,
     },
     /// Send SIGTERM to a session process.
     Kill {
-        /// Session ID to kill.
+        /// Session ID to kill (16 lowercase hex characters).
+        #[arg(value_parser = parse_session_id)]
         id: String,
     },
 }
