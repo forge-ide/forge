@@ -24,6 +24,10 @@ async function waitForFetch() {
 
 beforeEach(() => {
   invokeMock.mockReset();
+  // Default any unstubbed invoke to a resolved promise so fire-and-fix call
+  // sites (e.g., open_session in SessionsPanel) don't throw on `.catch(...)`
+  // when a test only stubs the initial session_list call.
+  invokeMock.mockResolvedValue(undefined);
   setInvokeForTesting(invokeMock as never);
 });
 
@@ -110,5 +114,25 @@ describe('SessionsPanel', () => {
     const { findByText } = render(() => <SessionsPanel />);
     await waitForFetch();
     expect(await findByText('// no active sessions')).toBeTruthy();
+  });
+
+  // F-079: open_session was previously a fire-and-forget `void invoke(...)`. A
+  // rejection (IPC auth failure, validation error, etc.) must surface
+  // user-visible feedback rather than silently dropping the click.
+  it('surfaces an inline error when open_session rejects', async () => {
+    invokeMock
+      .mockResolvedValueOnce([sample({ id: 'xyz', subject: 'click me', state: 'active' })])
+      .mockRejectedValueOnce(new Error('open denied'));
+
+    const { findByLabelText, findByRole } = render(() => <SessionsPanel />);
+    await waitForFetch();
+
+    const card = await findByLabelText(/open session click me/i);
+    fireEvent.click(card);
+
+    // After microtasks drain, an inline error region must be visible to the user.
+    await waitForFetch();
+    const alert = await findByRole('alert');
+    expect(alert.textContent ?? '').toMatch(/open denied/);
   });
 });
