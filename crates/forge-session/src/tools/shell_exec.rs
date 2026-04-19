@@ -8,7 +8,8 @@
 //!   "args": ["FOO"],                // optional
 //!   "cwd": "/path/to/workspace",    // optional; defaults to ctx.workspace_root
 //!   "env": { "FOO": "bar" },        // optional caller-scoped env allow-list
-//!   "timeout_ms": 30000             // optional wall-clock guard
+//!   "timeout_ms": 30000             // optional wall-clock guard; silently
+//!                                   // clamped to `MAX_TIMEOUT_MS` (10 min)
 //! }
 //! ```
 //!
@@ -20,6 +21,14 @@ use crate::sandbox::SandboxedCommand;
 use forge_core::ApprovalPreview;
 #[cfg(target_os = "linux")]
 use std::time::Duration;
+
+/// Upper bound for `shell.exec` `timeout_ms`. A provider-supplied value larger
+/// than this is silently clamped. Prevents a runaway tool call from holding
+/// the future open indefinitely (F-066 / CWE-400).
+pub(crate) const MAX_TIMEOUT_MS: u64 = 10 * 60 * 1000;
+
+/// Default `timeout_ms` when the caller does not supply one.
+pub(crate) const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 pub struct ShellExecTool;
 
@@ -145,7 +154,8 @@ fn run_linux(args: &serde_json::Value, ctx: &ToolCtx) -> serde_json::Value {
     let timeout_ms = args
         .get("timeout_ms")
         .and_then(|v| v.as_u64())
-        .unwrap_or(30_000);
+        .unwrap_or(DEFAULT_TIMEOUT_MS)
+        .min(MAX_TIMEOUT_MS);
 
     let mut sb = SandboxedCommand::new(command, &cwd);
     sb.command_mut().args(&argv);
