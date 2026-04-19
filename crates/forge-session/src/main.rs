@@ -161,4 +161,3 @@ async fn build_mock_provider() -> Result<Arc<MockProvider>> {
         Ok(Arc::new(MockProvider::with_default_path()))
     }
 }
-
