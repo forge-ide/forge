@@ -2,13 +2,15 @@
 
 > Extracted from DESIGN.md §10 — complete CSS custom properties for colors, spacing, radii, transitions, typography, and provider accents
 
+**Related docs:** [Color System](color-system.md) · [Spacing & Layout](spacing-layout.md) · [Typography](typography.md)
+
 ---
 
 ## 10. Token Reference
 
 ### CSS custom properties
 
-These tokens should be defined at `:root` and used throughout. Never use raw values in component styles.
+These tokens should be defined at `:root` and used throughout. Never use raw values in component styles. The semantics behind each token (Ember scale, Iron scale, Steel accent, semantic colors) are documented in [Color System](color-system.md); the spacing/radius scales are documented in [Spacing & Layout](spacing-layout.md); type families are documented in [Typography](typography.md).
 
 ```css
 :root {

@@ -2,13 +2,15 @@
 
 > Extracted from DESIGN.md §6 — buttons, inputs, toasts, status bar, and code blocks
 
+**Related docs:** [Color System](color-system.md) · [Token Reference](token-reference.md) · [Typography](typography.md)
+
 ---
 
 ## 6. Component Principles
 
 ### Buttons
 
-Four variants: **primary**, **secondary**, **ghost**, **icon**.
+Four variants: **primary**, **secondary**, **ghost**, **icon**. Color names below (`ember-400`, `iron-600`, etc.) are defined in the [Color System](color-system.md) and exposed as CSS custom properties in [Token Reference](token-reference.md).
 
 - **Primary** (`ember-400` fill): one per view maximum. The most important action.
 - **Secondary** (ember outline): alternative actions, same importance as primary but not the default.

@@ -2,13 +2,15 @@
 
 > Extracted from DESIGN.md §5 — base-4 spacing scale, border radii, shell structure, and surface elevation order
 
+**Related docs:** [Token Reference](token-reference.md) · [Color System](color-system.md) · [Component Principles](component-principles.md)
+
 ---
 
 ## 5. Spacing & Layout
 
 ### Spacing scale
 
-Forge uses a base-4 spacing scale. All spacing values should come from this scale.
+Forge uses a base-4 spacing scale. All spacing values should come from this scale. The `--sp-*` CSS custom properties for these tokens are declared in [Token Reference](token-reference.md).
 
 | Token | Value | Usage |
 |---|---|---|
@@ -52,7 +54,7 @@ Window
 
 ### Surface elevation order
 
-Surfaces must always stack from dark (deep) to light (elevated). Never violate this order.
+Surfaces must always stack from dark (deep) to light (elevated). Never violate this order. The `iron-*` colors below come from the [Color System](color-system.md) Iron scale.
 
 ```
 iron-900 (bg)        ← deepest — app background

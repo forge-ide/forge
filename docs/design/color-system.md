@@ -2,13 +2,15 @@
 
 > Extracted from DESIGN.md §3 — Ember brand scale, Iron surface scale, semantic colors, Steel accent, token usage rules, and agent coding rules
 
+**Related docs:** [Token Reference](token-reference.md) · [Component Principles](component-principles.md) · [Design Philosophy](philosophy.md)
+
 ---
 
 ## 3. Color System
 
 ### Palette overview
 
-Forge uses two base scales (Ember and Iron) and a set of semantic tokens. Always use tokens in code — never raw hex values except when defining the tokens themselves.
+Forge uses two base scales (Ember and Iron) and a set of semantic tokens. Always use tokens in code — never raw hex values except when defining the tokens themselves. The CSS custom properties for every value below are defined in [Token Reference](token-reference.md).
 
 ### Ember scale — brand
 
