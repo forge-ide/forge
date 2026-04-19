@@ -518,6 +518,49 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn shell_exec_clamps_timeout_ms_to_documented_ceiling() {
+        // Regression for F-066: a provider may pass an arbitrarily large
+        // timeout_ms (up to u64::MAX). Without the clamp, tokio::time::timeout
+        // receives a far-future deadline and a shell backgrounding sleeps can
+        // hold the tool-call future open indefinitely. With the clamp, the
+        // deadline is capped at MAX_TIMEOUT_MS (10 minutes) so the tool call
+        // always resolves within the ceiling. We drive a fast-exiting command
+        // here so the test runs quickly — the assertion is that the dispatch
+        // returns successfully (proving u64::MAX does not overflow or hang)
+        // and completes well under the ceiling.
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut d = ToolDispatcher::new();
+        d.register(Box::new(ShellExecTool)).unwrap();
+
+        let ctx = ToolCtx {
+            allowed_paths: vec![],
+            workspace_root: Some(dir.path().to_path_buf()),
+            child_registry: Some(crate::sandbox::ChildRegistry::new()),
+        };
+
+        let started = std::time::Instant::now();
+        let result = d
+            .dispatch(
+                "shell.exec",
+                &json!({"command": "/bin/true", "timeout_ms": u64::MAX}),
+                &ctx,
+            )
+            .unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(result["exit_code"].as_i64(), Some(0), "result: {result}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "u64::MAX timeout caused dispatch to hang for {elapsed:?}"
+        );
+        // Compile-time guard: ceiling exists and stays within the documented
+        // 10-minute budget.
+        const _: () = assert!(shell_exec::MAX_TIMEOUT_MS <= 10 * 60 * 1000);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn shell_exec_dispatch_clears_daemon_env_by_default() {
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("FORGE_SHELL_EXEC_CANARY", "nope");
