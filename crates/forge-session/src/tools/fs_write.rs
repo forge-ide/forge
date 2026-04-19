@@ -24,7 +24,12 @@ impl Tool for FsWriteTool {
     fn invoke(&self, args: &serde_json::Value, ctx: &ToolCtx) -> serde_json::Value {
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
         let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-        match forge_fs::write(path, content, &ctx.allowed_paths) {
+        match forge_fs::write(
+            path,
+            content,
+            &ctx.allowed_paths,
+            &forge_fs::Limits::default(),
+        ) {
             Ok(()) => serde_json::json!({ "ok": true }),
             Err(e) => serde_json::json!({ "error": e.to_string() }),
         }

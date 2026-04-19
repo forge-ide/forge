@@ -1,4 +1,4 @@
-use forge_fs::read_file;
+use forge_fs::{read_file, Limits};
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -21,7 +21,7 @@ fn read_file_returns_content_bytes_sha256() {
     let path = f.path().to_str().unwrap();
     let allowed = vec![parent_glob(&f)];
 
-    let result = read_file(path, &allowed).unwrap();
+    let result = read_file(path, &allowed, &Limits::default()).unwrap();
 
     assert_eq!(result.content, "hello world");
     assert_eq!(result.bytes, 11);
@@ -35,8 +35,18 @@ fn read_file_sha256_differs_for_different_content() {
     let f1 = make_temp_file("hello world");
     let f2 = make_temp_file("different content");
 
-    let r1 = read_file(f1.path().to_str().unwrap(), &[parent_glob(&f1)]).unwrap();
-    let r2 = read_file(f2.path().to_str().unwrap(), &[parent_glob(&f2)]).unwrap();
+    let r1 = read_file(
+        f1.path().to_str().unwrap(),
+        &[parent_glob(&f1)],
+        &Limits::default(),
+    )
+    .unwrap();
+    let r2 = read_file(
+        f2.path().to_str().unwrap(),
+        &[parent_glob(&f2)],
+        &Limits::default(),
+    )
+    .unwrap();
 
     assert_ne!(r1.sha256, r2.sha256);
 }
@@ -49,7 +59,7 @@ fn read_file_rejects_path_not_in_allowed_globs() {
     // No matching glob
     let allowed = vec!["/nonexistent/**".to_string()];
 
-    let err = read_file(path, &allowed).unwrap_err();
+    let err = read_file(path, &allowed, &Limits::default()).unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("not allowed") || msg.contains("denied"),
@@ -62,7 +72,7 @@ fn read_file_rejects_empty_allowed_paths() {
     let f = make_temp_file("data");
     let path = f.path().to_str().unwrap();
 
-    let err = read_file(path, &[]).unwrap_err();
+    let err = read_file(path, &[], &Limits::default()).unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("not allowed") || msg.contains("denied"),
@@ -73,7 +83,12 @@ fn read_file_rejects_empty_allowed_paths() {
 #[test]
 fn read_file_errors_on_missing_file() {
     let allowed = vec!["/**".to_string()];
-    let err = read_file("/nonexistent/path/to/missing.txt", &allowed).unwrap_err();
+    let err = read_file(
+        "/nonexistent/path/to/missing.txt",
+        &allowed,
+        &Limits::default(),
+    )
+    .unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("No such file")
@@ -92,7 +107,7 @@ fn read_file_allows_exact_path_glob() {
     let canonical_str = canonical_path.to_str().unwrap();
     let allowed = vec![canonical_str.to_string()];
 
-    let result = read_file(f.path().to_str().unwrap(), &allowed).unwrap();
+    let result = read_file(f.path().to_str().unwrap(), &allowed, &Limits::default()).unwrap();
     assert_eq!(result.content, "exact");
 }
 
@@ -106,7 +121,7 @@ fn read_file_blocks_path_traversal() {
     // (Only allow paths under "/allowed/**" — never the actual temp location)
     let allowed = vec!["/allowed/**".to_string()];
 
-    let err = read_file(f.path().to_str().unwrap(), &allowed).unwrap_err();
+    let err = read_file(f.path().to_str().unwrap(), &allowed, &Limits::default()).unwrap_err();
     let msg = err.to_string();
     // After canonicalization, the real path (not under /allowed) must be rejected.
     assert!(

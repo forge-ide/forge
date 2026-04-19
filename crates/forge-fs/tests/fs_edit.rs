@@ -1,4 +1,4 @@
-use forge_fs::{edit, edit_preview, FsError};
+use forge_fs::{edit, edit_preview, FsError, Limits};
 use std::io::Write;
 use tempfile::tempdir;
 
@@ -23,7 +23,13 @@ fn edit_applies_unified_diff_patch() {
     let updated = "alpha\nBETA\ngamma\n";
     let patch = unified_diff(original, updated);
 
-    edit(target.to_str().unwrap(), &patch, &allowed).unwrap();
+    edit(
+        target.to_str().unwrap(),
+        &patch,
+        &allowed,
+        &Limits::default(),
+    )
+    .unwrap();
 
     let body = std::fs::read_to_string(&target).unwrap();
     assert_eq!(body, updated);
@@ -37,7 +43,13 @@ fn edit_rejects_malformed_patch() {
     let allowed = vec![canonical_glob(dir.path())];
     let bogus = "this is not a unified diff at all\n";
 
-    let err = edit(target.to_str().unwrap(), bogus, &allowed).unwrap_err();
+    let err = edit(
+        target.to_str().unwrap(),
+        bogus,
+        &allowed,
+        &Limits::default(),
+    )
+    .unwrap_err();
 
     assert!(
         matches!(err, FsError::MalformedPatch { .. }),
@@ -53,7 +65,13 @@ fn edit_rejects_path_outside_allowed_paths_with_path_denied() {
     let allowed = vec!["/nonexistent/allow/**".to_string()];
     let patch = unified_diff("a\n", "b\n");
 
-    let err = edit(target.to_str().unwrap(), &patch, &allowed).unwrap_err();
+    let err = edit(
+        target.to_str().unwrap(),
+        &patch,
+        &allowed,
+        &Limits::default(),
+    )
+    .unwrap_err();
 
     assert!(matches!(err, FsError::PathDenied { .. }), "got: {err:?}");
 }
@@ -72,7 +90,7 @@ fn edit_rejects_symlink_target() {
     let allowed = vec![canonical_glob(dir.path())];
     let patch = unified_diff("a\n", "b\n");
 
-    let err = edit(link.to_str().unwrap(), &patch, &allowed).unwrap_err();
+    let err = edit(link.to_str().unwrap(), &patch, &allowed, &Limits::default()).unwrap_err();
 
     assert!(matches!(err, FsError::SymlinkDenied { .. }), "got: {err:?}");
 }
@@ -84,7 +102,13 @@ fn edit_requires_target_file_to_exist() {
     let allowed = vec![canonical_glob(dir.path())];
     let patch = unified_diff("a\n", "b\n");
 
-    let err = edit(missing.to_str().unwrap(), &patch, &allowed).unwrap_err();
+    let err = edit(
+        missing.to_str().unwrap(),
+        &patch,
+        &allowed,
+        &Limits::default(),
+    )
+    .unwrap_err();
 
     assert!(matches!(err, FsError::TargetMissing { .. }), "got: {err:?}");
 }

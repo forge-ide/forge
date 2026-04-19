@@ -1,4 +1,4 @@
-use forge_fs::{write, write_preview, FsError};
+use forge_fs::{write, write_preview, FsError, Limits};
 use std::io::Write;
 use tempfile::tempdir;
 
@@ -13,7 +13,13 @@ fn write_creates_file_atomically_when_path_allowed() {
     let target = dir.path().join("hello.txt");
     let allowed = vec![canonical_glob(dir.path())];
 
-    write(target.to_str().unwrap(), "hello world", &allowed).unwrap();
+    write(
+        target.to_str().unwrap(),
+        "hello world",
+        &allowed,
+        &Limits::default(),
+    )
+    .unwrap();
 
     let body = std::fs::read_to_string(&target).unwrap();
     assert_eq!(body, "hello world");
@@ -26,7 +32,13 @@ fn write_overwrites_existing_file_atomically() {
     std::fs::write(&target, "old").unwrap();
     let allowed = vec![canonical_glob(dir.path())];
 
-    write(target.to_str().unwrap(), "new", &allowed).unwrap();
+    write(
+        target.to_str().unwrap(),
+        "new",
+        &allowed,
+        &Limits::default(),
+    )
+    .unwrap();
 
     let body = std::fs::read_to_string(&target).unwrap();
     assert_eq!(body, "new");
@@ -38,7 +50,13 @@ fn write_rejects_path_outside_allowed_paths_with_path_denied() {
     let target = dir.path().join("blocked.txt");
     let allowed = vec!["/nonexistent/allow/**".to_string()];
 
-    let err = write(target.to_str().unwrap(), "nope", &allowed).unwrap_err();
+    let err = write(
+        target.to_str().unwrap(),
+        "nope",
+        &allowed,
+        &Limits::default(),
+    )
+    .unwrap_err();
 
     assert!(matches!(err, FsError::PathDenied { .. }), "got: {err:?}");
 }
@@ -58,7 +76,13 @@ fn write_rejects_symlink_parent() {
     // allow the real directory; symlinked path must still be rejected
     let allowed = vec![canonical_glob(dir.path())];
 
-    let err = write(target.to_str().unwrap(), "payload", &allowed).unwrap_err();
+    let err = write(
+        target.to_str().unwrap(),
+        "payload",
+        &allowed,
+        &Limits::default(),
+    )
+    .unwrap_err();
 
     assert!(matches!(err, FsError::SymlinkDenied { .. }), "got: {err:?}");
 }
@@ -69,7 +93,7 @@ fn write_refuses_to_create_parent_directories() {
     let target = dir.path().join("missing_parent").join("file.txt");
     let allowed = vec![canonical_glob(dir.path())];
 
-    let err = write(target.to_str().unwrap(), "x", &allowed).unwrap_err();
+    let err = write(target.to_str().unwrap(), "x", &allowed, &Limits::default()).unwrap_err();
 
     assert!(matches!(err, FsError::ParentMissing { .. }), "got: {err:?}");
 }
