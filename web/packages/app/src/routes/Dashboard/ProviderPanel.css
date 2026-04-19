@@ -158,3 +158,23 @@
   font-size: 13px;
   color: var(--color-text-secondary);
 }
+
+.provider-panel__error {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  background: var(--color-error-bg);
+  border-left: 3px solid var(--color-ember-400);
+  border-radius: var(--r-sm);
+}
+
+.provider-panel__error-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 12px;
+  color: var(--color-ember-300);
+}
