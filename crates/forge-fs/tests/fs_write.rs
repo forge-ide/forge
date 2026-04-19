@@ -75,11 +75,33 @@ fn write_refuses_to_create_parent_directories() {
 }
 
 #[test]
-fn write_preview_returns_unified_diff_for_new_file() {
+fn write_preview_does_not_leak_existing_file_contents() {
+    // Regression for F-042 (H3): write_preview used to read the target file
+    // from disk and embed its contents in the approval description, leaking
+    // arbitrary files (e.g. /etc/passwd, ~/.ssh/id_rsa) onto the event bus
+    // before the user could approve or reject.
+    let dir = tempdir().unwrap();
+    let target = dir.path().join("secret.txt");
+    let secret = "SECRETMARKER-f042-do-not-leak";
+    let mut f = std::fs::File::create(&target).unwrap();
+    f.write_all(secret.as_bytes()).unwrap();
+
+    let preview = write_preview(target.to_str().unwrap(), "replacement\n");
+
+    assert!(
+        !preview.description.contains(secret),
+        "preview description leaked existing file contents: {}",
+        preview.description
+    );
+}
+
+#[test]
+fn write_preview_describes_path_byte_count_and_proposed_content() {
     let dir = tempdir().unwrap();
     let target = dir.path().join("new.txt");
+    let content = "line1\nline2\n";
 
-    let preview = write_preview(target.to_str().unwrap(), "line1\nline2\n");
+    let preview = write_preview(target.to_str().unwrap(), content);
 
     assert!(
         preview.description.contains("new.txt"),
@@ -87,29 +109,15 @@ fn write_preview_returns_unified_diff_for_new_file() {
         preview.description
     );
     assert!(
-        preview.description.contains("+line1"),
-        "expected added line in diff: {}",
-        preview.description
-    );
-}
-
-#[test]
-fn write_preview_returns_unified_diff_for_overwrite() {
-    let dir = tempdir().unwrap();
-    let target = dir.path().join("existing.txt");
-    let mut f = std::fs::File::create(&target).unwrap();
-    f.write_all(b"old_line\n").unwrap();
-
-    let preview = write_preview(target.to_str().unwrap(), "new_line\n");
-
-    assert!(
-        preview.description.contains("-old_line"),
-        "expected removed line: {}",
+        preview
+            .description
+            .contains(&format!("({} bytes)", content.len())),
+        "description missing byte count: {}",
         preview.description
     );
     assert!(
-        preview.description.contains("+new_line"),
-        "expected added line: {}",
+        preview.description.contains(content),
+        "description missing proposed content: {}",
         preview.description
     );
 }

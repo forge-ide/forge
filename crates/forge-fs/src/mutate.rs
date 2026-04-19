@@ -8,8 +8,6 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use similar::TextDiff;
-
 use crate::{canonicalize_no_symlink, enforce_allowed};
 
 /// Error variants for mutation operations. Matches the DoD vocabulary.
@@ -105,19 +103,18 @@ pub fn edit(path: &str, patch: &str, allowed_paths: &[String]) -> Result<(), FsE
     write(canonical_str, &updated, allowed_paths)
 }
 
-/// `ApprovalPreview` for a prospective write. Compares on-disk contents (or
-/// empty for new files) against the proposed content and returns a unified
-/// diff.
+/// `ApprovalPreview` for a prospective write. Returns a content-only preview
+/// of the proposed new bytes — does **not** read the existing file.
+///
+/// Reading the target file here would run before `allowed_paths` enforcement
+/// (which happens in [`write`]) and leak attacker-chosen file contents into
+/// the approval event (see F-042 / audit finding H3). The proposed `content`
+/// is already supplied by the caller, so echoing it back does not expand the
+/// trust surface. If a before/after diff is needed for UX, compute it via an
+/// explicit `fs.read` call that goes through the same approval gate.
 pub fn write_preview(path: &str, content: &str) -> ApprovalPreview {
-    let old = std::fs::read_to_string(path).unwrap_or_default();
-    let diff = TextDiff::from_lines(old.as_str(), content);
-    let file_label = path;
-    let body = diff
-        .unified_diff()
-        .header(file_label, file_label)
-        .to_string();
     ApprovalPreview {
-        description: format!("Write file {path} ({} bytes)\n{body}", content.len()),
+        description: format!("Write file {path} ({} bytes)\n{content}", content.len()),
     }
 }
 
@@ -286,6 +283,7 @@ fn parse_hunk_old_start(rest: &str) -> Result<usize, FsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use similar::TextDiff;
 
     #[test]
     fn split_preserves_trailing_newlines() {
