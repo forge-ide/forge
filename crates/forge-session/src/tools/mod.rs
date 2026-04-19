@@ -291,6 +291,94 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shell_exec_timeout_kills_sandboxed_grandchild() {
+        // F-047 / H6: after `shell.exec` returns a timeout error, the
+        // sandboxed process group (including detached grandchildren) must
+        // be dead. Before the fix, `run_linux` called `.into_child()` which
+        // detached the `SandboxedChild` from the registry and disabled the
+        // Drop-based `killpg`, so the grandchild leaked past both the
+        // tool call and daemon shutdown.
+
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("grandchild.pid");
+
+        let mut d = ToolDispatcher::new();
+        d.register(Box::new(ShellExecTool)).unwrap();
+
+        let registry = crate::sandbox::ChildRegistry::new();
+        let ctx = ToolCtx {
+            allowed_paths: vec![],
+            workspace_root: Some(dir.path().to_path_buf()),
+            child_registry: Some(registry.clone()),
+        };
+
+        // Background a long sleep, write its pid, detach its stdio from
+        // the parent shell so that when the shell exits the wait_fut may
+        // complete but the grandchild stays alive. The parent shell needs
+        // to keep running long enough for the timeout to fire, so we also
+        // sleep in the foreground.
+        let script = format!(
+            "sleep 30 </dev/null >/dev/null 2>&1 & echo $! > {}; sleep 30",
+            pid_file.display()
+        );
+
+        let ctx_clone_args = serde_json::json!({
+            "command": "/bin/sh",
+            "args": ["-c", script],
+            "timeout_ms": 200,
+        });
+
+        let result = tokio::task::spawn_blocking(move || {
+            d.dispatch("shell.exec", &ctx_clone_args, &ctx).unwrap()
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            result.get("error").is_some(),
+            "expected timeout error, got: {result}"
+        );
+
+        // Read grandchild pid written by the script.
+        let mut grandchild_pid: Option<i32> = None;
+        for _ in 0..50 {
+            if let Ok(s) = std::fs::read_to_string(&pid_file) {
+                if let Ok(pid) = s.trim().parse::<i32>() {
+                    grandchild_pid = Some(pid);
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let grandchild_pid = grandchild_pid.expect("script never wrote grandchild pid");
+
+        // Poll for the grandchild to be reaped — killpg delivery plus shell
+        // teardown can take a few ms on loaded CI.
+        let mut alive = true;
+        for _ in 0..100 {
+            let rc = unsafe { libc::kill(grandchild_pid, 0) };
+            if rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                alive = false;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            !alive,
+            "grandchild {grandchild_pid} survived shell.exec timeout \
+             (sandbox escape — pgid was not killed)"
+        );
+
+        // Secondary assertion: the registry entry was cleared. If Drop
+        // on `SandboxedChild` ran, `registry.remove(pgid)` executed.
+        assert!(
+            registry.is_empty(),
+            "ChildRegistry still tracks pgid after timeout — Drop did not run"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn shell_exec_dispatch_clears_daemon_env_by_default() {
         let dir = tempfile::tempdir().unwrap();
