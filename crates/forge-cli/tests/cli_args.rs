@@ -115,15 +115,15 @@ fn parse_session_list() {
 
 #[test]
 fn parse_session_tail() {
-    let cli =
-        Cli::try_parse_from(["forge", "session", "tail", "abc123def456"]).expect("should parse");
+    let cli = Cli::try_parse_from(["forge", "session", "tail", "abc123def4560000"])
+        .expect("should parse");
     let Commands::Session {
         cmd: SessionCommands::Tail { id },
     } = cli.command
     else {
         panic!("wrong command shape");
     };
-    assert_eq!(id, "abc123def456");
+    assert_eq!(id, "abc123def4560000");
 }
 
 #[test]
@@ -137,6 +137,55 @@ fn parse_session_kill() {
         panic!("wrong command shape");
     };
     assert_eq!(id, "deadbeefcafe0000");
+}
+
+/// F-057 (T12a): clap must reject a path-traversal session id during
+/// argument parsing — before any command body runs — so the filesystem
+/// is never touched with an attacker-controlled path component.
+#[test]
+fn parse_session_kill_rejects_path_traversal() {
+    let result = Cli::try_parse_from(["forge", "session", "kill", "../../tmp/x"]);
+    assert!(
+        result.is_err(),
+        "path-traversal session id must be rejected at parse time"
+    );
+}
+
+#[test]
+fn parse_session_tail_rejects_path_traversal() {
+    let result = Cli::try_parse_from(["forge", "session", "tail", "../../tmp/x"]);
+    assert!(
+        result.is_err(),
+        "path-traversal session id must be rejected at parse time"
+    );
+}
+
+#[test]
+fn parse_session_kill_rejects_absolute_path() {
+    let result = Cli::try_parse_from(["forge", "session", "kill", "/etc/passwd"]);
+    assert!(result.is_err(), "absolute path id must be rejected");
+}
+
+#[test]
+fn parse_session_kill_rejects_uppercase_hex() {
+    // SessionId::new() emits lowercase hex only; uppercase cannot have
+    // come from the canonical generator.
+    let result = Cli::try_parse_from(["forge", "session", "kill", "DEADBEEFCAFEBABE"]);
+    assert!(result.is_err(), "uppercase hex id must be rejected");
+}
+
+#[test]
+fn parse_session_kill_rejects_wrong_length() {
+    // 15 chars — one short of the canonical 16.
+    let result = Cli::try_parse_from(["forge", "session", "kill", "deadbeefcafebab"]);
+    assert!(result.is_err(), "15-char id must be rejected");
+}
+
+#[test]
+fn parse_session_kill_rejects_non_hex() {
+    // 16 chars but contains 'g'.
+    let result = Cli::try_parse_from(["forge", "session", "kill", "deadbeefcafebabg"]);
+    assert!(result.is_err(), "non-hex id must be rejected");
 }
 
 #[test]
