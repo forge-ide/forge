@@ -1,9 +1,11 @@
 use std::collections::HashMap;
-use std::os::unix::fs::PermissionsExt;
+use std::io::ErrorKind;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use forge_core::{
     meta::{write_meta, SessionMeta},
@@ -67,6 +69,76 @@ pub async fn serve(path: &Path, auto_approve: bool, ephemeral: bool) -> Result<(
     serve_with_session(path, session, provider, auto_approve, ephemeral, None, None).await
 }
 
+/// Timeout for the post-`EADDRINUSE` liveness probe. Short enough that a
+/// genuinely orphaned socket doesn't stall daemon startup, long enough to let
+/// a slow local daemon reply. The probe is `connect(2)` only — no handshake —
+/// so the common-case round-trip is a few hundred microseconds.
+const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Bind a `UnixListener` at `path` without the classic pre-unlink TOCTOU.
+///
+/// F-056 (T6): the previous `if path.exists() { remove_file } ; bind` sequence
+/// let an attacker with write access to the parent directory plant a symlink
+/// and watch the daemon blindly unlink it. F-044 (H8) already closed the
+/// practical `/tmp/forge-0/` window by refusing the shared-directory fallback
+/// and chmod'ing the parent to 0o700, but the TOCTOU remains relevant as
+/// defense-in-depth for any future path configuration (e.g. an operator
+/// pointing `FORGE_SOCKET_PATH` into a shared location).
+///
+/// Protocol:
+/// 1. Try `bind` first — never pre-unlink.
+/// 2. On `EADDRINUSE`, probe with a short `UnixStream::connect`. If the probe
+///    succeeds, another live daemon is listening: bail out. **Do not** unlink
+///    another daemon's socket out from under it.
+/// 3. On probe failure (connection refused or timeout), the entry is likely
+///    an orphan. Confirm via `symlink_metadata` — which does **not** follow
+///    symlinks — that the entry is a real socket file. Symlinks and regular
+///    files are rejected outright: neither is a legitimate orphan, and
+///    unlinking either would be the exact exploit path this fix closes.
+/// 4. Unlink the confirmed orphan and retry `bind` exactly once.
+async fn bind_uds_safely(path: &Path) -> Result<UnixListener> {
+    match UnixListener::bind(path) {
+        Ok(listener) => Ok(listener),
+        Err(e) if e.kind() == ErrorKind::AddrInUse => {
+            // Address in use — either a live daemon is already serving or a
+            // prior daemon crashed leaving an orphan socket behind.
+            let probe =
+                tokio::time::timeout(LIVENESS_PROBE_TIMEOUT, UnixStream::connect(path)).await;
+            if let Ok(Ok(_stream)) = probe {
+                anyhow::bail!(
+                    "refusing to bind at {}: another daemon is already listening",
+                    path.display()
+                );
+            }
+
+            // Probe failed (refused or timed out). Check the entry type
+            // without following symlinks — `metadata()` would follow, which
+            // is itself exploitable.
+            let meta = tokio::fs::symlink_metadata(path).await.with_context(|| {
+                format!(
+                    "failed to stat {} while recovering from EADDRINUSE",
+                    path.display()
+                )
+            })?;
+            if !meta.file_type().is_socket() {
+                anyhow::bail!(
+                    "refusing to unlink {}: entry is not a socket (type={:?}). Remove it \
+                     manually after verifying it is not attacker-planted.",
+                    path.display(),
+                    meta.file_type()
+                );
+            }
+
+            tokio::fs::remove_file(path)
+                .await
+                .with_context(|| format!("failed to unlink orphan socket at {}", path.display()))?;
+            UnixListener::bind(path)
+                .with_context(|| format!("retry bind failed at {}", path.display()))
+        }
+        Err(e) => Err(e).with_context(|| format!("bind failed at {}", path.display())),
+    }
+}
+
 /// Start a session server with an explicit provider.
 ///
 /// `workspace` is reported back to clients via `HelloAck.workspace` (empty when `None`).
@@ -96,17 +168,15 @@ pub async fn serve_with_session<P: Provider + 'static>(
         // in a test), the 0o600 mode on the socket itself is the real defense.
         let _ = tokio::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).await;
     }
-    if path.exists() {
-        tokio::fs::remove_file(path).await?;
-    }
-    let listener = UnixListener::bind(path)?;
+    let listener = bind_uds_safely(path).await?;
     // F-044 (H8): chmod the socket to 0o600 the moment it exists. bind(2)
     // creates the socket file with `0o777 & ~umask`, typically 0o755 —
     // world-connectable, which in Phase 1 means any local user can drive the
-    // session. There is a brief TOCTOU window between bind and the chmod
-    // here (tracked by F-056); this call closes the steady-state exposure
-    // without widening that window. We refuse to proceed if the chmod fails
-    // rather than serve on a permissive socket.
+    // session. There is a brief post-bind TOCTOU window between `bind` and
+    // this chmod; it is a distinct concern from F-056 (which closed the
+    // *pre-bind* `remove_file`→`bind` race via `bind_uds_safely`) and remains
+    // bounded by the 0o700 parent-dir mode set above. We refuse to proceed if
+    // the chmod fails rather than serve on a permissive socket.
     tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
     let workspace_path: Option<PathBuf> = workspace.clone();
     // F-043: Derive `allowed_paths` from the workspace root so `fs.*` tools can
