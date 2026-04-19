@@ -15,9 +15,9 @@
 //!
 //! Result shape: `{ stdout, stderr, exit_code, signal? }` or `{ error }`.
 
+use super::{get_optional_str, Tool, ToolCtx};
 #[cfg(target_os = "linux")]
-use super::{get_required_str, ToolError};
-use super::{Tool, ToolCtx};
+use super::{get_optional_u64, get_required_str, ToolError};
 #[cfg(target_os = "linux")]
 use crate::sandbox::SandboxedCommand;
 use forge_core::ApprovalPreview;
@@ -44,7 +44,7 @@ impl Tool for ShellExecTool {
     }
 
     fn approval_preview(&self, args: &serde_json::Value) -> ApprovalPreview {
-        let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+        let command = get_optional_str(args, "command").unwrap_or("");
         let argv = args
             .get("args")
             .and_then(|v| v.as_array())
@@ -60,7 +60,7 @@ impl Tool for ShellExecTool {
         // the user to distinguish, so no `cwd` line is shown. When present,
         // the directory context is load-bearing and must appear in consent
         // (F-054 / audit finding M8).
-        let cwd = args.get("cwd").and_then(|v| v.as_str());
+        let cwd = get_optional_str(args, "cwd");
         let head = if argv.is_empty() {
             format!("Run command: {command}")
         } else {
@@ -126,7 +126,7 @@ fn run_linux(args: &serde_json::Value, ctx: &ToolCtx) -> serde_json::Value {
     // the workspace that points out is rejected by the post-canonical prefix
     // check (F-054 / audit finding M8, symmetric with forge-fs root checks
     // for F-043). If no cwd is supplied, fall back to the workspace root.
-    let cwd = match args.get("cwd").and_then(|v| v.as_str()) {
+    let cwd = match get_optional_str(args, "cwd") {
         Some(requested) => {
             let Some(root) = ctx.workspace_root.as_ref() else {
                 return serde_json::json!({
@@ -168,9 +168,7 @@ fn run_linux(args: &serde_json::Value, ctx: &ToolCtx) -> serde_json::Value {
         }),
     };
 
-    let timeout_ms = args
-        .get("timeout_ms")
-        .and_then(|v| v.as_u64())
+    let timeout_ms = get_optional_u64(args, "timeout_ms")
         .unwrap_or(DEFAULT_TIMEOUT_MS)
         .min(MAX_TIMEOUT_MS);
 

@@ -1,7 +1,7 @@
 //! `fs.read` tool: reads a file via [`forge_fs::read_file`] and returns
 //! `{ content, bytes, sha256 }` or `{ error }`.
 
-use super::{get_required_str, Tool, ToolCtx};
+use super::{get_optional_str, get_required_str, Tool, ToolCtx};
 use forge_core::ApprovalPreview;
 
 pub struct FsReadTool;
@@ -20,7 +20,7 @@ impl Tool for FsReadTool {
         // sees exactly what was requested before approval. Required-argument
         // validation runs in `invoke` only — no point rejecting a malformed
         // call until the user has had a chance to refuse it. (F-074)
-        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let path = get_optional_str(args, "path").unwrap_or("");
         ApprovalPreview {
             description: format!("Read file '{path}'"),
         }

@@ -2,7 +2,7 @@
 //! returns `{ ok: true }` or `{ error }`. Preview delegates to
 //! [`forge_fs::edit_preview`].
 
-use super::{get_required_str, Tool, ToolCtx};
+use super::{get_optional_str, get_required_str, Tool, ToolCtx};
 use forge_core::ApprovalPreview;
 
 pub struct FsEditTool;
@@ -19,8 +19,8 @@ impl Tool for FsEditTool {
     fn approval_preview(&self, args: &serde_json::Value) -> ApprovalPreview {
         // Preview reflects whatever the client sent so the approval UI shows
         // the literal request; `invoke` performs the required-arg check (F-074).
-        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-        let patch = args.get("patch").and_then(|v| v.as_str()).unwrap_or("");
+        let path = get_optional_str(args, "path").unwrap_or("");
+        let patch = get_optional_str(args, "patch").unwrap_or("");
         let fs_preview = forge_fs::edit_preview(path, patch);
         ApprovalPreview {
             description: fs_preview.description,
