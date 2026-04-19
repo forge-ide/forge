@@ -64,3 +64,7 @@ path = "tests/uds_socket_permissions.rs"
 [[test]]
 name = "socket_path_fallback"
 path = "tests/socket_path_fallback.rs"
+
+[[test]]
+name = "uds_bind_symlink_race"
+path = "tests/uds_bind_symlink_race.rs"
