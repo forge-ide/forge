@@ -101,8 +101,20 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
     props.containerRef.removeEventListener('keydown', handleKeyDown);
   });
 
+  const titleId = () => `approval-prompt-title-${props.toolCallId}`;
+
   return (
-    <div class="approval-prompt" data-testid="approval-prompt">
+    <div
+      class="approval-prompt"
+      data-testid="approval-prompt"
+      role="alertdialog"
+      aria-live="assertive"
+      aria-labelledby={titleId()}
+    >
+      <h3 id={titleId()} class="approval-prompt__title">
+        APPROVAL REQUIRED
+      </h3>
+
       {/* Preview */}
       <div class="approval-prompt__preview" data-testid="approval-preview">
         <pre class="approval-prompt__preview-text">{props.preview.description}</pre>
