@@ -53,18 +53,49 @@ Invoke `superpowers:test-driven-development` for every change. No exceptions.
 
 **Gate:** All tests pass and the DoD is fully addressed before proceeding.
 
-## Phase 3: Submit
+## Phase 3: Submit + hand off for gates
 
-Invoke `forge-finish-task`. That skill already spawns fresh-context subagents for DoD verification and code review — let it do so. Do not inline those checks.
+Invoke `forge-finish-task`. That skill verifies the build, pushes the branch, opens the PR, sets `status: code-review`, and emits a **`HANDOFF-REQUEST`** — but it does **not** run DoD verification or code review. Those gates run in the parent context so the verifier's context stays independent of the implementer's.
 
 Steps delegated inside `forge-finish-task`:
-- Fresh-context general-purpose subagent verifies every DoD checkbox independently
 - Build verification (`cargo fmt --check && cargo check && cargo test && cargo clippy`)
-- Fresh-context `feature-dev:code-reviewer` subagent reviews changed files
+- Branch push to `origin` (fork)
 - PR opened to `forge-ide/forge`
 - Issue label updated to `status: code-review`
+- HANDOFF-REQUEST returned to parent (PR URL, issue number, branch, changed files, DoD, design note)
 
-**If forge-finish-task finds gaps:** fix them (return to Phase 2), then re-run Phase 3. Do not re-run Phase 1.
+### Parent's responsibility after receiving HANDOFF-REQUEST
+
+The parent (the surrounding context that invoked `forge-complete-task`) must run both gates before merging. **A PR without completed gates must not be merged** — the whole point of the handoff is that the gates actually run.
+
+1. **Dispatch a fresh-context DoD-verifier agent** (general-purpose subagent). Prompt template:
+   > Verify the following Definition of Done checkboxes for the forge repo at `/home/jeroche/repos/forge`. For each item, find concrete code evidence (grep result, file read, or test run). Do NOT accept "it compiles" as evidence — find the actual symbol, method, or file.
+   >
+   > Definition of Done:
+   > `<paste DoD from HANDOFF-REQUEST>`
+   >
+   > Changed files:
+   > `<paste changed_files from HANDOFF-REQUEST>`
+   >
+   > For each checkbox report `VERIFIED: <what you found and where>` or `NOT FOUND: <what is missing>`. Do not guess.
+
+2. **Dispatch a fresh-context code-reviewer agent** (`pr-review-toolkit:code-reviewer` or equivalent). Prompt template:
+   > Review PR `<pr_url from HANDOFF-REQUEST>` for forge-ide/forge issue #`<issue_number>`.
+   >
+   > Definition of Done:
+   > `<paste DoD>`
+   >
+   > Verify: (1) every DoD item is behaviorally correct, not just structurally present; (2) no regressions in existing tests or public APIs; (3) Rust-specific issues — missing derives, incorrect serde attributes, clippy violations; (4) report only HIGH-confidence findings, skip style nitpicks.
+
+3. **If either gate surfaces issues:** re-engage the orchestrator (new Agent invocation with the findings embedded). The orchestrator returns to Phase 2, fixes, amends the branch, re-pushes, and re-emits HANDOFF-REQUEST. Parent re-runs the gates. Loop until both clean.
+
+4. **If both gates are clean:** merge the PR. Only then is the task complete.
+
+### Failure modes to watch for
+
+- `forge-finish-task` exits without a HANDOFF-REQUEST — the orchestrator aborted early. Do not merge blindly; investigate.
+- A gate fails but the orchestrator "fixed" it inline without re-emitting HANDOFF-REQUEST — that means the fix was never re-verified. Re-run the gates against the amended branch.
+- Merging on a timer / auto-merge without waiting for gates — the gates exist precisely to prevent this. Merge manually after gates confirm clean.
 
 ## Delegation Rules
 
