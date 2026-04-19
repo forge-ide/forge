@@ -1,7 +1,8 @@
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncBufRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
@@ -12,6 +13,14 @@ use crate::{ForgeError, Result};
 
 const SCHEMA_HEADER: &str = r#"{"schema_version":1}"#;
 const FLUSH_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Per-line byte cap for `events.jsonl` / transcript readers.
+///
+/// Legitimate events are far smaller than this (the orchestrator chunks
+/// assistant deltas). The cap exists so a malformed or adversarial log
+/// cannot force readers to buffer an unbounded line before parsing
+/// (see CWE-770 — Allocation of Resources Without Limits).
+pub const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 
 pub struct EventLog {
     writer: Arc<Mutex<BufWriter<tokio::fs::File>>>,
@@ -102,18 +111,123 @@ impl EventLog {
     }
 }
 
+/// Outcome of a single bounded-line read.
+enum BoundedLine {
+    /// A full line was read; terminating `\n` has been consumed but is not
+    /// included in the caller's buffer.
+    Line,
+    /// EOF was hit before any bytes were read.
+    Eof,
+    /// EOF was hit mid-line (no trailing `\n`). Buffer holds the partial line.
+    EofNoNewline,
+    /// The per-line byte cap was exhausted before a `\n` was seen.
+    Exceeded,
+}
+
+/// Read one line into `buf` with a hard upper bound of `max` bytes.
+///
+/// Uses `fill_buf`/`consume` directly so memory use is bounded to at most
+/// `max` regardless of how the adversarial input is shaped. The terminating
+/// `\n` is consumed from the reader but is not appended to `buf`.
+/// Outcome of a single `poll_fill_buf` pass.
+enum PassOutcome {
+    /// Reader returned an empty slice — EOF.
+    Eof,
+    /// Chunk contained a newline and the preceding content fit under `max`.
+    LineReady,
+    /// The per-line cap was exhausted before a newline was reached.
+    Exceeded,
+    /// Chunk had no newline; content was appended. Loop again.
+    KeepReading,
+}
+
+async fn read_bounded_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    max: usize,
+) -> std::io::Result<BoundedLine> {
+    use std::future::poll_fn;
+    use std::task::Poll;
+
+    buf.clear();
+    loop {
+        let outcome = poll_fn(|cx| {
+            let chunk = match Pin::new(&mut *reader).poll_fill_buf(cx) {
+                Poll::Ready(Ok(c)) => c,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            };
+            if chunk.is_empty() {
+                return Poll::Ready(Ok(PassOutcome::Eof));
+            }
+            match chunk.iter().position(|b| *b == b'\n') {
+                Some(pos) => {
+                    let consume = pos + 1;
+                    let outcome = if buf.len().saturating_add(pos) > max {
+                        PassOutcome::Exceeded
+                    } else {
+                        buf.extend_from_slice(&chunk[..pos]);
+                        PassOutcome::LineReady
+                    };
+                    Pin::new(&mut *reader).consume(consume);
+                    Poll::Ready(Ok(outcome))
+                }
+                None => {
+                    let len = chunk.len();
+                    let outcome = if buf.len().saturating_add(len) > max {
+                        PassOutcome::Exceeded
+                    } else {
+                        buf.extend_from_slice(chunk);
+                        PassOutcome::KeepReading
+                    };
+                    Pin::new(&mut *reader).consume(len);
+                    Poll::Ready(Ok(outcome))
+                }
+            }
+        })
+        .await?;
+
+        match outcome {
+            PassOutcome::Eof => {
+                return Ok(if buf.is_empty() {
+                    BoundedLine::Eof
+                } else {
+                    BoundedLine::EofNoNewline
+                });
+            }
+            PassOutcome::LineReady => return Ok(BoundedLine::Line),
+            PassOutcome::Exceeded => return Ok(BoundedLine::Exceeded),
+            PassOutcome::KeepReading => continue,
+        }
+    }
+}
+
 /// Reads events from the log at `path` that have sequence number greater than `since`.
 ///
 /// Events are 1-indexed: the first event in the file is seq 1. Sending `since: 0`
 /// returns all events; `since: N` returns events N+1 onward.
+///
+/// Every line is bounded to [`MAX_LINE_BYTES`]. An `events.jsonl` with a line that
+/// exceeds the cap is rejected with an error rather than buffered into memory.
 pub async fn read_since(path: &Path, since: u64) -> Result<Vec<(u64, Event)>> {
     let file = tokio::fs::File::open(path).await?;
-    let mut lines = BufReader::new(file).lines();
+    let mut reader = BufReader::new(file);
+    let mut line_buf: Vec<u8> = Vec::new();
 
-    let header = lines
-        .next_line()
-        .await?
-        .ok_or_else(|| ForgeError::Other(anyhow::anyhow!("event log is empty")))?;
+    match read_bounded_line(&mut reader, &mut line_buf, MAX_LINE_BYTES).await? {
+        BoundedLine::Eof => {
+            return Err(ForgeError::Other(anyhow::anyhow!("event log is empty")));
+        }
+        BoundedLine::Exceeded => {
+            return Err(ForgeError::Other(anyhow::anyhow!(
+                "events.jsonl header line exceeds {MAX_LINE_BYTES} bytes"
+            )));
+        }
+        BoundedLine::Line | BoundedLine::EofNoNewline => {}
+    }
+    let header = std::str::from_utf8(&line_buf).map_err(|_| {
+        ForgeError::Other(anyhow::anyhow!("events.jsonl header is not valid UTF-8"))
+    })?;
     if header != SCHEMA_HEADER {
         return Err(ForgeError::Other(anyhow::anyhow!(
             "schema header mismatch: expected {SCHEMA_HEADER:?}, got {header:?}"
@@ -122,12 +236,29 @@ pub async fn read_since(path: &Path, since: u64) -> Result<Vec<(u64, Event)>> {
 
     let mut events = Vec::new();
     let mut seq = 0u64;
-    while let Some(line) = lines.next_line().await? {
-        seq += 1;
-        if seq > since {
-            let event: Event = serde_json::from_str(&line)
-                .map_err(|e| ForgeError::Other(anyhow::anyhow!("bad event at seq {seq}: {e}")))?;
-            events.push((seq, event));
+    loop {
+        match read_bounded_line(&mut reader, &mut line_buf, MAX_LINE_BYTES).await? {
+            BoundedLine::Eof => break,
+            BoundedLine::Exceeded => {
+                return Err(ForgeError::Other(anyhow::anyhow!(
+                    "events.jsonl line at seq {next} exceeds {MAX_LINE_BYTES} bytes",
+                    next = seq + 1
+                )));
+            }
+            BoundedLine::Line | BoundedLine::EofNoNewline => {
+                seq += 1;
+                if seq > since {
+                    let line = std::str::from_utf8(&line_buf).map_err(|_| {
+                        ForgeError::Other(anyhow::anyhow!(
+                            "events.jsonl line at seq {seq} is not valid UTF-8"
+                        ))
+                    })?;
+                    let event: Event = serde_json::from_str(line).map_err(|e| {
+                        ForgeError::Other(anyhow::anyhow!("bad event at seq {seq}: {e}"))
+                    })?;
+                    events.push((seq, event));
+                }
+            }
         }
     }
     Ok(events)
