@@ -184,3 +184,242 @@ async fn session_hello_ignores_attacker_supplied_socket_path() {
         "rogue listener must not receive any connection from session_hello"
     );
 }
+
+// F-068 / L4 (T7): size caps on untyped-string fields in session commands.
+//
+// These tests assert that oversize payloads are rejected by the *command*
+// layer (before the bridge is consulted), not by the `forge_ipc` 4 MiB wire
+// cap. The discriminator: with an empty `SessionConnections` registry, the
+// bridge layer would respond with "no active connection for session …".
+// If the size check fires first, we instead see our size-cap error marker.
+//
+// The at-cap tests invert the assertion: a payload sized exactly at the cap
+// must pass the size check (still error later with "no active connection"),
+// proving the boundary is inclusive and the size check alone is not swallowing
+// every call.
+
+fn make_session_window(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    session_id: &str,
+) -> tauri::WebviewWindow<tauri::test::MockRuntime> {
+    tauri::WebviewWindowBuilder::new(
+        app,
+        &format!("session-{session_id}"),
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .build()
+    .expect("mock window")
+}
+
+fn invoke_err(
+    window: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+    cmd: &str,
+    payload: serde_json::Value,
+) -> String {
+    let res = tauri::test::get_ipc_response(
+        window,
+        tauri::webview::InvokeRequest {
+            cmd: cmd.into(),
+            callback: tauri::ipc::CallbackFn(0),
+            error: tauri::ipc::CallbackFn(1),
+            url: "http://tauri.localhost".parse().unwrap(),
+            body: tauri::ipc::InvokeBody::Json(payload),
+            headers: Default::default(),
+            invoke_key: INVOKE_KEY.to_string(),
+        },
+    );
+    match res {
+        Ok(ok) => panic!("expected error, got Ok: {ok:?}"),
+        Err(serde_json::Value::String(s)) => s,
+        Err(other) => other.to_string(),
+    }
+}
+
+#[test]
+fn session_send_message_rejects_text_above_cap_at_command_layer() {
+    // 1 MiB is well under `forge_ipc`'s 4 MiB wire cap, so any rejection must
+    // originate from the command layer's size check, not the wire.
+    let app = make_app();
+    app.manage(BridgeState::new(SessionConnections::new()));
+    let window = make_session_window(&app, "oversize");
+
+    let err = invoke_err(
+        &window,
+        "session_send_message",
+        serde_json::json!({
+            "sessionId": "oversize",
+            "text": "A".repeat(1024 * 1024),
+        }),
+    );
+
+    // The load-bearing assertion: rejection must be the size cap, not the
+    // bridge's "no active connection" — the latter would prove the size
+    // check was absent.
+    assert!(
+        err.contains("payload too large") && err.contains("text"),
+        "expected size-cap error mentioning text, got: {err}"
+    );
+    assert!(
+        !err.contains("no active connection"),
+        "size check must fire before the bridge, got: {err}"
+    );
+}
+
+#[test]
+fn session_send_message_accepts_text_exactly_at_cap() {
+    // 128 KiB — the inclusive boundary. The size check must let this through
+    // (the call will still fail, but at the bridge with "no active connection",
+    // proving the size gate didn't swallow it).
+    let app = make_app();
+    app.manage(BridgeState::new(SessionConnections::new()));
+    let window = make_session_window(&app, "at-cap");
+
+    let err = invoke_err(
+        &window,
+        "session_send_message",
+        serde_json::json!({
+            "sessionId": "at-cap",
+            "text": "A".repeat(128 * 1024),
+        }),
+    );
+
+    assert!(
+        err.contains("no active connection"),
+        "128 KiB text must pass size check and reach the bridge, got: {err}"
+    );
+    assert!(
+        !err.contains("payload too large"),
+        "128 KiB must not be rejected by the size cap, got: {err}"
+    );
+}
+
+#[test]
+fn session_approve_tool_rejects_tool_call_id_above_cap_at_command_layer() {
+    let app = make_app();
+    app.manage(BridgeState::new(SessionConnections::new()));
+    let window = make_session_window(&app, "tcid");
+
+    let err = invoke_err(
+        &window,
+        "session_approve_tool",
+        serde_json::json!({
+            "sessionId": "tcid",
+            "toolCallId": "x".repeat(65),
+            "scope": "ThisTool",
+        }),
+    );
+
+    assert!(
+        err.contains("payload too large") && err.contains("tool_call_id"),
+        "expected size-cap error mentioning tool_call_id, got: {err}"
+    );
+    assert!(
+        !err.contains("no active connection"),
+        "size check must fire before the bridge, got: {err}"
+    );
+}
+
+#[test]
+fn session_approve_tool_rejects_scope_above_cap_at_command_layer() {
+    let app = make_app();
+    app.manage(BridgeState::new(SessionConnections::new()));
+    let window = make_session_window(&app, "scope");
+
+    let err = invoke_err(
+        &window,
+        "session_approve_tool",
+        serde_json::json!({
+            "sessionId": "scope",
+            "toolCallId": "tc-1",
+            "scope": "x".repeat(257),
+        }),
+    );
+
+    assert!(
+        err.contains("payload too large") && err.contains("scope"),
+        "expected size-cap error mentioning scope, got: {err}"
+    );
+    assert!(
+        !err.contains("no active connection"),
+        "size check must fire before the bridge, got: {err}"
+    );
+}
+
+#[test]
+fn session_reject_tool_rejects_tool_call_id_above_cap_at_command_layer() {
+    let app = make_app();
+    app.manage(BridgeState::new(SessionConnections::new()));
+    let window = make_session_window(&app, "rej");
+
+    let err = invoke_err(
+        &window,
+        "session_reject_tool",
+        serde_json::json!({
+            "sessionId": "rej",
+            "toolCallId": "x".repeat(65),
+            "reason": null,
+        }),
+    );
+
+    assert!(
+        err.contains("payload too large") && err.contains("tool_call_id"),
+        "expected size-cap error mentioning tool_call_id, got: {err}"
+    );
+    assert!(
+        !err.contains("no active connection"),
+        "size check must fire before the bridge, got: {err}"
+    );
+}
+
+#[test]
+fn session_reject_tool_rejects_reason_above_cap_at_command_layer() {
+    let app = make_app();
+    app.manage(BridgeState::new(SessionConnections::new()));
+    let window = make_session_window(&app, "rej-reason");
+
+    let err = invoke_err(
+        &window,
+        "session_reject_tool",
+        serde_json::json!({
+            "sessionId": "rej-reason",
+            "toolCallId": "tc-1",
+            "reason": "x".repeat(1025),
+        }),
+    );
+
+    assert!(
+        err.contains("payload too large") && err.contains("reason"),
+        "expected size-cap error mentioning reason, got: {err}"
+    );
+    assert!(
+        !err.contains("no active connection"),
+        "size check must fire before the bridge, got: {err}"
+    );
+}
+
+#[test]
+fn session_reject_tool_accepts_absent_reason() {
+    // `reason` is `Option<String>` — None must not trigger the size check.
+    let app = make_app();
+    app.manage(BridgeState::new(SessionConnections::new()));
+    let window = make_session_window(&app, "rej-none");
+
+    let err = invoke_err(
+        &window,
+        "session_reject_tool",
+        serde_json::json!({
+            "sessionId": "rej-none",
+            "toolCallId": "tc-1",
+            "reason": null,
+        }),
+    );
+
+    assert!(
+        err.contains("no active connection"),
+        "None reason must skip size check and reach the bridge, got: {err}"
+    );
+    assert!(
+        !err.contains("payload too large"),
+        "None reason must not be rejected by the size cap, got: {err}"
+    );
+}
