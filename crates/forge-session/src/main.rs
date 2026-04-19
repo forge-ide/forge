@@ -79,9 +79,34 @@ async fn main() -> Result<()> {
                 .await
             }
             ProviderKind::Ollama { model } => {
-                let base_url = std::env::var("OLLAMA_BASE_URL")
-                    .unwrap_or_else(|_| forge_providers::ollama::DEFAULT_BASE_URL.to_string());
-                let provider = Arc::new(OllamaProvider::new(base_url, model));
+                // F-058 / M5 (T7): validate `OLLAMA_BASE_URL` before handing
+                // it to reqwest. An unvalidated URL (the old `env::var` +
+                // `unwrap_or_else` pattern) TLS-dials arbitrary hosts and
+                // exfiltrates every chat transcript + tool-result payload.
+                // Policy is enforced by `validate_base_url`; see its docs.
+                let raw = std::env::var("OLLAMA_BASE_URL").ok();
+                let allow_remote_raw =
+                    std::env::var(forge_providers::ollama::ALLOW_REMOTE_ENV).ok();
+                let allow_remote =
+                    forge_providers::ollama::parse_allow_remote(allow_remote_raw.as_deref());
+                let url = forge_providers::ollama::validate_base_url(raw.as_deref(), allow_remote)?;
+                // Loudly surface the resolved URL so env-var redirection is
+                // visible in logs. Remote-opt-in is called out explicitly.
+                if allow_remote
+                    && !matches!(
+                        url.host_str(),
+                        Some("127.0.0.1") | Some("localhost") | Some("::1") | Some("[::1]")
+                    )
+                {
+                    eprintln!(
+                        "forged: WARN ollama base_url = {} (remote endpoint enabled via {}=1)",
+                        url,
+                        forge_providers::ollama::ALLOW_REMOTE_ENV
+                    );
+                } else {
+                    eprintln!("forged: ollama base_url = {}", url);
+                }
+                let provider = Arc::new(OllamaProvider::new(url.as_str(), model));
                 serve_with_session(
                     &socket_path,
                     session,

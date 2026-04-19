@@ -26,8 +26,74 @@ use std::time::Duration;
 use crate::{ChatChunk, ChatMessage, ChatRequest, Provider, StreamErrorKind};
 use forge_core::Result;
 use futures::stream::{BoxStream, StreamExt};
+use reqwest::Url;
 
 pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434";
+
+/// Opt-in env var that gates non-loopback `OLLAMA_BASE_URL` values. Strict
+/// literal match against `"1"` — no other spelling is accepted so typos
+/// don't accidentally enable remote dialing.
+pub const ALLOW_REMOTE_ENV: &str = "FORGE_ALLOW_REMOTE_OLLAMA";
+
+/// Validate a user-supplied Ollama base URL against the loopback policy.
+///
+/// F-058 / M5 (T7 — config injection / trust boundary). `OLLAMA_BASE_URL` is
+/// read from the process environment and sets where LLM traffic and every
+/// `ChatBlock::ToolResult` payload (including `fs.read` content) is sent.
+/// Because `reqwest` is built with `rustls-tls`, an unvalidated URL can
+/// TLS-dial any host — an attacker with env-var write access (shell-init,
+/// `terminal.integrated.env`, `.envrc`, PATH-hijacked launcher) turns the
+/// agent into a remote-controlled exfiltration channel.
+///
+/// Policy:
+/// - `raw` is `None` or empty → fall back to [`DEFAULT_BASE_URL`].
+/// - Scheme must be `http` (Ollama's loopback convention; `https` is rejected
+///   even under opt-in — the trust model is loopback, not TLS-anywhere).
+/// - Host must be exact-match `127.0.0.1`, `localhost`, or `::1` unless
+///   `allow_remote` is true. Exact-match — not `starts_with` — so
+///   `127.0.0.1.attacker.com` is rejected.
+pub fn validate_base_url(raw: Option<&str>, allow_remote: bool) -> Result<Url> {
+    let raw = raw.map(str::trim).filter(|s| !s.is_empty());
+    let input = raw.unwrap_or(DEFAULT_BASE_URL);
+
+    let url = Url::parse(input)
+        .map_err(|e| anyhow::anyhow!("OLLAMA_BASE_URL parse failed for {input:?}: {e}"))?;
+
+    if url.scheme() != "http" {
+        return Err(anyhow::anyhow!(
+            "OLLAMA_BASE_URL scheme {:?} is not allowed; only `http` is accepted \
+             (Ollama loopback convention)",
+            url.scheme()
+        )
+        .into());
+    }
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("OLLAMA_BASE_URL {input:?} has no host"))?;
+
+    // `Url::host_str()` lowercases DNS names and, for IPv6 literals, returns
+    // the bracketed form (`"[::1]"`). Match both spellings defensively; a
+    // future `url` upgrade that switches to unbracketed will still pass.
+    let is_loopback = matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]");
+
+    if !is_loopback && !allow_remote {
+        return Err(anyhow::anyhow!(
+            "OLLAMA_BASE_URL host {host:?} is not loopback; set \
+             {ALLOW_REMOTE_ENV}=1 to explicitly opt in to a remote Ollama endpoint"
+        )
+        .into());
+    }
+
+    Ok(url)
+}
+
+/// Parse the `FORGE_ALLOW_REMOTE_OLLAMA` env-var value. Strict: only literal
+/// `"1"` is accepted. Any other value (including `"true"`, `"yes"`, or empty)
+/// is treated as not-set so a typo cannot silently unlock remote dialing.
+pub fn parse_allow_remote(raw: Option<&str>) -> bool {
+    raw == Some("1")
+}
 
 /// Per-line NDJSON byte cap (1 MiB). Real Ollama chunks are <100 KB.
 pub const DEFAULT_MAX_LINE_BYTES: usize = 1 << 20;
@@ -606,5 +672,163 @@ mod tests {
                 args: serde_json::json!({"path": "/tmp/x"}),
             })
         );
+    }
+
+    // ── validate_base_url: scheme/host policy ─────────────────────────────────
+    //
+    // F-058 / M5 (T7): `OLLAMA_BASE_URL` is a single-user trust boundary. An
+    // attacker who can plant shell-init env vars otherwise redirects LLM and
+    // tool-result traffic off-box. Policy: `http` only, loopback host only,
+    // remote hosts gated by an explicit opt-in (`FORGE_ALLOW_REMOTE_OLLAMA=1`).
+
+    #[test]
+    fn validate_base_url_accepts_default_when_raw_is_none() {
+        let url = validate_base_url(None, false).expect("default must pass");
+        assert_eq!(url.scheme(), "http");
+        assert_eq!(url.host_str(), Some("127.0.0.1"));
+    }
+
+    #[test]
+    fn validate_base_url_accepts_default_when_raw_is_empty() {
+        // Empty string (unset-but-present env var shape) is treated as unset
+        // so operators can't accidentally zero the URL to ""
+        let url = validate_base_url(Some(""), false).expect("empty must fall back");
+        assert_eq!(url.host_str(), Some("127.0.0.1"));
+    }
+
+    #[test]
+    fn validate_base_url_accepts_loopback_ipv4() {
+        let url = validate_base_url(Some("http://127.0.0.1:11434"), false).expect("loopback v4");
+        assert_eq!(url.host_str(), Some("127.0.0.1"));
+    }
+
+    #[test]
+    fn validate_base_url_accepts_localhost() {
+        validate_base_url(Some("http://localhost:11434"), false).expect("localhost");
+    }
+
+    #[test]
+    fn validate_base_url_accepts_localhost_uppercase() {
+        // `Url::parse` lowercases host; lock that assumption so a future
+        // upgrade that changes it doesn't silently reject valid input.
+        validate_base_url(Some("http://LOCALHOST:11434"), false).expect("LOCALHOST");
+    }
+
+    #[test]
+    fn validate_base_url_accepts_loopback_ipv6() {
+        // `Url::host_str()` strips the brackets; assert the normalized form.
+        let url = validate_base_url(Some("http://[::1]:11434"), false).expect("loopback v6");
+        assert_eq!(url.host_str(), Some("[::1]"));
+    }
+
+    #[test]
+    fn validate_base_url_rejects_https_even_loopback() {
+        let err = validate_base_url(Some("https://127.0.0.1:11434"), false)
+            .expect_err("https must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("scheme"),
+            "error must name the scheme policy, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_base_url_rejects_remote_host_without_opt_in() {
+        let err = validate_base_url(Some("http://example.com"), false)
+            .expect_err("non-loopback must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("FORGE_ALLOW_REMOTE_OLLAMA"),
+            "error must name the opt-in env var, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_base_url_rejects_https_remote_even_with_opt_in() {
+        // Scheme policy is independent of the host opt-in — `https` is always
+        // rejected because our trust model is for the Ollama loopback
+        // convention, not for TLS-dialing arbitrary servers.
+        let err = validate_base_url(Some("https://example.com"), true)
+            .expect_err("https must still be rejected under opt-in");
+        let msg = format!("{err}");
+        assert!(msg.contains("scheme"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_base_url_rejects_prefix_spoof_of_loopback() {
+        // A host like `127.0.0.1.attacker.com` must be rejected — the policy
+        // is exact host match, not a `starts_with` check.
+        let err = validate_base_url(Some("http://127.0.0.1.attacker.com"), false)
+            .expect_err("prefix-spoof must be rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("FORGE_ALLOW_REMOTE_OLLAMA"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_base_url_accepts_remote_with_opt_in() {
+        let url = validate_base_url(Some("http://example.com"), true).expect("opt-in remote");
+        assert_eq!(url.host_str(), Some("example.com"));
+    }
+
+    #[test]
+    fn validate_base_url_rejects_non_http_scheme() {
+        let err =
+            validate_base_url(Some("ftp://127.0.0.1"), false).expect_err("ftp must be rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("scheme"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_base_url_rejects_file_scheme() {
+        let err = validate_base_url(Some("file:///etc/passwd"), false)
+            .expect_err("file must be rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("scheme"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_base_url_rejects_malformed_url() {
+        let err =
+            validate_base_url(Some("not a url"), false).expect_err("malformed must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.to_lowercase().contains("parse") || msg.contains("OLLAMA_BASE_URL"),
+            "error should name the input or parse failure, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_base_url_rejects_url_without_host() {
+        // `http:///foo` parses but has no host — treat as invalid.
+        let err =
+            validate_base_url(Some("http:///foo"), false).expect_err("no-host must be rejected");
+        let msg = format!("{err}");
+        // Message should reach the user; exact wording is not asserted, just
+        // that we fail rather than dial an empty host.
+        assert!(!msg.is_empty());
+    }
+
+    // ── opt-in env-var parsing ────────────────────────────────────────────────
+    //
+    // `FORGE_ALLOW_REMOTE_OLLAMA` is strict: only literal `"1"` counts.
+    // Anything else (including common truthy spellings) is not opt-in so
+    // typos don't accidentally unlock remote dialing.
+
+    #[test]
+    fn allow_remote_parses_one_as_true() {
+        assert!(parse_allow_remote(Some("1")));
+    }
+
+    #[test]
+    fn allow_remote_parses_unset_as_false() {
+        assert!(!parse_allow_remote(None));
+    }
+
+    #[test]
+    fn allow_remote_rejects_true_spelling() {
+        assert!(!parse_allow_remote(Some("true")));
+        assert!(!parse_allow_remote(Some("yes")));
+        assert!(!parse_allow_remote(Some("0")));
+        assert!(!parse_allow_remote(Some("")));
     }
 }
