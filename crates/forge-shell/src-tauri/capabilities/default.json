@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the Dashboard and Session windows. Grants Tauri's built-in core APIs. App-local commands (F-020 session bridge etc.) do not require capability entries — Tauri only gates plugin commands.",
+  "description": "Default capability for the Dashboard and Session windows. Grants Tauri's built-in core APIs via `core:default`.\n\nApp-local commands registered on this capability are not Tauri-gated in Tauri 2 today (only plugin commands are), but are enumerated here so that a future Tauri upgrade or capability refactor that changes gating semantics produces a reviewable diff against an explicit list:\n\n- provider_status (dashboard only)\n- session_list (dashboard only)\n- open_session (dashboard only; validates the session id before creating the window — see F-063 / M11)\n- session_hello (session-* only)\n- session_subscribe (session-* only)\n- session_send_message (session-* only)\n- session_approve_tool (session-* only)\n- session_reject_tool (session-* only)\n\nPer-window authorization is enforced in-process by `require_window_label` (F-051 / H10). Bare identifiers like `allow-open-session` are intentionally omitted from the `permissions` array: Tauri 2's ACL resolver rejects identifiers that do not correspond to a compiled permission file, and Forge does not yet ship app-local permission manifests.",
   "windows": ["dashboard", "session-*"],
   "permissions": ["core:default"]
 }

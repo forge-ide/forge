@@ -240,3 +240,46 @@ fn non_dashboard_window_invoking_open_session_is_rejected() {
         "expected label-mismatch error, got: {err}"
     );
 }
+
+/// F-063 (M11 / T5): `open_session` must reject any id that does not match
+/// the canonical `SessionId` wire shape *before* the window is created, so
+/// the capability file's `session-*` glob cannot be matched by a label
+/// containing path-traversal or control characters.
+#[test]
+fn dashboard_window_invoking_open_session_with_invalid_id_is_rejected_and_creates_no_window() {
+    const INVALID_ID: &str = "../foo";
+    let malicious_label = format!("session-{INVALID_ID}");
+
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![
+            forge_shell::dashboard_sessions::open_session,
+        ])
+        .build(mock_context(noop_assets()))
+        .expect("build mock Tauri app");
+    let window = build_window(&app, "dashboard");
+
+    // Sanity: the malicious window does not exist before the call.
+    assert!(
+        app.get_webview_window(&malicious_label).is_none(),
+        "precondition: no window with label `{malicious_label}`"
+    );
+
+    let err = invoke(
+        &window,
+        "open_session",
+        serde_json::json!({ "id": INVALID_ID }),
+    )
+    .expect_err("open_session must reject non-canonical session ids");
+
+    assert!(
+        err.contains("invalid session id"),
+        "expected invalid-session-id error, got: {err}"
+    );
+
+    // The security property: no window was ever created for the malicious
+    // label. Without validation the `session-*` capability glob would match.
+    assert!(
+        app.get_webview_window(&malicious_label).is_none(),
+        "no window with label `{malicious_label}` must exist after a rejected open_session"
+    );
+}
