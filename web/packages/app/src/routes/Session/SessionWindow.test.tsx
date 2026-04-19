@@ -8,10 +8,6 @@ const { invokeMock, listenMock, unlistenMock, closeMock } = vi.hoisted(() => ({
   closeMock: vi.fn(),
 }));
 
-vi.mock('@tauri-apps/api/core', () => ({
-  invoke: invokeMock,
-}));
-
 vi.mock('@tauri-apps/api/event', () => ({
   listen: listenMock,
 }));
@@ -24,6 +20,7 @@ import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { SessionWindow } from './SessionWindow';
 import { resetSessionEventStore } from '../../stores/session';
 import { resetMessagesStore } from '../../stores/messages';
+import { setInvokeForTesting } from '../../lib/tauri';
 
 const helloAck = {
   session_id: 'abc123',
@@ -55,10 +52,12 @@ describe('SessionWindow', () => {
       if (cmd === 'session_hello') return helloAck;
       return undefined;
     });
+    setInvokeForTesting(invokeMock as never);
     listenMock.mockResolvedValue(unlistenMock);
   });
 
   afterEach(() => {
+    setInvokeForTesting(null);
     cleanup();
   });
 

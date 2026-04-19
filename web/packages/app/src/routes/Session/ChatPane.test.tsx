@@ -1,14 +1,8 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, fireEvent } from '@solidjs/testing-library';
 import type { SessionId } from '@forge/ipc';
 
-// --- Mocks (hoisted so vi.mock works) ---
-const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
-
-vi.mock('../../lib/tauri', () => ({ invoke: invokeMock }));
-vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }));
-
-// --- Store imports (after mocks) ---
+// --- Store imports ---
 import {
   pushEvent,
   setAwaitingResponse,
@@ -16,16 +10,23 @@ import {
 } from '../../stores/messages';
 import { setActiveSessionId } from '../../stores/session';
 import { resetApprovalsStore } from '../../stores/approvals';
+import { setInvokeForTesting } from '../../lib/tauri';
 import { ChatPane } from './ChatPane';
 
 const SID = 'session-chat-test' as SessionId;
+const invokeMock = vi.fn();
 
 beforeEach(() => {
   invokeMock.mockReset();
   invokeMock.mockResolvedValue(undefined);
+  setInvokeForTesting(invokeMock as never);
   resetMessagesStore();
   resetApprovalsStore();
   setActiveSessionId(SID);
+});
+
+afterEach(() => {
+  setInvokeForTesting(null);
 });
 
 describe('ChatPane rendering', () => {
