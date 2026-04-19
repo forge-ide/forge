@@ -52,6 +52,25 @@ pub enum ChatChunk {
         args: serde_json::Value,
     },
     Done(String),
+    /// Terminal, structured stream failure. The chunk stream closes after
+    /// yielding this variant — callers should treat the current turn as aborted.
+    Error {
+        kind: StreamErrorKind,
+        message: String,
+    },
+}
+
+/// Why a provider stream terminated abnormally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamErrorKind {
+    /// A single NDJSON line exceeded the per-line byte cap.
+    LineTooLong,
+    /// No bytes received within the inter-chunk idle window.
+    IdleTimeout,
+    /// The overall stream exceeded its wall-clock budget.
+    WallClockTimeout,
+    /// Transport-level error from the underlying reader.
+    Transport,
 }
 
 // ── Provider trait ────────────────────────────────────────────────────────────

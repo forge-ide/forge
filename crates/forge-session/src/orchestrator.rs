@@ -277,6 +277,28 @@ async fn run_request_loop<P: Provider>(
                     // Tool calls happened — build continuation request and loop.
                     break;
                 }
+
+                ChatChunk::Error { kind, message } => {
+                    // Stream aborted under a provider-layer bound (line cap,
+                    // idle timeout, wall-clock timeout, transport error).
+                    // Finalise whatever assistant text we streamed so the UI
+                    // composer unwedges, then surface the failure.
+                    session
+                        .emit(Event::AssistantMessage {
+                            id: msg_id.clone(),
+                            provider: provider_id.clone(),
+                            model: model.clone(),
+                            at: Utc::now(),
+                            stream_finalised: true,
+                            text: assistant_text.clone(),
+                            branch_parent: None,
+                            branch_variant_index: 0,
+                        })
+                        .await?;
+                    return Err(anyhow::anyhow!(
+                        "provider stream aborted ({kind:?}): {message}"
+                    ));
+                }
             }
         }
 
