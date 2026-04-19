@@ -1,4 +1,4 @@
-use forge_core::Event;
+use forge_core::{ApprovalScope, Event};
 use forge_ipc::{
     ClientInfo, Hello, IpcEvent, IpcMessage, SendUserMessage, Subscribe, ToolCallApproved,
     PROTO_VERSION,
@@ -564,5 +564,83 @@ async fn tool_result_fed_back_to_provider_in_continuation() {
     assert!(
         has_tool_result,
         "second ChatRequest should contain a ToolResult block"
+    );
+}
+
+/// F-053 regression: the client-supplied ApprovalScope on `ToolCallApproved`
+/// must be recorded faithfully in the emitted `Event::ToolCallApproved`,
+/// rather than being hard-coded to `Once`.
+#[tokio::test]
+async fn approval_with_this_tool_scope_is_recorded_faithfully() {
+    let dir = TempDir::new().unwrap();
+    let log_path = dir.path().join("events.jsonl");
+    let sock_path = dir.path().join("scope_fidelity.sock");
+
+    let session = Arc::new(Session::create(log_path).await.unwrap());
+    let provider =
+        Arc::new(MockProvider::from_responses(vec![SCRIPT_INITIAL.to_string()]).unwrap());
+
+    let server_session = Arc::clone(&session);
+    let server_provider = Arc::clone(&provider);
+    let server_sock = sock_path.clone();
+    tokio::spawn(async move {
+        serve_with_session(
+            &server_sock,
+            server_session,
+            server_provider,
+            false,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    });
+
+    let mut stream = connect_with_retry(&sock_path).await;
+    do_handshake(&mut stream).await;
+    forge_ipc::write_frame(&mut stream, &IpcMessage::Subscribe(Subscribe { since: 0 }))
+        .await
+        .unwrap();
+    forge_ipc::write_frame(
+        &mut stream,
+        &IpcMessage::SendUserMessage(SendUserMessage {
+            text: "hi".to_string(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let (mut reader, mut writer) = stream.into_split();
+
+    // Read events, approve with scope="ThisTool" when requested, and capture
+    // the emitted ToolCallApproved event so we can inspect its scope.
+    let mut approved_scope: Option<ApprovalScope> = None;
+    for _ in 0..20 {
+        let frame = forge_ipc::read_frame(&mut reader).await.unwrap();
+        match extract_event(&frame) {
+            Some(Event::ToolCallApprovalRequested { id, .. }) => {
+                forge_ipc::write_frame(
+                    &mut writer,
+                    &IpcMessage::ToolCallApproved(ToolCallApproved {
+                        id: id.to_string(),
+                        scope: "ThisTool".to_string(),
+                    }),
+                )
+                .await
+                .unwrap();
+            }
+            Some(Event::ToolCallApproved { scope, .. }) => {
+                approved_scope = Some(scope);
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(
+        approved_scope,
+        Some(ApprovalScope::ThisTool),
+        "client-supplied ApprovalScope::ThisTool must be recorded faithfully"
     );
 }

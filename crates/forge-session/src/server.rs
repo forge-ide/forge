@@ -16,9 +16,10 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{broadcast, Mutex};
 
 use crate::archive::archive_or_purge;
-use crate::orchestrator::{run_turn, PendingApprovals};
+use crate::orchestrator::{run_turn, ApprovalDecision, PendingApprovals};
 use crate::sandbox::ChildRegistry;
 use crate::session::Session;
+use forge_core::ApprovalScope;
 
 /// Compute the session's `allowed_paths` glob list from its workspace root.
 ///
@@ -387,16 +388,31 @@ async fn handle_connection<P: Provider + 'static>(
                     }
 
                     Some(IpcMessage::ToolCallApproved(a)) => {
+                        // F-053: parse the client-supplied scope (wire format is still
+                        // a bare string, per forge_ipc::ToolCallApproved) into the typed
+                        // `ApprovalScope`. On parse failure, fall back to `Once` and
+                        // warn — the user did click approve, so we honour the approval
+                        // at the weakest scope rather than dropping it silently.
+                        let scope = serde_json::from_value::<ApprovalScope>(
+                            serde_json::Value::String(a.scope.clone()),
+                        )
+                        .unwrap_or_else(|_| {
+                            eprintln!(
+                                "ToolCallApproved: unknown scope {:?}, falling back to Once",
+                                a.scope
+                            );
+                            ApprovalScope::Once
+                        });
                         let mut map = pending_approvals.lock().await;
                         if let Some(tx) = map.remove(&a.id) {
-                            let _ = tx.send(true);
+                            let _ = tx.send(ApprovalDecision::Approved(scope));
                         }
                     }
 
                     Some(IpcMessage::ToolCallRejected(r)) => {
                         let mut map = pending_approvals.lock().await;
                         if let Some(tx) = map.remove(&r.id) {
-                            let _ = tx.send(false);
+                            let _ = tx.send(ApprovalDecision::Rejected);
                         }
                     }
 

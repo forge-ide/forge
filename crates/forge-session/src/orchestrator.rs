@@ -18,8 +18,18 @@ use crate::tools::{
     FsEditTool, FsReadTool, FsWriteTool, ShellExecTool, ToolCtx, ToolDispatcher, ToolError,
 };
 
+/// Client decision for a pending tool call approval. Carries the
+/// client-supplied `ApprovalScope` on approval so the event log records
+/// the scope faithfully (F-053); `Rejected` collapses scope since there's
+/// nothing to carry forward.
+#[derive(Debug, Clone)]
+pub enum ApprovalDecision {
+    Approved(ApprovalScope),
+    Rejected,
+}
+
 /// Pending tool call approvals: maps ToolCallId → sender for the approval result.
-pub type PendingApprovals = Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>;
+pub type PendingApprovals = Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>>;
 
 /// Run a complete turn for the given user text. Emits all session events for:
 /// UserMessage → AssistantMessage(open) → AssistantDelta* →
@@ -178,7 +188,7 @@ async fn run_request_loop<P: Provider>(
                                     })
                                     .await?;
                             } else {
-                                let (tx, rx) = oneshot::channel::<bool>();
+                                let (tx, rx) = oneshot::channel::<ApprovalDecision>();
                                 pending_approvals
                                     .lock()
                                     .await
@@ -191,35 +201,40 @@ async fn run_request_loop<P: Provider>(
                                     })
                                     .await?;
 
-                                let approved = rx.await.unwrap_or(false);
+                                // If the client drops the channel we treat it as a
+                                // rejection — matches the pre-F-053 default.
+                                let decision = rx.await.unwrap_or(ApprovalDecision::Rejected);
 
-                                if !approved {
-                                    session
-                                        .emit(Event::ToolCallRejected {
-                                            id: call_id,
-                                            reason: Some("rejected by client".to_string()),
-                                        })
-                                        .await?;
-                                    session
-                                        .emit(Event::AssistantMessage {
-                                            id: msg_id.clone(),
-                                            provider: provider_id.clone(),
-                                            model: model.clone(),
-                                            at: Utc::now(),
-                                            stream_finalised: true,
-                                            text: assistant_text.clone(),
-                                            branch_parent: None,
-                                            branch_variant_index: 0,
-                                        })
-                                        .await?;
-                                    return Ok(());
-                                }
+                                let scope = match decision {
+                                    ApprovalDecision::Approved(scope) => scope,
+                                    ApprovalDecision::Rejected => {
+                                        session
+                                            .emit(Event::ToolCallRejected {
+                                                id: call_id,
+                                                reason: Some("rejected by client".to_string()),
+                                            })
+                                            .await?;
+                                        session
+                                            .emit(Event::AssistantMessage {
+                                                id: msg_id.clone(),
+                                                provider: provider_id.clone(),
+                                                model: model.clone(),
+                                                at: Utc::now(),
+                                                stream_finalised: true,
+                                                text: assistant_text.clone(),
+                                                branch_parent: None,
+                                                branch_variant_index: 0,
+                                            })
+                                            .await?;
+                                        return Ok(());
+                                    }
+                                };
 
                                 session
                                     .emit(Event::ToolCallApproved {
                                         id: call_id.clone(),
                                         by: ApprovalSource::User,
-                                        scope: ApprovalScope::Once,
+                                        scope,
                                         at: Utc::now(),
                                     })
                                     .await?;
