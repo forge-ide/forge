@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceEntry {
     pub id: WorkspaceId,
     pub path: PathBuf,
@@ -13,6 +14,7 @@ pub struct WorkspaceEntry {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WorkspacesFile {
     #[serde(default)]
     workspaces: Vec<WorkspaceEntry>,
