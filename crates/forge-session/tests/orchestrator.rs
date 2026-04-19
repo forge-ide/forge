@@ -644,3 +644,196 @@ async fn approval_with_this_tool_scope_is_recorded_faithfully() {
         "client-supplied ApprovalScope::ThisTool must be recorded faithfully"
     );
 }
+
+/// F-074 regression: when the client sends a `ToolCallApproved` whose
+/// `scope` does not deserialize into `ApprovalScope` (e.g. PascalCase typo
+/// "Always" or any other unknown variant), the session must NOT silently
+/// downgrade the approval to `Once`. Doing so would honour an approval the
+/// user did not actually grant. The new behaviour rejects the approval
+/// outright; the orchestrator emits `Event::ToolCallRejected` and the tool
+/// call is denied — observable to both client and session log.
+#[tokio::test]
+async fn malformed_approval_scope_rejects_instead_of_silently_downgrading_to_once() {
+    let dir = TempDir::new().unwrap();
+    let log_path = dir.path().join("events.jsonl");
+    let sock_path = dir.path().join("scope_reject.sock");
+
+    let session = Arc::new(Session::create(log_path).await.unwrap());
+    let provider =
+        Arc::new(MockProvider::from_responses(vec![SCRIPT_INITIAL.to_string()]).unwrap());
+
+    let server_session = Arc::clone(&session);
+    let server_provider = Arc::clone(&provider);
+    let server_sock = sock_path.clone();
+    tokio::spawn(async move {
+        serve_with_session(
+            &server_sock,
+            server_session,
+            server_provider,
+            false,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    });
+
+    let mut stream = connect_with_retry(&sock_path).await;
+    do_handshake(&mut stream).await;
+    forge_ipc::write_frame(&mut stream, &IpcMessage::Subscribe(Subscribe { since: 0 }))
+        .await
+        .unwrap();
+    forge_ipc::write_frame(
+        &mut stream,
+        &IpcMessage::SendUserMessage(SendUserMessage {
+            text: "hi".to_string(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let (mut reader, mut writer) = stream.into_split();
+
+    // Read events, send a bogus scope when approval is requested, and
+    // assert we observe a ToolCallRejected (NOT a ToolCallApproved {Once}).
+    let mut saw_rejected = false;
+    let mut saw_approved = false;
+    for _ in 0..40 {
+        let frame = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            forge_ipc::read_frame(&mut reader),
+        )
+        .await
+        {
+            Ok(Ok(f)) => f,
+            Ok(Err(_)) | Err(_) => break,
+        };
+        match extract_event(&frame) {
+            Some(Event::ToolCallApprovalRequested { id, .. }) => {
+                forge_ipc::write_frame(
+                    &mut writer,
+                    &IpcMessage::ToolCallApproved(ToolCallApproved {
+                        id: id.to_string(),
+                        // Deliberately unknown variant — this used to be
+                        // silently downgraded to `ApprovalScope::Once`.
+                        scope: "Always".to_string(),
+                    }),
+                )
+                .await
+                .unwrap();
+            }
+            Some(Event::ToolCallRejected { .. }) => {
+                saw_rejected = true;
+                break;
+            }
+            Some(Event::ToolCallApproved { .. }) => {
+                saw_approved = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        !saw_approved,
+        "malformed scope must NOT produce ToolCallApproved (silent downgrade regression)"
+    );
+    assert!(
+        saw_rejected,
+        "malformed scope must produce ToolCallRejected"
+    );
+}
+
+/// F-074 regression: the dispatch loop's previous catch-all
+/// `Some(_) => {}` silently dropped unexpected `IpcMessage` variants. The
+/// new exhaustive match logs the discriminant and continues; the session
+/// must not panic, deadlock, or stop processing subsequent valid frames.
+///
+/// This test sends a duplicate `Hello` mid-session — structurally valid as
+/// an `IpcMessage`, never expected after handshake — then drives a normal
+/// `SendUserMessage` turn through the same connection. If the session
+/// survives and emits the expected events, the dispatch path correctly
+/// handles the unexpected frame.
+#[tokio::test]
+async fn unexpected_post_handshake_frame_is_logged_not_silently_dropped() {
+    let dir = TempDir::new().unwrap();
+    let log_path = dir.path().join("events.jsonl");
+    let sock_path = dir.path().join("ipc_unexpected.sock");
+
+    let session = Arc::new(Session::create(log_path).await.unwrap());
+    let provider =
+        Arc::new(MockProvider::from_responses(vec![SCRIPT_INITIAL.to_string()]).unwrap());
+
+    let server_session = Arc::clone(&session);
+    let server_provider = Arc::clone(&provider);
+    let server_sock = sock_path.clone();
+    tokio::spawn(async move {
+        serve_with_session(
+            &server_sock,
+            server_session,
+            server_provider,
+            true, // auto_approve so we don't need an approval round-trip
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    });
+
+    let mut stream = connect_with_retry(&sock_path).await;
+    do_handshake(&mut stream).await;
+    forge_ipc::write_frame(&mut stream, &IpcMessage::Subscribe(Subscribe { since: 0 }))
+        .await
+        .unwrap();
+
+    // Send a duplicate Hello after handshake — this is an unexpected frame.
+    forge_ipc::write_frame(
+        &mut stream,
+        &IpcMessage::Hello(Hello {
+            proto: PROTO_VERSION,
+            client: ClientInfo {
+                kind: "test-replay".into(),
+                pid: std::process::id(),
+                user: "tester".into(),
+            },
+        }),
+    )
+    .await
+    .unwrap();
+
+    // Then issue a normal turn — the session must still be alive and
+    // responsive after the unexpected frame.
+    forge_ipc::write_frame(
+        &mut stream,
+        &IpcMessage::SendUserMessage(SendUserMessage {
+            text: "hi".to_string(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let (mut reader, _writer) = stream.into_split();
+    let mut saw_user_msg = false;
+    for _ in 0..40 {
+        let frame = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            forge_ipc::read_frame(&mut reader),
+        )
+        .await
+        {
+            Ok(Ok(f)) => f,
+            Ok(Err(_)) | Err(_) => break,
+        };
+        if let Some(Event::UserMessage { .. }) = extract_event(&frame) {
+            saw_user_msg = true;
+            break;
+        }
+    }
+
+    assert!(
+        saw_user_msg,
+        "session must keep processing valid frames after an unexpected one"
+    );
+}

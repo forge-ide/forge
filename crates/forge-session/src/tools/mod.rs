@@ -35,6 +35,43 @@ pub enum ToolError {
     DuplicateName(String),
     #[error("unknown tool '{0}'")]
     UnknownTool(String),
+    /// A required string argument was absent or the value was not a JSON
+    /// string. Empty strings are accepted — see [`get_required_str`] for the
+    /// rationale. `Display` shape is
+    /// `tool.{tool}: missing required parameter '{arg}'` and is asserted by
+    /// IPC-level regression tests; treat it as contractual. F-075 will
+    /// broaden the extractor to cover optional / non-string arguments;
+    /// keep this variant minimal so that extension stays additive.
+    #[error("tool.{tool}: missing required parameter '{arg}'")]
+    MissingRequiredArg { tool: String, arg: String },
+}
+
+/// Extract a required string argument from a tool-call's JSON args object.
+///
+/// Returns `Err(ToolError::MissingRequiredArg { tool, arg: key })` when the
+/// key is absent or the value is not a JSON string. Empty strings are
+/// **accepted** — `fs.write` with `{"content": ""}` is a legitimate
+/// "truncate file to zero bytes" operation, and rejecting it here would
+/// regress that behaviour with a misleading "missing parameter" error
+/// (the parameter is supplied; it is just empty). Tools that need to
+/// additionally reject empty (e.g. `shell.exec` on `command`) layer that
+/// check on top of this helper.
+///
+/// F-075 will refactor this into a broader extractor (optional values,
+/// non-string types). Keep the signature narrow so that extension is purely
+/// additive — do not bake in a generic here.
+pub fn get_required_str<'a>(
+    args: &'a serde_json::Value,
+    tool: &str,
+    key: &str,
+) -> Result<&'a str, ToolError> {
+    match args.get(key).and_then(|v| v.as_str()) {
+        Some(s) => Ok(s),
+        None => Err(ToolError::MissingRequiredArg {
+            tool: tool.to_string(),
+            arg: key.to_string(),
+        }),
+    }
 }
 
 #[derive(Default)]
@@ -139,6 +176,206 @@ mod tests {
         let d = ToolDispatcher::new();
         let err = d.dispatch("nope", &json!({}), &empty_ctx()).unwrap_err();
         assert_eq!(err, ToolError::UnknownTool("nope".to_string()));
+    }
+
+    // ---- F-074: shared `get_required_str` helper ----
+
+    #[test]
+    fn get_required_str_returns_string_when_present() {
+        let v = json!({ "path": "/tmp/x" });
+        assert_eq!(get_required_str(&v, "fs.read", "path").unwrap(), "/tmp/x");
+    }
+
+    #[test]
+    fn get_required_str_accepts_empty_string() {
+        // F-074: empty is intentionally allowed so `fs.write` can truncate
+        // a file via `{"content": ""}`. Tools that need stricter checks
+        // (e.g. `shell.exec` rejecting `""` for `command`) layer the
+        // empty-guard on top of this helper.
+        let v = json!({ "content": "" });
+        assert_eq!(get_required_str(&v, "fs.write", "content").unwrap(), "");
+    }
+
+    #[test]
+    fn get_required_str_rejects_missing_key_with_unified_shape() {
+        let v = json!({});
+        let err = get_required_str(&v, "fs.read", "path").unwrap_err();
+        assert_eq!(
+            err,
+            ToolError::MissingRequiredArg {
+                tool: "fs.read".to_string(),
+                arg: "path".to_string()
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "tool.fs.read: missing required parameter 'path'"
+        );
+    }
+
+    #[test]
+    fn get_required_str_rejects_non_string_value() {
+        let v = json!({ "path": 42 });
+        let err = get_required_str(&v, "fs.read", "path").unwrap_err();
+        assert_eq!(
+            err,
+            ToolError::MissingRequiredArg {
+                tool: "fs.read".to_string(),
+                arg: "path".to_string()
+            }
+        );
+    }
+
+    // ---- F-074: each tool surfaces the unified missing-arg error from
+    // `invoke` rather than coercing missing required args to "" and producing
+    // a confusing downstream error from `forge_fs` / sandbox. ----
+
+    #[test]
+    fn fs_read_invoke_errors_explicitly_on_missing_path() {
+        let mut d = ToolDispatcher::new();
+        d.register(Box::new(FsReadTool)).unwrap();
+        let result = d.dispatch("fs.read", &json!({}), &empty_ctx()).unwrap();
+        assert_eq!(
+            result["error"].as_str(),
+            Some("tool.fs.read: missing required parameter 'path'"),
+            "result was: {result}"
+        );
+    }
+
+    #[test]
+    fn fs_write_invoke_errors_explicitly_on_missing_path() {
+        let mut d = ToolDispatcher::new();
+        d.register(Box::new(FsWriteTool)).unwrap();
+        let result = d
+            .dispatch("fs.write", &json!({ "content": "hi" }), &empty_ctx())
+            .unwrap();
+        assert_eq!(
+            result["error"].as_str(),
+            Some("tool.fs.write: missing required parameter 'path'"),
+            "result was: {result}"
+        );
+    }
+
+    #[test]
+    fn fs_write_invoke_errors_explicitly_on_missing_content() {
+        let mut d = ToolDispatcher::new();
+        d.register(Box::new(FsWriteTool)).unwrap();
+        let result = d
+            .dispatch(
+                "fs.write",
+                &json!({ "path": "/tmp/forge-f074-noop" }),
+                &empty_ctx(),
+            )
+            .unwrap();
+        assert_eq!(
+            result["error"].as_str(),
+            Some("tool.fs.write: missing required parameter 'content'"),
+            "result was: {result}"
+        );
+    }
+
+    #[test]
+    fn fs_write_invoke_allows_empty_content_to_truncate() {
+        // Empty content must remain a valid request — only missing keys
+        // should error. Otherwise the F-074 helper would silently break the
+        // legitimate "create empty file" / "truncate" use case.
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("empty.txt");
+        std::fs::write(&target, "old contents").unwrap();
+        let canonical_parent = std::fs::canonicalize(dir.path()).unwrap();
+        let allowed = format!("{}/**", canonical_parent.to_str().unwrap());
+
+        let mut d = ToolDispatcher::new();
+        d.register(Box::new(FsWriteTool)).unwrap();
+        let ctx = ToolCtx {
+            allowed_paths: vec![allowed],
+            ..ToolCtx::default()
+        };
+        let result = d
+            .dispatch(
+                "fs.write",
+                &json!({ "path": target.to_str().unwrap(), "content": "" }),
+                &ctx,
+            )
+            .unwrap();
+        assert_eq!(result["ok"].as_bool(), Some(true), "result: {result}");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "");
+    }
+
+    #[test]
+    fn fs_edit_invoke_errors_explicitly_on_missing_path() {
+        let mut d = ToolDispatcher::new();
+        d.register(Box::new(FsEditTool)).unwrap();
+        let result = d
+            .dispatch("fs.edit", &json!({ "patch": "@@ -1 +1 @@" }), &empty_ctx())
+            .unwrap();
+        assert_eq!(
+            result["error"].as_str(),
+            Some("tool.fs.edit: missing required parameter 'path'"),
+            "result was: {result}"
+        );
+    }
+
+    #[test]
+    fn fs_edit_invoke_errors_explicitly_on_missing_patch() {
+        let mut d = ToolDispatcher::new();
+        d.register(Box::new(FsEditTool)).unwrap();
+        let result = d
+            .dispatch(
+                "fs.edit",
+                &json!({ "path": "/tmp/forge-f074-noop" }),
+                &empty_ctx(),
+            )
+            .unwrap();
+        assert_eq!(
+            result["error"].as_str(),
+            Some("tool.fs.edit: missing required parameter 'patch'"),
+            "result was: {result}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shell_exec_invoke_errors_explicitly_on_missing_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut d = ToolDispatcher::new();
+        d.register(Box::new(ShellExecTool)).unwrap();
+        let ctx = ToolCtx {
+            allowed_paths: vec![],
+            workspace_root: Some(dir.path().to_path_buf()),
+            child_registry: Some(crate::sandbox::ChildRegistry::new()),
+        };
+        let result = d.dispatch("shell.exec", &json!({}), &ctx).unwrap();
+        assert_eq!(
+            result["error"].as_str(),
+            Some("tool.shell.exec: missing required parameter 'command'"),
+            "result was: {result}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shell_exec_invoke_errors_explicitly_on_empty_command() {
+        // shell.exec layers an empty-guard on top of `get_required_str`
+        // because spawning `""` is meaningless. The error shape stays
+        // unified ("tool.X: missing required parameter 'Y'") so the IPC
+        // surface is consistent across all four tools.
+        let dir = tempfile::tempdir().unwrap();
+        let mut d = ToolDispatcher::new();
+        d.register(Box::new(ShellExecTool)).unwrap();
+        let ctx = ToolCtx {
+            allowed_paths: vec![],
+            workspace_root: Some(dir.path().to_path_buf()),
+            child_registry: Some(crate::sandbox::ChildRegistry::new()),
+        };
+        let result = d
+            .dispatch("shell.exec", &json!({ "command": "" }), &ctx)
+            .unwrap();
+        assert_eq!(
+            result["error"].as_str(),
+            Some("tool.shell.exec: missing required parameter 'command'"),
+            "result was: {result}"
+        );
     }
 
     #[test]
