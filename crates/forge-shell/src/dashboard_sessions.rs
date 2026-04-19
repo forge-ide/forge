@@ -257,7 +257,10 @@ pub fn default_workspaces_toml() -> PathBuf {
 /// Tauri command: return the sessions panel's data for the Dashboard.
 #[cfg(feature = "webview")]
 #[tauri::command]
-pub async fn session_list() -> Result<Vec<SessionSummary>, String> {
+pub async fn session_list<R: tauri::Runtime>(
+    webview: tauri::Webview<R>,
+) -> Result<Vec<SessionSummary>, String> {
+    crate::ipc::require_window_label(&webview, "dashboard")?;
     collect_sessions(&default_workspaces_toml(), &UdsPinger)
         .await
         .map_err(|e| e.to_string())
@@ -269,8 +272,10 @@ pub async fn session_list() -> Result<Vec<SessionSummary>, String> {
 #[tauri::command]
 pub async fn open_session<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
+    webview: tauri::Webview<R>,
     id: String,
 ) -> Result<(), String> {
+    crate::ipc::require_window_label(&webview, "dashboard")?;
     crate::window_manager::WindowManager::new(app)
         .open_session(&id)
         .map(|_| ())
