@@ -4,6 +4,9 @@ use ts_rs::TS;
 
 macro_rules! id_type {
     ($(#[$attr:meta])* $name:ident) => {
+        id_type!($(#[$attr])* $name, 8);
+    };
+    ($(#[$attr:meta])* $name:ident, $bytes:literal) => {
         $(#[$attr])*
         #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
         #[ts(export, export_to = "../../../web/packages/ipc/src/generated/", type = "string")]
@@ -11,7 +14,7 @@ macro_rules! id_type {
 
         impl $name {
             pub fn new() -> Self {
-                let bytes: [u8; 8] = rand::thread_rng().gen();
+                let bytes: [u8; $bytes] = rand::thread_rng().gen();
                 Self(bytes.iter().map(|b| format!("{b:02x}")).collect())
             }
 
@@ -42,7 +45,11 @@ id_type!(WorkspaceId);
 id_type!(AgentId);
 id_type!(ProviderId);
 id_type!(MessageId);
-id_type!(ToolCallId);
+// F-067: 128-bit entropy (16 bytes → 32 hex chars). Defense-in-depth
+// against local online guessing when combined with UDS-permission defects
+// (see H8/F-044). Other IDs stay at 64 bits — they're validated at narrower
+// entry points (SessionId is gated by `^[0-9a-f]{16}$` per F-057/F-063).
+id_type!(ToolCallId, 16);
 id_type!(AgentInstanceId);
 
 #[cfg(test)]
@@ -86,5 +93,21 @@ mod tests {
         check!(MessageId);
         check!(ToolCallId);
         check!(AgentInstanceId);
+    }
+
+    // F-067: ToolCallId uses 128-bit entropy (16 bytes -> 32 hex chars).
+    // SessionId deliberately stays at 64-bit because its canonical format is
+    // validated by `^[0-9a-f]{16}$` at F-057 (CLI) and F-063 (dashboard).
+    #[test]
+    fn tool_call_id_is_128_bits_of_hex() {
+        let id = ToolCallId::new();
+        assert_eq!(id.to_string().len(), 32, "expected 32 hex chars (16 bytes)");
+        assert!(id.to_string().chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn session_id_is_64_bits_of_hex() {
+        let id = SessionId::new();
+        assert_eq!(id.to_string().len(), 16, "SessionId must remain 16 hex chars to match F-057/F-063 validators");
     }
 }
