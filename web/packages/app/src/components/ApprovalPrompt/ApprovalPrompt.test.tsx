@@ -346,4 +346,118 @@ describe('Keyboard shortcuts', () => {
     fireEvent.keyDown(container, { key: 'a' }); // should not approve
     expect(onApprove).not.toHaveBeenCalled();
   });
+
+  it('Escape calls onReject when pattern editor is closed', () => {
+    const onReject = vi.fn();
+    const { container } = renderPrompt({ onReject });
+    fireEvent.keyDown(container, { key: 'Escape' });
+    expect(onReject).toHaveBeenCalledTimes(1);
+  });
+
+  it('Escape does NOT call onReject while the pattern editor is open', () => {
+    const onReject = vi.fn();
+    const { container, getByTestId, queryByTestId } = renderPrompt({ onReject });
+    fireEvent.keyDown(container, { key: 'p' });
+    expect(getByTestId('pattern-editor')).toBeInTheDocument();
+    fireEvent.keyDown(container, { key: 'Escape' });
+    // First Escape only closes the editor
+    expect(onReject).not.toHaveBeenCalled();
+    expect(queryByTestId('pattern-editor')).not.toBeInTheDocument();
+    // Second Escape now cancels the prompt
+    fireEvent.keyDown(container, { key: 'Escape' });
+    expect(onReject).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Focus management — initial focus, focus trap, focus restoration (F-089)
+// ---------------------------------------------------------------------------
+
+describe('Focus management — initial focus (F-089)', () => {
+  it('focuses the primary Approve button on mount', () => {
+    const { getByTestId } = renderPrompt();
+    expect(document.activeElement).toBe(getByTestId('approve-once-btn'));
+  });
+});
+
+describe('Focus management — focus trap (F-089)', () => {
+  function focusableInPrompt(root: HTMLElement): HTMLElement[] {
+    return Array.from(
+      root.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    );
+  }
+
+  it('Tab from the last focusable element wraps to the first', () => {
+    const { getByTestId } = renderPrompt();
+    const root = getByTestId('approval-prompt');
+    const focusables = focusableInPrompt(root);
+    expect(focusables.length).toBeGreaterThan(1);
+    const first = focusables[0]!;
+    const last = focusables[focusables.length - 1]!;
+
+    last.focus();
+    expect(document.activeElement).toBe(last);
+    fireEvent.keyDown(last, { key: 'Tab' });
+    expect(document.activeElement).toBe(first);
+  });
+
+  it('Shift+Tab from the first focusable element wraps to the last', () => {
+    const { getByTestId } = renderPrompt();
+    const root = getByTestId('approval-prompt');
+    const focusables = focusableInPrompt(root);
+    expect(focusables.length).toBeGreaterThan(1);
+    const first = focusables[0]!;
+    const last = focusables[focusables.length - 1]!;
+
+    first.focus();
+    expect(document.activeElement).toBe(first);
+    fireEvent.keyDown(first, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(last);
+  });
+
+  it('Tab in the middle of the focusable set does not interfere', () => {
+    const { getByTestId } = renderPrompt();
+    const root = getByTestId('approval-prompt');
+    const focusables = focusableInPrompt(root);
+    expect(focusables.length).toBeGreaterThan(2);
+    const middle = focusables[1]!;
+    middle.focus();
+    // No preventDefault or programmatic focus when not at a boundary —
+    // we simulate the keydown but the browser's default tab order takes over.
+    // The trap handler must NOT relocate focus mid-list.
+    fireEvent.keyDown(middle, { key: 'Tab' });
+    expect(document.activeElement).toBe(middle);
+  });
+});
+
+describe('Focus management — focus restoration (F-089)', () => {
+  it('restores focus to the previously focused element when the prompt unmounts', () => {
+    // Trigger element lives outside the prompt's container.
+    const trigger = document.createElement('button');
+    trigger.textContent = 'Open approval';
+    document.body.appendChild(trigger);
+    trigger.focus();
+    expect(document.activeElement).toBe(trigger);
+
+    const { unmount } = renderPrompt();
+    // Initial focus is captured by the prompt
+    expect(document.activeElement).not.toBe(trigger);
+
+    unmount();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('does not throw when the previously focused element is gone on unmount', () => {
+    const trigger = document.createElement('button');
+    document.body.appendChild(trigger);
+    trigger.focus();
+
+    const { unmount } = renderPrompt();
+    // Remove the trigger before unmount — restoration must be defensive
+    trigger.remove();
+
+    expect(() => unmount()).not.toThrow();
+  });
 });
