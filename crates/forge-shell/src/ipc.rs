@@ -2,7 +2,8 @@
 //!
 //! Every command is a thin wrapper over [`crate::bridge::SessionBridge`],
 //! plus an [`EventSink`] implementation that forwards payloads to the
-//! webview via `AppHandle::emit("session:event", …)`.
+//! owning session's webview via `AppHandle::emit_to(EventTarget::webview_window(
+//! "session-{session_id}"), "session:event", …)`.
 //!
 //! **Authorization (F-051 / H10):** each session command requires the
 //! calling webview's label to equal `format!("session-{session_id}")`.
@@ -10,11 +11,19 @@
 //! be forged from webview JS, so they serve as the per-window authenticator
 //! binding a session's control channel to its review channel. Mismatches
 //! return [`LABEL_MISMATCH_ERROR`] and never reach the daemon.
+//!
+//! **Webview isolation (F-062 / M10 / T5):** the event sink targets a single
+//! webview (`session-{session_id}`) instead of broadcasting app-wide. Prior
+//! to this fix, every session window (and the dashboard) received every
+//! session's events; the trust boundary was enforced client-side in the
+//! Solid store. The per-sink `session_id` is bound at construction in
+//! `session_subscribe` (already label-authenticated), not re-read from the
+//! event payload.
 
 use std::sync::Arc;
 
 use forge_ipc::HelloAck;
-use tauri::{AppHandle, Emitter, Manager, Runtime, State, Webview};
+use tauri::{AppHandle, Emitter, EventTarget, Manager, Runtime, State, Webview};
 
 use crate::bridge::{EventSink, SessionBridge, SessionConnections, SessionEventPayload};
 
@@ -78,18 +87,43 @@ impl BridgeState {
     }
 }
 
-/// Event sink that forwards session events to the webview under the
-/// `session:event` event name.
-struct AppHandleSink<R: Runtime> {
-    app: AppHandle<R>,
+/// Event sink that forwards session events to the owning session's webview
+/// under the `session:event` event name.
+///
+/// **F-062 (M10 / T5):** `session_id` is bound at construction from the
+/// authenticated `session_subscribe` argument (already gated by
+/// [`require_window_label`]). It is *not* re-read from the payload, so a
+/// forged payload field cannot redirect delivery to another window.
+pub(crate) struct AppHandleSink<R: Runtime> {
+    pub(crate) app: AppHandle<R>,
+    pub(crate) session_id: String,
 }
 
 impl<R: Runtime> EventSink for AppHandleSink<R> {
     fn emit(&self, payload: SessionEventPayload) {
-        if let Err(e) = self.app.emit("session:event", payload) {
+        // F-062 (M10 / T5): target the session's own webview window instead
+        // of broadcasting app-wide. Prior to this, every `session-*` window
+        // (and the dashboard) received every session's events; filtering
+        // happened client-side in the Solid store — exactly the wrong place
+        // for a trust boundary. Target label uses `self.session_id` (bound
+        // at construction from the authenticated `session_subscribe`
+        // argument), not a payload field, so a forged payload cannot
+        // redirect delivery.
+        let target = EventTarget::webview_window(format!("session-{}", self.session_id));
+        if let Err(e) = self.app.emit_to(target, "session:event", payload) {
             eprintln!("session:event emit failed: {e}");
         }
     }
+}
+
+/// Test-only constructor for [`AppHandleSink`]. Gated behind the
+/// `webview-test` feature so production builds cannot reach into the sink.
+#[cfg(feature = "webview-test")]
+pub fn make_app_handle_sink<R: Runtime>(
+    app: AppHandle<R>,
+    session_id: String,
+) -> std::sync::Arc<dyn EventSink> {
+    std::sync::Arc::new(AppHandleSink { app, session_id })
 }
 
 #[tauri::command]
@@ -123,7 +157,10 @@ pub async fn session_subscribe<R: Runtime>(
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
     require_window_label(&webview, &format!("session-{session_id}"))?;
-    let sink: Arc<dyn EventSink> = Arc::new(AppHandleSink { app });
+    let sink: Arc<dyn EventSink> = Arc::new(AppHandleSink {
+        app,
+        session_id: session_id.clone(),
+    });
     state
         .bridge
         .subscribe(&session_id, since.unwrap_or(0), sink)
