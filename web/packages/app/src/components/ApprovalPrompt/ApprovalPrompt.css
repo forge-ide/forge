@@ -113,7 +113,10 @@
   gap: var(--sp-2);
   padding: var(--sp-1) var(--sp-3);
   border-radius: var(--r-sm);
-  font-family: var(--font-mono);
+  font-family: var(--font-display);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
   font-size: 11px;
   cursor: pointer;
   transition: var(--ease);
@@ -207,7 +210,10 @@
   padding: var(--sp-2) var(--sp-3);
   background: transparent;
   border: none;
-  font-family: var(--font-mono);
+  font-family: var(--font-display);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
   font-size: 11px;
   color: var(--color-text-primary);
   cursor: pointer;

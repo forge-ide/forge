@@ -32,7 +32,7 @@ export const PaneHeader: Component<PaneHeaderProps> = (props) => {
         aria-label="Close session window"
         onClick={props.onClose}
       >
-        close
+        CLOSE SESSION
       </button>
     </header>
   );
