@@ -8,7 +8,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::{canonicalize_no_symlink, enforce_allowed};
+use crate::{canonicalize_no_symlink, enforce_allowed, Limits};
 
 /// Error variants for mutation operations. Matches the DoD vocabulary.
 #[derive(Debug, thiserror::Error)]
@@ -23,6 +23,12 @@ pub enum FsError {
     TargetMissing { path: PathBuf },
     #[error("malformed unified-diff patch: {reason}")]
     MalformedPatch { reason: String },
+    #[error("'{}' is {actual} bytes, exceeds limit of {limit}", path.display())]
+    TooLarge {
+        path: PathBuf,
+        actual: u64,
+        limit: u64,
+    },
     #[error("io error on '{}': {source}", path.display())]
     Io {
         path: PathBuf,
@@ -38,13 +44,27 @@ pub struct ApprovalPreview {
     pub description: String,
 }
 
-/// Atomically write `content` to `path` after validating the path.
+/// Atomically write `content` to `path` after validating the path and
+/// rejecting payloads larger than `limits.max_write_bytes`.
 ///
-/// Steps: reject symlinks → canonicalize → enforce `allowed_paths` glob →
-/// refuse if the parent dir is missing → write `content` to a sibling
+/// Steps: size cap → reject symlinks → canonicalize → enforce `allowed_paths`
+/// glob → refuse if the parent dir is missing → write `content` to a sibling
 /// `NamedTempFile` → `persist` (atomic rename on the same filesystem).
-pub fn write(path: &str, content: &str, allowed_paths: &[String]) -> Result<(), FsError> {
+pub fn write(
+    path: &str,
+    content: &str,
+    allowed_paths: &[String],
+    limits: &Limits,
+) -> Result<(), FsError> {
     let input = Path::new(path);
+    let actual = content.len() as u64;
+    if actual > limits.max_write_bytes {
+        return Err(FsError::TooLarge {
+            path: input.to_path_buf(),
+            actual,
+            limit: limits.max_write_bytes,
+        });
+    }
     let canonical = canonicalize_no_symlink(input)?;
     enforce_allowed(&canonical, allowed_paths)?;
 
@@ -77,8 +97,15 @@ pub fn write(path: &str, content: &str, allowed_paths: &[String]) -> Result<(), 
 }
 
 /// Apply a unified-diff `patch` to the file at `path` after validating the
-/// path. Writes atomically via [`write`]. Requires the target to exist.
-pub fn edit(path: &str, patch: &str, allowed_paths: &[String]) -> Result<(), FsError> {
+/// path. Rejects source files larger than `limits.max_read_bytes` before
+/// reading them into RAM, and delegates post-patch size enforcement to
+/// [`write`]. Writes atomically. Requires the target to exist.
+pub fn edit(
+    path: &str,
+    patch: &str,
+    allowed_paths: &[String],
+    limits: &Limits,
+) -> Result<(), FsError> {
     let input = Path::new(path);
     let canonical = canonicalize_no_symlink(input)?;
     enforce_allowed(&canonical, allowed_paths)?;
@@ -86,6 +113,19 @@ pub fn edit(path: &str, patch: &str, allowed_paths: &[String]) -> Result<(), FsE
     if !canonical.is_file() {
         return Err(FsError::TargetMissing {
             path: canonical.clone(),
+        });
+    }
+
+    let metadata = std::fs::metadata(&canonical).map_err(|e| FsError::Io {
+        path: canonical.clone(),
+        source: e,
+    })?;
+    let actual = metadata.len();
+    if actual > limits.max_read_bytes {
+        return Err(FsError::TooLarge {
+            path: canonical,
+            actual,
+            limit: limits.max_read_bytes,
         });
     }
 
@@ -100,7 +140,7 @@ pub fn edit(path: &str, patch: &str, allowed_paths: &[String]) -> Result<(), FsE
         path: canonical.clone(),
         source: std::io::Error::new(std::io::ErrorKind::InvalidData, "non-utf8 path"),
     })?;
-    write(canonical_str, &updated, allowed_paths)
+    write(canonical_str, &updated, allowed_paths, limits)
 }
 
 /// `ApprovalPreview` for a prospective write. Returns a content-only preview

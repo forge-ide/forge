@@ -20,7 +20,7 @@ impl Tool for FsReadTool {
 
     fn invoke(&self, args: &serde_json::Value, ctx: &ToolCtx) -> serde_json::Value {
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-        match forge_fs::read_file(path, &ctx.allowed_paths) {
+        match forge_fs::read_file(path, &ctx.allowed_paths, &forge_fs::Limits::default()) {
             Ok(r) => serde_json::json!({
                 "content": r.content,
                 "bytes": r.bytes,

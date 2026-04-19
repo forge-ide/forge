@@ -1035,7 +1035,6 @@ dependencies = [
 name = "forge-fs"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "glob",
  "hex",
  "sha2",
