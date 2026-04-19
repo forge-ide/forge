@@ -151,9 +151,11 @@ pub const CACHE_TTL: Duration = Duration::from_secs(10);
 
 #[cfg(feature = "webview")]
 #[tauri::command]
-pub async fn provider_status(
+pub async fn provider_status<R: tauri::Runtime>(
+    webview: tauri::Webview<R>,
     cache: tauri::State<'_, ProviderStatusCache>,
 ) -> std::result::Result<ProviderStatus, String> {
+    crate::ipc::require_window_label(&webview, "dashboard")?;
     Ok(cache.get_or_probe(DEFAULT_OLLAMA_URL, PROBE_TIMEOUT).await)
 }
 

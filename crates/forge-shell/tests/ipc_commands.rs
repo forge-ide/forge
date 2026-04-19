@@ -204,7 +204,7 @@ fn make_session_window(
 ) -> tauri::WebviewWindow<tauri::test::MockRuntime> {
     tauri::WebviewWindowBuilder::new(
         app,
-        &format!("session-{session_id}"),
+        format!("session-{session_id}"),
         tauri::WebviewUrl::App("index.html".into()),
     )
     .build()
