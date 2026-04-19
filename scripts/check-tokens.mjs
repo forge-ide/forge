@@ -4,10 +4,9 @@
 // properties declared inside the ```css fenced block in
 // docs/design/token-reference.md (the authoritative source).
 //
-// Pragmatic deviation from docs/frontend/token-pipeline.md, which names a
-// bash version; this Node version is functionally equivalent and avoids a
-// shell dependency in CI. Invoked via `pnpm --filter forge-web run check-tokens`
-// or directly: `node scripts/check-tokens.mjs`.
+// Documented in docs/frontend/generation-pipelines.md (§1, "Design tokens").
+// Invoked via `pnpm --filter forge-web run check-tokens` or directly:
+// `node scripts/check-tokens.mjs`.
 
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

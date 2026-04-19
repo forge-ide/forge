@@ -35,7 +35,7 @@ Automation vehicle:
 | Rust build | `cargo build --workspace` succeeds |
 | Binaries | `forge`, `forged`, and `forge-shell` on `$PATH` or under `target/{debug,release}` |
 | Web build | `pnpm install && pnpm --filter app build` from `web/` succeeds |
-| Design tokens | `pnpm check-tokens` from `web/` passes (runs `scripts/check-tokens.mjs` per `docs/frontend/token-pipeline.md`; guards F-018 drift) |
+| Design tokens | `pnpm check-tokens` from `web/` passes (runs `scripts/check-tokens.mjs` per `docs/frontend/generation-pipelines.md`; guards F-018 drift) |
 | Playwright | `pnpm --filter app exec playwright install` has been run |
 | Tauri driver | `tauri-driver` available on `$PATH` (`cargo install tauri-driver`) |
 | Ollama | Daemon running at `http://127.0.0.1:11434` with at least one small model pulled (e.g. `llama3.2:1b`). Required for UAT-01b, UAT-03, and UAT-12 variant A. Other UATs use `MockProvider`. |
