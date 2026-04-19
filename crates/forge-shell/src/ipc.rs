@@ -11,7 +11,6 @@
 //! binding a session's control channel to its review channel. Mismatches
 //! return [`LABEL_MISMATCH_ERROR`] and never reach the daemon.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use forge_ipc::HelloAck;
@@ -41,14 +40,40 @@ pub(crate) fn require_window_label<R: Runtime>(
 
 /// Tauri-managed bridge state. One per App; commands resolve it via
 /// `State<BridgeState>`.
+///
+/// **F-052 (H11 / T7):** the production `session_hello` command never
+/// accepts a webview-supplied socket path; the path is always derived via
+/// [`crate::bridge::default_socket_path`]. Integration tests (which run
+/// against ephemeral tempdir sockets) wire an override through the
+/// `webview-test`-gated [`Self::test_socket_override`] field. The field is
+/// absent from production builds entirely.
 pub struct BridgeState {
     pub bridge: SessionBridge,
+    #[cfg(feature = "webview-test")]
+    pub test_socket_override: Option<std::path::PathBuf>,
 }
 
 impl BridgeState {
     pub fn new(connections: SessionConnections) -> Self {
         Self {
             bridge: SessionBridge::new(connections),
+            #[cfg(feature = "webview-test")]
+            test_socket_override: None,
+        }
+    }
+
+    /// Test-only constructor: wires a fixed socket path that `session_hello`
+    /// will use instead of [`crate::bridge::default_socket_path`]. Gated
+    /// behind the `webview-test` feature so production builds cannot
+    /// construct a `BridgeState` that bypasses the default path.
+    #[cfg(feature = "webview-test")]
+    pub fn with_test_socket_override(
+        connections: SessionConnections,
+        socket_path: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            bridge: SessionBridge::new(connections),
+            test_socket_override: Some(socket_path),
         }
     }
 }
@@ -70,16 +95,21 @@ impl<R: Runtime> EventSink for AppHandleSink<R> {
 #[tauri::command]
 pub async fn session_hello<R: Runtime>(
     session_id: String,
-    socket_path: Option<String>,
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<HelloAck, String> {
     require_window_label(&webview, &format!("session-{session_id}"))?;
-    // TODO(F-052): validate socket_path here — see issue #94.
-    let socket_path = socket_path.as_deref().map(PathBuf::from);
+    // F-052 (H11 / T7): the socket path is never taken from the invoke
+    // payload — a webview cannot redirect this connection to an arbitrary
+    // UDS. Production always resolves through `default_socket_path`; tests
+    // inject a tempdir path via the `webview-test` override field.
+    #[cfg(feature = "webview-test")]
+    let override_path = state.test_socket_override.as_deref();
+    #[cfg(not(feature = "webview-test"))]
+    let override_path: Option<&std::path::Path> = None;
     state
         .bridge
-        .hello(&session_id, socket_path.as_deref())
+        .hello(&session_id, override_path)
         .await
         .map_err(|e| e.to_string())
 }

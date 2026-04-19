@@ -73,7 +73,6 @@ describe('SessionWindow', () => {
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith('session_hello', {
         sessionId: 'abc123',
-        socketPath: undefined,
       }),
     );
   });

@@ -194,7 +194,6 @@ fn session_a_window_invoking_session_hello_for_session_b_is_rejected() {
         "session_hello",
         serde_json::json!({
             "sessionId": "B",
-            "socketPath": "/tmp/nonexistent.sock",
         }),
     )
     .expect_err("session-A must not perform hello for session B");

@@ -29,7 +29,7 @@ describe('session ipc wrappers', () => {
     listenMock.mockReset();
   });
 
-  it('sessionHello invokes `session_hello` with sessionId + socketPath', async () => {
+  it('sessionHello invokes `session_hello` with sessionId only', async () => {
     invokeMock.mockResolvedValue({
       session_id: 'abc',
       workspace: '/ws',
@@ -38,30 +38,14 @@ describe('session ipc wrappers', () => {
       schema_version: 1,
     });
 
-    const ack = await sessionHello('abc', '/tmp/forge.sock');
+    const ack = await sessionHello('abc');
 
+    // F-052: no `socketPath` in the payload — the shell always resolves
+    // the UDS via `default_socket_path(session_id)`.
     expect(invokeMock).toHaveBeenCalledWith('session_hello', {
       sessionId: 'abc',
-      socketPath: '/tmp/forge.sock',
     });
     expect(ack.session_id).toBe('abc');
-  });
-
-  it('sessionHello omits socketPath when unspecified', async () => {
-    invokeMock.mockResolvedValue({
-      session_id: 'abc',
-      workspace: '',
-      started_at: '',
-      event_seq: 0,
-      schema_version: 1,
-    });
-
-    await sessionHello('abc');
-
-    expect(invokeMock).toHaveBeenCalledWith('session_hello', {
-      sessionId: 'abc',
-      socketPath: undefined,
-    });
   });
 
   it('sessionSubscribe invokes `session_subscribe` with since', async () => {

@@ -20,14 +20,16 @@ export interface SessionEventPayload {
   event: unknown;
 }
 
-export async function sessionHello(
-  sessionId: SessionId,
-  socketPath?: string,
-): Promise<HelloAck> {
-  return invoke<HelloAck>('session_hello', {
-    sessionId,
-    socketPath,
-  });
+/**
+ * F-052 (H11 / T7): `session_hello` takes no socket-path override. The Rust
+ * command has no `socketPath` parameter — any such field in the invoke
+ * payload is silently dropped by serde before the command runs, and the
+ * shell resolves the UDS exclusively via `default_socket_path(session_id)`.
+ * Do not add a second argument here; it would be unused at runtime and
+ * obscure the invariant that the webview cannot steer this connection.
+ */
+export async function sessionHello(sessionId: SessionId): Promise<HelloAck> {
+  return invoke<HelloAck>('session_hello', { sessionId });
 }
 
 export async function sessionSubscribe(
