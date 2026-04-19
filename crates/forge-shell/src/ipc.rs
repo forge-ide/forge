@@ -22,6 +22,7 @@
 
 use std::sync::Arc;
 
+use forge_core::ApprovalScope;
 use forge_ipc::HelloAck;
 use tauri::{AppHandle, Emitter, EventTarget, Manager, Runtime, State, Webview};
 
@@ -42,12 +43,13 @@ pub(crate) const LABEL_MISMATCH_ERROR: &str = "forbidden: window label mismatch"
 /// All caps are byte counts (`.len()` on `String`), not char counts — the
 /// resource being bounded is memory/wire cost.
 ///
-/// A single command may bind additive validations in the future
-/// (e.g. F-069 typed-enum validation on `scope` will layer on top of the
-/// size check here).
+/// F-069 / L5 (T7) superseded the byte cap on `session_approve_tool`'s `scope`
+/// with a typed-enum (`forge_core::ApprovalScope`) whose variants are all
+/// short; any oversize or non-variant input is rejected by serde at the Tauri
+/// arg-deserialization layer — earlier than this check. No `MAX_SCOPE_BYTES`
+/// constant is defined for that reason.
 pub(crate) const MAX_MESSAGE_TEXT_BYTES: usize = 128 * 1024;
 pub(crate) const MAX_TOOL_CALL_ID_BYTES: usize = 64;
-pub(crate) const MAX_APPROVAL_SCOPE_BYTES: usize = 256;
 pub(crate) const MAX_REJECT_REASON_BYTES: usize = 1024;
 
 /// F-068 / L4 (T7): error returned when a session command's untyped-string
@@ -229,16 +231,17 @@ pub async fn session_send_message<R: Runtime>(
 pub async fn session_approve_tool<R: Runtime>(
     session_id: String,
     tool_call_id: String,
-    scope: String,
+    scope: ApprovalScope,
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
     require_window_label(&webview, &format!("session-{session_id}"))?;
-    // F-068 / L4 (T7): tool_call_id is a short opaque handle; scope is a
-    // short enum-ish string. Both are bounded here before F-069's typed-enum
-    // validation lands on `scope`.
+    // F-068 / L4 (T7): tool_call_id is a short opaque handle; bound it here.
+    // F-069 / L5 (T7): `scope` is typed as `forge_core::ApprovalScope` — serde
+    // rejects any non-variant string at Tauri arg-deserialization (before this
+    // body runs), so no explicit scope validation is needed and no byte cap
+    // is useful (the longest variant is 11 bytes).
     require_size("tool_call_id", &tool_call_id, MAX_TOOL_CALL_ID_BYTES)?;
-    require_size("scope", &scope, MAX_APPROVAL_SCOPE_BYTES)?;
     state
         .bridge
         .approve_tool(&session_id, tool_call_id, scope)

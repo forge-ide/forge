@@ -319,31 +319,11 @@ fn session_approve_tool_rejects_tool_call_id_above_cap_at_command_layer() {
     );
 }
 
-#[test]
-fn session_approve_tool_rejects_scope_above_cap_at_command_layer() {
-    let app = make_app();
-    app.manage(BridgeState::new(SessionConnections::new()));
-    let window = make_session_window(&app, "scope");
-
-    let err = invoke_err(
-        &window,
-        "session_approve_tool",
-        serde_json::json!({
-            "sessionId": "scope",
-            "toolCallId": "tc-1",
-            "scope": "x".repeat(257),
-        }),
-    );
-
-    assert!(
-        err.contains("payload too large") && err.contains("scope"),
-        "expected size-cap error mentioning scope, got: {err}"
-    );
-    assert!(
-        !err.contains("no active connection"),
-        "size check must fire before the bridge, got: {err}"
-    );
-}
+// F-069 / L5 (T7) removed the byte-cap test for `scope` above — `scope` is
+// now typed as `forge_core::ApprovalScope`, so any oversize/non-variant input
+// is rejected by serde at the Tauri arg-deserialization layer. The
+// positive/negative coverage lives in `session_approve_tool_rejects_garbage_scope_at_command_layer`
+// and `session_approve_tool_accepts_valid_scope_variants` below.
 
 #[test]
 fn session_reject_tool_rejects_tool_call_id_above_cap_at_command_layer() {
@@ -422,4 +402,69 @@ fn session_reject_tool_accepts_absent_reason() {
         !err.contains("payload too large"),
         "None reason must not be rejected by the size cap, got: {err}"
     );
+}
+
+// F-069 / L5 (T7): typed-enum validation on `scope`.
+//
+// `scope` is declared as `forge_core::ApprovalScope` on the Tauri command, so
+// Tauri's arg-deserialization layer rejects any non-variant string before the
+// command body runs — earlier than `require_window_label`, earlier than the
+// F-068 byte caps, earlier than the bridge. A garbage string ("not-a-scope")
+// cannot reach the bridge, which defends against type-confusion widening of
+// approvals by a compromised webview.
+
+#[test]
+fn session_approve_tool_rejects_garbage_scope_at_command_layer() {
+    let app = make_app();
+    app.manage(BridgeState::new(SessionConnections::new()));
+    let window = make_session_window(&app, "garbage-scope");
+
+    let err = invoke_err(
+        &window,
+        "session_approve_tool",
+        serde_json::json!({
+            "sessionId": "garbage-scope",
+            "toolCallId": "tc-1",
+            "scope": "garbage",
+        }),
+    );
+
+    // The load-bearing assertions: rejection must be serde-level (typed-enum
+    // validation fires before the bridge is consulted). If the call reached
+    // the bridge, we would see "no active connection" instead.
+    assert!(
+        !err.contains("no active connection"),
+        "typed-enum validation must fire before the bridge, got: {err}"
+    );
+    assert!(
+        err.contains("scope"),
+        "error must surface the offending field `scope`, got: {err}"
+    );
+}
+
+#[test]
+fn session_approve_tool_accepts_valid_scope_variants() {
+    // Every TS-side ApprovalScope variant must round-trip through
+    // Tauri arg-deserialization and reach the bridge (which will then error
+    // with "no active connection" — the security-relevant evidence that the
+    // typed enum accepted the value).
+    let app = make_app();
+    app.manage(BridgeState::new(SessionConnections::new()));
+    let window = make_session_window(&app, "valid-scope");
+
+    for variant in ["Once", "ThisFile", "ThisPattern", "ThisTool"] {
+        let err = invoke_err(
+            &window,
+            "session_approve_tool",
+            serde_json::json!({
+                "sessionId": "valid-scope",
+                "toolCallId": "tc-1",
+                "scope": variant,
+            }),
+        );
+        assert!(
+            err.contains("no active connection"),
+            "variant {variant:?} must pass enum validation and reach the bridge, got: {err}"
+        );
+    }
 }
