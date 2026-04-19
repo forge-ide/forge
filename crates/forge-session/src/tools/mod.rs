@@ -3,11 +3,13 @@
 use crate::sandbox::ChildRegistry;
 use forge_core::ApprovalPreview;
 
+pub mod args;
 pub mod fs_edit;
 pub mod fs_read;
 pub mod fs_write;
 pub mod shell_exec;
 
+pub use args::{get_optional_str, get_optional_u64, get_required_str};
 pub use fs_edit::FsEditTool;
 pub use fs_read::FsReadTool;
 pub use fs_write::FsWriteTool;
@@ -36,42 +38,12 @@ pub enum ToolError {
     #[error("unknown tool '{0}'")]
     UnknownTool(String),
     /// A required string argument was absent or the value was not a JSON
-    /// string. Empty strings are accepted — see [`get_required_str`] for the
-    /// rationale. `Display` shape is
+    /// string. Empty strings are accepted — see [`args::get_required_str`]
+    /// for the rationale. `Display` shape is
     /// `tool.{tool}: missing required parameter '{arg}'` and is asserted by
-    /// IPC-level regression tests; treat it as contractual. F-075 will
-    /// broaden the extractor to cover optional / non-string arguments;
-    /// keep this variant minimal so that extension stays additive.
+    /// IPC-level regression tests; treat it as contractual.
     #[error("tool.{tool}: missing required parameter '{arg}'")]
     MissingRequiredArg { tool: String, arg: String },
-}
-
-/// Extract a required string argument from a tool-call's JSON args object.
-///
-/// Returns `Err(ToolError::MissingRequiredArg { tool, arg: key })` when the
-/// key is absent or the value is not a JSON string. Empty strings are
-/// **accepted** — `fs.write` with `{"content": ""}` is a legitimate
-/// "truncate file to zero bytes" operation, and rejecting it here would
-/// regress that behaviour with a misleading "missing parameter" error
-/// (the parameter is supplied; it is just empty). Tools that need to
-/// additionally reject empty (e.g. `shell.exec` on `command`) layer that
-/// check on top of this helper.
-///
-/// F-075 will refactor this into a broader extractor (optional values,
-/// non-string types). Keep the signature narrow so that extension is purely
-/// additive — do not bake in a generic here.
-pub fn get_required_str<'a>(
-    args: &'a serde_json::Value,
-    tool: &str,
-    key: &str,
-) -> Result<&'a str, ToolError> {
-    match args.get(key).and_then(|v| v.as_str()) {
-        Some(s) => Ok(s),
-        None => Err(ToolError::MissingRequiredArg {
-            tool: tool.to_string(),
-            arg: key.to_string(),
-        }),
-    }
 }
 
 #[derive(Default)]
@@ -178,53 +150,10 @@ mod tests {
         assert_eq!(err, ToolError::UnknownTool("nope".to_string()));
     }
 
-    // ---- F-074: shared `get_required_str` helper ----
-
-    #[test]
-    fn get_required_str_returns_string_when_present() {
-        let v = json!({ "path": "/tmp/x" });
-        assert_eq!(get_required_str(&v, "fs.read", "path").unwrap(), "/tmp/x");
-    }
-
-    #[test]
-    fn get_required_str_accepts_empty_string() {
-        // F-074: empty is intentionally allowed so `fs.write` can truncate
-        // a file via `{"content": ""}`. Tools that need stricter checks
-        // (e.g. `shell.exec` rejecting `""` for `command`) layer the
-        // empty-guard on top of this helper.
-        let v = json!({ "content": "" });
-        assert_eq!(get_required_str(&v, "fs.write", "content").unwrap(), "");
-    }
-
-    #[test]
-    fn get_required_str_rejects_missing_key_with_unified_shape() {
-        let v = json!({});
-        let err = get_required_str(&v, "fs.read", "path").unwrap_err();
-        assert_eq!(
-            err,
-            ToolError::MissingRequiredArg {
-                tool: "fs.read".to_string(),
-                arg: "path".to_string()
-            }
-        );
-        assert_eq!(
-            err.to_string(),
-            "tool.fs.read: missing required parameter 'path'"
-        );
-    }
-
-    #[test]
-    fn get_required_str_rejects_non_string_value() {
-        let v = json!({ "path": 42 });
-        let err = get_required_str(&v, "fs.read", "path").unwrap_err();
-        assert_eq!(
-            err,
-            ToolError::MissingRequiredArg {
-                tool: "fs.read".to_string(),
-                arg: "path".to_string()
-            }
-        );
-    }
+    // ---- shared `args` helpers (`get_required_str`, `get_optional_str`,
+    // `get_optional_u64`) live in `tools::args` with their own unit tests.
+    // The per-tool integration tests below assert the unified IPC error
+    // shape that those helpers produce on the `invoke` boundary. ----
 
     // ---- F-074: each tool surfaces the unified missing-arg error from
     // `invoke` rather than coercing missing required args to "" and producing
