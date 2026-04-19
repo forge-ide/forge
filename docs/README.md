@@ -44,7 +44,7 @@ Navigation hub for all Forge documentation. One topic per file; use the table be
 | File | Description |
 |---|---|
 | [architecture.md](frontend/architecture.md) | Solid signals, state model, Monaco iframe hosting, streaming |
-| [token-pipeline.md](frontend/token-pipeline.md) | Design token drift check and CI enforcement |
+| [generation-pipelines.md](frontend/generation-pipelines.md) | Design token drift check and ts-rs Rust to TypeScript IPC type generation, both CI-enforced |
 
 ## design/
 
