@@ -19,6 +19,24 @@ use crate::orchestrator::{run_turn, PendingApprovals};
 use crate::sandbox::ChildRegistry;
 use crate::session::Session;
 
+/// Compute the session's `allowed_paths` glob list from its workspace root.
+///
+/// Returns `[format!("{}/**", canonical_ws)]` when `workspace` points at an
+/// existing directory that canonicalizes successfully. Returns `vec![]`
+/// otherwise (no workspace, or canonicalization failure). An empty list causes
+/// every `fs.*` tool call to be rejected by
+/// `forge_fs::validate_against_globs`, which is the intended fail-closed
+/// behaviour when the session has no workspace to scope filesystem access to.
+pub(crate) fn compute_allowed_paths(workspace: Option<&Path>) -> Vec<String> {
+    let Some(ws) = workspace else {
+        return Vec::new();
+    };
+    match std::fs::canonicalize(ws) {
+        Ok(canonical) => vec![format!("{}/**", canonical.display())],
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Resolves the events.jsonl path for a daemon session.
 ///
 /// When `workspace` is provided, the log lives under
@@ -70,6 +88,15 @@ pub async fn serve_with_session<P: Provider + 'static>(
     }
     let listener = UnixListener::bind(path)?;
     let workspace_path: Option<PathBuf> = workspace.clone();
+    // F-043: Derive `allowed_paths` from the workspace root so `fs.*` tools can
+    // only touch files inside the session's workspace. Fail-closed — if no
+    // workspace is configured, or canonicalization fails (e.g. the workspace
+    // path doesn't exist), the session stays usable but every `fs.*` call is
+    // rejected by `forge_fs::validate_against_globs` (empty list matches
+    // nothing). Previously this was `vec!["**"]`, which matched every absolute
+    // path including `/etc/passwd` and `~/.ssh/id_rsa`.
+    let allowed_paths: Arc<Vec<String>> =
+        Arc::new(compute_allowed_paths(workspace_path.as_deref()));
     let workspace = Arc::new(
         workspace
             .map(|w| w.display().to_string())
@@ -98,6 +125,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
             session_id,
             socket_path,
             workspace_path,
+            allowed_paths,
             child_registry,
         )
         .await;
@@ -150,6 +178,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
                 let session_id = Arc::clone(&session_id);
                 let socket_path = Arc::clone(&socket_path);
                 let workspace_path = workspace_path.clone();
+                let allowed_paths = Arc::clone(&allowed_paths);
                 let child_registry = child_registry.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(
@@ -162,6 +191,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
                         session_id,
                         socket_path,
                         workspace_path,
+                        allowed_paths,
                         child_registry,
                     )
                     .await
@@ -209,6 +239,7 @@ async fn handle_connection<P: Provider + 'static>(
     session_id: Arc<String>,
     socket_path: Arc<PathBuf>,
     workspace_path: Option<PathBuf>,
+    allowed_paths: Arc<Vec<String>>,
     child_registry: ChildRegistry,
 ) -> Result<()> {
     // ── Handshake ──────────────────────────────────────────────────────────────
@@ -303,6 +334,7 @@ async fn handle_connection<P: Provider + 'static>(
                         let provider = Arc::clone(&provider);
                         let approvals = Arc::clone(&pending_approvals);
                         let workspace_path = workspace_path.clone();
+                        let allowed_paths = Arc::clone(&allowed_paths);
                         let child_registry = child_registry.clone();
                         tokio::spawn(async move {
                             let result = run_turn(
@@ -310,7 +342,7 @@ async fn handle_connection<P: Provider + 'static>(
                                 provider,
                                 m.text,
                                 approvals,
-                                vec!["**".to_string()],
+                                (*allowed_paths).clone(),
                                 auto_approve,
                                 workspace_path,
                                 Some(child_registry),
@@ -393,5 +425,66 @@ mod tests {
             .join("forge-session-abc123")
             .join("events.jsonl");
         assert_eq!(p, expected);
+    }
+
+    #[test]
+    fn compute_allowed_paths_returns_empty_when_workspace_absent() {
+        assert!(compute_allowed_paths(None).is_empty());
+    }
+
+    #[test]
+    fn compute_allowed_paths_returns_workspace_glob_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        let expected = format!("{}/**", canonical.display());
+        assert_eq!(compute_allowed_paths(Some(dir.path())), vec![expected]);
+    }
+
+    #[test]
+    fn compute_allowed_paths_returns_empty_when_workspace_does_not_exist() {
+        // Fail-closed: a non-existent path can't be canonicalized, so the
+        // session rejects every `fs.*` call rather than guessing at semantics.
+        let missing = Path::new("/nonexistent/forge-f043-test-path");
+        assert!(compute_allowed_paths(Some(missing)).is_empty());
+    }
+
+    // F-043 regression: derived `allowed_paths` must not permit reads outside
+    // the session workspace. These tests exercise the *composition* of
+    // `compute_allowed_paths` with `forge_fs::read_file` — a helper returning
+    // `vec![]` is only safe if the enforcement layer it feeds actually denies
+    // on empty. Likewise a workspace of `/tmp/ws` must not match `/etc/passwd`.
+    //
+    // `forge_fs::read_file` returns `anyhow::Result`, so we assert on the
+    // error message produced by `validate_against_globs`'s `bail!` rather than
+    // on a typed variant.
+    #[test]
+    fn fs_read_etc_passwd_denied_when_no_workspace() {
+        let allowed = compute_allowed_paths(None);
+        let err = forge_fs::read_file("/etc/passwd", &allowed)
+            .expect_err("reading /etc/passwd without a workspace must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("not allowed by allowed_paths"),
+            "expected path-denied error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn fs_read_etc_passwd_denied_when_workspace_is_tmp_ws() {
+        // Use a real temp directory so canonicalization succeeds and we get a
+        // non-empty allow-list. `/etc/passwd` must still be outside it.
+        let dir = tempfile::tempdir().unwrap();
+        let allowed = compute_allowed_paths(Some(dir.path()));
+        assert!(
+            !allowed.is_empty(),
+            "workspace present → allow-list should not be empty"
+        );
+        let err = forge_fs::read_file("/etc/passwd", &allowed)
+            .expect_err("reading /etc/passwd with a scoped workspace must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("not allowed by allowed_paths"),
+            "expected path-denied error, got: {msg}"
+        );
     }
 }
