@@ -31,6 +31,11 @@ pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434";
 
 /// Per-line NDJSON byte cap (1 MiB). Real Ollama chunks are <100 KB.
 pub const DEFAULT_MAX_LINE_BYTES: usize = 1 << 20;
+/// Cap on the buffered response body for `list_models()` (1 MiB). Real
+/// `/api/tags` responses are a few kilobytes; a multi-megabyte body is
+/// pathological and is rejected before `serde_json::from_slice` to bound
+/// peak allocation against a hostile peer on the loopback interface.
+pub const DEFAULT_MAX_BODY_BYTES: usize = 1 << 20;
 /// Wall-clock gap between consecutive chunks. 30 s is generous for local
 /// models but still bounds half-open and slow-drip peers.
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -197,9 +202,25 @@ impl OllamaProvider {
             .into());
         }
 
-        let value: serde_json::Value = resp
-            .json()
+        // Buffer the body and enforce a size cap before `serde_json::from_slice`.
+        // A hostile local peer can advertise any `Content-Length` and stream
+        // gigabytes into memory; the cap bounds peak allocation on the
+        // dashboard-refresh path. `resp.bytes()` still buffers, so this guards
+        // deserialization cost — transport-layer bounds (see `ClientConfig`)
+        // handle the wall-clock side.
+        let bytes = resp
+            .bytes()
             .await
+            .map_err(|e| anyhow::anyhow!("ollama list_models read failed: {e}"))?;
+        if bytes.len() > DEFAULT_MAX_BODY_BYTES {
+            return Err(anyhow::anyhow!(
+                "ollama list_models body too large: {} bytes exceeds cap of {} bytes",
+                bytes.len(),
+                DEFAULT_MAX_BODY_BYTES
+            )
+            .into());
+        }
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|e| anyhow::anyhow!("ollama list_models decode failed: {e}"))?;
 
         let models = value
