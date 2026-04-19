@@ -10,9 +10,11 @@ import { invoke } from '../../lib/tauri';
 import { activeSessionId } from '../../stores/session';
 import {
   getMessagesState,
+  pushEvent,
   setAwaitingResponse,
   type ChatTurn,
 } from '../../stores/messages';
+import type { SessionId } from '@forge/ipc';
 import {
   getApprovalWhitelist,
   addWhitelistEntry,
@@ -23,6 +25,23 @@ import { ApprovalPrompt } from '../../components/ApprovalPrompt/ApprovalPrompt';
 import { WhitelistedPill } from '../../components/ApprovalPrompt/WhitelistedPill';
 import type { ApprovalScope } from '@forge/ipc';
 import './ChatPane.css';
+
+// ---------------------------------------------------------------------------
+// invoke rejection helper (F-079)
+// ---------------------------------------------------------------------------
+
+/**
+ * Surface a rejected `invoke()` as an inline `error` turn in the chat. The
+ * `Error` event handler in the messages store (see `stores/messages.ts`) also
+ * clears `awaitingResponse` and `streamingMessageId`, which is what rolls back
+ * the optimistic disable performed by `handleSend` before the call. Routing
+ * every command-rejection through this single sink keeps the user-feedback
+ * shape consistent across approve/reject/send call sites.
+ */
+function reportInvokeError(sessionId: SessionId, command: string, err: unknown): void {
+  const detail = err instanceof Error ? err.message : String(err);
+  pushEvent(sessionId, { kind: 'Error', message: `${command} failed: ${detail}` });
+}
 
 // ---------------------------------------------------------------------------
 // ToolCallCard — inline tool call card with optional approval prompt (F-026/F-027)
@@ -89,7 +108,7 @@ const ToolCallCard: Component<{ turn: Extract<ChatTurn, { type: 'tool_placeholde
     const id = sessionId();
     const key = whitelistKey();
     if (!id || !key || props.turn.status !== 'awaiting-approval') return;
-    void invoke('session_approve_tool', {
+    invoke('session_approve_tool', {
       sessionId: id,
       toolCallId: props.turn.tool_call_id,
       // Derive scope from key prefix
@@ -98,7 +117,7 @@ const ToolCallCard: Component<{ turn: Extract<ChatTurn, { type: 'tool_placeholde
         : key.startsWith('pattern:')
           ? ('ThisPattern' as ApprovalScope)
           : ('ThisFile' as ApprovalScope),
-    });
+    }).catch((err) => reportInvokeError(id, 'session_approve_tool', err));
   });
 
   const handleApprove = (scope: ApprovalScope, pattern?: string) => {
@@ -117,20 +136,20 @@ const ToolCallCard: Component<{ turn: Extract<ChatTurn, { type: 'tool_placeholde
       addWhitelistEntry(id, scope, props.turn.tool_name, path, pattern);
     }
 
-    void invoke('session_approve_tool', {
+    invoke('session_approve_tool', {
       sessionId: id,
       toolCallId: props.turn.tool_call_id,
       scope,
-    });
+    }).catch((err) => reportInvokeError(id, 'session_approve_tool', err));
   };
 
   const handleReject = () => {
     const id = sessionId();
     if (!id) return;
-    void invoke('session_reject_tool', {
+    invoke('session_reject_tool', {
       sessionId: id,
       toolCallId: props.turn.tool_call_id,
-    });
+    }).catch((err) => reportInvokeError(id, 'session_reject_tool', err));
   };
 
   const handleRevoke = () => {
@@ -333,7 +352,12 @@ export const ChatPane: Component = () => {
     setAwaitingResponse(id, true);
     // Re-pin on new user message
     setUserScrolledUp(false);
-    void invoke('session_send_message', { sessionId: id, text });
+    // On rejection, the Error event handler in the messages store rolls back
+    // both `awaitingResponse` and `streamingMessageId`, re-enabling the
+    // composer and surfacing the failure as an inline error turn.
+    invoke('session_send_message', { sessionId: id, text }).catch((err) =>
+      reportInvokeError(id, 'session_send_message', err),
+    );
   };
 
   return (

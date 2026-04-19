@@ -45,11 +45,19 @@ function count(n: number): string {
 export const SessionsPanel: Component = () => {
   const [sessions] = createResource(fetchSessions, { initialValue: [] });
   const [tab, setTab] = createSignal<Tab>('active');
+  // F-079: inline error surface when `open_session` rejects (IPC auth fail,
+  // missing window, validation error, etc.). Previously a fire-and-forget
+  // `void invoke(...)` swallowed all rejections silently.
+  const [openError, setOpenError] = createSignal<string | null>(null);
   const groups = () => partition(sessions() ?? []);
   const current = () => groups()[tab()];
 
   const handleOpen = (id: string) => {
-    void invoke('open_session', { id });
+    setOpenError(null);
+    invoke('open_session', { id }).catch((err) => {
+      const detail = err instanceof Error ? err.message : String(err);
+      setOpenError(`open_session failed: ${detail}`);
+    });
   };
 
   return (
@@ -58,6 +66,13 @@ export const SessionsPanel: Component = () => {
         <TabButton tab="active" current={tab()} onSelect={setTab} count={groups().active.length} />
         <TabButton tab="archived" current={tab()} onSelect={setTab} count={groups().archived.length} />
       </div>
+      <Show when={openError()}>
+        {(msg) => (
+          <p class="sessions__error" role="alert">
+            {msg()}
+          </p>
+        )}
+      </Show>
       <Show
         when={current().length > 0}
         fallback={

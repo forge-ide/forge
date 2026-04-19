@@ -515,3 +515,73 @@ describe('Whitelist auto-approve', () => {
     expect(pills).toHaveLength(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// F-079: error handling on invoke rejection
+// ---------------------------------------------------------------------------
+
+async function flushMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+describe('invoke rejection handling (F-079)', () => {
+  it('clears awaitingResponse and surfaces an error turn when session_send_message rejects', async () => {
+    invokeMock.mockReset();
+    invokeMock.mockRejectedValueOnce(new Error('send failed'));
+
+    const { getByTestId, findByText } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+
+    fireEvent.input(textarea, { target: { value: 'hello' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false, ctrlKey: false, metaKey: false });
+
+    // Composer flips to disabled synchronously when handleSend sets awaitingResponse(true).
+    expect(textarea).toBeDisabled();
+
+    // After the rejected invoke promise resolves, awaitingResponse must be cleared
+    // (composer re-enabled) AND an error turn must surface the failure.
+    await flushMicrotasks();
+    expect(textarea).not.toBeDisabled();
+    expect(await findByText(/send failed/)).toBeInTheDocument();
+  });
+
+  it('surfaces an error turn when session_approve_tool rejects from the inline prompt', async () => {
+    invokeMock.mockReset();
+    invokeMock.mockRejectedValueOnce(new Error('approve boom'));
+
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-rej-approve',
+      tool_name: 'fs.edit',
+      args_json: JSON.stringify({ path: '/src/x.ts', patch: '...' }),
+      preview: { description: 'Edit /src/x.ts' },
+    });
+
+    const { getByTestId, findByText } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('approve-once-btn'));
+
+    await flushMicrotasks();
+    expect(await findByText(/approve boom/)).toBeInTheDocument();
+  });
+
+  it('surfaces an error turn when session_reject_tool rejects', async () => {
+    invokeMock.mockReset();
+    invokeMock.mockRejectedValueOnce(new Error('reject boom'));
+
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-rej-reject',
+      tool_name: 'fs.edit',
+      args_json: JSON.stringify({ path: '/src/x.ts', patch: '...' }),
+      preview: { description: 'Edit /src/x.ts' },
+    });
+
+    const { getByTestId, findByText } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('reject-btn'));
+
+    await flushMicrotasks();
+    expect(await findByText(/reject boom/)).toBeInTheDocument();
+  });
+});
