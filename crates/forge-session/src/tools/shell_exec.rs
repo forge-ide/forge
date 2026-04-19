@@ -15,6 +15,8 @@
 //!
 //! Result shape: `{ stdout, stderr, exit_code, signal? }` or `{ error }`.
 
+#[cfg(target_os = "linux")]
+use super::{get_required_str, ToolError};
 use super::{Tool, ToolCtx};
 #[cfg(target_os = "linux")]
 use crate::sandbox::SandboxedCommand;
@@ -89,9 +91,24 @@ impl Tool for ShellExecTool {
 
 #[cfg(target_os = "linux")]
 fn run_linux(args: &serde_json::Value, ctx: &ToolCtx) -> serde_json::Value {
-    let command = match args.get("command").and_then(|v| v.as_str()) {
-        Some(c) if !c.is_empty() => c,
-        _ => return serde_json::json!({ "error": "shell.exec: missing 'command'" }),
+    // F-074: route through the shared `get_required_str` helper so the
+    // missing-arg error shape matches the other tools (`tool.X: missing
+    // required parameter 'Y'`). An explicit empty-string guard sits on top
+    // because spawning `""` is meaningless — the helper itself accepts ""
+    // so callers like `fs.write` can legitimately truncate a file. Both
+    // the missing and empty cases surface the unified `MissingRequiredArg`
+    // error so the IPC error string is identical across all tools.
+    let command = match get_required_str(args, ShellExecTool::NAME, "command") {
+        Ok(c) if !c.is_empty() => c,
+        Ok(_) | Err(_) => {
+            return serde_json::json!({
+                "error": ToolError::MissingRequiredArg {
+                    tool: ShellExecTool::NAME.to_string(),
+                    arg: "command".to_string(),
+                }
+                .to_string()
+            });
+        }
     };
 
     let argv: Vec<String> = args

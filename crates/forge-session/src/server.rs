@@ -23,6 +23,22 @@ use crate::sandbox::ChildRegistry;
 use crate::session::Session;
 use forge_core::ApprovalScope;
 
+/// Static name for an `IpcMessage` discriminant — used for diagnostic logging
+/// when the dispatch loop encounters a frame that is structurally valid but
+/// not legal at the post-handshake stage of a session connection (F-074).
+/// Exhaustive over the variant set; adding a new variant is a compile error.
+fn ipc_message_kind(msg: &IpcMessage) -> &'static str {
+    match msg {
+        IpcMessage::Hello(_) => "Hello",
+        IpcMessage::HelloAck(_) => "HelloAck",
+        IpcMessage::Subscribe(_) => "Subscribe",
+        IpcMessage::Event(_) => "Event",
+        IpcMessage::SendUserMessage(_) => "SendUserMessage",
+        IpcMessage::ToolCallApproved(_) => "ToolCallApproved",
+        IpcMessage::ToolCallRejected(_) => "ToolCallRejected",
+    }
+}
+
 /// Compute the session's `allowed_paths` glob list from its workspace root.
 ///
 /// Returns `[format!("{}/**", canonical_ws)]` when `workspace` points at an
@@ -458,24 +474,33 @@ async fn handle_connection<P: Provider + 'static>(
                     }
 
                     Some(IpcMessage::ToolCallApproved(a)) => {
-                        // F-053: parse the client-supplied scope (wire format is still
-                        // a bare string, per forge_ipc::ToolCallApproved) into the typed
-                        // `ApprovalScope`. On parse failure, fall back to `Once` and
-                        // warn — the user did click approve, so we honour the approval
-                        // at the weakest scope rather than dropping it silently.
-                        let scope = serde_json::from_value::<ApprovalScope>(
+                        // F-053 / F-074: parse the client-supplied scope (wire
+                        // format is still a bare string, per
+                        // `forge_ipc::ToolCallApproved`) into the typed
+                        // `ApprovalScope`. On parse failure we now reject the
+                        // approval rather than silently downgrading to `Once`:
+                        // a user who granted "Always" must not have it
+                        // demoted without notice (audit M7-class finding).
+                        // The client receives the rejection via the same
+                        // approval channel it would for an explicit deny,
+                        // and downstream `ToolCallRejected` event surfaces
+                        // the outcome to the session log.
+                        let parsed = serde_json::from_value::<ApprovalScope>(
                             serde_json::Value::String(a.scope.clone()),
-                        )
-                        .unwrap_or_else(|_| {
-                            eprintln!(
-                                "ToolCallApproved: unknown scope {:?}, falling back to Once",
-                                a.scope
-                            );
-                            ApprovalScope::Once
-                        });
+                        );
                         let mut map = pending_approvals.lock().await;
                         if let Some(tx) = map.remove(&a.id) {
-                            let _ = tx.send(ApprovalDecision::Approved(scope));
+                            let decision = match parsed {
+                                Ok(scope) => ApprovalDecision::Approved(scope),
+                                Err(_) => {
+                                    eprintln!(
+                                        "ToolCallApproved: unknown scope {:?}, rejecting approval",
+                                        a.scope
+                                    );
+                                    ApprovalDecision::Rejected
+                                }
+                            };
+                            let _ = tx.send(decision);
                         }
                     }
 
@@ -486,7 +511,24 @@ async fn handle_connection<P: Provider + 'static>(
                         }
                     }
 
-                    Some(_) => {} // ignore other messages
+                    // F-074: exhaustive match over the remaining
+                    // `IpcMessage` variants — adding a new variant must be a
+                    // compile error here so an IPC handler is added
+                    // deliberately rather than silently swallowed at the
+                    // trust boundary. `Hello` / `HelloAck` are handshake
+                    // frames already consumed before the read loop;
+                    // `Subscribe` is reserved for future multi-subscriber
+                    // sessions; `Event` is server→client only and would
+                    // indicate a malformed/forged client frame.
+                    Some(other @ (IpcMessage::Hello(_)
+                        | IpcMessage::HelloAck(_)
+                        | IpcMessage::Subscribe(_)
+                        | IpcMessage::Event(_))) => {
+                        eprintln!(
+                            "session: ignoring unexpected client frame {}",
+                            ipc_message_kind(&other)
+                        );
+                    }
                     None => break,
                 }
             }
