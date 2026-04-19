@@ -52,6 +52,13 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --check
 
+      # F-097: rustdoc warnings break intra-doc links for anyone browsing
+      # the generated docs. `-D warnings` makes any new warning fail CI.
+      - name: cargo doc
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --no-deps --all-features
+
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
 

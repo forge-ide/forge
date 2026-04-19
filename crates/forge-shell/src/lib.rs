@@ -1,3 +1,4 @@
+#![deny(rustdoc::broken_intra_doc_links, rustdoc::private_intra_doc_links)]
 //! forge-shell: Tauri 2 host for the Forge Solid app.
 //!
 //! Modules:

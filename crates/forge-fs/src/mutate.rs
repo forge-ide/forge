@@ -99,7 +99,7 @@ pub fn write(
 /// Apply a unified-diff `patch` to the file at `path` after validating the
 /// path. Rejects source files larger than `limits.max_read_bytes` before
 /// reading them into RAM, and delegates post-patch size enforcement to
-/// [`write`]. Writes atomically. Requires the target to exist.
+/// [`write()`]. Writes atomically. Requires the target to exist.
 pub fn edit(
     path: &str,
     patch: &str,
@@ -147,7 +147,7 @@ pub fn edit(
 /// of the proposed new bytes — does **not** read the existing file.
 ///
 /// Reading the target file here would run before `allowed_paths` enforcement
-/// (which happens in [`write`]) and leak attacker-chosen file contents into
+/// (which happens in [`write()`]) and leak attacker-chosen file contents into
 /// the approval event (see F-042 / audit finding H3). The proposed `content`
 /// is already supplied by the caller, so echoing it back does not expand the
 /// trust surface. If a before/after diff is needed for UX, compute it via an
