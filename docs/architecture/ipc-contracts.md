@@ -28,6 +28,8 @@ Forge has **two distinct IPC boundaries**. They must not be confused.
 
 ### 4.1 Boundary 1: Tauri ↔ webview
 
+> **Phase 1 coverage.** Phase 1 ships the following Tauri commands: `session_hello`, `session_subscribe`, `session_send_message`, `session_approve_tool`, `session_reject_tool`, `session_list`, `open_session`, `provider_status`. Every other command listed below is reserved for subsequent milestones and is not wired in Phase 1. See ADR-001 §4 for the corresponding subset note on the UDS boundary.
+
 **Pattern.** Tauri `command` handlers for request/response (webview → host) and Tauri `events` for push (host → webview).
 
 #### Commands (webview → host)
@@ -181,6 +183,8 @@ The client then sends either:
 ```
 
 ### 5.3 Message types
+
+> **Phase 1 coverage.** Phase 1 implements the following `IpcMessage` variants in `crates/forge-ipc`: `Hello`, `HelloAck`, `Subscribe`, `Event`, `SendUserMessage`, `ToolCallApproved`, `ToolCallRejected`. Every other variant listed below is reserved for subsequent milestones and is not wired in Phase 1. See ADR-001 §4 for the same subset note alongside its rationale.
 
 Full discriminated union, `t` is the tag.
 
