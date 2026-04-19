@@ -67,10 +67,15 @@ async fn session_hello_command_round_trips_via_tauri_invoke() {
     let app = make_app();
     app.manage(BridgeState::new(SessionConnections::new()));
 
-    let window =
-        tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::App("index.html".into()))
-            .build()
-            .expect("mock window");
+    // F-051: window label must match `session-{session_id}` for the
+    // session_hello authz check to pass.
+    let window = tauri::WebviewWindowBuilder::new(
+        &app,
+        "session-tauri-hello",
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .build()
+    .expect("mock window");
 
     let payload = serde_json::json!({
         "sessionId": "tauri-hello",
