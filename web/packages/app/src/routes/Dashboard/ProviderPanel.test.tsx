@@ -90,4 +90,35 @@ describe('ProviderPanel', () => {
     });
     expect(await findByText(/3\s+models/i)).toBeInTheDocument();
   });
+
+  it('renders the error state when provider_status rejects, showing the detail verbatim', async () => {
+    const invoke = vi.fn().mockRejectedValue(new Error('authz denied: dashboard'));
+    setInvokeForTesting(invoke as never);
+
+    const { findByText } = render(() => <ProviderPanel />);
+
+    // Noun-state heading per voice-terminology.md
+    expect(await findByText('PROVIDER UNAVAILABLE')).toBeInTheDocument();
+    // Verbatim technical detail — String(new Error('x')) is "Error: x"
+    expect(await findByText(/Error: authz denied: dashboard/)).toBeInTheDocument();
+  });
+
+  it('retry button on the error state re-invokes provider_status and recovers', async () => {
+    const invoke = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('authz denied: dashboard'))
+      .mockResolvedValueOnce(reachable);
+    setInvokeForTesting(invoke as never);
+
+    const { findByRole, findByText } = render(() => <ProviderPanel />);
+
+    const retry = await findByRole('button', { name: /^retry$/i });
+    fireEvent.click(retry);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledTimes(2);
+    });
+    // After recovery, the success render replaces the error state.
+    expect(await findByText('http://127.0.0.1:11434')).toBeInTheDocument();
+  });
 });

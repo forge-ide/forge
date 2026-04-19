@@ -23,32 +23,47 @@ export const ProviderPanel: Component = () => {
         <span class="provider-panel__name">ollama</span>
       </header>
 
-      <Show when={status()} fallback={<p class="provider-panel__loading">PROBING</p>}>
-        {(s) => (
-          <>
-            <div class="provider-panel__row">
-              <HealthIndicator reachable={s().reachable} />
-              <code class="provider-panel__url">{s().base_url}</code>
-            </div>
-
-            <Show
-              when={s().reachable}
-              fallback={<UnreachableHint baseUrl={s().base_url} errorKind={s().error_kind} />}
-            >
-              <ModelSection
-                models={s().models}
-                expanded={expanded()}
-                onToggle={() => setExpanded((v) => !v)}
-              />
-            </Show>
-
+      <Show
+        when={!status.error}
+        fallback={
+          <div class="provider-panel__error" role="alert">
+            <p class="provider-panel__error-title">PROVIDER UNAVAILABLE</p>
+            <p class="provider-panel__error-detail">{String(status.error)}</p>
             <div class="provider-panel__actions">
               <button type="button" class="provider-panel__btn" onClick={() => refetch()}>
-                REFRESH
+                RETRY
               </button>
             </div>
-          </>
-        )}
+          </div>
+        }
+      >
+        <Show when={status()} fallback={<p class="provider-panel__loading">PROBING</p>}>
+          {(s) => (
+            <>
+              <div class="provider-panel__row">
+                <HealthIndicator reachable={s().reachable} />
+                <code class="provider-panel__url">{s().base_url}</code>
+              </div>
+
+              <Show
+                when={s().reachable}
+                fallback={<UnreachableHint baseUrl={s().base_url} errorKind={s().error_kind} />}
+              >
+                <ModelSection
+                  models={s().models}
+                  expanded={expanded()}
+                  onToggle={() => setExpanded((v) => !v)}
+                />
+              </Show>
+
+              <div class="provider-panel__actions">
+                <button type="button" class="provider-panel__btn" onClick={() => refetch()}>
+                  REFRESH
+                </button>
+              </div>
+            </>
+          )}
+        </Show>
       </Show>
     </section>
   );
