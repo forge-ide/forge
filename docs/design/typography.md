@@ -2,11 +2,15 @@
 
 > Extracted from DESIGN.md §4 — font families, type scale, per-family rules, and ligature usage
 
+**Related docs:** [Token Reference](token-reference.md) · [Voice & Terminology](voice-terminology.md) · [Component Principles](component-principles.md)
+
 ---
 
 ## 4. Typography
 
 ### Type families
+
+The font-family CSS variables (`--font-display`, `--font-body`, `--font-mono`) for the table below are defined in [Token Reference](token-reference.md).
 
 | Role | Family | Usage |
 |---|---|---|

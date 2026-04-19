@@ -2,6 +2,8 @@
 
 > Extracted from DESIGN.md §7 — provider identity, streaming state, tool call visibility, sub-agent banners, agent monitor, and MCP indicators
 
+**Related docs:** [Color System](color-system.md) · [Component Principles](component-principles.md) · [Voice & Terminology](voice-terminology.md)
+
 ---
 
 ## 7. AI-Specific UI Patterns
@@ -10,7 +12,7 @@ These patterns are Forge-specific. Follow them consistently — they are part of
 
 ### Provider identity
 
-Each AI provider gets an accent color used consistently across all panes:
+Each AI provider gets an accent color used consistently across all panes (see [Color System](color-system.md) for the named scales and [Token Reference](token-reference.md) for the `--color-provider-*` CSS variables):
 - Anthropic / Claude: `ember-400` (`#ff4a12`)
 - OpenAI / GPT: `amber` (`#ffaa33`)
 - Local / Ollama / LM Studio: `steel` (`#7aaaff`)

@@ -2,6 +2,8 @@
 
 > Extracted from DESIGN.md §8-9 — copy principles, formatting rules, terminology table, and do/don't reference
 
+**Related docs:** [Design Philosophy](philosophy.md) · [Component Principles](component-principles.md) · [AI Patterns](ai-patterns.md)
+
 ---
 
 ## 8. Writing & Voice
@@ -44,6 +46,8 @@ Always show technical identifiers verbatim: `ECONNREFUSED 127.0.0.1:11434` not `
 ## 9. Do and Don't
 
 ### Visual
+
+The `ember-400` and `iron` color names referenced below are defined in the [Color System](color-system.md) and exposed as CSS custom properties in [Token Reference](token-reference.md).
 
 | ✓ Do | ✕ Don't |
 |---|---|

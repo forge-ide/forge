@@ -2,6 +2,8 @@
 
 > Extracted from DESIGN.md §1-2 — principles, visual identity, mark construction, wordmark, and colorways
 
+**Related docs:** [Color System](color-system.md) · [Typography](typography.md) · [Voice & Terminology](voice-terminology.md)
+
 ---
 
 ## 1. Design Philosophy
@@ -58,6 +60,8 @@ The Forge mark is a hub-and-spoke diagram with a minimal flat hammer at the cent
 - Tagline: `"Any AI. One editor."` in Fira Code, 9px, `#6a7e98`
 
 ### Colorways
+
+The hex values below are referenced by name (`ember-400`, `iron-900`, etc.) elsewhere in the design system; see [Color System](color-system.md) for the full Ember and Iron scales and [Token Reference](token-reference.md) for the corresponding CSS custom properties.
 
 | Context | Background | Usage |
 |---|---|---|
