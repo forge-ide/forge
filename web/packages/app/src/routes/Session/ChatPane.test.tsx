@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, fireEvent } from '@solidjs/testing-library';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { SessionId } from '@forge/ipc';
 
 // --- Store imports ---
@@ -236,6 +238,53 @@ describe('Composer disabled state', () => {
     setAwaitingResponse(SID, true);
     const { getByTestId } = render(() => <ChatPane />);
     expect(getByTestId('streaming-indicator')).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-086: composer disabled-state CSS contract
+// ---------------------------------------------------------------------------
+//
+// `component-principles.md` ("Buttons"): "Disabled buttons use iron-600
+// background and text. Never reduce opacity on a button to show disabled
+// state — opacity makes elements appear interactive." The rule applies to
+// any interactive control, including the composer textarea while a stream
+// is locked. jsdom does not resolve external stylesheets at render time, so
+// the CSS source itself is the contract — assert against the source the
+// way `check-tokens.test.ts` asserts against `tokens.css`.
+describe('Composer disabled state CSS (F-086)', () => {
+  const cssSource = readFileSync(
+    resolve(__dirname, 'ChatPane.css'),
+    'utf-8',
+  );
+
+  // Match `.composer__textarea:disabled { ... }` and capture the rule body.
+  const ruleMatch = cssSource.match(
+    /\.composer__textarea:disabled\s*\{([^}]*)\}/,
+  );
+
+  it('declares a `:disabled` rule for the composer textarea', () => {
+    expect(ruleMatch).not.toBeNull();
+  });
+
+  it('does not reduce opacity to signal disabled (component-principles.md)', () => {
+    const body = ruleMatch?.[1] ?? '';
+    expect(body).not.toMatch(/\bopacity\s*:/);
+  });
+
+  it('uses --color-surface-2 for the locked background', () => {
+    const body = ruleMatch?.[1] ?? '';
+    expect(body).toMatch(/background\s*:\s*var\(--color-surface-2\)/);
+  });
+
+  it('uses --color-text-disabled for the locked text color', () => {
+    const body = ruleMatch?.[1] ?? '';
+    expect(body).toMatch(/color\s*:\s*var\(--color-text-disabled\)/);
+  });
+
+  it('keeps `cursor: not-allowed` to signal the locked state', () => {
+    const body = ruleMatch?.[1] ?? '';
+    expect(body).toMatch(/cursor\s*:\s*not-allowed/);
   });
 });
 

@@ -225,8 +225,13 @@
   color: var(--color-text-tertiary);
 }
 
+/* F-086: token-based locked state during streaming. Per
+   `component-principles.md` ("Buttons"): never use `opacity` to signal
+   disabled — opacity makes elements appear interactive. Mirror the
+   `iron-600`-style button-disabled precedent with surface + text tokens. */
 .composer__textarea:disabled {
-  opacity: 0.5;
+  background: var(--color-surface-2);
+  color: var(--color-text-disabled);
   cursor: not-allowed;
 }
 
