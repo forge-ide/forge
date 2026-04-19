@@ -247,21 +247,18 @@ async fn main() -> Result<()> {
 - Perform context compaction at 98% or on explicit user request
 - On end: archive (move to `.forge/sessions/archived/<id>/` if persist) or purge (if ephemeral)
 
-**State machine.**
+**Lifecycle.** `forge-session` does not run an internal `Spawned/Initializing/Ready/Running/Draining/Stopped` state machine. The `SessionState` enum in `crates/forge-core/src/types.rs` (see §3.1) has exactly three variants — `Active`, `Archived`, `Ended` — and the daemon is a long-running listener whose progress is observable through the event log, not through a session-level state field.
+
 ```
-  [Spawned] ─> [Initializing] ─> [Ready]
-                                    │
-                                    ▼
-  ┌─────────────── [Running] ─┐
-  │                            │
-  ▼                            ▼
-[PausedForApproval]         [Idle]
-  │                            │
-  └──────────> (resume) ───────┘
-                               │
-                               ▼
-                        [Draining] ─> [Stopped] ─> {Archived | Purged}
+  [Active] ──(SIGTERM/SIGINT, ephemeral)──> [Ended]   (session dir purged)
+     │
+     └──(SIGTERM/SIGINT, persist)──────────> [Archived] (moved to .forge/sessions/archived/<id>/)
 ```
+
+- The daemon starts in `Active` and emits an `Event::SessionStarted` to `events.jsonl` (`crates/forge-core/src/event.rs`).
+- Approval waiting is **event-driven, not a state transition**: when a tool call needs approval, the session emits `ToolCallApprovalRequested` and waits for an `ApproveToolCall` / `RejectToolCall` command from any connected client. The session remains `Active` throughout — there is no `PausedForApproval` state, and other reads can continue in parallel.
+- On `SIGTERM` / `SIGINT`, `crates/forge-session/src/server.rs` emits `Event::SessionEnded { archived }` and calls `archive_or_purge` from `crates/forge-session/src/archive.rs` (per F-039). Persistent sessions are renamed into `.forge/sessions/archived/<id>/` and `meta.toml.state` is rewritten to `Archived`; ephemeral sessions have their session directory removed and the in-memory state is `Ended` (no `meta.toml` survives).
+- The richer `Spawned → Initializing → Ready → Draining → Stopped` machine in earlier drafts is **not implemented** and is not currently planned for Phase 1. If a future phase grows the enum, update this section and `SessionState` in lockstep.
 
 **Client connections.**
 - Multiple clients (GUI instances, `forge session tail`, `forge session attach`) can connect simultaneously
