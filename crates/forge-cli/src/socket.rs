@@ -283,17 +283,26 @@ pub fn kill_session_from_pid_file(
     Ok((pid, recorded_start_time))
 }
 
-/// Compile-time guard: this crate targets Linux only. pidfd_open /
-/// pidfd_send_signal are Linux-specific syscalls, and the pid-file
-/// lifecycle depends on `/proc/<pid>/stat`. On non-Linux targets the
-/// secure kill path does not exist; fail the build rather than silently
-/// regressing to the racy `libc::kill` fallback that F-049 removes.
+/// Non-Linux stub for `kill_session_from_pid_file`. The race-free kill path
+/// relies on `pidfd_open` and `/proc/<pid>/stat`, both Linux-only. On other
+/// platforms we refuse to fall back to raw `libc::kill` (which F-049 removes
+/// precisely because it SIGTERMs a reused PID), so the function exists but
+/// returns a typed error — preserving the safety invariant without breaking
+/// workspace builds on macOS/Windows.
+///
+/// Follow-up work: implement `kqueue` `EVFILT_PROC` (macOS) or Win32 handle
+/// equivalent (Windows). See the H2 finding's "References" section.
 #[cfg(not(target_os = "linux"))]
-compile_error!(
-    "forge-cli session_kill requires Linux-specific pidfd_open + /proc/<pid>/stat \
-     for race-free PID-reuse verification (F-049). Non-Linux support is out of \
-     scope for Phase 1; file a follow-up if this is needed."
-);
+pub fn kill_session_from_pid_file(
+    _pid_file: &std::path::Path,
+) -> anyhow::Result<(libc::pid_t, u64)> {
+    anyhow::bail!(
+        "session_kill is only race-free on Linux (pidfd_open + /proc/<pid>/stat). \
+         macOS/Windows would need kqueue EVFILT_PROC or a Win32 handle-based \
+         equivalent; tracked as a follow-up to F-049. Terminate the daemon \
+         manually on this platform (e.g. Activity Monitor / Task Manager)."
+    );
+}
 
 #[cfg(test)]
 mod tests {
