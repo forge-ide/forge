@@ -185,12 +185,13 @@ async fn session_kill(id: &str) -> Result<()> {
     let raw = tokio::fs::read_to_string(&pid_file)
         .await
         .map_err(|_| anyhow::anyhow!("no pid file for session {id} — is it running?"))?;
-    let pid: libc::pid_t = raw
-        .trim()
-        .parse()
-        .map_err(|_| anyhow::anyhow!("invalid pid file for session {id}"))?;
+    let pid = forge_cli::socket::parse_session_pid(&raw)
+        .map_err(|e| anyhow::anyhow!("invalid pid file for session {id}: {e}"))?;
 
-    // SAFETY: pid comes from a file we wrote; SIGTERM is a valid signal number.
+    // SAFETY: pid has been validated as > 0 by `parse_session_pid`, so it
+    // cannot select the caller's process group (pid == 0), every signalable
+    // process (pid == -1), or a process group (pid < -1). SIGTERM is a valid
+    // signal number.
     let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
     if rc != 0 {
         let err = std::io::Error::last_os_error();
@@ -236,8 +237,8 @@ async fn run_agent(name: &str, input_source: &str) -> Result<()> {
         .env("FORGE_SOCKET_PATH", sock.to_str().unwrap_or(""))
         .spawn()?;
 
-    let pid = child.id().unwrap_or(0);
-    tokio::fs::write(&pid_file, pid.to_string()).await?;
+    let pid_contents = forge_cli::socket::pid_file_contents(child.id())?;
+    tokio::fs::write(&pid_file, &pid_contents).await?;
 
     wait_for_socket(&sock).await?;
 
