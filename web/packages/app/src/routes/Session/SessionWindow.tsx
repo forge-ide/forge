@@ -1,7 +1,7 @@
 import { type Component, onCleanup, onMount } from 'solid-js';
 import { useParams } from '@solidjs/router';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import type { SessionId } from '@forge/ipc';
+import type { ProviderId, SessionId } from '@forge/ipc';
 import {
   onSessionEvent,
   sessionHello,
@@ -83,6 +83,10 @@ export const SessionWindow: Component = () => {
   };
 
   const subject = () => `Session ${sessionId()}`;
+  // Phase 1 ships only the Ollama provider; once the active session carries
+  // its provider id over IPC (Phase 2), wire it through here so the pill
+  // accent follows the live provider per ai-patterns.md §7 (F-091).
+  const providerId = (): ProviderId => 'ollama' as ProviderId;
   const providerLabel = () => 'ollama \u00b7 pending';
   const costLabel = () => 'in 0 \u00b7 out 0 \u00b7 $0.00';
 
@@ -91,6 +95,7 @@ export const SessionWindow: Component = () => {
       <section class="session-window__pane" aria-label="Session pane">
         <PaneHeader
           subject={subject()}
+          providerId={providerId()}
           providerLabel={providerLabel()}
           costLabel={costLabel()}
           onClose={handleClose}

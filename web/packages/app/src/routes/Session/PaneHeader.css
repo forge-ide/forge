@@ -29,7 +29,10 @@
   padding: 0 var(--sp-2);
   font-family: var(--font-mono);
   font-size: 11px;
-  color: var(--color-provider-local);
+  /* F-091: per-provider accent set via inline custom property; the steel
+   * `--color-provider-local` fallback is the Phase-1 default for callers
+   * that haven't plumbed a providerId yet. */
+  color: var(--pane-header-provider-accent, var(--color-provider-local));
   background: var(--color-surface-3);
   border: 1px solid var(--color-border-1);
   border-radius: var(--r-sm);
