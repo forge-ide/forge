@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render } from '@solidjs/testing-library';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import type { ProviderId } from '@forge/ipc';
 import { ApprovalPrompt } from './components/ApprovalPrompt/ApprovalPrompt';
 import { ProviderPanel } from './routes/Dashboard/ProviderPanel';
 import { PaneHeader } from './routes/Session/PaneHeader';
@@ -121,6 +122,7 @@ describe('F-083 buttons are keyboard-focusable', () => {
     const { getByRole } = render(() => (
       <PaneHeader
         subject="hello"
+        providerId={'ollama' as ProviderId}
         providerLabel="ollama"
         costLabel="0.00"
         onClose={vi.fn()}
