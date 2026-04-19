@@ -542,8 +542,14 @@ mod tests {
         // automatically once setrlimit has run; this test is the
         // load-bearing one.
         let tmp = tempfile::tempdir().unwrap();
+        // Probe values are deliberately distinct from Default so the test
+        // would fail if pre_exec stopped applying setrlimit. NPROC stays
+        // above typical CI-runner-uid process counts (GHA's `runner` uid
+        // easily sits >100 processes at test time, so a value like 17
+        // would starve fork in the spawned shell). 8192 is well above
+        // that while distinct from the default 4096.
         let config = SandboxConfig {
-            max_processes: 17,
+            max_processes: 8192,
             max_open_files: 42,
             max_file_size_bytes: 4096,
             ..SandboxConfig::default()
@@ -568,7 +574,7 @@ mod tests {
 
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 3, "expected 3 ulimit lines, got: {out:?}");
-        assert_eq!(lines[0].trim(), "17", "RLIMIT_NPROC not applied: {out:?}");
+        assert_eq!(lines[0].trim(), "8192", "RLIMIT_NPROC not applied: {out:?}");
         assert_eq!(lines[1].trim(), "42", "RLIMIT_NOFILE not applied: {out:?}");
         // `ulimit -f` reports in 512-byte blocks; 4096 / 512 = 8.
         assert_eq!(lines[2].trim(), "8", "RLIMIT_FSIZE not applied: {out:?}");
