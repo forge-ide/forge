@@ -581,17 +581,15 @@ mod tests {
         //   Max file size             4096                 4096                 bytes
         // (plus other rows we don't care about)
         let soft_limit_for = |name: &str| -> Option<String> {
-            out.lines()
-                .find(|l| l.starts_with(name))
-                .and_then(|l| {
-                    // Fields after the name are whitespace-separated. Soft = idx 0
-                    // in the remainder; but `name` itself contains spaces (e.g.
-                    // "Max processes"), so split on whitespace and take column 2.
-                    let cols: Vec<&str> = l.split_whitespace().collect();
-                    // ["Max", "processes", "<soft>", "<hard>", "<units>"]
-                    let word_count = name.split_whitespace().count();
-                    cols.get(word_count).map(|s| s.to_string())
-                })
+            out.lines().find(|l| l.starts_with(name)).and_then(|l| {
+                // Fields after the name are whitespace-separated. Soft = idx 0
+                // in the remainder; but `name` itself contains spaces (e.g.
+                // "Max processes"), so split on whitespace and take column 2.
+                let cols: Vec<&str> = l.split_whitespace().collect();
+                // ["Max", "processes", "<soft>", "<hard>", "<units>"]
+                let word_count = name.split_whitespace().count();
+                cols.get(word_count).map(|s| s.to_string())
+            })
         };
 
         assert_eq!(
