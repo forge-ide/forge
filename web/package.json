@@ -12,5 +12,11 @@
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
     "check-tokens": "node ../scripts/check-tokens.mjs"
+  },
+  "pnpm": {
+    "overrides": {
+      "vite": "^6.4.2",
+      "esbuild": "^0.25.0"
+    }
   }
 }
