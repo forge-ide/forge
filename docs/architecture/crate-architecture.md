@@ -75,7 +75,9 @@ pub trait Credentials: Send + Sync {
 }
 ```
 
-**External deps.** `serde`, `serde_json`, `tokio`, `chrono`, `thiserror`, `anyhow`, `ts-rs` (for TS type generation), `secrecy` (for `Secret<T>`), `toml`, `gray_matter` (YAML frontmatter parsing).
+**External deps.** `serde`, `serde_json`, `tokio`, `chrono`, `thiserror`, `anyhow`, `ts-rs` (for TS type generation), `toml`, `rand`.
+
+**Planned (later phases).** `gray_matter` for `.agents/*.md` YAML frontmatter parsing arrives with `forge-agents` in Phase 2. `secrecy` (for `Secret<T>` in the `Credentials` trait above) arrives with credential management in Phase 3. See [`docs/build/roadmap.md`](../build/roadmap.md) §12 (Phase 2 — Full layout, MCP, agents; Phase 3 — Breadth).
 
 ---
 
