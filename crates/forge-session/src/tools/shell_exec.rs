@@ -44,11 +44,21 @@ impl Tool for ShellExecTool {
                     .join(" ")
             })
             .unwrap_or_default();
+        // Surface `cwd` in the preview whenever it is supplied. When absent,
+        // `run_linux` defaults to `ctx.workspace_root` — there is nothing for
+        // the user to distinguish, so no `cwd` line is shown. When present,
+        // the directory context is load-bearing and must appear in consent
+        // (F-054 / audit finding M8).
+        let cwd = args.get("cwd").and_then(|v| v.as_str());
+        let head = if argv.is_empty() {
+            format!("Run command: {command}")
+        } else {
+            format!("Run command: {command} {argv}")
+        };
         ApprovalPreview {
-            description: if argv.is_empty() {
-                format!("Run command: {command}")
-            } else {
-                format!("Run command: {command} {argv}")
+            description: match cwd {
+                Some(p) => format!("{head} (cwd: {p})"),
+                None => head,
             },
         }
     }
@@ -85,14 +95,52 @@ fn run_linux(args: &serde_json::Value, ctx: &ToolCtx) -> serde_json::Value {
         })
         .unwrap_or_default();
 
-    let cwd = args
-        .get("cwd")
-        .and_then(|v| v.as_str())
-        .map(std::path::PathBuf::from)
-        .or_else(|| ctx.workspace_root.clone())
-        .unwrap_or_else(|| {
+    // Resolve cwd. If the caller supplied one, validate it lives under
+    // `ctx.workspace_root` — canonicalize both sides so a symlink inside
+    // the workspace that points out is rejected by the post-canonical prefix
+    // check (F-054 / audit finding M8, symmetric with forge-fs root checks
+    // for F-043). If no cwd is supplied, fall back to the workspace root.
+    let cwd = match args.get("cwd").and_then(|v| v.as_str()) {
+        Some(requested) => {
+            let Some(root) = ctx.workspace_root.as_ref() else {
+                return serde_json::json!({
+                    "error": "shell.exec: cwd cannot be validated without workspace_root"
+                });
+            };
+            let canonical_cwd = match std::fs::canonicalize(requested) {
+                Ok(p) => p,
+                Err(e) => {
+                    return serde_json::json!({
+                        "error": format!("shell.exec: cannot resolve cwd {requested:?}: {e}")
+                    });
+                }
+            };
+            let canonical_root = match std::fs::canonicalize(root) {
+                Ok(p) => p,
+                Err(e) => {
+                    return serde_json::json!({
+                        "error": format!(
+                            "shell.exec: cannot resolve workspace_root {}: {e}",
+                            root.display()
+                        )
+                    });
+                }
+            };
+            if !canonical_cwd.starts_with(&canonical_root) {
+                return serde_json::json!({
+                    "error": format!(
+                        "shell.exec: cwd {} is outside workspace {}",
+                        canonical_cwd.display(),
+                        canonical_root.display()
+                    )
+                });
+            }
+            canonical_cwd
+        }
+        None => ctx.workspace_root.clone().unwrap_or_else(|| {
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-        });
+        }),
+    };
 
     let timeout_ms = args
         .get("timeout_ms")
