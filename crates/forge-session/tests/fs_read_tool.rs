@@ -76,6 +76,13 @@ async fn fs_read_tool_returns_content_bytes_sha256() {
     let server_session = Arc::clone(&session);
     let server_provider = Arc::clone(&provider);
     let server_sock = sock_path.clone();
+    // F-043: `serve_with_session` now derives `allowed_paths` from the
+    // workspace root, so the temp file must live inside the workspace it
+    // was created in. Previously `allowed_paths` was `vec!["**"]`, which
+    // matched every absolute path including the temp file path regardless
+    // of workspace. Passing the temp dir as the workspace keeps this test
+    // exercising the happy-path read through the orchestrator stack.
+    let server_workspace = Some(dir.path().to_path_buf());
     tokio::spawn(async move {
         serve_with_session(
             &server_sock,
@@ -83,7 +90,7 @@ async fn fs_read_tool_returns_content_bytes_sha256() {
             server_provider,
             false,
             false,
-            None,
+            server_workspace,
             None,
         )
         .await
