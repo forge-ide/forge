@@ -55,3 +55,11 @@ path = "tests/provider_selection.rs"
 [[test]]
 name = "pid_file_lifecycle"
 path = "tests/pid_file_lifecycle.rs"
+
+[[test]]
+name = "uds_socket_permissions"
+path = "tests/uds_socket_permissions.rs"
+
+[[test]]
+name = "socket_path_fallback"
+path = "tests/socket_path_fallback.rs"

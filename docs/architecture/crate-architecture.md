@@ -238,7 +238,7 @@ async fn main() -> Result<()> {
 - Write session metadata to `.forge/sessions/<id>/meta.toml`
 - Host the agent orchestrator
 - Host the tool dispatcher (fs, shell, agent.spawn, mcp.*)
-- Expose an IPC server over a Unix domain socket at `$XDG_RUNTIME_DIR/forge/sessions/<id>.sock` (macOS: `/tmp/forge-<uid>/sessions/<id>.sock`)
+- Expose an IPC server over a Unix domain socket at `$XDG_RUNTIME_DIR/forge/sessions/<id>.sock`. As of F-044 the daemon refuses to start without `XDG_RUNTIME_DIR` set — a shared-tmp fallback would be world-connectable and is no longer offered. macOS systems that want to host `forged` must set `XDG_RUNTIME_DIR` themselves (to a per-user `0o700` directory) or override the path via `FORGE_SOCKET_PATH`.
 - Handle approval prompts (by emitting an event and waiting for an `ApproveToolCall` command)
 - Track usage counters in-memory, flush to monthly aggregate on session end (strategy TBD per CONCEPT.md §13)
 - Execute parallel reads; serialize writes/exec

@@ -71,17 +71,31 @@ impl SessionConnections {
 }
 
 /// Resolve the default socket path for a session id, following the same
-/// rules as `forge-session::main`. Exposed so the Tauri command layer and
-/// tests agree on the convention.
-pub fn default_socket_path(session_id: &str) -> PathBuf {
+/// rules as `forge-session::socket_path::resolve_socket_path`. Exposed so
+/// the Tauri command layer and tests agree on the convention.
+///
+/// Returns `Err` when `XDG_RUNTIME_DIR` is unset. F-044 (H8) closed the
+/// pre-existing `/tmp/forge-<uid>` fallback; `forged` itself refuses to
+/// start without `XDG_RUNTIME_DIR`, so a shell that silently resolved to
+/// `/tmp/...` would only ever hit `ENOENT`. Surfacing the missing env var
+/// here gives the operator a clearer error than "no such file".
+pub fn default_socket_path(session_id: &str) -> Result<PathBuf> {
     let base = std::env::var("XDG_RUNTIME_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let uid = std::env::var("UID").unwrap_or_else(|_| "0".to_string());
-            PathBuf::from(format!("/tmp/forge-{uid}"))
-        });
-    base.join("forge/sessions")
-        .join(format!("{session_id}.sock"))
+        .ok_or_else(|| {
+            anyhow!(
+                "XDG_RUNTIME_DIR is unset: forge-shell refuses to fall \
+                 back to /tmp because the socket there would be \
+                 world-connectable. Set XDG_RUNTIME_DIR to a per-user \
+                 0o700 directory (systemd sets /run/user/<uid> \
+                 automatically). (F-044 / H8)"
+            )
+        })?;
+    Ok(base
+        .join("forge/sessions")
+        .join(format!("{session_id}.sock")))
 }
 
 /// Top-level bridge operations invoked by Tauri commands. Keyed on
@@ -114,9 +128,10 @@ impl SessionBridge {
             }
         }
 
-        let path: PathBuf = socket_path
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| default_socket_path(session_id));
+        let path: PathBuf = match socket_path {
+            Some(p) => p.to_path_buf(),
+            None => default_socket_path(session_id)?,
+        };
         let stream = UnixStream::connect(&path)
             .await
             .with_context(|| format!("connect UDS {}", path.display()))?;

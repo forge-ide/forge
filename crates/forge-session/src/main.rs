@@ -5,6 +5,7 @@ use forge_session::{
     provider_spec::{parse_provider_spec, ProviderKind},
     server::{event_log_path, serve_with_session},
     session::Session,
+    socket_path::resolve_socket_path,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,9 +25,14 @@ async fn main() -> Result<()> {
     // print the path before forged starts and can track it for `session kill`.
     let session_id = std::env::var("FORGE_SESSION_ID")
         .unwrap_or_else(|_| forge_core::SessionId::new().to_string());
-    let socket_path = std::env::var("FORGE_SOCKET_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| resolve_socket_path(&session_id));
+    // F-044 (H8): `resolve_socket_path` now refuses to return a path when
+    // `XDG_RUNTIME_DIR` is unset rather than falling back to `/tmp/forge-0`.
+    // Tests always set `FORGE_SOCKET_PATH` explicitly, so this resolver runs
+    // only on the production path where systemd provides `XDG_RUNTIME_DIR`.
+    let socket_path = match std::env::var("FORGE_SOCKET_PATH") {
+        Ok(p) if !p.is_empty() => PathBuf::from(p),
+        _ => resolve_socket_path(&session_id)?,
+    };
     // Normalize FORGE_WORKSPACE to an absolute path so HelloAck.workspace is
     // portable for clients (which may have a different CWD than the daemon).
     // std::path::absolute does not require the path to exist, unlike canonicalize.
@@ -154,15 +160,4 @@ async fn build_mock_provider() -> Result<Arc<MockProvider>> {
     } else {
         Ok(Arc::new(MockProvider::with_default_path()))
     }
-}
-
-fn resolve_socket_path(session_id: &str) -> PathBuf {
-    let base = std::env::var("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let uid = std::env::var("UID").unwrap_or_else(|_| "0".to_string());
-            PathBuf::from(format!("/tmp/forge-{uid}"))
-        });
-    base.join("forge/sessions")
-        .join(format!("{session_id}.sock"))
 }
