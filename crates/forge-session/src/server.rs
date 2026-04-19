@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -82,11 +83,30 @@ pub async fn serve_with_session<P: Provider + 'static>(
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
+        // F-044 (H8): tighten the socket's parent dir to 0o700 regardless of
+        // whether we created it or found it pre-existing. `XDG_RUNTIME_DIR`
+        // itself is 0o700 per systemd.exec(5), but the `forge/sessions`
+        // subdir sits inside and inherits `0o777 & ~umask` (typically 0o755)
+        // on first creation. Applying 0o700 explicitly closes the tiny window
+        // where the subdir is created loose and means the defense-in-depth
+        // survives if a future operator runs forged with `XDG_RUNTIME_DIR`
+        // pointed somewhere with a permissive parent. Best-effort: if the
+        // chmod fails (e.g. parent owned by another user under FORGE_SOCKET_PATH
+        // in a test), the 0o600 mode on the socket itself is the real defense.
+        let _ = tokio::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).await;
     }
     if path.exists() {
         tokio::fs::remove_file(path).await?;
     }
     let listener = UnixListener::bind(path)?;
+    // F-044 (H8): chmod the socket to 0o600 the moment it exists. bind(2)
+    // creates the socket file with `0o777 & ~umask`, typically 0o755 —
+    // world-connectable, which in Phase 1 means any local user can drive the
+    // session. There is a brief TOCTOU window between bind and the chmod
+    // here (tracked by F-056); this call closes the steady-state exposure
+    // without widening that window. We refuse to proceed if the chmod fails
+    // rather than serve on a permissive socket.
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
     let workspace_path: Option<PathBuf> = workspace.clone();
     // F-043: Derive `allowed_paths` from the workspace root so `fs.*` tools can
     // only touch files inside the session's workspace. Fail-closed — if no

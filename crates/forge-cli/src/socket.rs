@@ -13,8 +13,37 @@ pub fn session_id_is_valid(s: &str) -> bool {
     s.len() == 16 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+/// Error message shared by all path resolvers when `XDG_RUNTIME_DIR` is
+/// unset. Keeping a single message means any caller that surfaces this error
+/// (CLI, shell, daemon startup) advertises the same fix to the operator.
+fn xdg_runtime_dir_missing() -> anyhow::Error {
+    anyhow::anyhow!(
+        "XDG_RUNTIME_DIR is unset: forge refuses to fall back to a \
+         shared /tmp directory because the socket there would be \
+         world-connectable. Set XDG_RUNTIME_DIR to a per-user 0o700 \
+         directory (systemd sets it to /run/user/<uid> automatically). \
+         (F-044 / H8)"
+    )
+}
+
+/// Read `XDG_RUNTIME_DIR` or error. We deliberately do not consult `$UID`
+/// (an unreliable shell-only variable that F-044 removed) nor fall back to
+/// `/tmp/forge-<uid>` — that fallback was the defect H8 closed.
+fn xdg_runtime_dir() -> anyhow::Result<PathBuf> {
+    std::env::var("XDG_RUNTIME_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(xdg_runtime_dir_missing)
+}
+
 /// Resolve the Unix socket path for a session, using the same logic as `forged`.
-pub fn socket_path(session_id: &str) -> PathBuf {
+///
+/// Returns an error when `XDG_RUNTIME_DIR` is unset. `forged` refuses to
+/// start without it (see `forge_session::socket_path::resolve_socket_path`),
+/// so any CLI resolution without the env var would be pointing at a socket
+/// that can't exist.
+pub fn socket_path(session_id: &str) -> anyhow::Result<PathBuf> {
     // Defense-in-depth for F-057 (T12a): the CLI's clap `value_parser`
     // already rejects malformed ids, but any future caller that constructs
     // a session id from a non-CLI source (env var, IPC message, disk) must
@@ -25,29 +54,18 @@ pub fn socket_path(session_id: &str) -> PathBuf {
         session_id_is_valid(session_id),
         "socket_path: session_id_is_valid({session_id:?}) == false"
     );
-    let base = std::env::var("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let uid = std::env::var("UID").unwrap_or_else(|_| "0".to_string());
-            PathBuf::from(format!("/tmp/forge-{uid}"))
-        });
-    base.join("forge/sessions")
-        .join(format!("{session_id}.sock"))
+    Ok(xdg_runtime_dir()?
+        .join("forge/sessions")
+        .join(format!("{session_id}.sock")))
 }
 
 /// Return the directory containing all session sockets.
-pub fn sessions_socket_dir() -> PathBuf {
-    let base = std::env::var("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let uid = std::env::var("UID").unwrap_or_else(|_| "0".to_string());
-            PathBuf::from(format!("/tmp/forge-{uid}"))
-        });
-    base.join("forge/sessions")
+pub fn sessions_socket_dir() -> anyhow::Result<PathBuf> {
+    Ok(xdg_runtime_dir()?.join("forge/sessions"))
 }
 
 /// Resolve the PID file path for a session.
-pub fn pid_path(session_id: &str) -> PathBuf {
+pub fn pid_path(session_id: &str) -> anyhow::Result<PathBuf> {
     // Defense-in-depth for F-057 (T12a): same rationale as `socket_path`.
     // `socket_path` below will also debug-assert, but stating the invariant
     // explicitly here keeps the failure message attached to the function
@@ -56,7 +74,7 @@ pub fn pid_path(session_id: &str) -> PathBuf {
         session_id_is_valid(session_id),
         "pid_path: session_id_is_valid({session_id:?}) == false"
     );
-    socket_path(session_id).with_extension("pid")
+    Ok(socket_path(session_id)?.with_extension("pid"))
 }
 
 /// Parse and validate the contents of a session pid file.
@@ -398,32 +416,65 @@ mod tests {
         }
     }
 
+    /// F-044: cover both the success (XDG_RUNTIME_DIR set) and failure
+    /// (unset) branches of every path resolver in a single `#[test]` so
+    /// env-mutation can't race parallel readers in this binary.
     #[test]
-    fn socket_path_uses_xdg_runtime_dir() {
-        // Temporarily set XDG_RUNTIME_DIR to a known value.
-        // Use a fixed path so the test is deterministic.
-        // We can't really set env vars safely in parallel tests, so just verify
-        // the path structure with the fallback UID approach.
-        let path = socket_path("deadbeefcafebabe");
-        let path_str = path.to_string_lossy();
-        assert!(
-            path_str.contains("forge/sessions"),
-            "expected forge/sessions in path: {path_str}"
-        );
-        assert!(
-            path_str.ends_with("deadbeefcafebabe.sock"),
-            "expected .sock extension: {path_str}"
-        );
-    }
+    fn path_resolvers_require_xdg_runtime_dir() {
+        let prev_xdg = std::env::var("XDG_RUNTIME_DIR").ok();
+        let prev_uid = std::env::var("UID").ok();
 
-    #[test]
-    fn pid_path_has_pid_extension() {
-        let path = pid_path("abc123def4560000");
-        assert!(
-            path.to_string_lossy().ends_with("abc123def4560000.pid"),
-            "expected .pid extension: {}",
-            path.display()
+        // --- Happy path: XDG_RUNTIME_DIR set ---
+        // SAFETY: this is the only test in this binary mutating env vars at
+        // this point; the session_id_is_valid / parse_session_pid tests are
+        // pure and do not read XDG_RUNTIME_DIR / UID.
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", "/run/user/4242");
+        }
+
+        let sock = socket_path("deadbeefcafebabe").expect("should resolve");
+        assert_eq!(
+            sock.to_string_lossy(),
+            "/run/user/4242/forge/sessions/deadbeefcafebabe.sock"
         );
+        let pid = pid_path("abc123def4560000").expect("should resolve");
+        assert!(
+            pid.to_string_lossy().ends_with("abc123def4560000.pid"),
+            "expected .pid extension: {}",
+            pid.display()
+        );
+        let dir = sessions_socket_dir().expect("should resolve");
+        assert_eq!(dir.to_string_lossy(), "/run/user/4242/forge/sessions");
+
+        // --- Failure path: XDG_RUNTIME_DIR unset, no /tmp fallback ---
+        unsafe {
+            std::env::remove_var("XDG_RUNTIME_DIR");
+            std::env::remove_var("UID");
+        }
+        let err = socket_path("deadbeefcafebabe").expect_err("no xdg -> err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("XDG_RUNTIME_DIR"),
+            "error must name XDG_RUNTIME_DIR, got: {msg}"
+        );
+        assert!(
+            !msg.contains("/tmp/forge-"),
+            "error must not advertise /tmp fallback, got: {msg}"
+        );
+        assert!(sessions_socket_dir().is_err());
+        assert!(pid_path("abc123def4560000").is_err());
+
+        // Restore
+        unsafe {
+            match prev_xdg {
+                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+            }
+            match prev_uid {
+                Some(v) => std::env::set_var("UID", v),
+                None => std::env::remove_var("UID"),
+            }
+        }
     }
 
     /// Defense-in-depth: if clap's `value_parser` is ever bypassed (e.g. a
@@ -441,16 +492,6 @@ mod tests {
     #[cfg(debug_assertions)]
     fn socket_path_debug_asserts_valid_session_id() {
         let _ = socket_path("../../tmp/x");
-    }
-
-    #[test]
-    fn sessions_socket_dir_contains_forge_sessions() {
-        let dir = sessions_socket_dir();
-        assert!(
-            dir.to_string_lossy().contains("forge/sessions"),
-            "got: {}",
-            dir.display()
-        );
     }
 
     #[test]

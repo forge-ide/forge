@@ -29,8 +29,8 @@ async fn session_new(kind: SessionNewKind) -> Result<()> {
     };
 
     let session_id = forge_core::SessionId::new();
-    let sock = forge_cli::socket::socket_path(&session_id.to_string());
-    let pid_file = forge_cli::socket::pid_path(&session_id.to_string());
+    let sock = forge_cli::socket::socket_path(&session_id.to_string())?;
+    let pid_file = forge_cli::socket::pid_path(&session_id.to_string())?;
 
     if let Some(parent) = sock.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -79,7 +79,7 @@ async fn session_list() -> Result<()> {
     use forge_ipc::{ClientInfo, FramedStream, Hello, IpcMessage, PROTO_VERSION};
     use tokio::net::UnixStream;
 
-    let dir = forge_cli::socket::sessions_socket_dir();
+    let dir = forge_cli::socket::sessions_socket_dir()?;
     let mut read_dir = match tokio::fs::read_dir(&dir).await {
         Ok(d) => d,
         Err(_) => {
@@ -139,7 +139,7 @@ async fn session_tail(id: &str) -> Result<()> {
     use forge_ipc::{ClientInfo, FramedStream, Hello, IpcMessage, Subscribe, PROTO_VERSION};
     use tokio::net::UnixStream;
 
-    let sock = forge_cli::socket::socket_path(id);
+    let sock = forge_cli::socket::socket_path(id)?;
     let stream = UnixStream::connect(&sock)
         .await
         .map_err(|e| anyhow::anyhow!("cannot connect to session {id}: {e}"))?;
@@ -185,7 +185,7 @@ async fn session_tail(id: &str) -> Result<()> {
 }
 
 async fn session_kill(id: &str) -> Result<()> {
-    let pid_file = forge_cli::socket::pid_path(id);
+    let pid_file = forge_cli::socket::pid_path(id)?;
     // F-049: race-free kill via start-time verification + pidfd_send_signal.
     // `kill_session_from_pid_file` reads the two-line record (pid + start-time),
     // re-reads `/proc/<pid>/stat` to confirm the PID hasn't been recycled,
@@ -218,7 +218,7 @@ async fn run_agent(name: &str, input_source: &str) -> Result<()> {
     };
 
     let session_id = forge_core::SessionId::new();
-    let sock = forge_cli::socket::socket_path(&session_id.to_string());
+    let sock = forge_cli::socket::socket_path(&session_id.to_string())?;
 
     if let Some(parent) = sock.parent() {
         tokio::fs::create_dir_all(parent).await?;
