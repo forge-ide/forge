@@ -20,7 +20,44 @@ version = 2
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
-ignore = []
+
+# Suppression policy: only `unmaintained` or `unsound` advisories for
+# transitive deps we cannot upgrade from this repo (all reach us through
+# Tauri 2's webkit2gtk chain or its proc-macro toolchain). Every entry
+# carries an `expires` date ~6 months out so the suppression cannot
+# silently outlive its justification — when the date hits, CI re-flags
+# the advisory and we reassess. See docs/dev/security.md for policy.
+ignore = [
+    # gtk-rs GTK3 family (archived upstream; Tauri 2 still pulls them via
+    # webkit2gtk-webview). Track tauri releases for gtk4 migration.
+    { id = "RUSTSEC-2024-0411", reason = "gdkwayland-sys: gtk-rs GTK3 bindings unmaintained; transitive via Tauri 2 webkit2gtk-webview [expires 2026-10-19]" },
+    { id = "RUSTSEC-2024-0412", reason = "gdk: gtk-rs GTK3 bindings unmaintained; transitive via Tauri 2 webkit2gtk-webview [expires 2026-10-19]" },
+    { id = "RUSTSEC-2024-0413", reason = "atk: gtk-rs GTK3 bindings unmaintained; transitive via Tauri 2 webkit2gtk-webview [expires 2026-10-19]" },
+    { id = "RUSTSEC-2024-0414", reason = "gdkx11-sys: gtk-rs GTK3 bindings unmaintained; transitive via Tauri 2 webkit2gtk-webview [expires 2026-10-19]" },
+    { id = "RUSTSEC-2024-0415", reason = "gtk: gtk-rs GTK3 bindings unmaintained; transitive via Tauri 2 webkit2gtk-webview [expires 2026-10-19]" },
+    { id = "RUSTSEC-2024-0416", reason = "atk-sys: gtk-rs GTK3 bindings unmaintained; transitive via Tauri 2 webkit2gtk-webview [expires 2026-10-19]" },
+    { id = "RUSTSEC-2024-0417", reason = "gdkx11: gtk-rs GTK3 bindings unmaintained; transitive via Tauri 2 webkit2gtk-webview [expires 2026-10-19]" },
+    { id = "RUSTSEC-2024-0418", reason = "gdk-sys: gtk-rs GTK3 bindings unmaintained; transitive via Tauri 2 webkit2gtk-webview [expires 2026-10-19]" },
+    { id = "RUSTSEC-2024-0419", reason = "gtk3-macros: gtk-rs GTK3 bindings unmaintained; transitive via Tauri 2 webkit2gtk-webview [expires 2026-10-19]" },
+    { id = "RUSTSEC-2024-0420", reason = "gtk-sys: gtk-rs GTK3 bindings unmaintained; transitive via Tauri 2 webkit2gtk-webview [expires 2026-10-19]" },
+
+    # unic-* family (open-i18n/rust-unic archived). Reaches us through
+    # Tauri macro tooling; no direct use in Forge code.
+    { id = "RUSTSEC-2025-0075", reason = "unic-char-range unmaintained; transitive via Tauri macro toolchain [expires 2026-10-19]" },
+    { id = "RUSTSEC-2025-0080", reason = "unic-common unmaintained; transitive via Tauri macro toolchain [expires 2026-10-19]" },
+    { id = "RUSTSEC-2025-0081", reason = "unic-char-property unmaintained; transitive via Tauri macro toolchain [expires 2026-10-19]" },
+    { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version unmaintained; transitive via Tauri macro toolchain [expires 2026-10-19]" },
+    { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident unmaintained; transitive via Tauri macro toolchain [expires 2026-10-19]" },
+
+    # Miscellaneous unmaintained transitive deps.
+    { id = "RUSTSEC-2025-0057", reason = "fxhash unmaintained; transitive (no direct use in Forge) [expires 2026-10-19]" },
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error unmaintained; transitive build-time via gtk3-macros [expires 2026-10-19]" },
+
+    # Unsound advisories (present in the dep tree but not exercised by
+    # Forge code — see S3 rationale in the F-070 PR body).
+    { id = "RUSTSEC-2024-0429", reason = "glib VariantStrIter unsoundness; transitive via Tauri 2 webkit chain, not reachable from Forge code paths [expires 2026-10-19]" },
+    { id = "RUSTSEC-2026-0097", reason = "rand thread_rng unsound when combined with a custom log::Logger calling rand::rng(); Forge does not install such a logger [expires 2026-10-19]" },
+]
 
 [licenses]
 version = 2
@@ -34,6 +71,7 @@ allow = [
     "Unicode-DFS-2016",
     "Unicode-3.0",
     "CC0-1.0",
+    "CDLA-Permissive-2.0",
     "MPL-2.0",
     "Zlib",
     "OpenSSL",
