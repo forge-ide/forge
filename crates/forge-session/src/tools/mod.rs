@@ -1,7 +1,9 @@
 //! Tool dispatch: name → handler routing for orchestrator tool calls.
 
+use crate::byte_budget::ByteBudget;
 use crate::sandbox::ChildRegistry;
 use forge_core::ApprovalPreview;
+use std::sync::Arc;
 
 pub mod fs_edit;
 pub mod fs_read;
@@ -21,6 +23,12 @@ pub struct ToolCtx {
     /// Registry of live sandboxed children — populated for tools that spawn
     /// processes so session shutdown can kill them.
     pub child_registry: Option<ChildRegistry>,
+    /// F-077: per-session aggregate byte budget. When `Some`, the
+    /// dispatcher refuses further calls once the budget is exhausted
+    /// and charges each successful call by the bytes its result
+    /// occupies. `None` means no aggregate enforcement — preserves the
+    /// pre-F-077 behaviour for tests and any embedding that opts out.
+    pub byte_budget: Option<Arc<ByteBudget>>,
 }
 
 pub trait Tool: Send + Sync {
@@ -106,8 +114,69 @@ impl ToolDispatcher {
         args: &serde_json::Value,
         ctx: &ToolCtx,
     ) -> Result<serde_json::Value, ToolError> {
-        Ok(self.get(name)?.invoke(args, ctx))
+        let tool = self.get(name)?;
+
+        // F-077: pre-check the per-session aggregate byte budget. The
+        // tool itself never runs after exhaustion — short-circuiting at
+        // the dispatcher is what makes the cap meaningful (an attacker
+        // who can drive the tool past the cap, even with no payload
+        // returned, defeats the budget). On a success, post-charge the
+        // budget by the bytes the result occupies so the *next* call
+        // sees the updated counter.
+        if let Some(budget) = ctx.byte_budget.as_ref() {
+            if budget.is_exhausted() {
+                return Ok(serde_json::json!({
+                    "error": format!(
+                        "session byte budget exceeded: {}/{} bytes",
+                        budget.consumed(),
+                        budget.limit(),
+                    )
+                }));
+            }
+        }
+
+        let result = tool.invoke(args, ctx);
+
+        if let Some(budget) = ctx.byte_budget.as_ref() {
+            budget.charge(result_byte_cost(&result));
+        }
+
+        Ok(result)
     }
+}
+
+/// F-077: cost a tool result for budget accounting. The intent is to
+/// approximate the in-memory footprint the result imposes on the
+/// session — we sum the lengths of the *opaque payload* fields each
+/// tool returns and ignore framing / metadata. Specifically:
+///
+/// - `fs.read` charges the `content` byte length (not `bytes`, since
+///   `bytes` reflects on-disk size and `content` is the lossy-UTF-8
+///   string actually held in memory).
+/// - `fs.write` / `fs.edit` carry no payload back — `{"ok": true}` —
+///   so the cost is the JSON envelope length as a small token charge.
+///   This intentionally lets a write-heavy session run past the
+///   budget for far longer than a read-heavy one (writes do not
+///   buffer remote-fetched bytes in the daemon).
+/// - `shell.exec` charges the lengths of `stdout` and `stderr`.
+/// - Errors and unknown shapes fall back to the serialized JSON length;
+///   that bounds even a tool that returns a giant unstructured blob.
+fn result_byte_cost(result: &serde_json::Value) -> u64 {
+    if let Some(obj) = result.as_object() {
+        // fs.read shape
+        if let Some(content) = obj.get("content").and_then(|v| v.as_str()) {
+            return content.len() as u64;
+        }
+        // shell.exec shape
+        if obj.contains_key("stdout") || obj.contains_key("stderr") {
+            let so = obj.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+            let se = obj.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+            return so.len() as u64 + se.len() as u64;
+        }
+    }
+    serde_json::to_string(result)
+        .map(|s| s.len() as u64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -344,6 +413,7 @@ mod tests {
             allowed_paths: vec![],
             workspace_root: Some(dir.path().to_path_buf()),
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
+            byte_budget: None,
         };
         let result = d.dispatch("shell.exec", &json!({}), &ctx).unwrap();
         assert_eq!(
@@ -367,6 +437,7 @@ mod tests {
             allowed_paths: vec![],
             workspace_root: Some(dir.path().to_path_buf()),
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
+            byte_budget: None,
         };
         let result = d
             .dispatch("shell.exec", &json!({ "command": "" }), &ctx)
@@ -480,6 +551,7 @@ mod tests {
             allowed_paths: vec![],
             workspace_root: Some(dir.path().to_path_buf()),
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
+            byte_budget: None,
         };
         let result = d
             .dispatch(
@@ -511,6 +583,7 @@ mod tests {
             allowed_paths: vec![],
             workspace_root: Some(dir.path().to_path_buf()),
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
+            byte_budget: None,
         };
 
         // Run dispatch on a blocking task so we're inside the runtime but
@@ -548,6 +621,7 @@ mod tests {
             allowed_paths: vec![],
             workspace_root: Some(dir.path().to_path_buf()),
             child_registry: Some(registry.clone()),
+            byte_budget: None,
         };
 
         // Background a long sleep, write its pid, detach its stdio from
@@ -661,6 +735,7 @@ mod tests {
             allowed_paths: vec![],
             workspace_root: Some(dir.path().to_path_buf()),
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
+            byte_budget: None,
         };
         let result = d
             .dispatch(
@@ -699,6 +774,7 @@ mod tests {
             allowed_paths: vec![],
             workspace_root: Some(dir.path().to_path_buf()),
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
+            byte_budget: None,
         };
         let result = d
             .dispatch(
@@ -733,6 +809,7 @@ mod tests {
             allowed_paths: vec![],
             workspace_root: Some(dir.path().to_path_buf()),
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
+            byte_budget: None,
         };
         let result = d
             .dispatch(
@@ -774,6 +851,7 @@ mod tests {
             allowed_paths: vec![],
             workspace_root: Some(dir.path().to_path_buf()),
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
+            byte_budget: None,
         };
 
         let started = std::time::Instant::now();
@@ -809,6 +887,7 @@ mod tests {
             allowed_paths: vec![],
             workspace_root: Some(dir.path().to_path_buf()),
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
+            byte_budget: None,
         };
         let result = d
             .dispatch(
