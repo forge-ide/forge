@@ -33,6 +33,31 @@ use crate::bridge::{EventSink, SessionBridge, SessionConnections, SessionEventPa
 /// wire shape — never a panic.
 pub(crate) const LABEL_MISMATCH_ERROR: &str = "forbidden: window label mismatch";
 
+/// F-068 / L4 (T7): per-field byte caps on untyped-string inputs to session
+/// commands. `forge_ipc::write_frame` rejects frames above 4 MiB, but a
+/// compromised webview can still loop 4 MiB sends — each causes transient
+/// Rust-side allocation and, for `text`, billable model calls. These caps
+/// stop the allocation before serialization.
+///
+/// All caps are byte counts (`.len()` on `String`), not char counts — the
+/// resource being bounded is memory/wire cost.
+///
+/// A single command may bind additive validations in the future
+/// (e.g. F-069 typed-enum validation on `scope` will layer on top of the
+/// size check here).
+pub(crate) const MAX_MESSAGE_TEXT_BYTES: usize = 128 * 1024;
+pub(crate) const MAX_TOOL_CALL_ID_BYTES: usize = 64;
+pub(crate) const MAX_APPROVAL_SCOPE_BYTES: usize = 256;
+pub(crate) const MAX_REJECT_REASON_BYTES: usize = 1024;
+
+/// F-068 / L4 (T7): error returned when a session command's untyped-string
+/// input exceeds its byte cap. Tests assert against the literal fragments
+/// `"payload too large"` + the field name — keep both when evolving the
+/// message so existing tests and any UI handling stay stable.
+fn payload_too_large(field: &str, limit_bytes: usize) -> String {
+    format!("payload too large: {field} exceeds {limit_bytes}-byte limit")
+}
+
 /// Assert the calling webview's label equals `expected`. Used at the top of
 /// every session/dashboard `#[tauri::command]` to reject cross-window invokes
 /// before the bridge sees the frame.
@@ -44,6 +69,19 @@ pub(crate) fn require_window_label<R: Runtime>(
         Ok(())
     } else {
         Err(LABEL_MISMATCH_ERROR.to_string())
+    }
+}
+
+/// F-068 / L4 (T7): reject payloads whose byte length exceeds `limit_bytes`.
+/// Runs after `require_window_label` (so unauthorized windows don't learn
+/// about cap values) and before any bridge call (so the allocation/wire cost
+/// never materializes). Returns `Err` with a stable marker that tests and
+/// any UI-side handling can pattern-match on.
+pub(crate) fn require_size(field: &str, value: &str, limit_bytes: usize) -> Result<(), String> {
+    if value.len() <= limit_bytes {
+        Ok(())
+    } else {
+        Err(payload_too_large(field, limit_bytes))
     }
 }
 
@@ -176,6 +214,10 @@ pub async fn session_send_message<R: Runtime>(
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
     require_window_label(&webview, &format!("session-{session_id}"))?;
+    // F-068 / L4 (T7): bound `text` before the bridge allocates a frame or
+    // the provider is billed. Runs after authz so unauthorized windows
+    // don't learn the cap value.
+    require_size("text", &text, MAX_MESSAGE_TEXT_BYTES)?;
     state
         .bridge
         .send_message(&session_id, text)
@@ -192,6 +234,11 @@ pub async fn session_approve_tool<R: Runtime>(
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
     require_window_label(&webview, &format!("session-{session_id}"))?;
+    // F-068 / L4 (T7): tool_call_id is a short opaque handle; scope is a
+    // short enum-ish string. Both are bounded here before F-069's typed-enum
+    // validation lands on `scope`.
+    require_size("tool_call_id", &tool_call_id, MAX_TOOL_CALL_ID_BYTES)?;
+    require_size("scope", &scope, MAX_APPROVAL_SCOPE_BYTES)?;
     state
         .bridge
         .approve_tool(&session_id, tool_call_id, scope)
@@ -208,6 +255,12 @@ pub async fn session_reject_tool<R: Runtime>(
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
     require_window_label(&webview, &format!("session-{session_id}"))?;
+    // F-068 / L4 (T7): bound tool_call_id and — only when present — reason.
+    // `None` reason is the common case and must skip the size check.
+    require_size("tool_call_id", &tool_call_id, MAX_TOOL_CALL_ID_BYTES)?;
+    if let Some(r) = reason.as_deref() {
+        require_size("reason", r, MAX_REJECT_REASON_BYTES)?;
+    }
     state
         .bridge
         .reject_tool(&session_id, tool_call_id, reason)
