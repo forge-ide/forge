@@ -9,6 +9,17 @@
 //! three independent bounds — per-line byte cap, inter-chunk idle timeout, and
 //! overall wall-clock timeout — any of which terminates the stream with a
 //! typed [`ChatChunk::Error`] rather than panicking or growing unbounded.
+//!
+//! # Client bounds
+//!
+//! Below the decoder, the reqwest client itself is built with explicit
+//! `connect_timeout`, `read_timeout`, and `tcp_keepalive` settings (see
+//! [`ClientConfig`]). Two clients live on the provider: `stream_client` for
+//! `/api/chat` omits a total `.timeout()` so long generations are not cut,
+//! while `request_client` for short-lived `/api/tags` applies one. These
+//! HTTP-layer bounds fire on half-open connects and stalled header reads —
+//! conditions that occur *before* the NDJSON decoder starts and therefore
+//! cannot be caught by its stream-level timers.
 
 use std::time::Duration;
 
@@ -26,6 +37,20 @@ pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Wall-clock cap on the entire stream. 10 min accommodates slow local
 /// inference; pathological runs can be re-attempted by the user.
 pub const DEFAULT_WALL_CLOCK_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Cap on the TCP-connect handshake.
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Per-read idle cap at the HTTP layer (reqwest ≥ 0.12.5). Applies to header
+/// reads and between-chunk gaps on streaming responses. Aligns numerically
+/// with `DEFAULT_IDLE_TIMEOUT` but fires on a different condition (HTTP
+/// transport vs NDJSON line gap); both are intentionally kept.
+pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// Total-request cap for buffered (non-streaming) endpoints only. Streaming
+/// clients omit this so long generations are not cut mid-stream.
+pub const DEFAULT_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
+/// TCP keepalive probe interval; helps detect dead peers on long-lived
+/// streaming connections that might otherwise linger at the OS layer.
+pub const DEFAULT_TCP_KEEPALIVE: Duration = Duration::from_secs(30);
 
 /// Bounds that make the NDJSON decoder DoS-resistant against a hostile peer.
 #[derive(Debug, Clone, Copy)]
@@ -49,21 +74,73 @@ impl Default for StreamConfig {
     }
 }
 
+/// HTTP-layer timeouts applied at `reqwest::ClientBuilder` construction.
+///
+/// `total_timeout` is enforced on the buffered `list_models()` path only; the
+/// streaming `chat()` path relies on `read_timeout` (per-read) so long
+/// generations are not cut by a wall-clock cap.
+#[derive(Debug, Clone, Copy)]
+pub struct ClientConfig {
+    pub connect_timeout: Duration,
+    pub read_timeout: Duration,
+    pub total_timeout: Duration,
+    pub tcp_keepalive: Duration,
+}
+
+impl ClientConfig {
+    pub const DEFAULT: ClientConfig = ClientConfig {
+        connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+        read_timeout: DEFAULT_READ_TIMEOUT,
+        total_timeout: DEFAULT_TOTAL_TIMEOUT,
+        tcp_keepalive: DEFAULT_TCP_KEEPALIVE,
+    };
+}
+
+impl Default for ClientConfig {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Build the streaming client (no total `.timeout()`; long generations must
+/// not be cut by a wall-clock cap — `read_timeout` is the per-read guard).
+fn build_stream_client(cfg: &ClientConfig) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(cfg.connect_timeout)
+        .read_timeout(cfg.read_timeout)
+        .tcp_keepalive(Some(cfg.tcp_keepalive))
+        .build()
+        .expect("reqwest stream client builder — only fails if no TLS backend is available")
+}
+
+/// Build the buffered request client (short-lived endpoints; total timeout
+/// bounds every call end-to-end in addition to the per-read guard).
+fn build_request_client(cfg: &ClientConfig) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(cfg.connect_timeout)
+        .read_timeout(cfg.read_timeout)
+        .timeout(cfg.total_timeout)
+        .tcp_keepalive(Some(cfg.tcp_keepalive))
+        .build()
+        .expect("reqwest request client builder — only fails if no TLS backend is available")
+}
+
 pub struct OllamaProvider {
     base_url: String,
     model: String,
-    client: reqwest::Client,
+    stream_client: reqwest::Client,
+    request_client: reqwest::Client,
     stream_cfg: StreamConfig,
 }
 
 impl OllamaProvider {
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
-        Self {
-            base_url: base_url.into(),
-            model: model.into(),
-            client: reqwest::Client::new(),
-            stream_cfg: StreamConfig::DEFAULT,
-        }
+        Self::with_config_full(
+            base_url,
+            model,
+            ClientConfig::DEFAULT,
+            StreamConfig::DEFAULT,
+        )
     }
 
     pub fn with_default_url(model: impl Into<String>) -> Self {
@@ -78,10 +155,25 @@ impl OllamaProvider {
         model: impl Into<String>,
         stream_cfg: StreamConfig,
     ) -> Self {
+        Self::with_config_full(base_url, model, ClientConfig::DEFAULT, stream_cfg)
+    }
+
+    /// Construct a provider with explicit HTTP-client and decoder bounds.
+    /// Primarily a test affordance for regression tests that need fast
+    /// `read_timeout` windows; production code should use
+    /// [`OllamaProvider::new`].
+    #[doc(hidden)]
+    pub fn with_config_full(
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+        client_cfg: ClientConfig,
+        stream_cfg: StreamConfig,
+    ) -> Self {
         Self {
             base_url: base_url.into(),
             model: model.into(),
-            client: reqwest::Client::new(),
+            stream_client: build_stream_client(&client_cfg),
+            request_client: build_request_client(&client_cfg),
             stream_cfg,
         }
     }
@@ -89,7 +181,7 @@ impl OllamaProvider {
     pub async fn list_models(&self) -> Result<Vec<String>> {
         let url = format!("{}/api/tags", self.base_url.trim_end_matches('/'));
         let resp = self
-            .client
+            .request_client
             .get(&url)
             .send()
             .await
@@ -135,7 +227,7 @@ impl Provider for OllamaProvider {
             "messages": to_ollama_messages(&req.system, &req.messages),
             "stream": true,
         });
-        let client = self.client.clone();
+        let client = self.stream_client.clone();
         let cfg = self.stream_cfg;
 
         async move {
@@ -161,10 +253,10 @@ impl Provider for OllamaProvider {
 
 /// Decode a byte stream of NDJSON into [`ChatChunk`]s under the configured
 /// bounds. Terminal failures (cap exceeded, idle/wall-clock elapsed, transport
-/// error) surface as a single [`ChatChunk::Error`] and close the stream. This
-/// helper is factored out to keep the `chat()` body readable and to give
-/// future changes (e.g. F-046's reqwest client timeouts) a single seam to
-/// extend without reshaping the decoder.
+/// error) surface as a single [`ChatChunk::Error`] and close the stream.
+/// Transport errors here include reqwest's client-level `read_timeout` firing
+/// mid-stream (see [`ClientConfig`]), which surfaces as
+/// [`StreamErrorKind::Transport`].
 fn decode_ndjson_stream<S, E>(byte_stream: S, cfg: StreamConfig) -> BoxStream<'static, ChatChunk>
 where
     S: futures::Stream<Item = std::result::Result<bytes::Bytes, E>> + Send + 'static,

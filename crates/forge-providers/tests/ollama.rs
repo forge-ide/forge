@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use forge_providers::ollama::{OllamaProvider, StreamConfig};
+use forge_providers::ollama::{ClientConfig, OllamaProvider, StreamConfig};
 use forge_providers::{
     ChatBlock, ChatChunk, ChatMessage, ChatRequest, ChatRole, Provider, StreamErrorKind,
 };
@@ -247,6 +247,68 @@ async fn chat_idle_timeout_yields_typed_error_and_terminates() {
             }
         ),
         "expected terminal IdleTimeout error, got: {chunks:?}"
+    );
+
+    server_task.abort();
+}
+
+/// A peer that accepts the TCP connect but never writes a single byte of the
+/// HTTP response must be cut by the client-level `read_timeout`. This is the
+/// layer *below* F-045's decoder idle timer — the decoder is never reached,
+/// because headers never arrive. `provider.chat().await` must return `Err`
+/// within `read_timeout + small_margin`, not hang.
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_half_open_connect_times_out_within_read_timeout() {
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    // Accept one connection and hold the socket open without ever writing a
+    // byte (no status line, no headers). Drop only after the client has
+    // already timed out.
+    let server_task = tokio::spawn(async move {
+        let (sock, _) = listener.accept().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        drop(sock);
+    });
+
+    let read_timeout = Duration::from_millis(200);
+    let client_cfg = ClientConfig {
+        connect_timeout: Duration::from_secs(2),
+        read_timeout,
+        total_timeout: Duration::from_secs(5),
+        tcp_keepalive: Duration::from_secs(30),
+    };
+    let provider = OllamaProvider::with_config_full(
+        format!("http://{addr}"),
+        "llama3",
+        client_cfg,
+        StreamConfig::DEFAULT,
+    );
+    let req = ChatRequest {
+        system: None,
+        messages: vec![user_msg("hi")],
+    };
+
+    let start = std::time::Instant::now();
+    let result = tokio::time::timeout(
+        read_timeout + Duration::from_millis(800),
+        provider.chat(req),
+    )
+    .await
+    .expect("chat() must return within read_timeout + margin, not hang");
+    let elapsed = start.elapsed();
+
+    assert!(result.is_err(), "half-open connect must surface as Err");
+    assert!(
+        elapsed >= read_timeout,
+        "chat() returned in {elapsed:?}, before read_timeout ({read_timeout:?}) — \
+         the read_timeout did not fire; another code path produced the error"
+    );
+    assert!(
+        elapsed < read_timeout + Duration::from_millis(800),
+        "chat() took {elapsed:?}, exceeds read_timeout ({read_timeout:?}) + margin"
     );
 
     server_task.abort();
