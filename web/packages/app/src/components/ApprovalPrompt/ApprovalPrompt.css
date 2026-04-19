@@ -139,6 +139,11 @@
   color: var(--color-text-primary);
 }
 
+.approval-prompt__btn--ghost:active {
+  background: var(--color-surface-3);
+  transform: translateY(1px);
+}
+
 .approval-prompt__btn--primary {
   background: var(--color-ember-400);
   border: 1px solid var(--color-ember-400);
@@ -153,6 +158,7 @@
 .approval-prompt__btn--primary:active {
   background: var(--color-ember-500);
   border-color: var(--color-ember-500);
+  transform: translateY(1px);
 }
 
 /* Split-button seam between Approve and ▾ */
