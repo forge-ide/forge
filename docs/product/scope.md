@@ -7,7 +7,7 @@
 ## 12. Scope boundaries
 
 ### In v1.0
-Everything in §§2–11. Including Windows (via WSL2, native build pending).
+Everything in §§2–11, on Linux. Windows is not supported in v1.0 — see deferred items below.
 
 ### Out of v1.0 — deliberately
 - **Remote development** (SSH sessions, containers-as-dev-env) — v1.1 focus
@@ -17,7 +17,8 @@ Everything in §§2–11. Including Windows (via WSL2, native build pending).
 - **OAuth provider login** — stdin credentials in v1, browser flow in v1.1
 - **Bundled OCI runtime** — users install podman or docker themselves in v1
 - **HTTP tarball skill distribution** — Git URLs and local paths only in v1; checksummed tarballs in v1.1
-- **Native Windows build** — v1.3; WSL covers v1
+- **Windows (WSL2)** — planned for v1.1; v1.0 is Linux-only and WSL2 is untested
+- **Native Windows build** — planned for v1.3
 - **Image attachments in composer** — v1.1
 - **Native Rust editor** — a possibility if Monaco constraints bite, but not planned
 
