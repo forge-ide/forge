@@ -157,9 +157,9 @@
 }
 
 .session-card__badge--persist {
-  background: rgba(255, 74, 18, 0.08);
+  background: var(--color-error-bg);
   color: var(--color-ember-300);
-  border-color: rgba(255, 74, 18, 0.22);
+  border-color: var(--color-error-border);
 }
 
 .session-card__badge--ephemeral {

@@ -35,6 +35,7 @@ These tokens should be defined at `:root` and used throughout. Never use raw val
   --color-text-disabled:  #252f3e;
   --color-text-ember:     #ff4a12;
   --color-text-link:      #7aaaff;
+  --color-text-inverted:  #fff;
 
   /* Semantic */
   --color-success:   #3ddc84;
