@@ -275,3 +275,106 @@ describe('fromRustEvent — assistant_message', () => {
     expect(fromRustEvent(rust)).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// F-064 / M12 / T7 — Runtime narrowing regression tests.
+//
+// Before narrowing, required string/shape fields were type-asserted with
+// `as string` / `as { description: string }`, so malformed daemon payloads
+// (bug, version skew, compromised bridge writer) silently flowed into the
+// messages store as `undefined`. Downstream, `AssistantDelta` concatenated
+// the literal "undefined" into chat text, and `ApprovalPrompt` dereferenced
+// `preview.description` on an undefined object and threw at render time.
+//
+// fromRustEvent must now reject these payloads (return null) rather than
+// forwarding garbage. See docs/audits/phase-1/findings/M12.md.
+// ---------------------------------------------------------------------------
+
+describe('fromRustEvent — narrowing drops malformed required fields', () => {
+  it('drops user_message missing id', () => {
+    expect(fromRustEvent({ type: 'user_message', text: 'hi' })).toBeNull();
+  });
+
+  it('drops user_message missing text', () => {
+    expect(fromRustEvent({ type: 'user_message', id: 'm1' })).toBeNull();
+  });
+
+  it('drops user_message with non-string text', () => {
+    expect(fromRustEvent({ type: 'user_message', id: 'm1', text: 42 })).toBeNull();
+  });
+
+  it('drops tool_call_rejected missing id', () => {
+    expect(fromRustEvent({ type: 'tool_call_rejected', reason: 'x' })).toBeNull();
+  });
+
+  it('drops tool_call_completed missing id', () => {
+    expect(fromRustEvent({ type: 'tool_call_completed', result: {} })).toBeNull();
+  });
+
+  it('drops tool_call_approval_requested missing id', () => {
+    expect(
+      fromRustEvent({ type: 'tool_call_approval_requested', preview: { description: 'x' } }),
+    ).toBeNull();
+  });
+
+  it('drops tool_call_approval_requested missing preview (ApprovalPrompt crash repro)', () => {
+    expect(fromRustEvent({ type: 'tool_call_approval_requested', id: 'tc-x' })).toBeNull();
+  });
+
+  it('drops tool_call_approval_requested with preview missing description', () => {
+    expect(
+      fromRustEvent({ type: 'tool_call_approval_requested', id: 'tc-x', preview: {} }),
+    ).toBeNull();
+  });
+
+  it('drops tool_call_approval_requested with preview.description non-string', () => {
+    expect(
+      fromRustEvent({
+        type: 'tool_call_approval_requested',
+        id: 'tc-x',
+        preview: { description: 123 },
+      }),
+    ).toBeNull();
+  });
+
+  it('drops tool_call_started missing tool name', () => {
+    expect(
+      fromRustEvent({ type: 'tool_call_started', id: 'tc-1', args: {} }),
+    ).toBeNull();
+  });
+
+  it('drops tool_call_started missing id', () => {
+    expect(
+      fromRustEvent({ type: 'tool_call_started', tool: 'fs.read', args: {} }),
+    ).toBeNull();
+  });
+
+  it('drops assistant_delta missing delta (AssistantDelta undefined-concat repro)', () => {
+    expect(fromRustEvent({ type: 'assistant_delta', id: 'm1' })).toBeNull();
+  });
+
+  it('drops assistant_delta with non-string delta', () => {
+    expect(fromRustEvent({ type: 'assistant_delta', id: 'm1', delta: 42 })).toBeNull();
+  });
+
+  it('drops assistant_delta missing id', () => {
+    expect(fromRustEvent({ type: 'assistant_delta', delta: 'hi' })).toBeNull();
+  });
+
+  it('drops finalised assistant_message missing text', () => {
+    expect(
+      fromRustEvent({ type: 'assistant_message', id: 'm1', stream_finalised: true }),
+    ).toBeNull();
+  });
+
+  it('drops finalised assistant_message with non-string text', () => {
+    expect(
+      fromRustEvent({
+        type: 'assistant_message',
+        id: 'm1',
+        stream_finalised: true,
+        text: null,
+      }),
+    ).toBeNull();
+  });
+});
