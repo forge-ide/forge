@@ -1,3 +1,5 @@
+#![deny(rustdoc::broken_intra_doc_links, rustdoc::private_intra_doc_links)]
+
 use glob::Pattern;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};

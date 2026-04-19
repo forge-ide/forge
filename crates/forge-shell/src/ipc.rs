@@ -10,7 +10,7 @@
 //! Window labels are set by `window_manager` at window creation and cannot
 //! be forged from webview JS, so they serve as the per-window authenticator
 //! binding a session's control channel to its review channel. Mismatches
-//! return [`LABEL_MISMATCH_ERROR`] and never reach the daemon.
+//! return a label-mismatch error and never reach the daemon.
 //!
 //! **Webview isolation (F-062 / M10 / T5):** the event sink targets a single
 //! webview (`session-{session_id}`) instead of broadcasting app-wide. Prior
@@ -156,8 +156,9 @@ impl<R: Runtime> EventSink for AppHandleSink<R> {
     }
 }
 
-/// Test-only constructor for [`AppHandleSink`]. Gated behind the
-/// `webview-test` feature so production builds cannot reach into the sink.
+/// Test-only constructor for the per-session app-handle event sink. Gated
+/// behind the `webview-test` feature so production builds cannot reach into
+/// the sink.
 #[cfg(feature = "webview-test")]
 pub fn make_app_handle_sink<R: Runtime>(
     app: AppHandle<R>,
