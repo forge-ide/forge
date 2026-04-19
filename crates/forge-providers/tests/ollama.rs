@@ -333,3 +333,41 @@ async fn list_models_returns_tag_names() {
     let models = provider.list_models().await.expect("list_models succeeds");
     assert_eq!(models, vec!["llama3", "mistral"]);
 }
+
+/// A malicious Ollama substitute that returns a multi-megabyte 200 OK body
+/// must not OOM the dashboard refresh. `list_models()` enforces a size cap
+/// before `serde_json::from_slice` and surfaces the overflow as a clean error.
+#[tokio::test(flavor = "multi_thread")]
+async fn list_models_rejects_oversized_body() {
+    let server = MockServer::start().await;
+
+    // 10 MiB of body (matches the DoD reproduction). Default cap is 1 MiB
+    // (see `DEFAULT_MAX_BODY_BYTES`), so this must error out — not OOM and
+    // not hang. Content is a large opaque string; the size check fires
+    // before deserialization, so the payload's JSON validity is irrelevant.
+    let oversized = "A".repeat(10 * 1024 * 1024);
+
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(oversized))
+        .mount(&server)
+        .await;
+
+    let provider = OllamaProvider::new(server.uri(), "llama3");
+
+    let err = match provider.list_models().await {
+        Ok(_) => panic!("oversized body must map to an error"),
+        Err(e) => e,
+    };
+    let msg = format!("{err}");
+    // Must surface as an explicit size-cap error (not a generic JSON decode
+    // failure). The message should name the cap so operators can diagnose.
+    assert!(
+        msg.contains("cap") || msg.contains("too large"),
+        "error should describe the size cap, got: {msg}"
+    );
+    assert!(
+        msg.contains("1048576") || msg.contains("1 MiB") || msg.contains("1MiB"),
+        "error should name the cap value, got: {msg}"
+    );
+}
