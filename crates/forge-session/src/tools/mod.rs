@@ -378,6 +378,144 @@ mod tests {
         );
     }
 
+    #[test]
+    fn shell_exec_preview_includes_cwd_when_provided() {
+        let tool = ShellExecTool;
+        let preview = tool.approval_preview(&json!({
+            "command": "ls",
+            "args": ["."],
+            "cwd": "/tmp/somewhere-specific"
+        }));
+        assert!(
+            preview.description.contains("/tmp/somewhere-specific"),
+            "cwd missing from preview: {}",
+            preview.description
+        );
+        assert!(
+            preview.description.contains("ls"),
+            "command missing from preview: {}",
+            preview.description
+        );
+    }
+
+    #[test]
+    fn shell_exec_preview_omits_cwd_when_absent() {
+        let tool = ShellExecTool;
+        let preview = tool.approval_preview(&json!({
+            "command": "ls",
+            "args": ["."]
+        }));
+        assert!(
+            !preview.description.to_lowercase().contains("cwd"),
+            "cwd should not appear when absent: {}",
+            preview.description
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shell_exec_dispatch_rejects_cwd_outside_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut d = ToolDispatcher::new();
+        d.register(Box::new(ShellExecTool)).unwrap();
+
+        let ctx = ToolCtx {
+            allowed_paths: vec![],
+            workspace_root: Some(dir.path().to_path_buf()),
+            child_registry: Some(crate::sandbox::ChildRegistry::new()),
+        };
+        let result = d
+            .dispatch(
+                "shell.exec",
+                &json!({
+                    "command": "/bin/sh",
+                    "args": ["-c", "echo should-not-run"],
+                    "cwd": "/etc",
+                    "timeout_ms": 5000
+                }),
+                &ctx,
+            )
+            .unwrap();
+
+        assert!(
+            result.get("error").is_some(),
+            "expected error when cwd is outside workspace; got: {result}"
+        );
+        assert!(
+            result.get("exit_code").is_none(),
+            "command must not execute when cwd is rejected; got: {result}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shell_exec_dispatch_accepts_cwd_inside_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+
+        let mut d = ToolDispatcher::new();
+        d.register(Box::new(ShellExecTool)).unwrap();
+
+        let ctx = ToolCtx {
+            allowed_paths: vec![],
+            workspace_root: Some(dir.path().to_path_buf()),
+            child_registry: Some(crate::sandbox::ChildRegistry::new()),
+        };
+        let result = d
+            .dispatch(
+                "shell.exec",
+                &json!({
+                    "command": "/bin/sh",
+                    "args": ["-c", "pwd"],
+                    "cwd": sub.to_str().unwrap(),
+                    "timeout_ms": 5000
+                }),
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result["exit_code"].as_i64(), Some(0), "result: {result}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shell_exec_dispatch_rejects_cwd_via_symlink_escape() {
+        // Symlink inside the workspace pointing outside must be rejected:
+        // canonicalize() resolves the symlink, and the post-canonical
+        // prefix check catches the escape.
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("escape");
+        std::os::unix::fs::symlink("/etc", &link).unwrap();
+
+        let mut d = ToolDispatcher::new();
+        d.register(Box::new(ShellExecTool)).unwrap();
+
+        let ctx = ToolCtx {
+            allowed_paths: vec![],
+            workspace_root: Some(dir.path().to_path_buf()),
+            child_registry: Some(crate::sandbox::ChildRegistry::new()),
+        };
+        let result = d
+            .dispatch(
+                "shell.exec",
+                &json!({
+                    "command": "/bin/sh",
+                    "args": ["-c", "echo should-not-run"],
+                    "cwd": link.to_str().unwrap(),
+                    "timeout_ms": 5000
+                }),
+                &ctx,
+            )
+            .unwrap();
+
+        assert!(
+            result.get("error").is_some(),
+            "symlink escape must be rejected; got: {result}"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn shell_exec_dispatch_clears_daemon_env_by_default() {
