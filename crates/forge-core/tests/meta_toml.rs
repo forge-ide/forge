@@ -87,6 +87,48 @@ async fn meta_toml_round_trip_bare_provider() {
 }
 
 #[tokio::test]
+async fn meta_toml_rejects_unknown_field() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("meta.toml");
+
+    let meta = SessionMeta {
+        id: SessionId::new(),
+        workspace_id: WorkspaceId::new(),
+        name: "unknown-field-probe".to_string(),
+        agent: None,
+        provider_id: None,
+        model: None,
+        state: SessionState::Active,
+        persistence: SessionPersistence::Persist,
+        started_at: Utc::now().with_nanosecond(0).unwrap(),
+        ended_at: None,
+        tokens_in: 0,
+        tokens_out: 0,
+        cost_usd: 0.0,
+        pid: 1,
+        socket_path: PathBuf::from("/tmp/test.sock"),
+    };
+
+    write_meta(&path, &meta).await.unwrap();
+
+    // Append a forward-looking trust-bearing field that this version of the
+    // daemon does not know about. An older daemon must refuse the file rather
+    // than silently drop the field — see audit finding L1 (F-065).
+    let mut contents = tokio::fs::read_to_string(&path).await.unwrap();
+    contents.push_str("\nallowed_paths = [\"/etc\"]\n");
+    tokio::fs::write(&path, contents).await.unwrap();
+
+    let err = read_meta(&path)
+        .await
+        .expect_err("unknown field must error");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("allowed_paths") || msg.contains("unknown field"),
+        "expected unknown-field error, got: {msg}"
+    );
+}
+
+#[tokio::test]
 async fn meta_toml_creates_parent_dirs() {
     let dir = TempDir::new().unwrap();
     let path = dir

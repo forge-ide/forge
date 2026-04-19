@@ -76,6 +76,55 @@ async fn workspaces_toml_creates_parent_dirs() {
 }
 
 #[tokio::test]
+async fn workspaces_toml_rejects_unknown_field_on_entry() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("workspaces.toml");
+
+    // Hand-written TOML: a valid entry plus a forward-looking field (e.g. a
+    // trust-bearing `trusted` flag) that this daemon does not recognize.
+    // Must error rather than silently drop the field — audit L1 (F-065).
+    let toml_contents = r#"
+[[workspaces]]
+id = "01J9X0000000000000000WENTR"
+path = "/home/alice/code/acme-api"
+name = "acme-api"
+last_opened = "2025-01-01T00:00:00Z"
+pinned = false
+trusted = true
+"#;
+    tokio::fs::write(&path, toml_contents).await.unwrap();
+
+    let err = read_workspaces(&path)
+        .await
+        .expect_err("unknown field on WorkspaceEntry must error");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("trusted") || msg.contains("unknown field"),
+        "expected unknown-field error, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn workspaces_toml_rejects_unknown_field_on_file() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("workspaces.toml");
+
+    // Top-level unknown key on WorkspacesFile (e.g. a future `version` field
+    // that an older daemon should not silently ignore).
+    let toml_contents = "workspaces = []\nversion = 2\n";
+    tokio::fs::write(&path, toml_contents).await.unwrap();
+
+    let err = read_workspaces(&path)
+        .await
+        .expect_err("unknown field on WorkspacesFile must error");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("version") || msg.contains("unknown field"),
+        "expected unknown-field error, got: {msg}"
+    );
+}
+
+#[tokio::test]
 async fn workspaces_toml_empty_list() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("workspaces.toml");
