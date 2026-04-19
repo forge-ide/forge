@@ -1,5 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { cleanup, render, fireEvent } from '@solidjs/testing-library';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { SessionsPanel, type SessionSummary } from './SessionsPanel';
 import { setInvokeForTesting } from '../../lib/tauri';
 
@@ -114,6 +116,64 @@ describe('SessionsPanel', () => {
     const { findByText } = render(() => <SessionsPanel />);
     await waitForFetch();
     expect(await findByText('// no active sessions')).toBeTruthy();
+  });
+
+  // F-092: the stopped-pip pulse animation must be gated behind
+  // `@media (prefers-reduced-motion: no-preference)` so users with
+  // vestibular sensitivities (OS-level reduced-motion preference) get a
+  // static, dimmed pip instead of an infinite pulse. JSDOM cannot evaluate
+  // `@media (prefers-reduced-motion)`, so we assert the rule on disk.
+  describe('reduced-motion gating for the stopped pip', () => {
+    const css = readFileSync(resolve(__dirname, 'SessionsPanel.css'), 'utf-8');
+
+    // Strip the `@media (prefers-reduced-motion: no-preference) { ... }`
+    // block so we can inspect the *default* (no-preference, motion-on)
+    // baseline without the gated overrides.
+    function stripReducedMotionMediaBlock(source: string): string {
+      const opener = /@media\s*\(\s*prefers-reduced-motion\s*:\s*no-preference\s*\)\s*\{/;
+      const match = source.match(opener);
+      if (!match || match.index === undefined) return source;
+      const start = match.index;
+      let i = start + match[0].length; // first byte inside the block
+      let depth = 1;
+      while (i < source.length && depth > 0) {
+        const ch = source[i];
+        if (ch === '{') depth += 1;
+        else if (ch === '}') depth -= 1;
+        i += 1;
+      }
+      return source.slice(0, start) + source.slice(i);
+    }
+
+    function ruleBody(source: string, selector: string): string | null {
+      const escaped = selector.replace(/[.\\-]/g, (c) => `\\${c}`);
+      const re = new RegExp(`(^|\\s)${escaped}\\s*\\{([^}]*)\\}`, 'm');
+      const m = source.match(re);
+      return m && m[2] !== undefined ? m[2] : null;
+    }
+
+    it('declares the pulse animation only inside a prefers-reduced-motion: no-preference media query', () => {
+      // Default (reduced-motion or unspecified) baseline: no animation
+      // should reach the stopped pip.
+      const baseline = stripReducedMotionMediaBlock(css);
+      expect(baseline).toContain('.session-card__pip--stopped');
+      expect(baseline).not.toMatch(/\.session-card__pip--stopped\s*\{[^}]*animation\s*:/);
+
+      // The animation lives behind the `no-preference` opt-in.
+      expect(css).toMatch(
+        /@media\s*\(\s*prefers-reduced-motion\s*:\s*no-preference\s*\)\s*\{[\s\S]*\.session-card__pip--stopped[\s\S]*animation\s*:\s*sessions-pip-pulse/,
+      );
+    });
+
+    it('keeps the static stopped pip visually differentiated (dimmed opacity) for reduced-motion users', () => {
+      // Strip the motion-gated overrides; the remaining baseline must still
+      // give `.session-card__pip--stopped` a static differentiator (dimmed
+      // opacity) so the "stopped" state stays readable without animation.
+      const baseline = stripReducedMotionMediaBlock(css);
+      const body = ruleBody(baseline, '.session-card__pip--stopped');
+      expect(body, 'expected a default .session-card__pip--stopped rule').not.toBeNull();
+      expect(body!).toMatch(/opacity\s*:\s*0?\.[0-9]+/);
+    });
   });
 
   // F-079: open_session was previously a fire-and-forget `void invoke(...)`. A

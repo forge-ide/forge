@@ -190,7 +190,18 @@
 
 .session-card__pip--stopped {
   background: var(--color-warning);
-  animation: sessions-pip-pulse 2s ease-in-out infinite;
+  /* Static dimming communicates "stopped" without motion. The pulse below
+   * is opt-in via `prefers-reduced-motion: no-preference` so users with
+   * vestibular sensitivities (WCAG 2.3.3) keep the state cue without
+   * infinite animation. */
+  opacity: 0.8;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .session-card__pip--stopped {
+    opacity: 1;
+    animation: sessions-pip-pulse 2s ease-in-out infinite;
+  }
 }
 
 @keyframes sessions-pip-pulse {
