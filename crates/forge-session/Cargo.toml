@@ -68,3 +68,7 @@ path = "tests/socket_path_fallback.rs"
 [[test]]
 name = "uds_bind_symlink_race"
 path = "tests/uds_bind_symlink_race.rs"
+
+[[test]]
+name = "session_error"
+path = "tests/session_error.rs"
