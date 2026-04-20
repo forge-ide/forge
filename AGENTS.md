@@ -78,19 +78,39 @@ docs/               architecture, build, design, product, ui-specs
 
 ## Build commands
 
+Dev workflows are wrapped in a top-level `justfile`. Install once with
+`cargo install just` (or `brew install just`, `apt install just`), then:
+
+```bash
+just                # list recipes
+just dev            # full Rust + webview + Tauri loop (spawns Vite at :5173)
+just build          # Rust workspace + full pnpm workspace
+just check          # fmt --check, cargo check, clippy -D warnings, rustdoc -D warnings, typecheck, token drift
+just test           # cargo test --all + pnpm -r test
+just smoke          # Phase 1 CLI-only UAT gate
+just ts-check       # verify web/packages/ipc/src/generated/ is in sync
+```
+
+CI (`.github/workflows/ci.yml`) calls the same `just check-rust` / `test-rust`
+/ `check-web` / `test-web` recipes, so green-locally == green-in-CI for
+everything except the supply-chain actions (cargo audit, cargo deny, pnpm
+audit).
+
+Raw commands if you prefer them:
+
 ```bash
 cargo build --workspace
 cargo test --workspace
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 
-./scripts/gen-ts-types.sh      # after changing forge-ipc
-
 pnpm install                   # from web/
-pnpm dev                       # Vite dev server
-
-./scripts/dev.sh               # full Rust + webview + Tauri loop
+pnpm --filter app dev          # Vite dev server (use `just dev` for full Tauri loop)
 ```
+
+TS types under `web/packages/ipc/src/generated/` regenerate as a side effect
+of `cargo build` via `ts-rs`'s `export_to` attribute — no separate script.
+Touch anything in `forge-ipc` and rebuild to see the diff.
 
 ---
 
