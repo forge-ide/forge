@@ -392,10 +392,9 @@ async fn handle_connection<P: Provider + 'static>(
     let (mut reader, mut writer) = stream.into_split();
 
     for (seq, event) in history {
-        let frame = IpcMessage::Event(IpcEvent {
-            seq,
-            event: serde_json::to_value(&event)?,
-        });
+        // F-112: `IpcEvent.event` is now typed — no `serde_json::to_value`
+        // intermediate. serde walks `Event` directly to bytes.
+        let frame = IpcMessage::Event(IpcEvent { seq, event });
         forge_ipc::write_frame(&mut writer, &frame).await?;
         last_sent = seq;
     }
@@ -423,10 +422,8 @@ async fn handle_connection<P: Provider + 'static>(
                 match result {
                     Ok((seq, event)) if seq > last_sent => {
                         let is_session_ended = matches!(event, forge_core::Event::SessionEnded { .. });
-                        let frame = IpcMessage::Event(IpcEvent {
-                            seq,
-                            event: serde_json::to_value(&event)?,
-                        });
+                        // F-112: typed path — no Value intermediate.
+                        let frame = IpcMessage::Event(IpcEvent { seq, event });
                         forge_ipc::write_frame(&mut writer, &frame).await?;
                         last_sent = seq;
                         if is_session_ended {

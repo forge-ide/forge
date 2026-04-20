@@ -36,13 +36,20 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 /// Payload emitted to the webview for every session event forwarded by the
-/// background reader task. The `event` value is the daemon's `Event` JSON
-/// pass-through (see `forge-core::Event`).
+/// background reader task. `event` is the daemon's typed [`forge_core::Event`]
+/// — Tauri serializes the full payload once when it calls `AppHandle::emit`,
+/// so nothing on this path touches `serde_json::Value`.
+///
+/// F-112: prior to this change `event: serde_json::Value` forced a second
+/// serialization hop (Event → Value → bytes). Carrying typed `Event` here
+/// keeps the whole emit path at a single static traversal without altering
+/// the wire shape observed by the webview (`#[serde(flatten)]`-equivalent —
+/// serde walks the nested struct the same way regardless).
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionEventPayload {
     pub session_id: String,
     pub seq: u64,
-    pub event: serde_json::Value,
+    pub event: forge_core::Event,
 }
 
 /// Sink for forwarded session events. In production the Tauri command layer

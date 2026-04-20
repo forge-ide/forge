@@ -88,7 +88,7 @@ async fn appended_events_appear_after_header() {
     let event = Event::AssistantDelta {
         id: MessageId::new(),
         at: Utc::now(),
-        delta: "hello".to_string(),
+        delta: "hello".into(),
     };
     log.append(&event).await.unwrap();
     log.flush().await.unwrap();
@@ -113,7 +113,7 @@ async fn background_task_flushes_after_50ms_without_further_appends() {
     let event = Event::AssistantDelta {
         id: MessageId::new(),
         at: Utc::now(),
-        delta: "persisted".to_string(),
+        delta: "persisted".into(),
     };
     log.append(&event).await.unwrap();
 
@@ -139,7 +139,7 @@ async fn close_flushes_final_buffered_event() {
     let event = Event::AssistantDelta {
         id: MessageId::new(),
         at: Utc::now(),
-        delta: "final".to_string(),
+        delta: "final".into(),
     };
     log.append(&event).await.unwrap();
     log.close().await.unwrap();

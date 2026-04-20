@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use forge_core::{EndReason, Event};
 use forge_shell::bridge::{EventSink, SessionEventPayload};
 use forge_shell::ipc::make_app_handle_sink;
 use tauri::test::{mock_builder, mock_context, noop_assets};
@@ -62,10 +63,16 @@ fn session_event_reaches_only_the_owning_window() {
     // Window A's authenticated session).
     let sink: Arc<dyn EventSink> = make_app_handle_sink(app.handle().clone(), "A".to_string());
 
+    // F-112: `event` is typed `Event` — pick any real variant (the test only
+    // asserts delivery target, not payload contents).
     sink.emit(SessionEventPayload {
         session_id: "A".to_string(),
         seq: 1,
-        event: serde_json::json!({ "type": "test" }),
+        event: Event::SessionEnded {
+            at: chrono::Utc::now(),
+            reason: EndReason::Completed,
+            archived: false,
+        },
     });
 
     // Listener dispatch is asynchronous on MockRuntime; give the event loop

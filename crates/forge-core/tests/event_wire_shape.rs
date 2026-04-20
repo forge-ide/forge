@@ -125,7 +125,9 @@ fn assistant_message_stream_open_wire_shape() {
             model: "mock-1".into(),
             at: fixed_time(),
             stream_finalised: false,
-            text: String::new(),
+            // F-112: Arc<str> via From<&str>; wire-shape-equivalent to
+            // the previous empty `String`.
+            text: "".into(),
             branch_parent: None,
             branch_variant_index: 0,
         },
