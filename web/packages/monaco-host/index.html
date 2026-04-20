@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Content-Security-Policy (F-121).
+      This iframe's CSP is independent of the parent `app` document's CSP
+      (web/packages/app/index.html). Differences from the parent:
+        - `frame-ancestors 'self'`: the parent `app` embeds this document
+          as an <iframe>; 'none' would block embedding.
+        - `worker-src 'self' blob:`: Monaco spawns language-service workers
+          from blob URLs.
+        - `script-src 'self' 'wasm-unsafe-eval'`: Monaco uses WebAssembly
+          for some tokenisers; 'wasm-unsafe-eval' allows instantiation
+          without broader 'unsafe-eval'.
+        - `style-src 'self' 'unsafe-inline'`: Monaco injects styles at
+          runtime.
+      Keep in sync with the parent's CSP where they share concerns.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: asset: https://asset.localhost; connect-src 'self' ipc: http://ipc.localhost; frame-ancestors 'self'; base-uri 'self'; object-src 'none'"
+    />
+    <title>Forge Monaco Host</title>
+    <style>
+      html,
+      body,
+      #editor {
+        height: 100%;
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        background: #07080a;
+        color: #eae6de;
+        font-family: 'Fira Code', monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="editor"></div>
+    <script type="module" src="/src/index.ts"></script>
+  </body>
+</html>
