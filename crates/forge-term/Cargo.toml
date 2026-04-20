@@ -3,3 +3,16 @@ name = "forge-term"
 version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+
+[lib]
+name = "forge_term"
+path = "src/lib.rs"
+
+[dependencies]
+portable-pty = "0.9"
+thiserror = "1"
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time", "test-util"] }
