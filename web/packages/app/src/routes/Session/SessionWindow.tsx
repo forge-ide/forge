@@ -1,4 +1,4 @@
-import { type Component, onCleanup, onMount } from 'solid-js';
+import { type Component, createSignal, onCleanup, onMount } from 'solid-js';
 import { useParams } from '@solidjs/router';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { ProviderId, SessionId } from '@forge/ipc';
@@ -19,6 +19,7 @@ import { fromRustEvent } from '../../ipc/events';
 import { seedPersistentApprovals } from '../../stores/approvals';
 import { PaneHeader } from './PaneHeader';
 import { ChatPane } from './ChatPane';
+import { usePaneWidth } from '../../layout/usePaneWidth';
 import './SessionWindow.css';
 
 /**
@@ -108,14 +109,28 @@ export const SessionWindow: Component = () => {
   const providerLabel = () => 'ollama \u00b7 pending';
   const costLabel = () => 'in 0 \u00b7 out 0 \u00b7 $0.00';
 
+  // F-119: observe the pane section's width so the header collapses its
+  // chrome below the 320/240 thresholds. The ref is populated synchronously
+  // by Solid when the element mounts, which is the resolution order the
+  // hook expects. In the jsdom test environment ResizeObserver is absent
+  // and the hook degrades to `full` — the existing SessionWindow tests
+  // still pass without a fixture.
+  const [paneEl, setPaneEl] = createSignal<HTMLElement | null>(null);
+  const { compactness } = usePaneWidth(paneEl);
+
   return (
     <main class="session-window">
-      <section class="session-window__pane" aria-label="Session pane">
+      <section
+        class="session-window__pane"
+        aria-label="Session pane"
+        ref={setPaneEl}
+      >
         <PaneHeader
           subject={subject()}
           providerId={providerId()}
           providerLabel={providerLabel()}
           costLabel={costLabel()}
+          compactness={compactness()}
           onClose={handleClose}
         />
         <div class="session-window__pane-body">

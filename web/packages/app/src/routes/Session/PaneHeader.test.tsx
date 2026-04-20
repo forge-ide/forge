@@ -87,3 +87,93 @@ describe('PaneHeader provider pill accent (F-091)', () => {
     );
   });
 });
+
+// PaneHeader compactness (F-119): per layout-panes.md §3.7 + pane-header.md
+// §2.3, the header must collapse chrome as the pane narrows. The prop is
+// optional — omitting it is `full`. At `compact` the type label collapses
+// to an icon; at `icon-only` the provider pill + cost meter also hide.
+// Callers derive the prop from `usePaneWidth` against the enclosing pane.
+
+describe('PaneHeader compactness (F-119)', () => {
+  it('defaults to `full` when no compactness prop is passed — all chrome visible', () => {
+    const { getByTestId, queryByTestId } = render(() => (
+      <PaneHeader
+        subject="example"
+        providerId={'ollama' as ProviderId}
+        providerLabel="local"
+        costLabel="$0.00"
+        onClose={vi.fn()}
+      />
+    ));
+    const root = getByTestId('pane-header-subject').parentElement;
+    expect(root?.getAttribute('data-compactness')).toBe('full');
+    expect(queryByTestId('pane-header-provider')).not.toBeNull();
+    expect(queryByTestId('pane-header-cost')).not.toBeNull();
+  });
+
+  it('at `compact`: marks root with data-compactness="compact" and collapses the type label to an icon', () => {
+    const { getByTestId, queryByTestId } = render(() => (
+      <PaneHeader
+        subject="example"
+        providerId={'ollama' as ProviderId}
+        providerLabel="local"
+        costLabel="$0.00"
+        compactness="compact"
+        onClose={vi.fn()}
+      />
+    ));
+    const root = getByTestId('pane-header-subject').parentElement;
+    expect(root?.getAttribute('data-compactness')).toBe('compact');
+    // Type label swapped to an icon glyph (aria-hidden; the a11y name is
+    // carried by the pane-header-type-label element via aria-label).
+    const typeLabel = getByTestId('pane-header-type-label');
+    expect(typeLabel.getAttribute('data-icon-only')).toBe('true');
+    // Badges (provider pill + cost meter) still render at `compact` — they
+    // only disappear at `icon-only`. This matches DoD: labels collapse at
+    // 320px, badges collapse at 240px.
+    expect(queryByTestId('pane-header-provider')).not.toBeNull();
+    expect(queryByTestId('pane-header-cost')).not.toBeNull();
+  });
+
+  it('at `icon-only`: hides both the provider pill and the cost meter badges', () => {
+    const { getByTestId, queryByTestId } = render(() => (
+      <PaneHeader
+        subject="example"
+        providerId={'ollama' as ProviderId}
+        providerLabel="local"
+        costLabel="$0.00"
+        compactness="icon-only"
+        onClose={vi.fn()}
+      />
+    ));
+    const root = getByTestId('pane-header-subject').parentElement;
+    expect(root?.getAttribute('data-compactness')).toBe('icon-only');
+    // Label is still in icon mode at `icon-only` (`compact` or narrower).
+    const typeLabel = getByTestId('pane-header-type-label');
+    expect(typeLabel.getAttribute('data-icon-only')).toBe('true');
+    // Badges removed from the tree entirely — the narrow-width spec treats
+    // them as non-essential chrome. Keeping them with `display: none`
+    // would leave them discoverable by screen readers.
+    expect(queryByTestId('pane-header-provider')).toBeNull();
+    expect(queryByTestId('pane-header-cost')).toBeNull();
+  });
+
+  it('keeps the close button visible at every compactness level', () => {
+    for (const c of ['full', 'compact', 'icon-only'] as const) {
+      const { getByRole, unmount } = render(() => (
+        <PaneHeader
+          subject="example"
+          providerId={'ollama' as ProviderId}
+          providerLabel="local"
+          costLabel="$0.00"
+          compactness={c}
+          onClose={vi.fn()}
+        />
+      ));
+      // Close is essential at every width — no pane is useful without a
+      // way to dismiss it. (Per pane-header.md §PH.6 the close button stays.)
+      expect(getByRole('button', { name: 'Close session window' })).not.toBeNull();
+      unmount();
+    }
+  });
+});
