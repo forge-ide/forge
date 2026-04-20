@@ -396,10 +396,10 @@ impl Orchestrator {
     ///      don't compound.
     ///   2. Reconstruct the provider request from events up to — but not
     ///      including — `msg_id`'s assistant turn.
-    ///   3. Drive [`run_request_loop`] with a fresh `new_id` to regenerate
+    ///   3. Drive `run_request_loop` with a fresh `new_id` to regenerate
     ///      the response.
     ///   4. After the regenerated assistant message is finalised, emit
-    ///      [`Event::MessageSuperseded { old_id: msg_id, new_id }`] so
+    ///      `Event::MessageSuperseded { old_id: msg_id, new_id }` so
     ///      replay consumers hide the original.
     ///
     /// Ordering matters: the `MessageSuperseded` marker is emitted *after*
