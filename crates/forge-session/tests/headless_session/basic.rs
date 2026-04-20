@@ -161,24 +161,34 @@ async fn full_headless_turn_emits_correct_event_sequence() {
 
     // --- Assertions ---
 
+    // F-139: step-trace events (`StepStarted`/`StepFinished`/`ToolInvoked`/
+    // `ToolReturned`) are emitted in addition to the user-visible message /
+    // tool-call sequence this test pins. They're covered by
+    // `tests/step_events.rs`; filter them out here so the existing
+    // backward-compatibility assertion stays tight on the original
+    // sequence.
     let kinds: Vec<&str> = events
         .iter()
-        .map(|e| match e {
-            Event::UserMessage { .. } => "UserMessage",
+        .filter_map(|e| match e {
+            Event::UserMessage { .. } => Some("UserMessage"),
             Event::AssistantMessage {
                 stream_finalised: false,
                 ..
-            } => "AssistantMessage(open)",
+            } => Some("AssistantMessage(open)"),
             Event::AssistantMessage {
                 stream_finalised: true,
                 ..
-            } => "AssistantMessage(final)",
-            Event::AssistantDelta { .. } => "AssistantDelta",
-            Event::ToolCallStarted { .. } => "ToolCallStarted",
-            Event::ToolCallApprovalRequested { .. } => "ToolCallApprovalRequested",
-            Event::ToolCallApproved { .. } => "ToolCallApproved",
-            Event::ToolCallCompleted { .. } => "ToolCallCompleted",
-            _ => "Other",
+            } => Some("AssistantMessage(final)"),
+            Event::AssistantDelta { .. } => Some("AssistantDelta"),
+            Event::ToolCallStarted { .. } => Some("ToolCallStarted"),
+            Event::ToolCallApprovalRequested { .. } => Some("ToolCallApprovalRequested"),
+            Event::ToolCallApproved { .. } => Some("ToolCallApproved"),
+            Event::ToolCallCompleted { .. } => Some("ToolCallCompleted"),
+            Event::StepStarted { .. }
+            | Event::StepFinished { .. }
+            | Event::ToolInvoked { .. }
+            | Event::ToolReturned { .. } => None,
+            _ => Some("Other"),
         })
         .collect();
 

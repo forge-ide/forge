@@ -6,8 +6,8 @@ use anyhow::{anyhow, Result};
 use chrono::Utc;
 use forge_core::{
     apply_superseded,
-    ids::{MessageId, ProviderId, ToolCallId},
-    read_since, ApprovalScope, ApprovalSource, Event, RerunVariant,
+    ids::{MessageId, ProviderId, StepId, ToolCallId},
+    read_since, ApprovalScope, ApprovalSource, Event, RerunVariant, StepKind, StepOutcome,
 };
 use forge_providers::{ChatBlock, ChatChunk, ChatMessage, ChatRequest, ChatRole, Provider};
 use futures::StreamExt;
@@ -34,10 +34,41 @@ pub enum ApprovalDecision {
 /// Pending tool call approvals: maps ToolCallId → sender for the approval result.
 pub type PendingApprovals = Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>>;
 
+/// F-139: short SHA-256 prefix of a JSON-serialized args payload.
+///
+/// Used on `ToolInvoked` so downstream consumers can correlate a tool
+/// invocation with the matching `ToolCallStarted.args` without shipping
+/// the payload twice. 8 hex chars (32 bits) is ample for UI correlation
+/// within a single turn — collisions are not a security boundary here.
+fn args_digest(args: &serde_json::Value) -> String {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(args).unwrap_or_default();
+    let full = Sha256::digest(&bytes);
+    let mut s = String::with_capacity(8);
+    for b in full.iter().take(4) {
+        use std::fmt::Write as _;
+        let _ = write!(&mut s, "{b:02x}");
+    }
+    s
+}
+
 /// Run a complete turn for the given user text. Emits all session events for:
-/// UserMessage → AssistantMessage(open) → AssistantDelta* →
-/// [ToolCallStarted → ToolCallApprovalRequested → ToolCallApproved → ToolCallCompleted]* →
-/// AssistantMessage(finalised)
+/// UserMessage → StepStarted(Model) → AssistantMessage(open) → AssistantDelta* →
+/// [StepStarted(Tool) → ToolCallStarted → ToolCallApprovalRequested →
+///  ToolCallApproved → ToolInvoked → ToolReturned → ToolCallCompleted →
+///  StepFinished(Tool)]* → AssistantMessage(finalised) → StepFinished(Model)
+///
+/// F-139 ordering invariant (pinned by `tests/step_events.rs`):
+///  * every `StepStarted` is followed by exactly one `StepFinished` with
+///    the same `step_id`, in LIFO order relative to other open steps;
+///  * `ToolInvoked` / `ToolReturned` for a given `step_id` fall strictly
+///    between that step's `StepStarted` and `StepFinished`;
+///  * `AssistantMessage` / `AssistantDelta` for a turn fall inside the
+///    enclosing `Model` step's window;
+///  * on abnormal exits (stream error, tool rejection) the inner step is
+///    closed with `StepOutcome::Error` and the outer Model step is
+///    closed as `Ok` before the function returns — so replay never sees
+///    an unterminated step window.
 ///
 /// Tool calls block until the client sends `ToolCallApproved` / `ToolCallRejected`
 /// through `pending_approvals`. `allowed_paths` is the set of glob patterns the
@@ -158,6 +189,26 @@ pub(crate) async fn run_request_loop<P: Provider>(
     let model = "mock".to_string();
 
     loop {
+        // F-139: open a `Model` step around each provider pass. The step
+        // envelopes every event this iteration emits (AssistantMessage*,
+        // AssistantDelta, Tool*) — downstream consumers (Agent Monitor,
+        // replay readers) rely on StepStarted preceding any per-turn
+        // event with the same step_id.
+        //
+        // `instance_id: None` today — the session turn loop runs outside
+        // of a registered `AgentInstance`. F-140 wires the `AgentMonitor`
+        // into `run_turn` and will populate the field.
+        let model_step_id = StepId::new();
+        let model_step_started = Instant::now();
+        session
+            .emit(Event::StepStarted {
+                step_id: model_step_id.clone(),
+                instance_id: None,
+                kind: StepKind::Model,
+                started_at: Utc::now(),
+            })
+            .await?;
+
         // Emit AssistantMessage(open) before any chunks arrive — ensures the
         // event is present even when the first chunk is a tool call (not text).
         session
@@ -201,6 +252,22 @@ pub(crate) async fn run_request_loop<P: Provider>(
                 ChatChunk::ToolCall { name, args } => {
                     had_tool_calls = true;
                     let call_id = ToolCallId::new();
+
+                    // F-139: open a nested `Tool` step around this tool
+                    // invocation. Nests inside the enclosing Model step
+                    // and closes before we loop back to the next stream
+                    // chunk. `StepFinished` carries the same `step_id`;
+                    // `ToolInvoked` / `ToolReturned` reference it.
+                    let tool_step_id = StepId::new();
+                    let tool_step_started = Instant::now();
+                    session
+                        .emit(Event::StepStarted {
+                            step_id: tool_step_id.clone(),
+                            instance_id: None,
+                            kind: StepKind::Tool,
+                            started_at: Utc::now(),
+                        })
+                        .await?;
 
                     session
                         .emit(Event::ToolCallStarted {
@@ -254,6 +321,22 @@ pub(crate) async fn run_request_loop<P: Provider>(
                                                 reason: Some("rejected by client".to_string()),
                                             })
                                             .await?;
+                                        // F-139: close the Tool step with
+                                        // an error outcome before unwinding.
+                                        // The enclosing Model step is
+                                        // closed just below, in the
+                                        // AssistantMessage(final) path.
+                                        session
+                                            .emit(Event::StepFinished {
+                                                step_id: tool_step_id.clone(),
+                                                outcome: StepOutcome::Error {
+                                                    reason: "rejected by client".to_string(),
+                                                },
+                                                duration_ms: tool_step_started.elapsed().as_millis()
+                                                    as u64,
+                                                token_usage: None,
+                                            })
+                                            .await?;
                                         session
                                             .emit(Event::AssistantMessage {
                                                 id: msg_id.clone(),
@@ -265,6 +348,20 @@ pub(crate) async fn run_request_loop<P: Provider>(
                                                 text: Arc::from(assistant_text.as_str()),
                                                 branch_parent: None,
                                                 branch_variant_index: 0,
+                                            })
+                                            .await?;
+                                        // Close the Model step too so the
+                                        // LIFO invariant holds even on
+                                        // early return.
+                                        session
+                                            .emit(Event::StepFinished {
+                                                step_id: model_step_id.clone(),
+                                                outcome: StepOutcome::Ok,
+                                                duration_ms: model_step_started
+                                                    .elapsed()
+                                                    .as_millis()
+                                                    as u64,
+                                                token_usage: None,
                                             })
                                             .await?;
                                         return Ok(());
@@ -281,15 +378,69 @@ pub(crate) async fn run_request_loop<P: Provider>(
                                     .await?;
                             }
 
+                            // F-139: emit ToolInvoked at the approval→
+                            // execution boundary — after approval logged,
+                            // before the tool runs. `args_digest` is a
+                            // short SHA-256 prefix; downstream consumers
+                            // correlate with `ToolCallStarted.args`.
+                            session
+                                .emit(Event::ToolInvoked {
+                                    step_id: tool_step_id.clone(),
+                                    tool_call_id: call_id.clone(),
+                                    tool_id: name.clone(),
+                                    args_digest: args_digest(&args),
+                                })
+                                .await?;
+
                             tool.invoke(&args, ctx).await
                         }
                         Err(ToolError::UnknownTool(n)) => {
+                            // Unknown / errored dispatcher lookups still
+                            // emit ToolInvoked so the step window is
+                            // bracketed even when no tool actually ran.
+                            // `ok` on the subsequent ToolReturned will
+                            // reflect the synthetic error payload.
+                            session
+                                .emit(Event::ToolInvoked {
+                                    step_id: tool_step_id.clone(),
+                                    tool_call_id: call_id.clone(),
+                                    tool_id: name.clone(),
+                                    args_digest: args_digest(&args),
+                                })
+                                .await?;
                             serde_json::json!({ "error": format!("unknown tool '{n}'") })
                         }
-                        Err(e) => serde_json::json!({ "error": e.to_string() }),
+                        Err(e) => {
+                            session
+                                .emit(Event::ToolInvoked {
+                                    step_id: tool_step_id.clone(),
+                                    tool_call_id: call_id.clone(),
+                                    tool_id: name.clone(),
+                                    args_digest: args_digest(&args),
+                                })
+                                .await?;
+                            serde_json::json!({ "error": e.to_string() })
+                        }
                     };
 
                     let duration_ms = started.elapsed().as_millis() as u64;
+
+                    // F-139: ToolReturned right after the invocation
+                    // settled. `ok` = absence of a top-level `error` key
+                    // on the result payload; `bytes_out` = byte length of
+                    // the serialized result.
+                    let result_bytes = serde_json::to_string(&result)
+                        .map(|s| s.len() as u64)
+                        .unwrap_or(0);
+                    let result_ok = result.get("error").is_none();
+                    session
+                        .emit(Event::ToolReturned {
+                            step_id: tool_step_id.clone(),
+                            tool_call_id: call_id.clone(),
+                            ok: result_ok,
+                            bytes_out: result_bytes,
+                        })
+                        .await?;
 
                     session
                         .emit(Event::ToolCallCompleted {
@@ -297,6 +448,28 @@ pub(crate) async fn run_request_loop<P: Provider>(
                             result: result.clone(),
                             duration_ms,
                             at: Utc::now(),
+                        })
+                        .await?;
+
+                    // F-139: close the Tool step. `outcome` mirrors the
+                    // result's top-level `error` field so consumers can
+                    // filter failures without parsing the payload.
+                    session
+                        .emit(Event::StepFinished {
+                            step_id: tool_step_id.clone(),
+                            outcome: if result_ok {
+                                StepOutcome::Ok
+                            } else {
+                                StepOutcome::Error {
+                                    reason: result
+                                        .get("error")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("tool returned error")
+                                        .to_string(),
+                                }
+                            },
+                            duration_ms: tool_step_started.elapsed().as_millis() as u64,
+                            token_usage: None,
                         })
                         .await?;
 
@@ -328,6 +501,19 @@ pub(crate) async fn run_request_loop<P: Provider>(
                         })
                         .await?;
 
+                    // F-139: close the Model step before returning or
+                    // looping. We emit StepFinished *after* the final
+                    // AssistantMessage so the step window contains every
+                    // event it logically owns.
+                    session
+                        .emit(Event::StepFinished {
+                            step_id: model_step_id.clone(),
+                            outcome: StepOutcome::Ok,
+                            duration_ms: model_step_started.elapsed().as_millis() as u64,
+                            token_usage: None,
+                        })
+                        .await?;
+
                     if !had_tool_calls {
                         return Ok(());
                     }
@@ -353,6 +539,19 @@ pub(crate) async fn run_request_loop<P: Provider>(
                             branch_variant_index: 0,
                         })
                         .await?;
+                    // F-139: close the Model step with an Error outcome
+                    // so late-joining subscribers see a well-formed
+                    // step window even on provider abort.
+                    session
+                        .emit(Event::StepFinished {
+                            step_id: model_step_id.clone(),
+                            outcome: StepOutcome::Error {
+                                reason: format!("provider stream aborted ({kind:?}): {message}"),
+                            },
+                            duration_ms: model_step_started.elapsed().as_millis() as u64,
+                            token_usage: None,
+                        })
+                        .await?;
                     return Err(anyhow::anyhow!(
                         "provider stream aborted ({kind:?}): {message}"
                     ));
@@ -373,6 +572,15 @@ pub(crate) async fn run_request_loop<P: Provider>(
                     text: Arc::from(assistant_text.as_str()),
                     branch_parent: None,
                     branch_variant_index: 0,
+                })
+                .await?;
+            // F-139: close Model step on the no-Done exit path too.
+            session
+                .emit(Event::StepFinished {
+                    step_id: model_step_id.clone(),
+                    outcome: StepOutcome::Ok,
+                    duration_ms: model_step_started.elapsed().as_millis() as u64,
+                    token_usage: None,
                 })
                 .await?;
             return Ok(());

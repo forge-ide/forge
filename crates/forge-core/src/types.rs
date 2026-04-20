@@ -70,6 +70,48 @@ pub enum RerunVariant {
     Fresh,
 }
 
+/// F-139: step kinds emitted by the session turn loop. The Agent Monitor
+/// (F-140) renders the sequence step-by-step, grouping tool/model/wait
+/// segments under their parent turn.
+///
+/// `model` — one pass through the provider stream (text deltas, tool calls).
+/// `tool`  — one tool invocation (start → invoke → return → complete).
+/// `plan`  — reserved for future agent planning phases; not emitted today.
+/// `wait`  — reserved for approval/idle gaps; not emitted today.
+/// `spawn` — reserved for sub-agent spawn steps (F-140); not emitted today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepKind {
+    Plan,
+    Tool,
+    Model,
+    Wait,
+    Spawn,
+}
+
+/// F-139: terminal status for a step.
+///
+/// `ok` — step completed normally (the common case).
+/// `error { reason }` — step failed; the reason is a short, display-safe
+/// human-readable string. Intentionally minimal; structured failure
+/// payloads stay on the underlying event (`ToolCallCompleted.result`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum StepOutcome {
+    Ok,
+    Error { reason: String },
+}
+
+/// F-139: per-step token accounting. Mirrors `UsageTick` field names
+/// (`tokens_in`, `tokens_out`) so dashboards can sum step-level with
+/// session-level without a field-name remap. `None` on `StepFinished`
+/// means the provider didn't report usage for this step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

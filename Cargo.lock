@@ -1275,6 +1275,7 @@ dependencies = [
  "libc",
  "reqwest 0.12.28",
  "serde_json",
+ "sha2",
  "similar",
  "tempfile",
  "thiserror 1.0.69",
