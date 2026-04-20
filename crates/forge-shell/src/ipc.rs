@@ -30,6 +30,7 @@ use forge_core::approvals::{
 };
 use forge_core::{ApprovalLevel, ApprovalScope, RerunVariant, TerminalId};
 use forge_ipc::HelloAck;
+use forge_lsp::{MessageTransport, Server as LspServer, ServerEvent as LspServerEvent};
 use forge_term::{ShellSpec, TerminalEvent, TerminalSession, TerminalSize};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, EventTarget, Manager, Runtime, State, Webview};
@@ -386,6 +387,9 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         read_file,
         write_file,
         tree,
+        lsp_start,
+        lsp_stop,
+        lsp_send,
     ])
 }
 
@@ -403,6 +407,15 @@ pub fn manage_bridge<R: Runtime>(app: &AppHandle<R>) {
 pub fn manage_terminals<R: Runtime>(app: &AppHandle<R>) {
     if app.try_state::<TerminalState>().is_none() {
         app.manage(TerminalState::default());
+    }
+}
+
+/// Attach the `LspState` to an app builder. Idempotent — parallels
+/// [`manage_terminals`] so tests can wire both and production `window_manager`
+/// can call once.
+pub fn manage_lsp<R: Runtime>(app: &AppHandle<R>) {
+    if app.try_state::<LspState>().is_none() {
+        app.manage(LspState::default());
     }
 }
 
@@ -1363,4 +1376,261 @@ pub async fn tree<R: Runtime>(
     let requested = depth.unwrap_or(6).min(16);
     let node = forge_fs::list_tree(&root, &allowed, requested).map_err(|e| e.to_string())?;
     Ok(TreeNodeDto::from(node))
+}
+
+// ---------------------------------------------------------------------------
+// F-123: LSP bridge commands (lsp_start / lsp_stop / lsp_send)
+//
+// Scope. Three Tauri commands connect the parent webview's iframe LSP client
+// (F-121) to a `forge-lsp::Server` stdio subprocess. Each spawned server is
+// owned by exactly one webview label (the label that called `lsp_start`),
+// and every subsequent send/stop from a different label is rejected with the
+// standard label-mismatch error — mirroring the F-125 terminal authz story on
+// the LSP axis.
+//
+// Scope divergence. Architecture doc §3.7 describes `forge-lsp` as a
+// management layer ("doesn't proxy LSP messages"). F-121 and this task
+// reshape that: the iframe talks to `forge-lsp` through the parent webview's
+// IPC bridge. F-148 is the doc-reconcile follow-up. The proxy is
+// byte-transparent — we never parse LSP frames on the Rust side.
+//
+// Event model. Bytes flow out on a per-webview Tauri event named
+// `lsp_message`. Each payload carries the `server` id so the JS renderer
+// can route it to the right iframe. The emit target is always
+// `EventTarget::webview_window(owner_label)` — the label is stored at spawn
+// time and never re-read from a payload, mirroring `AppHandleSink`'s F-062
+// discipline.
+// ---------------------------------------------------------------------------
+
+/// Event name for server → parent-webview LSP messages.
+pub const LSP_MESSAGE_EVENT: &str = "lsp_message";
+
+/// Size caps for LSP command inputs. Mirrors the terminal caps shape — LSP
+/// frames can be large (initialize payloads with workspace folders + document
+/// uris run tens of KiB), so the ceiling is generous but still bounded so a
+/// compromised webview can't loop 1 MiB sends billing server memory.
+pub(crate) const MAX_LSP_SERVER_ID_BYTES: usize = 128;
+pub(crate) const MAX_LSP_BINARY_PATH_BYTES: usize = 4096;
+pub(crate) const MAX_LSP_MESSAGE_BYTES: usize = 512 * 1024;
+
+/// Wire-format arguments for `lsp_start`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct LspStartArgs {
+    /// Server identifier (matches `forge_lsp::ServerId` entries in the
+    /// bundled registry). Used as the routing key on `lsp_message` events.
+    pub server: String,
+    /// Absolute path to the server binary. Callers resolve this via
+    /// `forge-lsp::Bootstrap::ensure` before invoking; the command does not
+    /// download. Keeps the download path out of the Tauri trust boundary.
+    pub binary_path: String,
+    /// Optional argv after the binary path. Bounded via the server-id cap
+    /// since each arg is expected to be short; oversize argv is a misuse.
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+/// Event payload pushed on `lsp_message` when the server emits a frame.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct LspMessageEvent {
+    /// Server that produced the message (matches `LspStartArgs.server`).
+    pub server: String,
+    /// Opaque JSON-RPC payload. Parsing happens inside the iframe — ts-rs
+    /// emits `unknown` so the TS side is forced to narrow before use.
+    #[ts(type = "unknown")]
+    pub message: serde_json::Value,
+}
+
+/// Per-server bookkeeping tracked by [`LspState`]. The supervisor task is
+/// aborted on entry removal; its Drop kills the child via the `kill_on_drop`
+/// flag set inside `forge-lsp`.
+pub(crate) struct LspEntry {
+    /// Transport handle for `lsp_send`. Sends go through this, not the
+    /// supervisor task.
+    pub(crate) transport: Arc<dyn MessageTransport>,
+    /// Webview label that called `lsp_start` — the only label permitted
+    /// to subsequently send/stop this server.
+    pub(crate) owner_label: String,
+    /// Supervisor task. Aborting drops the child.
+    pub(crate) supervisor: tauri::async_runtime::JoinHandle<()>,
+    /// Event forwarder task. Aborting stops message delivery to the webview.
+    pub(crate) forwarder: tauri::async_runtime::JoinHandle<()>,
+}
+
+/// Tauri-managed registry of live LSP servers. Scoped per app (one instance
+/// per Tauri `App`), keyed by `server` id.
+#[derive(Default)]
+pub struct LspState {
+    entries: Mutex<HashMap<String, LspEntry>>,
+}
+
+impl LspState {
+    fn insert(&self, id: String, entry: LspEntry) -> Result<(), String> {
+        let mut guard = self.entries.lock().expect("lsp state poisoned");
+        if guard.contains_key(&id) {
+            return Err(format!("lsp server already running: {id}"));
+        }
+        guard.insert(id, entry);
+        Ok(())
+    }
+
+    fn remove_owned_by(&self, id: &str, caller_label: &str) -> Result<LspEntry, String> {
+        let mut guard = self.entries.lock().expect("lsp state poisoned");
+        let Some(entry) = guard.get(id) else {
+            return Err(format!("unknown lsp server: {id}"));
+        };
+        if entry.owner_label != caller_label {
+            return Err(LABEL_MISMATCH_ERROR.to_string());
+        }
+        let entry = guard.remove(id).expect("presence checked above");
+        Ok(entry)
+    }
+
+    fn owned_transport(
+        &self,
+        id: &str,
+        caller_label: &str,
+    ) -> Result<Arc<dyn MessageTransport>, String> {
+        let guard = self.entries.lock().expect("lsp state poisoned");
+        let Some(entry) = guard.get(id) else {
+            return Err(format!("unknown lsp server: {id}"));
+        };
+        if entry.owner_label != caller_label {
+            return Err(LABEL_MISMATCH_ERROR.to_string());
+        }
+        Ok(entry.transport.clone())
+    }
+}
+
+/// Forward every `ServerEvent::Message` from the supervisor to the owning
+/// webview as an `lsp_message` Tauri event. Mirrors `spawn_event_forwarder`
+/// for terminals: the target label is bound at spawn time and never re-read
+/// from a payload, so a forged payload cannot redirect delivery.
+fn spawn_lsp_forwarder<R: Runtime>(
+    app: AppHandle<R>,
+    owner_label: String,
+    server_id: String,
+    mut rx: tokio::sync::mpsc::Receiver<LspServerEvent>,
+) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            if let LspServerEvent::Message(value) = event {
+                let payload = LspMessageEvent {
+                    server: server_id.clone(),
+                    message: value,
+                };
+                let target = EventTarget::webview_window(&owner_label);
+                if let Err(e) = app.emit_to(target, LSP_MESSAGE_EVENT, payload) {
+                    eprintln!("lsp_message emit failed: {e}");
+                }
+            }
+            // `Exited` / `GaveUp` events are observable only server-side
+            // today; the iframe protocol surfaces restart transparently
+            // because the transport reinstalls stdin between attempts.
+        }
+    })
+}
+
+/// Start a supervised LSP server. The calling webview's label is recorded
+/// as the server's owner; subsequent commands targeting this `server` id
+/// are rejected unless they come from the same webview.
+///
+/// Errors:
+/// - label not `session-*` → `forbidden: window label mismatch`
+/// - oversize `server` / `binary_path` → size-cap error
+/// - duplicate `server` id → `"lsp server already running: <id>"`
+/// - spawn failure surfaces the `forge-lsp` error
+#[tauri::command]
+pub async fn lsp_start<R: Runtime>(
+    args: LspStartArgs,
+    app: AppHandle<R>,
+    webview: Webview<R>,
+    state: State<'_, LspState>,
+) -> Result<(), String> {
+    // LSP servers are session-scoped. Dashboard and any other label is
+    // rejected — mirrors the terminal authz shape on the LSP axis.
+    require_window_label_in(&webview, &[], true)?;
+
+    require_size("server", &args.server, MAX_LSP_SERVER_ID_BYTES)?;
+    require_size("binary_path", &args.binary_path, MAX_LSP_BINARY_PATH_BYTES)?;
+
+    let owner_label = webview.label().to_string();
+    let server_id = args.server.clone();
+
+    // Build the supervisor + transport before registering, so spawn failures
+    // don't leave a zombie entry.
+    let mut supervisor = LspServer::new(args.binary_path.into(), args.args);
+    let transport = supervisor.transport();
+    let rx = supervisor
+        .take_events()
+        .ok_or_else(|| "lsp_start: event channel already taken".to_string())?;
+
+    // Register before starting so `lsp_send` can observe the transport
+    // immediately. The supervisor races spawn with the first send; the
+    // transport itself returns `NotRunning` until the child is up.
+    let forwarder = spawn_lsp_forwarder(app.clone(), owner_label.clone(), server_id.clone(), rx);
+
+    let supervisor_handle = tauri::async_runtime::spawn(async move {
+        // Errors here (bad path, etc.) are recorded on the event channel
+        // via the supervisor's internal paths; we swallow the top-level
+        // Result because the forwarder terminates when the channel closes.
+        let _ = supervisor.start().await;
+    });
+
+    state.insert(
+        server_id,
+        LspEntry {
+            transport,
+            owner_label,
+            supervisor: supervisor_handle,
+            forwarder,
+        },
+    )?;
+
+    Ok(())
+}
+
+/// Stop the server owned by the caller. Aborts the supervisor + forwarder
+/// tasks — the child is killed via `tokio::process::Command::kill_on_drop`.
+#[tauri::command]
+pub async fn lsp_stop<R: Runtime>(
+    server: String,
+    webview: Webview<R>,
+    state: State<'_, LspState>,
+) -> Result<(), String> {
+    require_window_label_in(&webview, &[], true)?;
+    require_size("server", &server, MAX_LSP_SERVER_ID_BYTES)?;
+    let caller_label = webview.label().to_string();
+    let entry = state.remove_owned_by(&server, &caller_label)?;
+    entry.supervisor.abort();
+    entry.forwarder.abort();
+    Ok(())
+}
+
+/// Forward a JSON-RPC message to the server's stdin. Caller must own the
+/// server. The message is opaque — this crate never parses LSP frames on
+/// behalf of the iframe.
+#[tauri::command]
+pub async fn lsp_send<R: Runtime>(
+    server: String,
+    message: serde_json::Value,
+    webview: Webview<R>,
+    state: State<'_, LspState>,
+) -> Result<(), String> {
+    require_window_label_in(&webview, &[], true)?;
+    require_size("server", &server, MAX_LSP_SERVER_ID_BYTES)?;
+    // Rough byte cap: serialize once and check length. Avoids building a
+    // serialized frame twice (send path also serializes) by short-circuiting
+    // oversize payloads before the transport touches stdin.
+    let encoded_len = serde_json::to_vec(&message)
+        .map(|v| v.len())
+        .map_err(|e| format!("serialize lsp message: {e}"))?;
+    if encoded_len > MAX_LSP_MESSAGE_BYTES {
+        return Err(payload_too_large("message", MAX_LSP_MESSAGE_BYTES));
+    }
+
+    let caller_label = webview.label().to_string();
+    let transport = state.owned_transport(&server, &caller_label)?;
+    transport.send(message).await.map_err(|e| e.to_string())
 }

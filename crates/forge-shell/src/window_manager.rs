@@ -82,10 +82,14 @@ pub fn run() -> Result<()> {
             crate::ipc::read_file,
             crate::ipc::write_file,
             crate::ipc::tree,
+            crate::ipc::lsp_start,
+            crate::ipc::lsp_stop,
+            crate::ipc::lsp_send,
         ])
         .setup(|app| {
             crate::ipc::manage_bridge(&app.handle().clone());
             crate::ipc::manage_terminals(&app.handle().clone());
+            crate::ipc::manage_lsp(&app.handle().clone());
             let manager = WindowManager::new(app.handle().clone());
             manager.open_dashboard()?;
             Ok(())

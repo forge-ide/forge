@@ -3,3 +3,34 @@ name = "forge-lsp"
 version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+
+[lib]
+name = "forge_lsp"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+dirs = "5"
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "1"
+tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "rt", "rt-multi-thread", "time", "fs"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "rt", "rt-multi-thread", "time", "test-util", "fs"] }
+wiremock = "0.6"
+
+# Mock stdio LSP fixture. Same pattern as forge-mcp's mock_stdio — a
+# dependency-free stdin/stdout JSON-RPC echo server the integration test
+# spawns in place of a real LSP binary. Not shipped.
+[[bin]]
+name = "forge-lsp-mock-stdio"
+path = "tests/bin/mock_stdio.rs"
+test = false
+doc = false
