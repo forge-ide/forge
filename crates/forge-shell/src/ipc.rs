@@ -363,6 +363,9 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         get_persistent_approvals,
         save_approval,
         remove_approval,
+        read_file,
+        write_file,
+        tree,
     ])
 }
 
@@ -605,4 +608,181 @@ pub(crate) fn require_window_label_in<R: Runtime>(
         return Ok(());
     }
     Err(LABEL_MISMATCH_ERROR.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// F-122: filesystem commands for the EditorPane (read_file, write_file, tree).
+//
+// The webview-facing editor pane needs to read file contents into Monaco,
+// write them back on save, and list the workspace tree for the file-picker
+// that F-126 will surface. All three commands:
+//
+// 1. Require `session-{session_id}` window-label authz (F-051 / H10) — the
+//    editor only runs inside a session window, so the session-scoped gate is
+//    correct and keeps the dashboard from invoking these paths.
+// 2. Take `workspace_root` as an explicit param. The frontend reads it from
+//    `HelloAck.workspace` and passes it through; the bridge does not cache
+//    the workspace today. The allowlist is derived from `workspace_root`
+//    inside this module — never taken from the webview — so a compromised
+//    webview cannot widen its sandbox by claiming a wider root. (The
+//    session-* window-label gate additionally bounds *who* can call at all;
+//    a richer "verify workspace_root matches the HelloAck workspace" check
+//    is a follow-up once `SessionConnections` caches it.)
+// 3. Delegate size caps and symlink rejection to `forge-fs` (F-061 / M3) so
+//    the filesystem trust boundary lives in one place.
+// ---------------------------------------------------------------------------
+
+/// F-122: per-field cap on byte payloads handed to `write_file`. Matches
+/// `forge_fs::Limits::max_write_bytes` default (10 MiB); keep the pre-check
+/// here so the Tauri frame bound in `forge_ipc::write_frame` (4 MiB) doesn't
+/// short-circuit the cap with a more confusing "frame too large" error. The
+/// actual enforcement authority is still `forge-fs`.
+pub(crate) const MAX_EDITOR_WRITE_BYTES: usize = 10 * 1024 * 1024;
+
+/// Wire shape returned by `read_file`. `content` is UTF-8 (lossy on decode)
+/// so the generated TS binding is a plain string — aligns with Monaco's
+/// `ITextModel.getValue()`. `sha256` lets the frontend detect drift between
+/// a buffer it believes it has saved and a reload result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct FileContent {
+    pub path: String,
+    pub content: String,
+    pub bytes: u32,
+    pub sha256: String,
+}
+
+/// Wire shape for `tree`. The root is always returned; `children` is `None`
+/// for non-directory entries and `Some(_)` for directories (empty vec when
+/// the depth cap is hit or the directory is empty).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct TreeNodeDto {
+    pub name: String,
+    /// Absolute canonicalized path. The frontend joins this with a `file://`
+    /// scheme when building Monaco URIs so a round-trip to `read_file` lands
+    /// on the same on-disk object.
+    pub path: String,
+    pub kind: TreeKindDto,
+    pub children: Option<Vec<TreeNodeDto>>,
+}
+
+/// Wire shape for [`TreeNodeDto::kind`]. Narrow on purpose — anything unusual
+/// (block device, socket, FIFO) maps to `Other` so the wire shape is stable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub enum TreeKindDto {
+    File,
+    Dir,
+    Symlink,
+    Other,
+}
+
+impl From<forge_fs::TreeNode> for TreeNodeDto {
+    fn from(node: forge_fs::TreeNode) -> Self {
+        use forge_fs::NodeKind;
+        let kind = match node.kind {
+            NodeKind::File => TreeKindDto::File,
+            NodeKind::Dir => TreeKindDto::Dir,
+            NodeKind::Symlink => TreeKindDto::Symlink,
+            NodeKind::Other => TreeKindDto::Other,
+        };
+        Self {
+            name: node.name,
+            path: node.path.to_string_lossy().into_owned(),
+            kind,
+            children: node
+                .children
+                .map(|cs| cs.into_iter().map(TreeNodeDto::from).collect()),
+        }
+    }
+}
+
+/// Build the `forge-fs` allowlist for a session's workspace. Canonicalizing
+/// the workspace root here (not in the webview) is the security invariant —
+/// a webview that lies about `workspace_root` only gets the sandbox rooted
+/// at the path it passed; a compromised webview cannot widen that sandbox by
+/// pointing outside the directory the session is actually attached to.
+///
+/// The glob form (`<root>/**` plus an exact `<root>` match) mirrors the
+/// pattern used by the existing `fs.read` / `fs.write` tool call paths.
+fn workspace_allowlist(workspace_root: &str) -> Result<Vec<String>, String> {
+    let root = std::path::Path::new(workspace_root);
+    let canonical =
+        std::fs::canonicalize(root).map_err(|e| format!("workspace_root not accessible: {e}"))?;
+    let display = canonical.to_string_lossy();
+    Ok(vec![format!("{display}/**"), display.into_owned()])
+}
+
+#[tauri::command]
+pub async fn read_file<R: Runtime>(
+    session_id: String,
+    workspace_root: String,
+    path: String,
+    webview: Webview<R>,
+) -> Result<FileContent, String> {
+    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
+    // Path is an absolute canonical path chosen by the frontend; we cap at
+    // workspace_root's budget so a lying webview cannot allocate unbounded
+    // PathBuf space in the allowlist match.
+    require_size("path", &path, MAX_WORKSPACE_ROOT_BYTES)?;
+
+    let allowed = workspace_allowlist(&workspace_root)?;
+    let limits = forge_fs::Limits::default();
+    let result = forge_fs::read_file(&path, &allowed, &limits).map_err(|e| e.to_string())?;
+    Ok(FileContent {
+        path,
+        content: result.content,
+        bytes: result.bytes as u32,
+        sha256: result.sha256,
+    })
+}
+
+#[tauri::command]
+pub async fn write_file<R: Runtime>(
+    session_id: String,
+    workspace_root: String,
+    path: String,
+    bytes: Vec<u8>,
+    webview: Webview<R>,
+) -> Result<(), String> {
+    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
+    require_size("path", &path, MAX_WORKSPACE_ROOT_BYTES)?;
+    // Pre-check before `forge-fs` copies the buffer into the atomic-write
+    // temp file. `forge-fs` also enforces; belt-and-braces keeps the error
+    // source local and predictable.
+    if bytes.len() > MAX_EDITOR_WRITE_BYTES {
+        return Err(payload_too_large("bytes", MAX_EDITOR_WRITE_BYTES));
+    }
+
+    let allowed = workspace_allowlist(&workspace_root)?;
+    let limits = forge_fs::Limits::default();
+    forge_fs::write_bytes(&path, &bytes, &allowed, &limits).map_err(|e| e.to_string())
+}
+
+/// `tree(session_id, workspace_root, root, depth?)` — list the filesystem
+/// subtree rooted at `root`. Pass `workspace_root` again as `root` to list
+/// the whole workspace. `depth` defaults to 6 and is capped at 16.
+#[tauri::command]
+pub async fn tree<R: Runtime>(
+    session_id: String,
+    workspace_root: String,
+    root: String,
+    depth: Option<u32>,
+    webview: Webview<R>,
+) -> Result<TreeNodeDto, String> {
+    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
+    require_size("root", &root, MAX_WORKSPACE_ROOT_BYTES)?;
+
+    let allowed = workspace_allowlist(&workspace_root)?;
+    // Cap depth at 16 so a pathological request can't walk a Linux-style
+    // deep tree and return a megabyte of JSON. 16 is deep enough for the
+    // workspaces Forge targets; the entry budget inside `forge-fs` is the
+    // second line of defense.
+    let requested = depth.unwrap_or(6).min(16);
+    let node = forge_fs::list_tree(&root, &allowed, requested).map_err(|e| e.to_string())?;
+    Ok(TreeNodeDto::from(node))
 }

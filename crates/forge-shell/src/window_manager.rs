@@ -75,6 +75,9 @@ pub fn run() -> Result<()> {
             crate::ipc::get_persistent_approvals,
             crate::ipc::save_approval,
             crate::ipc::remove_approval,
+            crate::ipc::read_file,
+            crate::ipc::write_file,
+            crate::ipc::tree,
         ])
         .setup(|app| {
             crate::ipc::manage_bridge(&app.handle().clone());
