@@ -109,6 +109,62 @@ pub fn write(
     Ok(())
 }
 
+/// Byte-oriented counterpart to [`write()`]. The webview-facing `write_file`
+/// Tauri command (F-122) saves editor buffers that may contain non-UTF-8
+/// payloads (e.g. a binary file opened by mistake; Monaco tolerates it via
+/// lossy decode on open and lossless byte writes on save). Routing those
+/// through [`write()`]'s `&str` signature would require a UTF-8 round-trip
+/// that silently corrupts the bytes.
+///
+/// Policy is identical to [`write()`] — size cap, symlink rejection,
+/// canonical `allowed_paths` glob enforcement, atomic rename — just with a
+/// `&[u8]` payload.
+pub fn write_bytes(
+    path: &str,
+    content: &[u8],
+    allowed_paths: &[String],
+    limits: &Limits,
+) -> Result<(), FsError> {
+    let input = Path::new(path);
+    let actual = content.len() as u64;
+    if actual > limits.max_write_bytes {
+        return Err(FsError::TooLarge {
+            path: input.to_path_buf(),
+            actual,
+            limit: limits.max_write_bytes,
+        });
+    }
+    let canonical = canonicalize_no_symlink(input)?;
+    enforce_allowed(&canonical, allowed_paths)?;
+
+    let parent = canonical.parent().ok_or_else(|| FsError::ParentMissing {
+        path: canonical.clone(),
+    })?;
+    if !parent.is_dir() {
+        return Err(FsError::ParentMissing {
+            path: canonical.clone(),
+        });
+    }
+
+    let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(|e| FsError::Io {
+        path: canonical.clone(),
+        source: e,
+    })?;
+    tmp.write_all(content).map_err(|e| FsError::Io {
+        path: canonical.clone(),
+        source: e,
+    })?;
+    tmp.as_file_mut().sync_all().map_err(|e| FsError::Io {
+        path: canonical.clone(),
+        source: e,
+    })?;
+    tmp.persist(&canonical).map_err(|e| FsError::Io {
+        path: canonical.clone(),
+        source: e.error,
+    })?;
+    Ok(())
+}
+
 /// Apply a unified-diff `patch` to the file at `path` after validating the
 /// path. Rejects source files larger than `limits.max_read_bytes` before
 /// reading them into RAM, and delegates post-patch size enforcement to

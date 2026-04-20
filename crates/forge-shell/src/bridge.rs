@@ -68,9 +68,23 @@ struct Connection {
 }
 
 /// Session-id keyed registry of active bridge connections.
+///
+/// **F-122 workspace-root cache.** `workspace_roots` stores the canonical
+/// workspace path the daemon returned in `HelloAck.workspace` for each
+/// session. The editor-pane filesystem commands (`read_file`, `write_file`,
+/// `tree`) look up this value server-side instead of trusting a webview
+/// parameter — a compromised or buggy webview cannot widen its sandbox by
+/// claiming `workspace = /` because the server always consults the cached
+/// value. Populated in [`SessionBridge::hello`] after the `HelloAck`
+/// returns.
+///
+/// TODO: once a `session_disconnect` command lands, drop the matching
+/// `workspace_roots` entry alongside the `inner` entry so a recycled
+/// `session_id` can't reuse a stale cache.
 #[derive(Clone, Default)]
 pub struct SessionConnections {
     inner: Arc<Mutex<HashMap<String, Connection>>>,
+    workspace_roots: Arc<Mutex<HashMap<String, PathBuf>>>,
 }
 
 impl SessionConnections {
@@ -88,6 +102,34 @@ impl SessionConnections {
 
     pub async fn contains(&self, session_id: &str) -> bool {
         self.inner.lock().await.contains_key(session_id)
+    }
+
+    /// Return the cached canonical workspace root for `session_id`, or `None`
+    /// when `session_hello` has not yet populated the cache. The `PathBuf`
+    /// is cloned — the map lock is released before the caller awaits
+    /// anything.
+    pub async fn workspace_root(&self, session_id: &str) -> Option<PathBuf> {
+        self.workspace_roots.lock().await.get(session_id).cloned()
+    }
+
+    /// F-122 test seam: prime the workspace-root cache so integration tests
+    /// can exercise `read_file` / `write_file` / `tree` without running a
+    /// live `session_hello` handshake. Gated behind `webview-test` so
+    /// production builds cannot reach it. Mirrors the existing
+    /// `test_socket_override` / `test_user_config_dir_override` pattern on
+    /// [`crate::ipc::BridgeState`] — tests use tempdir-rooted workspaces and
+    /// bypass the UDS.
+    #[cfg(feature = "webview-test")]
+    #[doc(hidden)]
+    pub async fn prime_workspace_root_for_test(
+        &self,
+        session_id: impl Into<String>,
+        root: PathBuf,
+    ) {
+        self.workspace_roots
+            .lock()
+            .await
+            .insert(session_id.into(), root);
     }
 }
 
@@ -185,6 +227,35 @@ impl SessionBridge {
             .lock()
             .await
             .insert(session_id.to_string(), conn);
+
+        // F-122 security fix: cache the daemon-reported workspace root so the
+        // editor-pane filesystem commands (`read_file`, `write_file`, `tree`)
+        // can look it up server-side rather than trusting a webview-supplied
+        // parameter. We canonicalize at cache time so the authoritative
+        // value is already normalized; a lying webview that later claims a
+        // different path literally cannot widen its sandbox — the command
+        // layer never reads the param.
+        //
+        // Defense in depth: refuse to cache an empty workspace path. An
+        // empty string would canonicalize to "" → the `forge-fs` allowlist
+        // glob `"/**"` would match every path on the host. The daemon
+        // never emits an empty `HelloAck.workspace` today (`forge-session`
+        // canonicalizes a non-empty path at load time), but a defective or
+        // compromised daemon would otherwise silently widen the sandbox.
+        //
+        // Canonicalization failure on a non-empty path (e.g. the daemon
+        // reported a path that doesn't exist) is non-fatal to `hello`; we
+        // fall back to the raw string because `forge-fs` will canonicalize
+        // on its own hot path and reject the read/write there.
+        if !ack.workspace.is_empty() {
+            let cached = std::fs::canonicalize(&ack.workspace)
+                .unwrap_or_else(|_| PathBuf::from(&ack.workspace));
+            self.connections
+                .workspace_roots
+                .lock()
+                .await
+                .insert(session_id.to_string(), cached);
+        }
 
         Ok(ack)
     }
