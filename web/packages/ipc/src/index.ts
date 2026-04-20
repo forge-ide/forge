@@ -4,6 +4,7 @@ export type { ApprovalScope } from './generated/ApprovalScope';
 export type { CompactTrigger } from './generated/CompactTrigger';
 export type { MessageId } from './generated/MessageId';
 export type { ProviderId } from './generated/ProviderId';
+export type { RerunVariant } from './generated/RerunVariant';
 export type { RosterScope } from './generated/RosterScope';
 export type { SessionId } from './generated/SessionId';
 export type { SessionPersistence } from './generated/SessionPersistence';

@@ -185,6 +185,32 @@ fn session_a_window_invoking_session_subscribe_for_session_b_is_rejected() {
     );
 }
 
+/// F-143: `rerun_message` is a session-scoped Tauri command — a session-A
+/// webview must not be able to trigger a rerun on session-B's transcript.
+/// Authz runs before the bridge, so the rejection is the label-mismatch
+/// error (not a "no active connection" bridge error).
+#[test]
+fn session_a_window_invoking_rerun_message_for_session_b_is_rejected() {
+    let app = make_app_with_session_bridge();
+    let window = build_window(&app, "session-A");
+
+    let err = invoke(
+        &window,
+        "rerun_message",
+        serde_json::json!({
+            "sessionId": "B",
+            "msgId": "deadbeefdeadbeef",
+            "variant": "Replace",
+        }),
+    )
+    .expect_err("session-A must not rerun a message in session B");
+
+    assert!(
+        err.contains(LABEL_MISMATCH),
+        "expected label-mismatch error, got: {err}"
+    );
+}
+
 #[test]
 fn session_a_window_invoking_session_hello_for_session_b_is_rejected() {
     let app = make_app_with_session_bridge();

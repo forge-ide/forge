@@ -1,5 +1,6 @@
 use anyhow::bail;
 use bytes::Bytes;
+pub use forge_core::RerunVariant;
 use futures::{SinkExt, StreamExt};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -20,6 +21,19 @@ pub enum IpcMessage {
     SendUserMessage(SendUserMessage),
     ToolCallApproved(ToolCallApproved),
     ToolCallRejected(ToolCallRejected),
+    /// F-143: client → session request to re-run an assistant message.
+    RerunMessage(RerunMessage),
+}
+
+/// Client → session: re-run the assistant message with `msg_id` using the
+/// given `variant`. Phase 1 only dispatches [`RerunVariant::Replace`]; Branch
+/// and Fresh return an error until F-144/F-145 land.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RerunMessage {
+    /// Target assistant message to re-run. Wire shape is the canonical
+    /// `MessageId` string to stay symmetric with `ToolCallApproved.id`.
+    pub msg_id: String,
+    pub variant: RerunVariant,
 }
 
 /// Client → session: send a user message to start a new turn.

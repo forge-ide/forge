@@ -14,5 +14,7 @@ pub use event_log::{read_since, EventLog, MAX_LINE_BYTES};
 pub use ids::{
     AgentId, AgentInstanceId, MessageId, ProviderId, SessionId, ToolCallId, WorkspaceId,
 };
-pub use transcript::Transcript;
-pub use types::{ApprovalScope, CompactTrigger, RosterScope, SessionPersistence, SessionState};
+pub use transcript::{apply_superseded, Transcript};
+pub use types::{
+    ApprovalScope, CompactTrigger, RerunVariant, RosterScope, SessionPersistence, SessionState,
+};

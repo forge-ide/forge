@@ -40,6 +40,21 @@ pub enum CompactTrigger {
     UserRequested,
 }
 
+/// F-143: variant selector for the `rerun_message` Tauri command.
+///
+/// Only [`RerunVariant::Replace`] is wired today — truncate the transcript
+/// logically at the target message and regenerate the assistant response in
+/// its place. [`RerunVariant::Branch`] (F-144) and [`RerunVariant::Fresh`]
+/// (F-145) are reserved enum tags so the wire shape is stable across the
+/// rerun milestone; dispatching them today returns an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub enum RerunVariant {
+    Replace,
+    Branch,
+    Fresh,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
