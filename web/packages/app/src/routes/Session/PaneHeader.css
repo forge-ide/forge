@@ -17,6 +17,19 @@
   color: var(--color-text-tertiary);
 }
 
+/*
+ * F-119: narrow-width chrome rules. The root carries `data-compactness` so
+ * descendant styling can respond without per-component prop plumbing. The
+ * type-label cell drops its tracked/uppercase treatment when rendering as
+ * an icon so the emoji glyph isn't visually blown apart.
+ */
+.pane-header[data-compactness='compact'] .pane-header__type-label,
+.pane-header[data-compactness='icon-only'] .pane-header__type-label {
+  letter-spacing: 0;
+  text-transform: none;
+  font-family: var(--font-body);
+}
+
 .pane-header__subject {
   font-size: 13px;
   color: var(--color-text-primary);

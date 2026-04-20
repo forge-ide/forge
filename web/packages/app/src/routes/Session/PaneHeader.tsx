@@ -11,6 +11,25 @@ import './PaneHeader.css';
  */
 export type PaneHeaderType = 'CHAT' | 'TERMINAL' | 'EDITOR';
 
+/**
+ * Responsive compactness level per F-119 (`layout-panes.md §3.7`,
+ * `pane-header.md §PH.4`). Derived from the enclosing pane's width via
+ * `usePaneWidth`. See that hook for threshold semantics.
+ */
+export type Compactness = 'full' | 'compact' | 'icon-only';
+
+/**
+ * Map each pane type to its icon-only glyph. Used when the header collapses
+ * its type-label text under F-119's `compact` / `icon-only` thresholds.
+ * Emoji keeps the glyph system-font-safe (no extra icon dependency) and
+ * stable across Phase 1's token refresh cadence.
+ */
+const TYPE_ICON: Record<PaneHeaderType, string> = {
+  CHAT: '\u{1F4AC}',
+  TERMINAL: '\u2328\uFE0F',
+  EDITOR: '\u270E\uFE0F',
+};
+
 export interface PaneHeaderProps {
   subject: string;
   /**
@@ -45,6 +64,14 @@ export interface PaneHeaderProps {
    * `CHAT` for call-site compatibility with the Phase-1 session window.
    */
   typeLabel?: PaneHeaderType;
+  /**
+   * Responsive compactness level, typically derived from `usePaneWidth`
+   * against the enclosing pane element. Controls label collapse (`compact`
+   * at <320px) and badge removal (`icon-only` at <240px). Defaults to
+   * `full`, preserving pre-F-119 layout for untouched callers.
+   * Per `docs/ui-specs/layout-panes.md §3.7` and `pane-header.md §2.3`.
+   */
+  compactness?: Compactness;
   onClose: () => void;
 }
 
@@ -57,6 +84,12 @@ export interface PaneHeaderProps {
  * / `providerLabel`. `costLabel` is also optional so the terminal variant can
  * render the cwd in the same margin-left-auto slot, and `closeLabel` lets the
  * terminal variant render `CLOSE PANE` instead of `CLOSE SESSION`.
+ *
+ * F-119: at narrow widths the header collapses chrome. The type label swaps
+ * to a compact-safe icon glyph at `compact` (<320px) and the provider pill +
+ * cost meter are removed from the tree entirely at `icon-only` (<240px) —
+ * removed rather than hidden so screen readers don't announce vestigial
+ * content. The close button stays at every compactness level per §PH.6.
  */
 export const PaneHeader: Component<PaneHeaderProps> = (props) => {
   // Inline custom property keeps `.pane-header__provider` rule generic; the
@@ -67,13 +100,30 @@ export const PaneHeader: Component<PaneHeaderProps> = (props) => {
       '--pane-header-provider-accent': providerAccent(props.providerId),
     };
   };
+  const compactness = (): Compactness => props.compactness ?? 'full';
+  const typeLabel = (): PaneHeaderType => props.typeLabel ?? 'CHAT';
+  const isIconLabel = (): boolean => compactness() !== 'full';
+  const showBadges = (): boolean => compactness() !== 'icon-only';
   return (
-    <header class="pane-header" role="banner">
-      <span class="pane-header__type-label">{props.typeLabel ?? 'CHAT'}</span>
+    <header class="pane-header" role="banner" data-compactness={compactness()}>
+      <span
+        class="pane-header__type-label"
+        data-testid="pane-header-type-label"
+        data-icon-only={isIconLabel() ? 'true' : 'false'}
+        aria-label={`${typeLabel().toLowerCase()} pane`}
+      >
+        {isIconLabel() ? TYPE_ICON[typeLabel()] : typeLabel()}
+      </span>
       <span class="pane-header__subject" data-testid="pane-header-subject">
         {props.subject}
       </span>
-      <Show when={props.providerId !== undefined && props.providerLabel !== undefined}>
+      <Show
+        when={
+          showBadges() &&
+          props.providerId !== undefined &&
+          props.providerLabel !== undefined
+        }
+      >
         <span
           class="pane-header__provider"
           data-testid="pane-header-provider"
@@ -82,7 +132,7 @@ export const PaneHeader: Component<PaneHeaderProps> = (props) => {
           {props.providerLabel}
         </span>
       </Show>
-      <Show when={props.costLabel !== undefined}>
+      <Show when={showBadges() && props.costLabel !== undefined}>
         <span class="pane-header__cost" data-testid="pane-header-cost">
           {props.costLabel}
         </span>
