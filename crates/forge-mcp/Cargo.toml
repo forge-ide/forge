@@ -7,6 +7,13 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 anyhow = "1"
 dirs = "6.0.0"
+# `futures::StreamExt` drives the SSE `bytes_stream()` in the HTTP transport
+# reader task.
+futures = "0.3"
+# HTTP transport (F-129). Feature set mirrors forge-providers: rustls-tls
+# avoids a system OpenSSL build-time dep, `stream` enables `bytes_stream()`
+# for SSE, `json` for the POST request body.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "rt", "rt-multi-thread", "time"] }
@@ -15,6 +22,8 @@ tracing = "0.1"
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "rt", "rt-multi-thread", "time", "test-util"] }
+# Used by the HTTP transport integration test to stub POST + SSE endpoints.
+wiremock = "0.6"
 
 # Mock stdio MCP server used by the stdio transport integration test.
 # Not shipped: this only exists so tests have a deterministic, dependency-free

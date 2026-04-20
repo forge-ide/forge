@@ -1,0 +1,509 @@
+//! HTTP JSON-RPC transport for a single MCP server reachable over
+//! `https://` (or `http://`). Two wire channels share one handle:
+//!
+//! 1. **POST `{url}`** — outbound JSON-RPC requests. [`Http::send`] sets
+//!    `Content-Type: application/json`, merges the spec's custom headers
+//!    (for auth tokens), and waits for the JSON response body which it
+//!    then forwards into the same event channel the SSE reader uses.
+//! 2. **GET `{url}`** — server-sent events. The background reader parses
+//!    `data:` frames into JSON-RPC notifications and pushes them as
+//!    [`HttpEvent::Message`]. Disconnects are non-fatal: the reader
+//!    reconnects with exponential backoff so the manager (F-130) sees a
+//!    steady stream until it explicitly drops the transport.
+//!
+//! Timeouts: per the F-071 reqwest-timeout hardening, the POST client has
+//! a 30s total timeout plus a `connect_timeout`. The SSE GET uses the same
+//! `connect_timeout` but no total timeout — a long-lived stream must not
+//! be killed by a wall-clock cap. The SSE reader relies on reconnection
+//! to recover from dead sockets.
+
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use anyhow::{anyhow, Context, Result};
+use futures::StreamExt;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+
+use crate::{McpServerSpec, ServerKind};
+
+/// Total timeout for the POST round-trip, measured from send to the full
+/// response body. Matches the DoD's "configured headers + 30s timeout".
+const POST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Connect timeout applied to both clients — a slow TCP/TLS handshake
+/// should fail fast rather than stall the entire transport.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Initial reconnect delay for the SSE reader. Kept short so a transient
+/// blip doesn't lose notifications for long.
+const INITIAL_RECONNECT_DELAY: Duration = Duration::from_millis(100);
+
+/// Upper bound on the reconnect delay; we stop doubling once we hit this.
+/// 30s is long enough to avoid hammering a down server while still being
+/// responsive when the server comes back.
+const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+
+/// Channel depth for outbound [`HttpEvent`]s. Matches stdio's capacity so
+/// the two transports back-pressure consumers identically.
+const EVENT_CHANNEL_CAPACITY: usize = 128;
+
+/// Events emitted on [`Http::recv`].
+///
+/// Unlike stdio there is no terminal exit event — an HTTP MCP server is
+/// a remote process out of our lifecycle. The reader task keeps retrying
+/// until the [`Http`] handle is dropped. If the caller needs to know when
+/// the stream is unhealthy, it can observe the absence of events; the
+/// manager (F-130) owns the restart policy.
+#[derive(Debug)]
+pub enum HttpEvent {
+    /// A JSON-RPC message: either a response to a prior POST or an SSE
+    /// notification. Dispatch is the manager's job.
+    Message(serde_json::Value),
+}
+
+/// An active HTTP JSON-RPC connection to one MCP server.
+///
+/// Construct with [`Http::connect`]. Internally holds a `reqwest::Client`
+/// for POSTs, an SSE reader task subscribed to the server's GET endpoint,
+/// and an `mpsc` receiver that muxes POST responses and SSE notifications
+/// into a single stream.
+pub struct Http {
+    client: reqwest::Client,
+    url: String,
+    headers: HeaderMap,
+    tx: mpsc::Sender<HttpEvent>,
+    rx: mpsc::Receiver<HttpEvent>,
+    /// Dropping this aborts the reader. The handle owns the join handle
+    /// strictly for cancellation — we never await its result.
+    _reader: JoinHandle<()>,
+}
+
+impl std::fmt::Debug for Http {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Http")
+            .field("url", &self.url)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Http {
+    /// Connect to the HTTP MCP server described by `spec`. Builds the
+    /// shared `reqwest::Client`, materialises custom headers, and spawns
+    /// the SSE reader. Errors if `spec` describes a stdio server, if any
+    /// custom header is malformed, or if the client builder fails (only
+    /// happens when no TLS backend is compiled in).
+    pub async fn connect(spec: &McpServerSpec) -> Result<Self> {
+        let (url, raw_headers) = match &spec.kind {
+            ServerKind::Http { url, headers } => (url.clone(), headers),
+            ServerKind::Stdio { .. } => {
+                return Err(anyhow!(
+                    "http transport cannot connect to a stdio MCP server"
+                ));
+            }
+        };
+
+        let headers = build_header_map(raw_headers)?;
+
+        let client = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .build()
+            .context("building reqwest client for HTTP MCP transport")?;
+
+        let (tx, rx) = mpsc::channel::<HttpEvent>(EVENT_CHANNEL_CAPACITY);
+
+        let reader_client = client.clone();
+        let reader_url = url.clone();
+        let reader_headers = headers.clone();
+        let reader_tx = tx.clone();
+        let reader = tokio::spawn(async move {
+            sse_reader_loop(reader_client, reader_url, reader_headers, reader_tx).await;
+        });
+
+        Ok(Self {
+            client,
+            url,
+            headers,
+            tx,
+            rx,
+            _reader: reader,
+        })
+    }
+
+    /// POST one JSON-RPC request to the server. On a `2xx` response we
+    /// parse the JSON body and push it into the event channel as
+    /// [`HttpEvent::Message`] so callers see POST responses and SSE
+    /// notifications on the same `recv()` surface — this matches the
+    /// stdio transport's contract and keeps the manager (F-130) simple.
+    ///
+    /// Network errors (timeout, connection reset, DNS failure, non-2xx
+    /// status) are returned as `Err`. Per the DoD these are recoverable:
+    /// the manager is expected to decide whether to retry the request,
+    /// restart the whole session, or surface a user-visible failure.
+    pub async fn send(&self, message: serde_json::Value) -> Result<()> {
+        let resp = self
+            .client
+            .post(&self.url)
+            .headers(self.headers.clone())
+            .header(CONTENT_TYPE, "application/json")
+            .timeout(POST_TIMEOUT)
+            .json(&message)
+            .send()
+            .await
+            .with_context(|| format!("POST {} failed", self.url))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "POST {} returned HTTP {}: {}",
+                self.url,
+                status,
+                truncate(&body, 512),
+            ));
+        }
+
+        // MCP HTTP responses are JSON-RPC objects; empty 2xx bodies (e.g.
+        // 202 Accepted for a fire-and-forget notification) are legal and
+        // we silently skip them — there's nothing to forward.
+        let body = resp
+            .bytes()
+            .await
+            .with_context(|| format!("reading POST {} response body", self.url))?;
+        if body.is_empty() {
+            return Ok(());
+        }
+
+        let value: serde_json::Value = serde_json::from_slice(&body).with_context(|| {
+            format!(
+                "parsing POST {} response as JSON: {}",
+                self.url,
+                truncate(&String::from_utf8_lossy(&body), 512),
+            )
+        })?;
+
+        // Best-effort forward; if the consumer has dropped we log and
+        // move on — the POST itself succeeded, which is what the caller
+        // is asking about.
+        if self.tx.send(HttpEvent::Message(value)).await.is_err() {
+            tracing::debug!(
+                target: "forge_mcp::transport::http",
+                "consumer dropped before POST response could be forwarded",
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Receive the next inbound event, or `None` only if the event
+    /// channel has been closed (which only happens if the handle itself
+    /// is being torn down — see note on [`HttpEvent`]).
+    pub async fn recv(&mut self) -> Option<HttpEvent> {
+        self.rx.recv().await
+    }
+}
+
+/// Translate the spec's string-keyed header map into a validated
+/// [`HeaderMap`]. Invalid names or values are reported with the offending
+/// key so misconfigurations surface at connect time rather than on the
+/// first request.
+fn build_header_map(raw: &BTreeMap<String, String>) -> Result<HeaderMap> {
+    let mut out = HeaderMap::with_capacity(raw.len());
+    for (k, v) in raw {
+        let name = HeaderName::try_from(k.as_str())
+            .with_context(|| format!("invalid header name {k:?}"))?;
+        let value = HeaderValue::try_from(v.as_str())
+            .with_context(|| format!("invalid header value for {k:?}"))?;
+        out.insert(name, value);
+    }
+    Ok(out)
+}
+
+/// Drive the SSE reader indefinitely. Each iteration opens a GET and
+/// streams frames until the body ends or an error surfaces, then sleeps
+/// with exponential backoff before retrying. The loop exits only when
+/// [`mpsc::Sender::send`] returns `Err`, meaning the consumer has
+/// dropped [`Http`].
+async fn sse_reader_loop(
+    client: reqwest::Client,
+    url: String,
+    headers: HeaderMap,
+    tx: mpsc::Sender<HttpEvent>,
+) {
+    let mut delay = INITIAL_RECONNECT_DELAY;
+
+    loop {
+        match open_and_read_sse(&client, &url, &headers, &tx).await {
+            Ok(ReaderExit::ConsumerDropped) => {
+                // Nothing left to feed — quit cleanly.
+                return;
+            }
+            Ok(ReaderExit::StreamEnded) => {
+                // Clean server disconnect. Reset the delay so the next
+                // reconnect is fast, then reconnect immediately.
+                delay = INITIAL_RECONNECT_DELAY;
+                tracing::debug!(
+                    target: "forge_mcp::transport::http",
+                    url = %url,
+                    "SSE stream ended cleanly; reconnecting",
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "forge_mcp::transport::http",
+                    url = %url,
+                    error = %err,
+                    "SSE read failed; backing off before reconnect",
+                );
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(MAX_RECONNECT_DELAY);
+            }
+        }
+    }
+}
+
+enum ReaderExit {
+    /// The event channel was closed by the consumer dropping [`Http`].
+    ConsumerDropped,
+    /// The HTTP response body ended normally; we should reconnect.
+    StreamEnded,
+}
+
+/// One pass over an SSE connection: open the GET, stream bytes, split
+/// into events, forward JSON frames. Returns on clean end or surfaces
+/// any error up to the reconnect loop for backoff.
+async fn open_and_read_sse(
+    client: &reqwest::Client,
+    url: &str,
+    headers: &HeaderMap,
+    tx: &mpsc::Sender<HttpEvent>,
+) -> Result<ReaderExit> {
+    let resp = client
+        .get(url)
+        .headers(headers.clone())
+        .header(ACCEPT, "text/event-stream")
+        .send()
+        .await
+        .with_context(|| format!("GET {url} for SSE stream"))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(anyhow!("GET {url} returned HTTP {status}"));
+    }
+
+    let mut stream = resp.bytes_stream();
+    // Accumulator across network chunks. SSE frames are separated by
+    // `\n\n` and a frame can span multiple TCP reads.
+    let mut buf: Vec<u8> = Vec::with_capacity(1024);
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("reading SSE chunk from {url}"))?;
+        buf.extend_from_slice(&chunk);
+
+        while let Some(end) = find_event_boundary(&buf) {
+            let raw_event = buf.drain(..end.frame_end).collect::<Vec<u8>>();
+            // Strip the trailing delimiter bytes from the slice we parse.
+            let event_bytes = &raw_event[..raw_event.len() - end.delim_len];
+
+            if let Some(payload) = parse_event_data(event_bytes) {
+                match serde_json::from_str::<serde_json::Value>(&payload) {
+                    Ok(value) => {
+                        if tx.send(HttpEvent::Message(value)).await.is_err() {
+                            return Ok(ReaderExit::ConsumerDropped);
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "forge_mcp::transport::http",
+                            error = %err,
+                            payload = %truncate(&payload, 512),
+                            "dropping malformed SSE JSON frame",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(ReaderExit::StreamEnded)
+}
+
+/// Record of where one SSE event ends in the read buffer.
+struct EventBoundary {
+    /// Index in the buffer one past the end of the frame delimiter — what
+    /// you pass to `drain(..frame_end)` to consume the event plus its
+    /// separator.
+    frame_end: usize,
+    /// Width of the delimiter found (2 for `\n\n`, 4 for `\r\n\r\n`). The
+    /// caller trims this many bytes off the drained slice before parsing
+    /// so the event body itself has no trailing blank line.
+    delim_len: usize,
+}
+
+/// Scan `buf` for the first SSE event boundary. Per RFC-like SSE, events
+/// are separated by a blank line, which may be `\n\n` (Unix servers) or
+/// `\r\n\r\n` (wire-spec-compliant). Returns `None` when no full event
+/// has arrived yet.
+fn find_event_boundary(buf: &[u8]) -> Option<EventBoundary> {
+    // Prefer the 4-byte CRLF delimiter when both are present at the same
+    // offset, so we don't split a `\r\n\r\n` into two `\n\n` events.
+    let crlf = buf.windows(4).position(|w| w == b"\r\n\r\n");
+    let lf = buf.windows(2).position(|w| w == b"\n\n");
+    match (crlf, lf) {
+        (Some(c), Some(l)) if c <= l => Some(EventBoundary {
+            frame_end: c + 4,
+            delim_len: 4,
+        }),
+        (_, Some(l)) => Some(EventBoundary {
+            frame_end: l + 2,
+            delim_len: 2,
+        }),
+        (Some(c), None) => Some(EventBoundary {
+            frame_end: c + 4,
+            delim_len: 4,
+        }),
+        (None, None) => None,
+    }
+}
+
+/// Extract the concatenated `data:` payload from one SSE event. Non-data
+/// lines (`event:`, `id:`, comments starting with `:`, retry hints) are
+/// ignored — JSON-RPC frames only care about `data:`. Multi-line `data`
+/// fields are joined with `\n` per the SSE spec.
+fn parse_event_data(event_bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(event_bytes).ok()?;
+    let mut data = String::new();
+    let mut had_data = false;
+    for line in text.split('\n') {
+        // Tolerate \r-terminated lines emitted by CRLF servers.
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.is_empty() || line.starts_with(':') {
+            continue;
+        }
+        // `data: foo` or `data:foo` — strip the prefix and an optional
+        // single leading space. Ignore other field names entirely.
+        if let Some(rest) = line.strip_prefix("data:") {
+            let rest = rest.strip_prefix(' ').unwrap_or(rest);
+            if had_data {
+                data.push('\n');
+            }
+            data.push_str(rest);
+            had_data = true;
+        }
+    }
+    if had_data {
+        Some(data)
+    } else {
+        None
+    }
+}
+
+/// Cap a log field at `max` bytes on a char boundary so a runaway frame
+/// can't flood the log ring.
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    for (i, _) in s.char_indices() {
+        if i > max {
+            break;
+        }
+        end = i;
+    }
+    format!("{}…", &s[..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_stdio_spec() {
+        let spec = McpServerSpec {
+            kind: ServerKind::Stdio {
+                command: "/bin/true".to_string(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+            },
+        };
+        // `connect` is async; we only need the validation path, so drive
+        // it on a current-thread runtime.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let err = rt
+            .block_on(Http::connect(&spec))
+            .expect_err("stdio spec must reject");
+        assert!(
+            format!("{err:#}").contains("stdio"),
+            "error should explain transport mismatch: {err:#}"
+        );
+    }
+
+    #[test]
+    fn build_header_map_round_trips_common_headers() {
+        let mut raw = BTreeMap::new();
+        raw.insert("Authorization".to_string(), "Bearer abc123".to_string());
+        raw.insert("X-Tenant".to_string(), "forge".to_string());
+        let map = build_header_map(&raw).expect("valid headers");
+        assert_eq!(map.get("authorization").unwrap(), "Bearer abc123");
+        assert_eq!(map.get("x-tenant").unwrap(), "forge");
+    }
+
+    #[test]
+    fn build_header_map_rejects_invalid_name() {
+        let mut raw = BTreeMap::new();
+        raw.insert("bad header".to_string(), "x".to_string());
+        let err = build_header_map(&raw).expect_err("space in name must reject");
+        assert!(
+            format!("{err:#}").contains("bad header"),
+            "error should name the bad header: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_event_data_joins_multi_line_data() {
+        let frame = b"event: note\ndata: {\"a\":1,\ndata: \"b\":2}";
+        let payload = parse_event_data(frame).expect("data field");
+        assert_eq!(payload, "{\"a\":1,\n\"b\":2}");
+    }
+
+    #[test]
+    fn parse_event_data_ignores_comments_and_non_data_lines() {
+        let frame = b": keepalive\nid: 42\nretry: 5000\ndata: {\"ok\":true}";
+        let payload = parse_event_data(frame).expect("data field");
+        assert_eq!(payload, "{\"ok\":true}");
+    }
+
+    #[test]
+    fn parse_event_data_returns_none_without_data_field() {
+        let frame = b"event: heartbeat\nid: 7";
+        assert!(parse_event_data(frame).is_none());
+    }
+
+    #[test]
+    fn find_event_boundary_handles_lf_and_crlf() {
+        let lf = b"data: 1\n\ndata: 2\n\n";
+        let b = find_event_boundary(lf).expect("lf boundary");
+        assert_eq!(b.frame_end, 9);
+        assert_eq!(b.delim_len, 2);
+
+        let crlf = b"data: 1\r\n\r\ndata: 2\r\n\r\n";
+        let b = find_event_boundary(crlf).expect("crlf boundary");
+        assert_eq!(b.frame_end, 11);
+        assert_eq!(b.delim_len, 4);
+
+        assert!(find_event_boundary(b"data: partial\n").is_none());
+    }
+
+    #[test]
+    fn truncate_is_utf8_safe() {
+        let s = "a".repeat(600) + "é";
+        let out = truncate(&s, 300);
+        assert!(out.ends_with('…'));
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+}
