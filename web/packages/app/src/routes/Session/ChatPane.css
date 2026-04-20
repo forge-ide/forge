@@ -199,10 +199,26 @@
 
 .composer {
   flex: 0 0 auto;
+  position: relative;
   border-top: 1px solid var(--color-border-1);
   background: var(--color-surface-2);
   display: flex;
   flex-direction: column;
+}
+
+/* F-141: ctx-chips row — sits above the textarea and hosts inserted
+   `ContextChip` pills. Hidden visually (zero padding) when empty so the
+   composer layout doesn't reserve space before the user triggers the
+   picker. */
+.composer__ctx-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-4) 0;
+}
+
+.composer__ctx-chips--empty {
+  padding: 0;
 }
 
 .composer__textarea {

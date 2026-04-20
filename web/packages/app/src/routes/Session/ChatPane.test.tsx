@@ -13,7 +13,7 @@ import {
 import { setActiveSessionId } from '../../stores/session';
 import { resetApprovalsStore } from '../../stores/approvals';
 import { setInvokeForTesting } from '../../lib/tauri';
-import { ChatPane, MAX_COMPOSER_BYTES } from './ChatPane';
+import { ChatPane, Composer, MAX_COMPOSER_BYTES, removeAtSpan } from './ChatPane';
 
 const SID = 'session-chat-test' as SessionId;
 const invokeMock = vi.fn();
@@ -678,6 +678,139 @@ describe('Composer message-byte cap (F-080)', () => {
 // produces valid JSON, so removing the defensive try/catches in ChatPane
 // must not regress the path-extraction or rendering behavior.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// F-141: @-trigger + ContextPicker integration in the composer
+// ---------------------------------------------------------------------------
+//
+// The DoD requires: typing `@` opens the picker; selecting a result appends
+// a ContextChip to the `ctx-chips` row above the textarea AND removes the
+// `@text` span; Escape dismisses without inserting. Full keyboard coverage
+// for the picker itself lives in ContextPicker.test.tsx — these tests pin
+// the *composer-side* plumbing (trigger detection, chip row population,
+// textarea mutation on insert).
+describe('Composer @-trigger and ContextPicker integration (F-141)', () => {
+  it('does not render the picker while the textarea holds no `@` token', () => {
+    const { queryByTestId } = render(() => <ChatPane />);
+    expect(queryByTestId('context-picker')).not.toBeInTheDocument();
+  });
+
+  it('opens the picker when the user types `@`', () => {
+    const { getByTestId, queryByTestId } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+    // Typing `@` at the start of a fresh composer — the simplest trigger.
+    textarea.value = '@';
+    textarea.selectionStart = 1;
+    textarea.selectionEnd = 1;
+    fireEvent.input(textarea);
+    expect(queryByTestId('context-picker')).toBeInTheDocument();
+  });
+
+  it('closes the picker once the user types a space after `@`', () => {
+    const { getByTestId, queryByTestId } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+    textarea.value = '@foo';
+    textarea.selectionStart = 4;
+    textarea.selectionEnd = 4;
+    fireEvent.input(textarea);
+    expect(queryByTestId('context-picker')).toBeInTheDocument();
+    textarea.value = '@foo ';
+    textarea.selectionStart = 5;
+    textarea.selectionEnd = 5;
+    fireEvent.input(textarea);
+    expect(queryByTestId('context-picker')).not.toBeInTheDocument();
+  });
+
+  it('does not send the message when Enter is pressed while the picker is open', () => {
+    invokeMock.mockReset();
+    const { getByTestId } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+    textarea.value = '@foo';
+    textarea.selectionStart = 4;
+    textarea.selectionEnd = 4;
+    fireEvent.input(textarea);
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    const sendCalls = invokeMock.mock.calls.filter(
+      (c) => c[0] === 'session_send_message',
+    );
+    expect(sendCalls).toHaveLength(0);
+  });
+
+  it('renders the ctx-chips row above the textarea', () => {
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('ctx-chips')).toBeInTheDocument();
+  });
+
+  // DoD item 4: "selected result appends a `ContextChip` to `ctx-chips` row;
+  // the `@text` span is replaced". `removeAtSpan` is the pure-function half
+  // of that (the span removal + caret positioning). Unit-testing it directly
+  // decouples the invariant from the picker's async onPick wiring.
+  it('removeAtSpan removes an @token at the start of text and keeps the caret at 0', () => {
+    const result = removeAtSpan('@foo', 0, 4);
+    expect(result.text).toBe('');
+    expect(result.caret).toBe(0);
+  });
+
+  it('removeAtSpan removes an @token embedded in text and positions the caret at the join', () => {
+    const text = 'hello @foo world';
+    // caret sits just after "foo" — span is "@foo".
+    const result = removeAtSpan(text, 6, 10);
+    expect(result.text).toBe('hello  world');
+    expect(result.caret).toBe(6);
+  });
+
+  it('removeAtSpan preserves trailing text that was after the caret', () => {
+    const text = '@partial rest';
+    const result = removeAtSpan(text, 0, 8);
+    expect(result.text).toBe(' rest');
+    expect(result.caret).toBe(0);
+  });
+
+  // DoD item 4 end-to-end: render the Composer with a seeded category, open
+  // the picker via `@`, pick a result, and assert the chip lands in the
+  // ctx-chips row AND the `@text` span is removed from the textarea.
+  it('end-to-end: @-trigger → pick result → chip appears in ctx-chips, @text span removed', () => {
+    const items = {
+      file: [
+        { category: 'file' as const, label: 'alpha.ts', value: 'src/alpha.ts' },
+      ],
+    };
+    const { getByTestId, queryByTestId } = render(() => (
+      <Composer disabled={false} onSend={() => {}} items={items} />
+    ));
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+    textarea.value = 'pref @foo';
+    textarea.selectionStart = 9;
+    textarea.selectionEnd = 9;
+    fireEvent.input(textarea);
+    // Picker is open with the seeded file result.
+    expect(queryByTestId('context-picker')).toBeInTheDocument();
+    expect(queryByTestId('context-picker-result-0')).toBeInTheDocument();
+    // Click the first result.
+    fireEvent.mouseDown(getByTestId('context-picker-result-0'));
+    // Chip landed in the ctx-chips row with the picked label.
+    const chip = getByTestId('ctx-chip');
+    expect(chip).toHaveTextContent('alpha.ts');
+    // Picker closed.
+    expect(queryByTestId('context-picker')).not.toBeInTheDocument();
+    // `@text` span removed from the textarea.
+    expect(textarea.value).toBe('pref ');
+  });
+
+  it('Escape while picker is open dismisses without inserting a chip', () => {
+    const { getByTestId, queryByTestId } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+    textarea.value = '@foo';
+    textarea.selectionStart = 4;
+    textarea.selectionEnd = 4;
+    fireEvent.input(textarea);
+    expect(queryByTestId('context-picker')).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    // Picker must close, no chip inserted (chips row stays empty).
+    expect(queryByTestId('context-picker')).not.toBeInTheDocument();
+    expect(queryByTestId('ctx-chip')).not.toBeInTheDocument();
+  });
+});
+
 describe('args_json boundary contract (F-080)', () => {
   it('renders the path and uses it for whitelist matching when args is a path-bearing object', () => {
     pushEvent(SID, {
