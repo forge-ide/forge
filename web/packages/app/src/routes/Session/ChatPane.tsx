@@ -51,16 +51,17 @@ function reportInvokeError(sessionId: SessionId, command: string, err: unknown):
  * One-line arg summary for the collapsed tool-call card (F-041). Path-taking
  * tools (fs.read / fs.write / fs.edit / shell.exec) render their `path` whole;
  * anything else gets `JSON.stringify(args)` capped near 60 chars with an
- * ellipsis. Unparseable args_json returns null — the component skips the span
- * via `<Show>`, so malformed payloads never crash the card.
+ * ellipsis.
+ *
+ * F-080 item 6: `args_json` is produced exclusively by `fromRustEvent`
+ * (`ipc/events.ts`) via `JSON.stringify(ev['args'] ?? null)`, so it is
+ * guaranteed to be valid JSON at this boundary. The previous defensive
+ * `try { JSON.parse } catch { return null }` was cognitive overhead with no
+ * risk reduction; relying on the boundary contract collapses three sites in
+ * this file to a single `JSON.parse` per call.
  */
 function summarizeArgs(argsJson: string): string | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(argsJson);
-  } catch {
-    return null;
-  }
+  const parsed = JSON.parse(argsJson) as unknown;
   if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
     const path = (parsed as Record<string, unknown>)['path'];
     if (typeof path === 'string' && path.length > 0) {
@@ -71,6 +72,23 @@ function summarizeArgs(argsJson: string): string | null {
   if (stringified === undefined) return null;
   const MAX = 60;
   return stringified.length > MAX ? stringified.slice(0, MAX - 1) + '…' : stringified;
+}
+
+/**
+ * Extract a `path` field from a tool call's `args_json` if present.
+ *
+ * F-080 item 6: shares the boundary contract documented on `summarizeArgs` —
+ * `args_json` is always valid JSON. Returns `''` when the parsed value is not
+ * an object with a string `path` field (e.g. `null`, an array, or a
+ * non-path-taking tool).
+ */
+function extractPath(argsJson: string): string {
+  const parsed = JSON.parse(argsJson) as unknown;
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    const path = (parsed as Record<string, unknown>)['path'];
+    if (typeof path === 'string') return path;
+  }
+  return '';
 }
 
 const ToolCallCard: Component<{ turn: Extract<ChatTurn, { type: 'tool_placeholder' }> }> = (
@@ -84,13 +102,7 @@ const ToolCallCard: Component<{ turn: Extract<ChatTurn, { type: 'tool_placeholde
     const id = sessionId();
     if (!id) return null;
     if (props.turn.status !== 'awaiting-approval') return null;
-    let path = '';
-    try {
-      const args = JSON.parse(props.turn.args_json) as Record<string, unknown>;
-      if (typeof args['path'] === 'string') path = args['path'];
-    } catch {
-      // ignore
-    }
+    const path = extractPath(props.turn.args_json);
     const wl = getApprovalWhitelist(id);
     const keys = new Set(Object.keys(wl.entries));
     return matchWhitelistKey(keys, props.turn.tool_name, path);
@@ -126,13 +138,7 @@ const ToolCallCard: Component<{ turn: Extract<ChatTurn, { type: 'tool_placeholde
 
     // Record whitelist for scopes > Once
     if (scope !== 'Once') {
-      let path = '';
-      try {
-        const args = JSON.parse(props.turn.args_json) as Record<string, unknown>;
-        if (typeof args['path'] === 'string') path = args['path'];
-      } catch {
-        // ignore
-      }
+      const path = extractPath(props.turn.args_json);
       addWhitelistEntry(id, scope, props.turn.tool_name, path, pattern);
     }
 
@@ -258,8 +264,25 @@ const ErrorTurn: Component<{ turn: Extract<ChatTurn, { type: 'error' }> }> = (pr
 // Composer
 // ---------------------------------------------------------------------------
 
+/// F-080 item 5: composer-side message-byte cap. The Rust side
+/// (`forge-shell::ipc::session_send_message`) enforces a 128 KiB cap on the
+/// UTF-8 byte length of `text`; capping at 100 KiB on the TS side gives the
+/// user feedback before the IPC round trip and stays comfortably below the
+/// backend cap so a marginal extra prompt token does not race the boundary.
+/// `TextEncoder` measures UTF-8 bytes (matching the Rust check) — `String.length`
+/// would return UTF-16 code units and be wrong for non-BMP input.
+export const MAX_COMPOSER_BYTES = 100 * 1024;
+
+function utf8ByteLength(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
 const Composer: Component<{ disabled: boolean; onSend: (text: string) => void }> = (props) => {
   const [text, setText] = createSignal('');
+
+  // Byte length of the *trimmed* value because that is what we actually send.
+  const trimmedByteLength = createMemo(() => utf8ByteLength(text().trim()));
+  const overCap = createMemo(() => trimmedByteLength() > MAX_COMPOSER_BYTES);
 
   const handleKeyDown = (e: KeyboardEvent) => {
     if (e.key !== 'Enter') return;
@@ -270,6 +293,9 @@ const Composer: Component<{ disabled: boolean; onSend: (text: string) => void }>
     e.preventDefault();
     const value = text().trim();
     if (!value) return;
+    // Block the send if the trimmed payload is over the byte cap. The
+    // inline warning in the bar tells the user *why* nothing happened.
+    if (utf8ByteLength(value) > MAX_COMPOSER_BYTES) return;
     props.onSend(value);
     setText('');
   };
@@ -285,11 +311,28 @@ const Composer: Component<{ disabled: boolean; onSend: (text: string) => void }>
         onInput={(e) => setText(e.currentTarget.value)}
         onKeyDown={handleKeyDown}
         rows={3}
+        aria-invalid={overCap() ? true : undefined}
       />
       <div class="composer__bar">
         <span class="composer__hints">
-          <span class="composer__hint">@ for context</span>
-          <span class="composer__hint">/ for commands</span>
+          <Show
+            when={overCap()}
+            fallback={
+              <>
+                <span class="composer__hint">@ for context</span>
+                <span class="composer__hint">/ for commands</span>
+              </>
+            }
+          >
+            <span
+              class="composer__hint composer__hint--warning"
+              data-testid="composer-overflow-warning"
+              role="status"
+            >
+              Message is {trimmedByteLength().toLocaleString()} bytes — over the{' '}
+              {MAX_COMPOSER_BYTES.toLocaleString()}-byte limit. Trim before sending.
+            </span>
+          </Show>
         </span>
         <div class="composer__actions">
           <Show when={props.disabled}>

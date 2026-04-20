@@ -50,6 +50,19 @@ pub struct ApprovalPreview {
 /// Steps: size cap → reject symlinks → canonicalize → enforce `allowed_paths`
 /// glob → refuse if the parent dir is missing → write `content` to a sibling
 /// `NamedTempFile` → `persist` (atomic rename on the same filesystem).
+///
+/// # Canonicalization policy (write vs read asymmetry)
+///
+/// Unlike [`crate::read_file`], which uses strict [`std::fs::canonicalize`],
+/// `write` uses [`crate::canonicalize_no_symlink`] — a lenient helper that
+/// canonicalizes the parent directory and joins the file name, so a
+/// not-yet-existing leaf is permitted. This is required for the
+/// file-creation case; without it `fs.write` could only ever overwrite
+/// existing files. Symlink rejection is preserved by walking every path
+/// component and rejecting any that is itself a symlink, before joining the
+/// new leaf onto the canonical parent. The trust boundary remains loud:
+/// `enforce_allowed` glob-matches the resolved path, so `..` traversal is
+/// still rejected — only the "leaf must exist" requirement is relaxed.
 pub fn write(
     path: &str,
     content: &str,
@@ -100,6 +113,17 @@ pub fn write(
 /// path. Rejects source files larger than `limits.max_read_bytes` before
 /// reading them into RAM, and delegates post-patch size enforcement to
 /// [`write()`]. Writes atomically. Requires the target to exist.
+///
+/// # Canonicalization policy (edit vs read asymmetry)
+///
+/// `edit` uses the same lenient [`crate::canonicalize_no_symlink`] as
+/// [`write()`] (not the strict [`std::fs::canonicalize`] used by
+/// [`crate::read_file`]) so the helper is shared across both mutation paths.
+/// `edit` then explicitly re-asserts that the canonical target *is* a file
+/// via the `canonical.is_file()` check below — distinct from the read path,
+/// which fails earlier in canonicalization itself. The threat model is the
+/// same as `write`: symlink components are rejected pre-canonicalization,
+/// and `enforce_allowed` glob-matches the resolved path.
 pub fn edit(
     path: &str,
     patch: &str,

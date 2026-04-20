@@ -261,6 +261,13 @@
   color: var(--color-text-tertiary);
 }
 
+/* F-080 item 5: composer-byte-cap warning. Replaces the standard hint row
+ * when the trimmed payload exceeds MAX_COMPOSER_BYTES so the user knows
+ * why bare-Enter is silently no-oping. */
+.composer__hint--warning {
+  color: var(--color-warning);
+}
+
 .composer__actions {
   display: flex;
   align-items: center;
