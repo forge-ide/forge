@@ -75,9 +75,14 @@ pub fn run() -> Result<()> {
             crate::ipc::get_persistent_approvals,
             crate::ipc::save_approval,
             crate::ipc::remove_approval,
+            crate::ipc::terminal_spawn,
+            crate::ipc::terminal_write,
+            crate::ipc::terminal_resize,
+            crate::ipc::terminal_kill,
         ])
         .setup(|app| {
             crate::ipc::manage_bridge(&app.handle().clone());
+            crate::ipc::manage_terminals(&app.handle().clone());
             let manager = WindowManager::new(app.handle().clone());
             manager.open_dashboard()?;
             Ok(())

@@ -79,6 +79,12 @@ id_type!(MessageId);
 // entry points (SessionId is gated by `^[0-9a-f]{16}$` per F-057/F-063).
 id_type!(ToolCallId, 16);
 id_type!(AgentInstanceId);
+// F-125: identifies a terminal session within a single session window.
+// 64-bit entropy is sufficient — the id space is per-window (each `session-*`
+// webview owns its own `TerminalRegistry`), never serialized to disk, and the
+// command handlers verify the calling webview owns the terminal before each
+// operation. See `forge-shell::ipc::TerminalRegistry`.
+id_type!(TerminalId);
 
 #[cfg(test)]
 mod tests {

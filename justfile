@@ -67,12 +67,21 @@ check: check-rust check-web
 test-rust:
     cargo test --all
 
+# Tauri webview integration tests. Gated on the `webview-test` feature
+# because `tauri::test::mock_builder` pulls in the full Tauri runtime; keeping
+# it off `test-rust`'s default build lets hosts without WebKitGTK headers
+# still run the pure-Rust suite. Covers:
+#   - forge-shell/tests/ipc_*.rs           (F-020 / F-051 / F-068 / F-069 / F-125)
+#   - forge-shell/tests/approval_commands.rs (F-036)
+test-rust-webview:
+    cargo test -p forge-shell --features webview-test
+
 # Web test suite.
 test-web:
     cd web && pnpm -r test
 
 # Both lanes.
-test: test-rust test-web
+test: test-rust test-rust-webview test-web
 
 # Verify generated TS bindings are in sync with Rust types. ts-rs emits the
 # TS files as a side effect of `cargo build` (see forge-core/src/ids.rs `ts`

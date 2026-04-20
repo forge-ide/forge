@@ -25,6 +25,7 @@ dirs = "5"
 forge-core = { path = "../forge-core" }
 forge-ipc = { path = "../forge-ipc" }
 forge-providers = { path = "../forge-providers" }
+forge-term = { path = "../forge-term" }
 # `rc`: `SessionEventPayload.event` embeds `forge_core::Event`, whose hot
 # variants carry `Arc<str>` fields (F-112). `rc` lets serde serialize those
 # without `ArcStr` workarounds; the payload is Serialize-only so this is

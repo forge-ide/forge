@@ -20,15 +20,17 @@
 //! `session_subscribe` (already label-authenticated), not re-read from the
 //! event payload.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use forge_core::approvals::{
     load_user_config_in, load_workspace_config, save_user_config_in, save_workspace_config,
     ApprovalConfig, ApprovalEntry,
 };
-use forge_core::{ApprovalLevel, ApprovalScope, RerunVariant};
+use forge_core::{ApprovalLevel, ApprovalScope, RerunVariant, TerminalId};
 use forge_ipc::HelloAck;
+use forge_term::{ShellSpec, TerminalEvent, TerminalSession, TerminalSize};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, EventTarget, Manager, Runtime, State, Webview};
 use ts_rs::TS;
@@ -75,6 +77,18 @@ pub(crate) const MAX_MESSAGE_ID_BYTES: usize = 64;
 pub(crate) const MAX_WORKSPACE_ROOT_BYTES: usize = 4096;
 pub(crate) const MAX_SCOPE_KEY_BYTES: usize = 4096;
 pub(crate) const MAX_APPROVAL_ENTRY_BYTES: usize = 8 * 1024;
+
+/// F-125: caps on untyped-string / byte-vec inputs to the terminal commands.
+/// `cwd` is an absolute fs path — same 4 KiB PATH_MAX envelope as the approval
+/// commands' `workspace_root`. `shell` (optional program override) is bounded
+/// generously since some exotic shells live under deep paths. `data` is the
+/// per-call input write cap — most terminal input frames are well under this,
+/// but pastes can be large; 64 KiB matches common terminal emulator paste
+/// chunks without letting a compromised webview loop PTY writes at full wire
+/// speed.
+pub(crate) const MAX_TERMINAL_CWD_BYTES: usize = 4096;
+pub(crate) const MAX_TERMINAL_SHELL_BYTES: usize = 4096;
+pub(crate) const MAX_TERMINAL_WRITE_BYTES: usize = 64 * 1024;
 
 /// F-068 / L4 (T7): error returned when a session command's untyped-string
 /// input exceeds its byte cap. Tests assert against the literal fragments
@@ -363,6 +377,10 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         get_persistent_approvals,
         save_approval,
         remove_approval,
+        terminal_spawn,
+        terminal_write,
+        terminal_resize,
+        terminal_kill,
     ])
 }
 
@@ -370,6 +388,16 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
 pub fn manage_bridge<R: Runtime>(app: &AppHandle<R>) {
     if app.try_state::<BridgeState>().is_none() {
         app.manage(BridgeState::new(SessionConnections::new()));
+    }
+}
+
+/// Attach the `TerminalState` to an app builder. Used by `window_manager::run`
+/// and by integration tests. Idempotent — if state is already present it is a
+/// no-op, so test helpers that call both `build_invoke_handler` (for command
+/// registration) and this function cannot double-initialize.
+pub fn manage_terminals<R: Runtime>(app: &AppHandle<R>) {
+    if app.try_state::<TerminalState>().is_none() {
+        app.manage(TerminalState::default());
     }
 }
 
@@ -605,4 +633,315 @@ pub(crate) fn require_window_label_in<R: Runtime>(
         return Ok(());
     }
     Err(LABEL_MISMATCH_ERROR.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// F-125: Terminal commands (spawn / write / resize / kill)
+//
+// Scope. Four Tauri commands let a session webview drive a PTY-backed shell
+// via `forge-term::TerminalSession`. Each spawned session is owned by exactly
+// one webview label (the label that called `terminal_spawn`), and every
+// subsequent write/resize/kill from a *different* label is rejected with the
+// standard label-mismatch error. This is the F-051 invariant lifted to the
+// terminal axis: a session-A webview cannot steer session-B's terminals.
+//
+// Event model. Bytes flow out on a per-webview Tauri event named
+// `terminal:bytes`. Each payload carries the `terminal_id` so the JS renderer
+// can fan out to the right xterm.js instance. Exit events carry a distinct
+// `code` + `killed_by_drop` shape; the renderer uses them to detach the pane.
+// The emit target is always `EventTarget::webview_window(owner_label)` — the
+// label is stored at spawn time and never re-read from a payload, mirroring
+// the `AppHandleSink` / F-062 discipline for session events.
+//
+// State. `TerminalState` is a Tauri-managed `Mutex<HashMap<TerminalId,
+// TerminalEntry>>`. `TerminalEntry` holds the live `TerminalSession` plus the
+// owning webview label. Drop on removal SIGTERMs the child (via forge-term's
+// `impl Drop`).
+// ---------------------------------------------------------------------------
+
+/// Per-terminal metadata tracked by [`TerminalState`]. The `TerminalSession`
+/// drops the child on removal; `owner_label` is the label of the webview that
+/// spawned the terminal and is the *only* label permitted to subsequently
+/// write/resize/kill it.
+pub(crate) struct TerminalEntry {
+    pub(crate) session: TerminalSession,
+    pub(crate) owner_label: String,
+}
+
+/// Tauri-managed registry of live terminals. Scoped per app (one instance per
+/// Tauri `App`), keyed by [`TerminalId`]. Internally a `Mutex<HashMap<..>>`:
+/// every command path grabs the lock briefly, never across an `await`.
+#[derive(Default)]
+pub struct TerminalState {
+    entries: Mutex<HashMap<TerminalId, TerminalEntry>>,
+}
+
+impl TerminalState {
+    fn insert(&self, id: TerminalId, entry: TerminalEntry) {
+        let mut guard = self.entries.lock().expect("terminal state poisoned");
+        guard.insert(id, entry);
+    }
+
+    /// Remove the terminal at `id`, returning its `TerminalSession`. Dropping
+    /// the returned session SIGTERMs the child (see forge-term `impl Drop`).
+    fn remove_owned_by(
+        &self,
+        id: &TerminalId,
+        caller_label: &str,
+    ) -> Result<TerminalSession, String> {
+        let mut guard = self.entries.lock().expect("terminal state poisoned");
+        let Some(entry) = guard.get(id) else {
+            return Err(format!("unknown terminal id: {id}"));
+        };
+        if entry.owner_label != caller_label {
+            return Err(LABEL_MISMATCH_ERROR.to_string());
+        }
+        // Safe to remove: ownership matches. `remove` returns the entry.
+        let entry = guard.remove(id).expect("presence checked above");
+        Ok(entry.session)
+    }
+
+    /// Run `op` against the terminal at `id`, validating that `caller_label`
+    /// owns it first. The closure receives a `&mut TerminalSession` so it can
+    /// call `write` / `resize`. Returns the op's result; if ownership does not
+    /// match, returns the label-mismatch error before touching the session.
+    fn with_owned_session_mut<F, T>(
+        &self,
+        id: &TerminalId,
+        caller_label: &str,
+        op: F,
+    ) -> Result<T, String>
+    where
+        F: FnOnce(&mut TerminalSession) -> Result<T, String>,
+    {
+        let mut guard = self.entries.lock().expect("terminal state poisoned");
+        let Some(entry) = guard.get_mut(id) else {
+            return Err(format!("unknown terminal id: {id}"));
+        };
+        if entry.owner_label != caller_label {
+            return Err(LABEL_MISMATCH_ERROR.to_string());
+        }
+        op(&mut entry.session)
+    }
+}
+
+/// Wire-format arguments for `terminal_spawn`. `shell` is optional; when
+/// absent the shell picks `$SHELL` (or `/bin/sh` on unix / `cmd.exe` on
+/// windows). `cols`/`rows` mirror `TerminalSize`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct TerminalSpawnArgs {
+    pub terminal_id: TerminalId,
+    /// Optional shell program override. When `None`, resolved per-platform via
+    /// `$SHELL` → `/bin/sh` / `cmd.exe`.
+    pub shell: Option<String>,
+    /// Working directory for the spawned shell. Must be an existing directory
+    /// readable to the forge-shell process.
+    pub cwd: String,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// Event payload emitted on the `terminal:bytes` channel. `data` is a byte
+/// buffer; on the JS side it is a `number[]` that xterm.js consumes via
+/// `terminal.write(new Uint8Array(data))`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct TerminalBytesEvent {
+    pub terminal_id: TerminalId,
+    pub data: Vec<u8>,
+}
+
+/// Event payload emitted on the `terminal:exit` channel when the underlying
+/// child reaps. `code` is `Some(n)` for a normal exit; `None` when the
+/// process was killed by signal (Unix) or the exit code was otherwise
+/// unavailable. `killed_by_drop` is `true` when `terminal_kill` (or pane
+/// teardown) initiated the termination, so the renderer can distinguish a
+/// user-issued `exit` from a container detach.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct TerminalExitEvent {
+    pub terminal_id: TerminalId,
+    pub code: Option<i32>,
+    pub killed_by_drop: bool,
+}
+
+/// Event name emitted on every raw PTY chunk. Consumed by the JS side via
+/// `listen<TerminalBytesEvent>('terminal:bytes', ...)`.
+pub const TERMINAL_BYTES_EVENT: &str = "terminal:bytes";
+/// Event name emitted once per terminal when the child reaps.
+pub const TERMINAL_EXIT_EVENT: &str = "terminal:exit";
+
+/// Resolve the default shell when the webview did not specify one. Honors
+/// `$SHELL` first, then falls back to the platform's POSIX/NT default.
+fn default_shell() -> String {
+    if let Ok(s) = std::env::var("SHELL") {
+        if !s.is_empty() {
+            return s;
+        }
+    }
+    if cfg!(windows) {
+        "cmd.exe".to_string()
+    } else {
+        "/bin/sh".to_string()
+    }
+}
+
+/// Forward every `TerminalEvent` from a `forge-term` receiver to the owning
+/// webview. Spawned as a tokio task inside `terminal_spawn`. Terminates when
+/// the sender (held by `TerminalSession`) drops — either via `terminal_kill`
+/// or when the child reaps naturally.
+fn spawn_event_forwarder<R: Runtime>(
+    app: AppHandle<R>,
+    owner_label: String,
+    terminal_id: TerminalId,
+    mut rx: tokio::sync::mpsc::Receiver<TerminalEvent>,
+) {
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            match event {
+                TerminalEvent::Bytes(data) => {
+                    let payload = TerminalBytesEvent {
+                        terminal_id: terminal_id.clone(),
+                        data,
+                    };
+                    let target = EventTarget::webview_window(&owner_label);
+                    if let Err(e) = app.emit_to(target, TERMINAL_BYTES_EVENT, payload) {
+                        eprintln!("terminal:bytes emit failed: {e}");
+                    }
+                }
+                TerminalEvent::Exit(status) => {
+                    let payload = TerminalExitEvent {
+                        terminal_id: terminal_id.clone(),
+                        code: status.code,
+                        killed_by_drop: status.killed_by_drop,
+                    };
+                    let target = EventTarget::webview_window(&owner_label);
+                    if let Err(e) = app.emit_to(target, TERMINAL_EXIT_EVENT, payload) {
+                        eprintln!("terminal:exit emit failed: {e}");
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Spawn a new PTY-backed terminal. The calling webview's label is recorded
+/// as the terminal's owner; all subsequent commands targeting this
+/// `terminal_id` are rejected unless they come from the same webview.
+///
+/// Errors:
+/// - label not `session-*` → `forbidden: window label mismatch`
+///   (see `LABEL_MISMATCH_ERROR` in this module)
+/// - oversize `cwd` / `shell` → size-cap error
+/// - duplicate `terminal_id` → `"terminal id already registered"`
+/// - shell spawn failure → surface the `forge-term` error
+#[tauri::command]
+pub async fn terminal_spawn<R: Runtime>(
+    args: TerminalSpawnArgs,
+    app: AppHandle<R>,
+    webview: Webview<R>,
+    state: State<'_, TerminalState>,
+) -> Result<(), String> {
+    // F-125: terminals are session-scoped. Dashboard and any other label is
+    // rejected. This mirrors the chat-pane authz shape on the terminal axis.
+    require_window_label_in(&webview, &[], true)?;
+
+    require_size("cwd", &args.cwd, MAX_TERMINAL_CWD_BYTES)?;
+    if let Some(shell) = args.shell.as_deref() {
+        require_size("shell", shell, MAX_TERMINAL_SHELL_BYTES)?;
+    }
+
+    // Reject duplicate ids early so a caller re-using an id doesn't leak a
+    // zombie registration.
+    {
+        let guard = state.entries.lock().expect("terminal state poisoned");
+        if guard.contains_key(&args.terminal_id) {
+            return Err(format!(
+                "terminal id already registered: {id}",
+                id = args.terminal_id
+            ));
+        }
+    }
+
+    let program = args.shell.unwrap_or_else(default_shell);
+    let spec = ShellSpec::new(program);
+    let cwd = PathBuf::from(&args.cwd);
+    let size = TerminalSize {
+        cols: args.cols,
+        rows: args.rows,
+    };
+
+    let owner_label = webview.label().to_string();
+    let terminal_id = args.terminal_id.clone();
+
+    let (session, rx) = TerminalSession::spawn(spec, cwd, size).map_err(|e| e.to_string())?;
+
+    state.insert(
+        terminal_id.clone(),
+        TerminalEntry {
+            session,
+            owner_label: owner_label.clone(),
+        },
+    );
+
+    spawn_event_forwarder(app, owner_label, terminal_id, rx);
+
+    Ok(())
+}
+
+/// Write `data` to the PTY. The caller must own the terminal (its webview
+/// label must match the owner recorded at spawn).
+#[tauri::command]
+pub async fn terminal_write<R: Runtime>(
+    terminal_id: TerminalId,
+    data: Vec<u8>,
+    webview: Webview<R>,
+    state: State<'_, TerminalState>,
+) -> Result<(), String> {
+    require_window_label_in(&webview, &[], true)?;
+
+    if data.len() > MAX_TERMINAL_WRITE_BYTES {
+        return Err(payload_too_large("data", MAX_TERMINAL_WRITE_BYTES));
+    }
+
+    let caller_label = webview.label().to_string();
+    state.with_owned_session_mut(&terminal_id, &caller_label, |session| {
+        session.write(&data).map_err(|e| e.to_string())
+    })
+}
+
+/// Resize the PTY window to `(cols, rows)`. Caller must own the terminal.
+#[tauri::command]
+pub async fn terminal_resize<R: Runtime>(
+    terminal_id: TerminalId,
+    cols: u16,
+    rows: u16,
+    webview: Webview<R>,
+    state: State<'_, TerminalState>,
+) -> Result<(), String> {
+    require_window_label_in(&webview, &[], true)?;
+    let caller_label = webview.label().to_string();
+    state.with_owned_session_mut(&terminal_id, &caller_label, |session| {
+        session.resize(cols, rows).map_err(|e| e.to_string())
+    })
+}
+
+/// Tear down the terminal (drops the session → SIGTERM + reap). Caller must
+/// own the terminal. Emits a final `terminal:exit` event on the owner webview.
+#[tauri::command]
+pub async fn terminal_kill<R: Runtime>(
+    terminal_id: TerminalId,
+    webview: Webview<R>,
+    state: State<'_, TerminalState>,
+) -> Result<(), String> {
+    require_window_label_in(&webview, &[], true)?;
+    let caller_label = webview.label().to_string();
+    // Removing the entry drops its `TerminalSession` — forge-term's `impl Drop`
+    // SIGTERMs the child and joins the reaper thread, which emits the final
+    // `TerminalEvent::Exit` on the receiver that our forwarder converts into
+    // `terminal:exit`.
+    let session = state.remove_owned_by(&terminal_id, &caller_label)?;
+    drop(session);
+    Ok(())
 }

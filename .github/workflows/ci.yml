@@ -58,6 +58,14 @@ jobs:
       - name: Rust tests
         run: just test-rust
 
+      # Tauri webview integration tests (F-020 / F-051 / F-068 / F-069 /
+      # F-036 / F-125). Gated on the `webview-test` feature so the pure-Rust
+      # suite above can run on hosts without WebKitGTK; CI runners have the
+      # Tauri system deps installed earlier in this job, so enabling the
+      # feature here lights up these integration tests as a separate step.
+      - name: Rust webview integration tests
+        run: just test-rust-webview
+
       # Supply-chain hygiene (F-070, consolidated in F-115).
       # cargo deny is the single advisory scanner: it consults the RustSec
       # advisory DB (same source as cargo-audit) plus enforces licenses,
