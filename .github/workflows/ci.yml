@@ -58,18 +58,12 @@ jobs:
       - name: Rust tests
         run: just test-rust
 
-      # Supply-chain hygiene (F-070).
-      # cargo audit fails on any vulnerability advisory; unmaintained /
-      # unsound transitive deps are suppressed via deny.toml with expiry
-      # dates. See docs/dev/security.md for the suppression policy.
-      - name: cargo audit
-        uses: rustsec/audit-check@v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          denyWarnings: false
-
-      # cargo deny covers licenses, bans (multi-version warnings), advisory
-      # ignores with expiry dates, and source allowlists. Config: deny.toml.
+      # Supply-chain hygiene (F-070, consolidated in F-115).
+      # cargo deny is the single advisory scanner: it consults the RustSec
+      # advisory DB (same source as cargo-audit) plus enforces licenses,
+      # bans (multi-version warnings), and source allowlists. Advisory
+      # suppressions with reasons and expiry dates live in deny.toml.
+      # See docs/dev/security.md for the suppression policy.
       - name: cargo deny
         uses: EmbarkStudios/cargo-deny-action@v2
         with:

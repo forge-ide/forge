@@ -93,8 +93,7 @@ just ts-check       # verify web/packages/ipc/src/generated/ is in sync
 
 CI (`.github/workflows/ci.yml`) calls the same `just check-rust` / `test-rust`
 / `check-web` / `test-web` recipes, so green-locally == green-in-CI for
-everything except the supply-chain actions (cargo audit, cargo deny, pnpm
-audit).
+everything except the supply-chain actions (cargo deny, pnpm audit).
 
 Raw commands if you prefer them:
 

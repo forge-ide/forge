@@ -81,10 +81,11 @@ ts-check:
     git diff --exit-code web/packages/ipc/src/generated/
 
 # Supply-chain audits. Local use only; CI uses dedicated actions for caching
-# and for surfacing advisories as PR annotations.
-# Requires: cargo install cargo-audit cargo-deny
+# and for surfacing advisories as PR annotations. cargo-deny consults the
+# same RustSec advisory DB as cargo-audit while also enforcing licenses,
+# bans, and sources — see docs/dev/security.md.
+# Requires: cargo install cargo-deny
 audit:
-    cargo audit
     cargo deny check --all-features
     cd web && pnpm audit --audit-level moderate
 
