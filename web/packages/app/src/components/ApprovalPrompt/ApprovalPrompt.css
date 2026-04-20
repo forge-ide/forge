@@ -48,6 +48,56 @@
 }
 
 /* -------------------------------------------------------------------------
+   Persistence level toggle (F-036)
+   ---------------------------------------------------------------------- */
+
+.approval-prompt__level-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.approval-prompt__level-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.approval-prompt__level-btn {
+  padding: var(--sp-1) var(--sp-2);
+  background: transparent;
+  border: 1px solid var(--color-border-2);
+  border-radius: var(--r-sm);
+  font-family: var(--font-display);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: var(--ease);
+  line-height: 1;
+}
+
+.approval-prompt__level-btn:hover {
+  border-color: var(--color-text-secondary);
+  color: var(--color-text-primary);
+}
+
+.approval-prompt__level-btn:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
+}
+
+.approval-prompt__level-btn--active {
+  background: var(--color-surface-3);
+  border-color: var(--color-ember-400);
+  color: var(--color-ember-300);
+}
+
+/* -------------------------------------------------------------------------
    Pattern editor
    ---------------------------------------------------------------------- */
 

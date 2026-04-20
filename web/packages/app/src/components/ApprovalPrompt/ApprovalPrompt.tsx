@@ -5,7 +5,7 @@ import {
   onMount,
   onCleanup,
 } from 'solid-js';
-import type { ApprovalScope } from '@forge/ipc';
+import type { ApprovalScope, ApprovalLevel } from '@forge/ipc';
 import type { ApprovalPreview } from '../../stores/messages';
 import { defaultPatternForPath } from '../../stores/approvals';
 import './ApprovalPrompt.css';
@@ -21,7 +21,13 @@ export interface ApprovalPromptProps {
   preview: ApprovalPreview;
   /** Container element to attach keyboard listeners to (the card div). */
   containerRef: HTMLElement;
-  onApprove: (scope: ApprovalScope, pattern?: string) => void;
+  /**
+   * Approve handler. `scope` picks the whitelist-key shape (Once / ThisFile /
+   * ThisPattern / ThisTool); `level` picks the persistence tier (session /
+   * workspace / user). `level` is always `'session'` when `scope === 'Once'`
+   * because a one-shot approval has nothing to persist. F-036.
+   */
+  onApprove: (scope: ApprovalScope, level: ApprovalLevel, pattern?: string) => void;
   onReject: () => void;
 }
 
@@ -50,6 +56,8 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
   const [menuOpen, setMenuOpen] = createSignal(false);
   const [patternMode, setPatternMode] = createSignal(false);
   const [pattern, setPattern] = createSignal('');
+  // F-036: persistence level toggle. Defaults to `'session'` per DoD.
+  const [level, setLevel] = createSignal<ApprovalLevel>('session');
 
   // Capture the element that had focus before this prompt mounted so we can
   // restore focus to it on dismiss. Read synchronously during component setup,
@@ -74,7 +82,11 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
   const approveWithScope = (scope: ApprovalScope, pat?: string) => {
     setMenuOpen(false);
     setPatternMode(false);
-    props.onApprove(scope, pat);
+    // A one-shot approval has nothing to persist; collapse the tier to session
+    // regardless of which pill is active. Persistence only makes sense for
+    // scopes > Once.
+    const effectiveLevel: ApprovalLevel = scope === 'Once' ? 'session' : level();
+    props.onApprove(scope, effectiveLevel, pat);
   };
 
   // Focusable elements within the prompt root, in DOM order. Used by the
@@ -173,6 +185,52 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
       <div class="approval-prompt__preview" data-testid="approval-preview">
         <pre class="approval-prompt__preview-text">{props.preview.description}</pre>
       </div>
+
+      {/* F-036: persistence level toggle. Hidden in pattern-editor mode so
+          tab order stays predictable and the label-line stays clean. */}
+      <Show when={!patternMode()}>
+        <div
+          class="approval-prompt__level-toggle"
+          data-testid="level-toggle"
+          role="radiogroup"
+          aria-label="Persistence level"
+        >
+          <span class="approval-prompt__level-label">Persist:</span>
+          <button
+            type="button"
+            class="approval-prompt__level-btn"
+            classList={{ 'approval-prompt__level-btn--active': level() === 'session' }}
+            data-testid="level-session-btn"
+            role="radio"
+            aria-checked={level() === 'session'}
+            onClick={() => setLevel('session')}
+          >
+            Session
+          </button>
+          <button
+            type="button"
+            class="approval-prompt__level-btn"
+            classList={{ 'approval-prompt__level-btn--active': level() === 'workspace' }}
+            data-testid="level-workspace-btn"
+            role="radio"
+            aria-checked={level() === 'workspace'}
+            onClick={() => setLevel('workspace')}
+          >
+            Workspace
+          </button>
+          <button
+            type="button"
+            class="approval-prompt__level-btn"
+            classList={{ 'approval-prompt__level-btn--active': level() === 'user' }}
+            data-testid="level-user-btn"
+            role="radio"
+            aria-checked={level() === 'user'}
+            onClick={() => setLevel('user')}
+          >
+            User
+          </button>
+        </div>
+      </Show>
 
       {/* Pattern editor */}
       <Show when={patternMode()}>

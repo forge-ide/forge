@@ -1,8 +1,12 @@
 export type { AgentId } from './generated/AgentId';
 export type { AgentInstanceId } from './generated/AgentInstanceId';
+export type { ApprovalConfig } from './generated/ApprovalConfig';
+export type { ApprovalEntry } from './generated/ApprovalEntry';
+export type { ApprovalLevel } from './generated/ApprovalLevel';
 export type { ApprovalScope } from './generated/ApprovalScope';
 export type { CompactTrigger } from './generated/CompactTrigger';
 export type { MessageId } from './generated/MessageId';
+export type { PersistentApprovalEntry } from './generated/PersistentApprovalEntry';
 export type { ProviderId } from './generated/ProviderId';
 export type { RerunVariant } from './generated/RerunVariant';
 export type { RosterScope } from './generated/RosterScope';

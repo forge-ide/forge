@@ -20,11 +20,18 @@
 //! `session_subscribe` (already label-authenticated), not re-read from the
 //! event payload.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use forge_core::{ApprovalScope, RerunVariant};
+use forge_core::approvals::{
+    load_user_config_in, load_workspace_config, save_user_config_in, save_workspace_config,
+    ApprovalConfig, ApprovalEntry,
+};
+use forge_core::{ApprovalLevel, ApprovalScope, RerunVariant};
 use forge_ipc::HelloAck;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, EventTarget, Manager, Runtime, State, Webview};
+use ts_rs::TS;
 
 use crate::bridge::{EventSink, SessionBridge, SessionConnections, SessionEventPayload};
 
@@ -55,6 +62,19 @@ pub(crate) const MAX_REJECT_REASON_BYTES: usize = 1024;
 /// hex is 16 chars; 64 bytes leaves room for the wrapper/URL-safe variants
 /// without permitting unbounded growth if a compromised webview lies.
 pub(crate) const MAX_MESSAGE_ID_BYTES: usize = 64;
+
+/// F-036 / F-068 (L4 / T7): caps on untyped-string inputs to the persistent
+/// approval commands. `workspace_root` is an absolute filesystem path — 4096
+/// bytes covers PATH_MAX on every target platform (Linux 4096, macOS 1024,
+/// Windows 32 767 WTF-16 → bounded under 64 KiB). `scope_key` mirrors the
+/// deterministic keys produced by the frontend (`file:<tool>:<path>`,
+/// `pattern:<tool>:<glob>`, `tool:<name>`) so 4 KiB is well above any realistic
+/// value. `tool_name` and `label` stay small; we cap them together with a
+/// per-entry cap of 8 KiB to block oversized pseudo-entries before the bridge
+/// allocates TOML output.
+pub(crate) const MAX_WORKSPACE_ROOT_BYTES: usize = 4096;
+pub(crate) const MAX_SCOPE_KEY_BYTES: usize = 4096;
+pub(crate) const MAX_APPROVAL_ENTRY_BYTES: usize = 8 * 1024;
 
 /// F-068 / L4 (T7): error returned when a session command's untyped-string
 /// input exceeds its byte cap. Tests assert against the literal fragments
@@ -104,6 +124,11 @@ pub struct BridgeState {
     pub bridge: SessionBridge,
     #[cfg(feature = "webview-test")]
     pub test_socket_override: Option<std::path::PathBuf>,
+    /// F-036 test seam: redirect the user-scope approvals file to this
+    /// directory instead of the platform config dir. Mirrors
+    /// `test_socket_override`'s pattern — absent from production builds.
+    #[cfg(feature = "webview-test")]
+    pub test_user_config_dir_override: Option<std::path::PathBuf>,
 }
 
 impl BridgeState {
@@ -112,6 +137,8 @@ impl BridgeState {
             bridge: SessionBridge::new(connections),
             #[cfg(feature = "webview-test")]
             test_socket_override: None,
+            #[cfg(feature = "webview-test")]
+            test_user_config_dir_override: None,
         }
     }
 
@@ -127,6 +154,21 @@ impl BridgeState {
         Self {
             bridge: SessionBridge::new(connections),
             test_socket_override: Some(socket_path),
+            test_user_config_dir_override: None,
+        }
+    }
+
+    /// F-036 test-only constructor: override the user-scope config dir so tests
+    /// can point at a tempdir instead of the real `{config_dir}/forge/`.
+    #[cfg(feature = "webview-test")]
+    pub fn with_test_user_config_dir(
+        connections: SessionConnections,
+        user_config_dir: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            bridge: SessionBridge::new(connections),
+            test_socket_override: None,
+            test_user_config_dir_override: Some(user_config_dir),
         }
     }
 }
@@ -318,6 +360,9 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         session_approve_tool,
         session_reject_tool,
         rerun_message,
+        get_persistent_approvals,
+        save_approval,
+        remove_approval,
     ])
 }
 
@@ -326,4 +371,238 @@ pub fn manage_bridge<R: Runtime>(app: &AppHandle<R>) {
     if app.try_state::<BridgeState>().is_none() {
         app.manage(BridgeState::new(SessionConnections::new()));
     }
+}
+
+// ---------------------------------------------------------------------------
+// F-036: persistent approval commands
+//
+// Three Tauri commands surface the approvals config to the Solid store:
+//
+// - `get_persistent_approvals(workspace_root)` — loads both the user and
+//   workspace files, tags each entry with its level, and returns a flat list
+//   the store can seed its whitelist with. Workspace wins on `scope_key`
+//   collision (mirrors `forge-mcp::config::load_merged`).
+// - `save_approval(entry, level, workspace_root)` — upserts the entry into
+//   the matching file; no-op for `Session` (the frontend should not route
+//   session-level approvals through IPC, but we handle it defensively).
+// - `remove_approval(scope_key, level, workspace_root)` — drops the matching
+//   entry from the specified tier.
+//
+// Both writes go through `ApprovalConfig` + the atomic-write helper in
+// `forge-core::approvals`, so partial writes cannot produce a corrupted TOML
+// file. Neither command is authz-gated to a specific session window: approval
+// config is a user-level artifact, not per-session. The `session-*` capability
+// glob still bounds who can invoke it at all.
+// ---------------------------------------------------------------------------
+
+/// Wire shape returned by `get_persistent_approvals`. Frontend stores it in
+/// the per-session whitelist record keyed by `scope_key`, so the
+/// `ApprovalPrompt`'s auto-approve path and the `WhitelistedPill`'s
+/// provenance label can both read the persistence tier without re-querying.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct PersistentApprovalEntry {
+    pub scope_key: String,
+    pub tool_name: String,
+    pub label: String,
+    pub level: ApprovalLevel,
+}
+
+impl PersistentApprovalEntry {
+    fn from_entry(entry: ApprovalEntry, level: ApprovalLevel) -> Self {
+        Self {
+            scope_key: entry.scope_key,
+            tool_name: entry.tool_name,
+            label: entry.label,
+            level,
+        }
+    }
+}
+
+/// Resolve the user-scope config dir, honoring the `webview-test` override
+/// when present. Returns `Ok(None)` when neither the override nor the
+/// platform resolution yields a path (extremely unusual — no `$HOME`, no
+/// Known Folder). Callers should treat `Ok(None)` as "empty user config."
+fn resolve_user_config_dir(state: &BridgeState) -> Option<PathBuf> {
+    #[cfg(feature = "webview-test")]
+    {
+        if let Some(override_dir) = state.test_user_config_dir_override.as_ref() {
+            return Some(override_dir.clone());
+        }
+    }
+    #[cfg(not(feature = "webview-test"))]
+    let _ = state;
+    dirs::config_dir()
+}
+
+#[tauri::command]
+pub async fn get_persistent_approvals<R: Runtime>(
+    workspace_root: String,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+) -> Result<Vec<PersistentApprovalEntry>, String> {
+    // F-051: only authenticated session/dashboard windows may invoke. The
+    // default capability glob allows `session-*` and `dashboard`; per-command
+    // label authz would add nothing here (the data is user-scoped, not
+    // per-session), so we accept any window that cleared the ACL.
+    require_window_label_in(&webview, &["dashboard"], true)?;
+    require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
+
+    let workspace_cfg = load_workspace_config(std::path::Path::new(&workspace_root))
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let user_cfg = match resolve_user_config_dir(&state) {
+        Some(dir) => load_user_config_in(&dir).await.map_err(|e| e.to_string())?,
+        None => ApprovalConfig::default(),
+    };
+
+    // Workspace wins on `scope_key` collision with user (mirrors
+    // `forge-mcp::config::load_merged`). Build a set of workspace keys so
+    // user entries that duplicate are suppressed.
+    let workspace_keys: std::collections::HashSet<String> = workspace_cfg
+        .entries
+        .iter()
+        .map(|e| e.scope_key.clone())
+        .collect();
+
+    let mut out: Vec<PersistentApprovalEntry> =
+        Vec::with_capacity(workspace_cfg.entries.len() + user_cfg.entries.len());
+    for entry in workspace_cfg.entries {
+        out.push(PersistentApprovalEntry::from_entry(
+            entry,
+            ApprovalLevel::Workspace,
+        ));
+    }
+    for entry in user_cfg.entries {
+        if workspace_keys.contains(&entry.scope_key) {
+            continue;
+        }
+        out.push(PersistentApprovalEntry::from_entry(
+            entry,
+            ApprovalLevel::User,
+        ));
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub async fn save_approval<R: Runtime>(
+    entry: ApprovalEntry,
+    level: ApprovalLevel,
+    workspace_root: String,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+) -> Result<(), String> {
+    require_window_label_in(&webview, &["dashboard"], true)?;
+    require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
+    require_size("scope_key", &entry.scope_key, MAX_SCOPE_KEY_BYTES)?;
+    let total = entry.scope_key.len() + entry.tool_name.len() + entry.label.len();
+    if total > MAX_APPROVAL_ENTRY_BYTES {
+        return Err(payload_too_large("entry", MAX_APPROVAL_ENTRY_BYTES));
+    }
+
+    match level {
+        ApprovalLevel::Session => {
+            // Session-level approvals are purely in-memory on the frontend.
+            // Accept the call defensively (so a misrouted invoke is not an
+            // error the user sees) but never touch disk.
+            Ok(())
+        }
+        ApprovalLevel::Workspace => {
+            let root = std::path::Path::new(&workspace_root);
+            let mut cfg = load_workspace_config(root)
+                .await
+                .map_err(|e| e.to_string())?;
+            upsert_entry(&mut cfg, entry);
+            save_workspace_config(root, &cfg)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        ApprovalLevel::User => {
+            let dir = resolve_user_config_dir(&state)
+                .ok_or_else(|| "could not resolve user config directory".to_string())?;
+            let mut cfg = load_user_config_in(&dir).await.map_err(|e| e.to_string())?;
+            upsert_entry(&mut cfg, entry);
+            save_user_config_in(&dir, &cfg)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn remove_approval<R: Runtime>(
+    scope_key: String,
+    level: ApprovalLevel,
+    workspace_root: String,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+) -> Result<(), String> {
+    require_window_label_in(&webview, &["dashboard"], true)?;
+    require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
+    require_size("scope_key", &scope_key, MAX_SCOPE_KEY_BYTES)?;
+
+    match level {
+        ApprovalLevel::Session => Ok(()),
+        ApprovalLevel::Workspace => {
+            let root = std::path::Path::new(&workspace_root);
+            let mut cfg = load_workspace_config(root)
+                .await
+                .map_err(|e| e.to_string())?;
+            cfg.entries.retain(|e| e.scope_key != scope_key);
+            save_workspace_config(root, &cfg)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        ApprovalLevel::User => {
+            let Some(dir) = resolve_user_config_dir(&state) else {
+                // No config dir resolvable — there is nothing to remove because
+                // the load path returns empty in the same condition. Treat as a
+                // no-op rather than an error so revoke-after-cold-start paths
+                // don't surface a spurious failure.
+                return Ok(());
+            };
+            let mut cfg = load_user_config_in(&dir).await.map_err(|e| e.to_string())?;
+            cfg.entries.retain(|e| e.scope_key != scope_key);
+            save_user_config_in(&dir, &cfg)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    }
+}
+
+/// Upsert by `scope_key`: replace the existing entry if present, otherwise
+/// append. Keeps insertion order stable for the common "add once" case.
+fn upsert_entry(cfg: &mut ApprovalConfig, entry: ApprovalEntry) {
+    if let Some(existing) = cfg
+        .entries
+        .iter_mut()
+        .find(|e| e.scope_key == entry.scope_key)
+    {
+        *existing = entry;
+    } else {
+        cfg.entries.push(entry);
+    }
+}
+
+/// Lightweight window-label gate that allows either the dashboard or any
+/// session window (`session-*` prefix) to invoke a command. Used by the F-036
+/// approval commands which are user-scoped, not per-session, but should still
+/// be unreachable from other surfaces. Keeping this as a separate helper from
+/// [`require_window_label`] preserves that helper's strict single-label
+/// semantics for F-051.
+pub(crate) fn require_window_label_in<R: Runtime>(
+    webview: &Webview<R>,
+    exact: &[&str],
+    allow_session_prefix: bool,
+) -> Result<(), String> {
+    let label = webview.label();
+    if exact.contains(&label) {
+        return Ok(());
+    }
+    if allow_session_prefix && label.starts_with("session-") {
+        return Ok(());
+    }
+    Err(LABEL_MISMATCH_ERROR.to_string())
 }

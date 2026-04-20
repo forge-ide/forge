@@ -72,6 +72,9 @@ pub fn run() -> Result<()> {
             crate::ipc::session_send_message,
             crate::ipc::session_approve_tool,
             crate::ipc::session_reject_tool,
+            crate::ipc::get_persistent_approvals,
+            crate::ipc::save_approval,
+            crate::ipc::remove_approval,
         ])
         .setup(|app| {
             crate::ipc::manage_bridge(&app.handle().clone());

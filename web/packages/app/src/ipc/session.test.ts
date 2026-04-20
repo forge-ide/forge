@@ -17,6 +17,9 @@ import {
   sessionRejectTool,
   onSessionEvent,
   SESSION_EVENT,
+  getPersistentApprovals,
+  saveApproval,
+  removeApproval,
 } from './session';
 
 describe('session ipc wrappers', () => {
@@ -197,6 +200,76 @@ describe('setInvokeForTesting intercepts ipc/session commands', () => {
       sessionId: 'seam',
       toolCallId: 'tc-2',
       reason: 'no',
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-036: persistent approval wrappers
+// ---------------------------------------------------------------------------
+
+describe('persistent approval ipc wrappers (F-036)', () => {
+  let invokeMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    invokeMock = vi.fn();
+    setInvokeForTesting(invokeMock as never);
+  });
+
+  afterEach(() => {
+    setInvokeForTesting(null);
+  });
+
+  it('getPersistentApprovals invokes `get_persistent_approvals` with workspaceRoot', async () => {
+    invokeMock.mockResolvedValue([
+      {
+        scope_key: 'tool:fs.write',
+        tool_name: 'fs.write',
+        label: 'this tool',
+        level: 'workspace',
+      },
+    ]);
+
+    const entries = await getPersistentApprovals('/ws');
+
+    expect(invokeMock).toHaveBeenCalledWith('get_persistent_approvals', {
+      workspaceRoot: '/ws',
+    });
+    expect(entries).toEqual([
+      {
+        scope_key: 'tool:fs.write',
+        tool_name: 'fs.write',
+        label: 'this tool',
+        level: 'workspace',
+      },
+    ]);
+  });
+
+  it('saveApproval invokes `save_approval` with entry, level, workspaceRoot', async () => {
+    invokeMock.mockResolvedValue(undefined);
+
+    await saveApproval(
+      { scope_key: 'tool:fs.edit', tool_name: 'fs.edit', label: 'this tool' },
+      'user',
+      '/ws',
+    );
+
+    expect(invokeMock).toHaveBeenCalledWith('save_approval', {
+      entry: { scope_key: 'tool:fs.edit', tool_name: 'fs.edit', label: 'this tool' },
+      level: 'user',
+      workspaceRoot: '/ws',
+    });
+  });
+
+  it('removeApproval invokes `remove_approval` with scopeKey, level, workspaceRoot', async () => {
+    invokeMock.mockResolvedValue(undefined);
+
+    await removeApproval('tool:shell.exec', 'workspace', '/repo');
+
+    expect(invokeMock).toHaveBeenCalledWith('remove_approval', {
+      scopeKey: 'tool:shell.exec',
+      level: 'workspace',
+      workspaceRoot: '/repo',
     });
   });
 });

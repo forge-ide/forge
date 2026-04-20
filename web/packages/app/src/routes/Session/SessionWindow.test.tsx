@@ -139,6 +139,50 @@ describe('SessionWindow', () => {
     expect(chatPane.textContent).toContain('CHAT');
   });
 
+  it('calls get_persistent_approvals with the HelloAck workspace after hello resolves (F-036)', async () => {
+    renderAt('/session/abc123');
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith('get_persistent_approvals', {
+        workspaceRoot: '/ws',
+      }),
+    );
+    // Must fire after hello (we need its `workspace` field).
+    const helloIdx = invokeMock.mock.calls.findIndex((c) => c[0] === 'session_hello');
+    const getIdx = invokeMock.mock.calls.findIndex(
+      (c) => c[0] === 'get_persistent_approvals',
+    );
+    expect(helloIdx).toBeGreaterThanOrEqual(0);
+    expect(getIdx).toBeGreaterThan(helloIdx);
+  });
+
+  it('seeds the approvals store from get_persistent_approvals (F-036)', async () => {
+    const seedMod = await import('../../stores/approvals');
+    // Mock get_persistent_approvals to return two seed entries.
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'session_hello') return helloAck;
+      if (cmd === 'get_persistent_approvals') {
+        return [
+          {
+            scope_key: 'tool:fs.write',
+            tool_name: 'fs.write',
+            label: 'this tool',
+            level: 'workspace',
+          },
+        ];
+      }
+      return undefined;
+    });
+
+    seedMod.resetApprovalsStore();
+    renderAt('/session/abc123');
+    await waitFor(() => {
+      const wl = seedMod.getApprovalWhitelist('abc123' as never);
+      expect('tool:fs.write' in wl.entries).toBe(true);
+    });
+    const wl = seedMod.getApprovalWhitelist('abc123' as never);
+    expect(wl.entries['tool:fs.write']?.level).toBe('workspace');
+  });
+
   it('routes Rust-shaped session:event payloads through the adapter into the chat pane', async () => {
     let captured: ((ev: { payload: unknown }) => void) | null = null;
     listenMock.mockImplementation(async (_name: string, handler: (ev: { payload: unknown }) => void) => {

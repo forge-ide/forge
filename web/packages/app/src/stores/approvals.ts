@@ -1,5 +1,5 @@
 import { createStore, produce, reconcile } from 'solid-js/store';
-import type { SessionId, ApprovalScope } from '@forge/ipc';
+import type { SessionId, ApprovalScope, ApprovalLevel } from '@forge/ipc';
 
 // ---------------------------------------------------------------------------
 // Whitelist key derivation
@@ -93,14 +93,23 @@ export function matchGlob(glob: string, path: string): boolean {
 //
 // We use a plain object record keyed by whitelist-key for SolidJS reactive
 // tracking. Storing Set/Map inside a store would not be tracked reactively.
+//
+// F-036: each entry now carries a `level` discriminator so the pill can render
+// provenance and the revoke path knows whether to hit IPC (workspace/user) or
+// stay in memory (session).
 // ---------------------------------------------------------------------------
+
+export interface ApprovalWhitelistEntry {
+  label: string;
+  level: ApprovalLevel;
+}
 
 export interface ApprovalWhitelist {
   /**
-   * Record of whitelist-key → human-readable label.
-   * A key is present iff it is whitelisted. Use Object.keys() to enumerate.
+   * Record of whitelist-key → `{ label, level }`.
+   * A key is present iff it is whitelisted. Use `Object.keys()` to enumerate.
    */
-  entries: Record<string, string>;
+  entries: Record<string, ApprovalWhitelistEntry>;
 }
 
 const [approvalsStore, setApprovalsStore] = createStore<
@@ -121,6 +130,10 @@ export function getApprovalWhitelist(sessionId: SessionId): ApprovalWhitelist {
 /**
  * Record a whitelist entry for a scope > Once.
  * Returns the key that was added.
+ *
+ * F-036: `level` defaults to `'session'` so existing call-sites upgrade
+ * without behavior change; pass an explicit level when the approval should
+ * persist beyond the current session.
  */
 export function addWhitelistEntry(
   sessionId: SessionId,
@@ -128,13 +141,14 @@ export function addWhitelistEntry(
   toolName: string,
   path: string,
   pattern?: string,
+  level: ApprovalLevel = 'session',
 ): string {
   ensureSession(sessionId);
   const key = makeWhitelistKey(scope, toolName, path, pattern);
   const label = scopeLabel(scope, pattern ?? path);
   setApprovalsStore(
     produce((s) => {
-      s[sessionId]!.entries[key] = label;
+      s[sessionId]!.entries[key] = { label, level };
     }),
   );
   return key;
@@ -148,6 +162,38 @@ export function revokeWhitelistEntry(sessionId: SessionId, key: string): void {
   setApprovalsStore(
     produce((s) => {
       delete s[sessionId]!.entries[key];
+    }),
+  );
+}
+
+/**
+ * F-036: seed the per-session whitelist from the persistent approval entries
+ * returned by `get_persistent_approvals`. Called once on session init from
+ * `SessionWindow.tsx`. Existing entries for the session are preserved
+ * (additive merge); callers that need a reset should call
+ * `resetApprovalsStore` first.
+ */
+export interface PersistentSeed {
+  scope_key: string;
+  tool_name: string;
+  label: string;
+  level: ApprovalLevel;
+}
+
+export function seedPersistentApprovals(
+  sessionId: SessionId,
+  seeds: readonly PersistentSeed[] | null | undefined,
+): void {
+  ensureSession(sessionId);
+  if (!seeds || !Array.isArray(seeds) || seeds.length === 0) return;
+  setApprovalsStore(
+    produce((s) => {
+      for (const seed of seeds) {
+        s[sessionId]!.entries[seed.scope_key] = {
+          label: seed.label,
+          level: seed.level,
+        };
+      }
     }),
   );
 }

@@ -14,6 +14,16 @@ export interface SessionSummary {
 
 export const [activeSessionId, setActiveSessionId] = createSignal<SessionId | null>(null);
 
+/**
+ * F-036: workspace root for the active session, as returned by
+ * `session_hello`'s `HelloAck.workspace`. Approval persistence commands
+ * (`save_approval`, `remove_approval`, `get_persistent_approvals`) need this
+ * to locate `<root>/.forge/approvals.toml`. `null` before hello resolves;
+ * components that require it should guard accordingly.
+ */
+export const [activeWorkspaceRoot, setActiveWorkspaceRoot] =
+  createSignal<string | null>(null);
+
 export const [sessions, setSessions] = createStore<Record<SessionId, SessionSummary>>({});
 
 /**

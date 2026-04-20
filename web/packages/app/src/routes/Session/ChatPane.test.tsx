@@ -837,3 +837,217 @@ describe('args_json boundary contract (F-080)', () => {
     expect(getByTestId('tool-call-card-tc-bc-null')).toHaveTextContent('null');
   });
 });
+
+// ---------------------------------------------------------------------------
+// F-036: persistent approvals — approve/revoke at workspace/user level
+// ---------------------------------------------------------------------------
+
+import { setActiveWorkspaceRoot } from '../../stores/session';
+import {
+  seedPersistentApprovals,
+  getApprovalWhitelist,
+} from '../../stores/approvals';
+
+describe('ChatPane — persistent approvals (F-036)', () => {
+  const PREVIEW = { description: 'Edit file /src/foo.ts' };
+  const FS_EDIT_ARGS = JSON.stringify({ path: '/src/foo.ts', patch: '...' });
+
+  beforeEach(() => {
+    setActiveWorkspaceRoot('/ws');
+  });
+
+  afterEach(() => {
+    setActiveWorkspaceRoot(null);
+  });
+
+  it('invokes save_approval with level=workspace for ThisFile + Workspace tier', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-f36-ws',
+      tool_name: 'fs.edit',
+      args_json: FS_EDIT_ARGS,
+      preview: PREVIEW,
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('level-workspace-btn'));
+    fireEvent.click(getByTestId('approve-dropdown-btn'));
+    fireEvent.click(getByTestId('scope-file-btn'));
+
+    const saveCall = invokeMock.mock.calls.find((c) => c[0] === 'save_approval');
+    expect(saveCall).toBeDefined();
+    expect(saveCall?.[1]).toMatchObject({
+      level: 'workspace',
+      workspaceRoot: '/ws',
+      entry: expect.objectContaining({
+        scope_key: 'file:fs.edit:/src/foo.ts',
+        tool_name: 'fs.edit',
+        label: 'this file',
+      }),
+    });
+  });
+
+  it('invokes save_approval with level=user for ThisTool + User tier', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-f36-user',
+      tool_name: 'fs.edit',
+      args_json: FS_EDIT_ARGS,
+      preview: PREVIEW,
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('level-user-btn'));
+    fireEvent.click(getByTestId('approve-dropdown-btn'));
+    fireEvent.click(getByTestId('scope-tool-btn'));
+
+    const saveCall = invokeMock.mock.calls.find((c) => c[0] === 'save_approval');
+    expect(saveCall?.[1]).toMatchObject({
+      level: 'user',
+      workspaceRoot: '/ws',
+      entry: expect.objectContaining({
+        scope_key: 'tool:fs.edit',
+        label: 'this tool',
+      }),
+    });
+  });
+
+  it('does NOT invoke save_approval for Session level', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-f36-session',
+      tool_name: 'fs.edit',
+      args_json: FS_EDIT_ARGS,
+      preview: PREVIEW,
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('approve-dropdown-btn'));
+    fireEvent.click(getByTestId('scope-file-btn'));
+
+    expect(
+      invokeMock.mock.calls.filter((c) => c[0] === 'save_approval'),
+    ).toHaveLength(0);
+  });
+
+  it('does NOT invoke save_approval for a one-shot Once approval even with Workspace selected', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-f36-once-ws',
+      tool_name: 'fs.edit',
+      args_json: FS_EDIT_ARGS,
+      preview: PREVIEW,
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('level-workspace-btn'));
+    fireEvent.click(getByTestId('approve-once-btn'));
+
+    expect(
+      invokeMock.mock.calls.filter((c) => c[0] === 'save_approval'),
+    ).toHaveLength(0);
+  });
+
+  it('renders workspace-level pill with provenance suffix when seeded', () => {
+    seedPersistentApprovals(SID, [
+      {
+        scope_key: 'file:fs.edit:/src/foo.ts',
+        tool_name: 'fs.edit',
+        label: 'this file',
+        level: 'workspace',
+      },
+    ]);
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-f36-pill-ws',
+      tool_name: 'fs.edit',
+      args_json: FS_EDIT_ARGS,
+      preview: PREVIEW,
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('whitelisted-pill')).toHaveTextContent(
+      'whitelisted · this file · workspace',
+    );
+  });
+
+  it('renders user-level pill with provenance suffix when seeded', () => {
+    seedPersistentApprovals(SID, [
+      {
+        scope_key: 'tool:fs.edit',
+        tool_name: 'fs.edit',
+        label: 'this tool',
+        level: 'user',
+      },
+    ]);
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-f36-pill-user',
+      tool_name: 'fs.edit',
+      args_json: FS_EDIT_ARGS,
+      preview: PREVIEW,
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('whitelisted-pill')).toHaveTextContent(
+      'whitelisted · this tool · user',
+    );
+  });
+
+  it('invokes remove_approval when a workspace-level entry is revoked via the pill', () => {
+    seedPersistentApprovals(SID, [
+      {
+        scope_key: 'tool:fs.edit',
+        tool_name: 'fs.edit',
+        label: 'this tool',
+        level: 'workspace',
+      },
+    ]);
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-f36-revoke-ws',
+      tool_name: 'fs.edit',
+      args_json: FS_EDIT_ARGS,
+      preview: PREVIEW,
+    });
+    invokeMock.mockClear();
+    const { getByTestId } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('whitelisted-pill'));
+    fireEvent.click(getByTestId('revoke-btn'));
+
+    const removeCall = invokeMock.mock.calls.find((c) => c[0] === 'remove_approval');
+    expect(removeCall?.[1]).toEqual({
+      scopeKey: 'tool:fs.edit',
+      level: 'workspace',
+      workspaceRoot: '/ws',
+    });
+    // The entry is also removed from the in-memory whitelist.
+    expect('tool:fs.edit' in getApprovalWhitelist(SID).entries).toBe(false);
+  });
+
+  it('does NOT invoke remove_approval when a session-level entry is revoked', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-f36-revoke-session-1',
+      tool_name: 'fs.edit',
+      args_json: FS_EDIT_ARGS,
+      preview: PREVIEW,
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    // Approve ThisFile at session level first.
+    fireEvent.click(getByTestId('approve-dropdown-btn'));
+    fireEvent.click(getByTestId('scope-file-btn'));
+
+    // A second call with the same key — pill rendered, revoke.
+    resetMessagesStore();
+    invokeMock.mockClear();
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-f36-revoke-session-2',
+      tool_name: 'fs.edit',
+      args_json: FS_EDIT_ARGS,
+      preview: PREVIEW,
+    });
+    const second = render(() => <ChatPane />);
+    fireEvent.click(second.getByTestId('whitelisted-pill'));
+    fireEvent.click(second.getByTestId('revoke-btn'));
+
+    expect(
+      invokeMock.mock.calls.filter((c) => c[0] === 'remove_approval'),
+    ).toHaveLength(0);
+  });
+});
