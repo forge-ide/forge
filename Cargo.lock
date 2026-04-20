@@ -1175,6 +1175,13 @@ version = "0.2.0"
 [[package]]
 name = "forge-mcp"
 version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "dirs 6.0.0",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "forge-oci"
