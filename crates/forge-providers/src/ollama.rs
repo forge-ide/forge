@@ -21,6 +21,7 @@
 //! conditions that occur *before* the NDJSON decoder starts and therefore
 //! cannot be caught by its stream-level timers.
 
+use std::borrow::Cow;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -28,6 +29,7 @@ use crate::{ChatChunk, ChatMessage, ChatRequest, Provider, StreamErrorKind};
 use forge_core::Result;
 use futures::stream::{BoxStream, StreamExt};
 use reqwest::Url;
+use serde::Deserialize;
 
 pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434";
 
@@ -473,45 +475,88 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-fn parse_line(line: &str) -> Option<ChatChunk> {
-    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+// ── NDJSON line decode ────────────────────────────────────────────────────────
+//
+// F-108: this was previously a two-step decode (`serde_json::from_str::<Value>`
+// then `Value::get(..).as_str().to_string()`), which allocated three Strings
+// per streamed text-delta token — the hottest per-token path in the app.
+//
+// The structures below deserialize a single line directly into stack storage.
+// String fields carry `Cow<'a, str>`, so `#[serde(borrow)]` points them at the
+// input slice for the common case (no JSON escapes) and only allocates when
+// unescaping is necessary. `.into_owned()` runs exactly once at the
+// `ChatChunk::*` emission boundary, matching the "0 or 1 allocation per
+// text-delta token" budget in the F-108 DoD.
+//
+// `tool_calls` / `arguments` are held as owned `serde_json::Value` so the
+// previous `.cloned()` on the tool-call path is now a move. That replaces one
+// `Value`-tree clone per tool-call token (issue §Finding, line 498).
+//
+// `#[serde(default)]` on every optional field means the common text-delta
+// shape (`{"message":{"content":".."},"done":false}`) deserializes without
+// erroring on missing tool-call / done-reason fields.
+#[derive(Deserialize)]
+struct RawLine<'a> {
+    #[serde(default)]
+    done: bool,
+    #[serde(default, borrow)]
+    done_reason: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    message: Option<RawMessage<'a>>,
+}
 
-    if value.get("done").and_then(|d| d.as_bool()) == Some(true) {
-        let reason = value
-            .get("done_reason")
-            .and_then(|r| r.as_str())
-            .unwrap_or("")
-            .to_string();
+#[derive(Deserialize)]
+struct RawMessage<'a> {
+    #[serde(default, borrow)]
+    content: Option<Cow<'a, str>>,
+    #[serde(default)]
+    tool_calls: Vec<RawToolCall<'a>>,
+}
+
+#[derive(Deserialize)]
+struct RawToolCall<'a> {
+    #[serde(borrow)]
+    function: Option<RawFunction<'a>>,
+}
+
+#[derive(Deserialize)]
+struct RawFunction<'a> {
+    #[serde(borrow)]
+    name: Cow<'a, str>,
+    #[serde(default)]
+    arguments: serde_json::Value,
+}
+
+/// Parse one Ollama NDJSON line into a [`ChatChunk`]. Public for the criterion
+/// bench at `benches/ollama_stream.rs`; not part of the stable API surface.
+#[doc(hidden)]
+pub fn parse_line(line: &str) -> Option<ChatChunk> {
+    let raw: RawLine<'_> = serde_json::from_str(line).ok()?;
+
+    if raw.done {
+        let reason = raw.done_reason.map(Cow::into_owned).unwrap_or_default();
         return Some(ChatChunk::Done(reason));
     }
 
-    if let Some(first_call) = value
-        .get("message")
-        .and_then(|m| m.get("tool_calls"))
-        .and_then(|tc| tc.as_array())
-        .and_then(|arr| arr.first())
-    {
-        if let Some(func) = first_call.get("function") {
-            let name = func.get("name").and_then(|n| n.as_str())?.to_string();
-            let args = func
-                .get("arguments")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null);
-            return Some(ChatChunk::ToolCall { name, args });
+    let message = raw.message?;
+
+    // Tool-call chunks take priority over the text field — the shape is
+    // `{"content":"","tool_calls":[..]}` and the empty content would otherwise
+    // be discarded by the text-delta branch below.
+    if let Some(first) = message.tool_calls.into_iter().next() {
+        if let Some(func) = first.function {
+            return Some(ChatChunk::ToolCall {
+                name: func.name.into_owned(),
+                args: func.arguments,
+            });
         }
     }
 
-    if let Some(content) = value
-        .get("message")
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_str())
-    {
-        if !content.is_empty() {
-            return Some(ChatChunk::TextDelta(content.to_string()));
-        }
+    let content = message.content?;
+    if content.is_empty() {
+        return None;
     }
-
-    None
+    Some(ChatChunk::TextDelta(content.into_owned()))
 }
 
 /// Cap on `log_unparseable_line` emissions per process. A hostile or buggy
@@ -752,6 +797,45 @@ mod tests {
                 args: serde_json::json!({"path": "/tmp/x"}),
             })
         );
+    }
+
+    // F-108: tool-call chunks used to carry an empty `content: ""` field
+    // alongside `tool_calls`; the old `Value`-tree parser discarded that field
+    // by testing `!content.is_empty()` after the tool-call branch. The typed
+    // parser must preserve that ordering — tool_calls win over empty content.
+    #[test]
+    fn parse_line_tool_call_beats_empty_content() {
+        let line = r#"{"message":{"content":"","tool_calls":[{"function":{"name":"n","arguments":{}}}]},"done":false}"#;
+        assert!(matches!(parse_line(line), Some(ChatChunk::ToolCall { .. })));
+    }
+
+    // F-108: the common-case text delta has no `tool_calls`, no `done_reason`,
+    // and no `done: true`. The typed decode must accept the lean shape without
+    // requiring a `done: false` field.
+    #[test]
+    fn parse_line_text_delta_accepts_lean_shape() {
+        let line = r#"{"message":{"content":"hello"}}"#;
+        assert_eq!(parse_line(line), Some(ChatChunk::TextDelta("hello".into())));
+    }
+
+    // F-108: JSON escapes in the content field exercise the Cow::Owned path
+    // (serde must allocate to unescape). The decoded payload must still be
+    // the unescaped string, not the raw source bytes.
+    #[test]
+    fn parse_line_text_delta_with_escapes_is_unescaped() {
+        let line = r#"{"message":{"content":"a\"b\nc"},"done":false}"#;
+        assert_eq!(
+            parse_line(line),
+            Some(ChatChunk::TextDelta("a\"b\nc".into()))
+        );
+    }
+
+    // F-108: empty content with no tool_calls emits nothing (the stream sends
+    // these as keepalives on some models).
+    #[test]
+    fn parse_line_empty_content_without_tool_calls_returns_none() {
+        let line = r#"{"message":{"content":""},"done":false}"#;
+        assert_eq!(parse_line(line), None);
     }
 
     // ── validate_base_url: scheme/host policy ─────────────────────────────────
