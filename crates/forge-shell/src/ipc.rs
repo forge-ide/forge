@@ -381,6 +381,8 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         terminal_write,
         terminal_resize,
         terminal_kill,
+        read_layouts,
+        write_layouts,
     ])
 }
 
@@ -944,4 +946,218 @@ pub async fn terminal_kill<R: Runtime>(
     let session = state.remove_owned_by(&terminal_id, &caller_label)?;
     drop(session);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// F-120: Layout persistence commands (read_layouts / write_layouts)
+//
+// `.forge/layouts.json` under the workspace root stores the serialized
+// `GridContainer` tree for each named layout plus per-pane state (active file,
+// scroll position, terminal PID). The frontend calls `read_layouts` on session
+// mount and `write_layouts` on a 500 ms debounced layout change.
+//
+// Authz. Both commands allow the dashboard label or any `session-*` label. The
+// artifact is a workspace-level file (not per-session), so binding it to a
+// specific `session-{id}` window would block the dashboard from pre-rendering
+// the last saved layout and would force two near-identical commands. Reusing
+// the approval commands' gate (`require_window_label_in(&[], &["dashboard"], true)`)
+// keeps the policy consistent with other workspace-scoped surfaces.
+//
+// Fallback semantics. Missing or corrupt files degrade to
+// `Layouts::default()` — a single chat leaf — not an error. A JSON-parse
+// failure from a half-written or hand-edited file would otherwise leave the
+// user with a blank window on every session open, which is worse than losing
+// the prior layout silently.
+//
+// Type placement. `Layouts`, `LayoutTree`, and `PaneState` live alongside the
+// other ts-rs wire shapes in this module (`PersistentApprovalEntry`,
+// `TerminalSpawnArgs`) rather than `forge-ipc` — that crate is the UDS framing
+// layer and does not carry ts-rs. This is the consistent pattern for Tauri
+// command wire shapes in the workspace.
+// ---------------------------------------------------------------------------
+
+/// Per-pane runtime state attached to a leaf node. All fields are optional so
+/// a session can persist whatever subset is meaningful to its pane type — a
+/// chat pane has no terminal PID; a terminal pane has no scroll position that
+/// outlives the PTY.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct PaneState {
+    /// For editor panes: the file path the pane was last focused on, relative
+    /// to the workspace root. `None` for panes that don't address a file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_file: Option<String>,
+    /// For editor / chat scroll-back panes: the top scroll offset in pixels
+    /// rounded to an integer. `None` when unknown or inapplicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scroll_top: Option<i64>,
+    /// For terminal panes: the PID of the live child shell, if any. Carried
+    /// through restart so the UI can re-attach rather than spawn a new PTY —
+    /// the reattach decision itself lives in F-125's terminal module.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_pid: Option<u32>,
+}
+
+/// Serialized form of the `GridContainer` tree. Mirrors the TS `LayoutNode`
+/// discriminated union (`kind: "leaf" | "split"`) but adds `pane_type` on
+/// leaves so the renderer can pick a pane implementation on rehydrate — the
+/// runtime tree's `render` callback is a closure that cannot be serialized.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub enum LayoutTree {
+    /// A terminal pane node. `id` is stable across sessions so per-pane state
+    /// keys in `Layout.pane_state` stay valid after a tree edit.
+    Leaf {
+        id: String,
+        /// Which pane implementation to mount on the leaf. Unknown values are
+        /// rejected by serde at deserialize, so a future pane type must land
+        /// as a variant here before it can be persisted.
+        pane_type: PaneType,
+    },
+    /// An internal node splitting its area between `a` and `b`. `ratio` is
+    /// the fraction of the container occupied by `a`, in `0.0..=1.0`.
+    Split {
+        id: String,
+        direction: SplitDirection,
+        ratio: f32,
+        a: Box<LayoutTree>,
+        b: Box<LayoutTree>,
+    },
+}
+
+/// The pane implementations that may be mounted on a leaf. Kept as a typed
+/// enum (not a free-form string) so an unknown variant from a future version
+/// fails loudly on load and the fallback-to-default path fires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub enum PaneType {
+    Chat,
+    Terminal,
+    Editor,
+    Files,
+    AgentMonitor,
+}
+
+/// Axis of a split node. Mirrors the TS `'h' | 'v'` shape exactly — `h` means
+/// the two children sit side-by-side horizontally, `v` stacked vertically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub enum SplitDirection {
+    H,
+    V,
+}
+
+/// One named layout in the workspace. `tree` is the GridContainer shape;
+/// `pane_state` holds side-car state keyed by leaf id. `pane_state` is a
+/// `HashMap` so ids removed from the tree can be garbage-collected by the
+/// frontend without a schema change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct Layout {
+    pub tree: LayoutTree,
+    #[serde(default)]
+    pub pane_state: HashMap<String, PaneState>,
+}
+
+/// The on-disk shape of `.forge/layouts.json`. Multiple named layouts share a
+/// workspace (e.g. "default", "split-editor", "terminal-focus"); `active` is
+/// the key into `named` the UI should restore on next session open.
+///
+/// Unknown keys at any level are ignored on load — the TS and Rust shapes
+/// evolve in lockstep but tolerate hand-edits that drop optional fields.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct Layouts {
+    pub active: String,
+    pub named: HashMap<String, Layout>,
+}
+
+impl Default for Layouts {
+    fn default() -> Self {
+        let mut named = HashMap::new();
+        named.insert(
+            "default".to_string(),
+            Layout {
+                tree: LayoutTree::Leaf {
+                    id: "root".to_string(),
+                    pane_type: PaneType::Chat,
+                },
+                pane_state: HashMap::new(),
+            },
+        );
+        Self {
+            active: "default".to_string(),
+            named,
+        }
+    }
+}
+
+/// Resolve `<workspace_root>/.forge/layouts.json`. Does not create anything —
+/// callers that write decide when to `create_dir_all`.
+fn layouts_file_path(workspace_root: &std::path::Path) -> PathBuf {
+    workspace_root.join(".forge").join("layouts.json")
+}
+
+/// Load `.forge/layouts.json` under `workspace_root`, degrading to
+/// [`Layouts::default`] on any failure.
+///
+/// Degradation targets are:
+/// - file missing (fresh workspace, first session open);
+/// - file unreadable (permissions anomaly on a dev machine);
+/// - file present but invalid JSON (user hand-edit, crash-during-write, or
+///   a forward-incompatible variant we now reject).
+///
+/// A silent fallback is preferable to surfacing the error to the webview: a
+/// failed read would leave the UI with no layout to mount and the user with a
+/// blank window. Losing the persisted layout is recoverable; losing the
+/// ability to open the session is not.
+async fn load_layouts_from_disk(workspace_root: &std::path::Path) -> Layouts {
+    let path = layouts_file_path(workspace_root);
+    let Ok(bytes) = tokio::fs::read(&path).await else {
+        return Layouts::default();
+    };
+    serde_json::from_slice(&bytes).unwrap_or_default()
+}
+
+/// Read the persisted layouts for `workspace_root`. Missing or corrupt files
+/// return the default single-pane layout — a failed read would otherwise
+/// leave the webview with no layout to mount and the user with a blank
+/// window. Authz: dashboard or any `session-*` label.
+#[tauri::command]
+pub async fn read_layouts<R: Runtime>(
+    workspace_root: String,
+    webview: Webview<R>,
+) -> Result<Layouts, String> {
+    require_window_label_in(&webview, &["dashboard"], true)?;
+    require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
+    Ok(load_layouts_from_disk(std::path::Path::new(&workspace_root)).await)
+}
+
+/// Persist `layouts` to `<workspace_root>/.forge/layouts.json`, creating the
+/// `.forge/` directory on first save. Authz: dashboard or any `session-*`
+/// label. Write failures (disk full, read-only mount) surface as `Err` — the
+/// frontend debouncer will retry on the next layout change, so a transient
+/// failure does not need a retry loop here.
+#[tauri::command]
+pub async fn write_layouts<R: Runtime>(
+    workspace_root: String,
+    layouts: Layouts,
+    webview: Webview<R>,
+) -> Result<(), String> {
+    require_window_label_in(&webview, &["dashboard"], true)?;
+    require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
+
+    let forge_dir = std::path::Path::new(&workspace_root).join(".forge");
+    tokio::fs::create_dir_all(&forge_dir)
+        .await
+        .map_err(|e| format!("create .forge dir: {e}"))?;
+
+    let path = forge_dir.join("layouts.json");
+    let bytes = serde_json::to_vec_pretty(&layouts).map_err(|e| format!("serialize: {e}"))?;
+    tokio::fs::write(&path, &bytes)
+        .await
+        .map_err(|e| format!("write layouts.json: {e}"))
 }
