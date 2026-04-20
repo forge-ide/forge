@@ -1,9 +1,14 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use forge_core::Result;
 use futures::stream::BoxStream;
+// `parking_lot::Mutex` — guards are not poisoned on a panicking holder, so a
+// panicking test that holds the mutex does not cascade into every subsequent
+// `.lock()` in the same process. The `std::sync::Mutex` here used to require
+// `.lock().unwrap()` at every call site, turning one panic into N.
+use parking_lot::Mutex;
 use serde::Deserialize;
 
 pub mod ollama;
@@ -199,7 +204,7 @@ impl MockProvider {
     /// All `ChatRequest` values received in call order (sequence mode only).
     pub fn recorded_requests(&self) -> Vec<ChatRequest> {
         match &self.source {
-            MockSource::Sequence { log, .. } => log.lock().unwrap().clone(),
+            MockSource::Sequence { log, .. } => log.lock().clone(),
             MockSource::File(_) => vec![],
         }
     }
@@ -212,7 +217,7 @@ impl MockProvider {
                 Ok(Box::pin(futures::stream::iter(parse_ndjson(&content)?)))
             }
             MockSource::Sequence { scripts, .. } => {
-                let script = scripts.lock().unwrap().pop_front().unwrap_or_default();
+                let script = scripts.lock().pop_front().unwrap_or_default();
                 Ok(Box::pin(futures::stream::iter(parse_ndjson(&script)?)))
             }
         }
@@ -234,12 +239,48 @@ impl Provider for MockProvider {
                 })
             }
             MockSource::Sequence { scripts, log } => {
-                log.lock().unwrap().push(req);
-                let script = scripts.lock().unwrap().pop_front().unwrap_or_default();
+                log.lock().push(req);
+                let script = scripts.lock().pop_front().unwrap_or_default();
                 let result: Result<BoxStream<'static, ChatChunk>> =
                     parse_ndjson(&script).map(|c| Box::pin(futures::stream::iter(c)) as _);
                 futures::future::Either::Right(async move { result })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod mock_provider_concurrency_tests {
+    use super::*;
+
+    /// F-080: `MockProvider` previously held its inner state in
+    /// `std::sync::Mutex`, which poisons on holder-thread panic and turns
+    /// every subsequent `.lock().unwrap()` into a panic chain. With
+    /// `parking_lot::Mutex` the surviving threads keep working — this test
+    /// would panic under the old implementation.
+    #[test]
+    fn recorded_requests_survives_panicking_holder_thread() {
+        let provider = Arc::new(
+            MockProvider::from_responses(vec!["{\"done\":\"stop\"}\n".into()]).expect("construct"),
+        );
+
+        // A worker thread panics while it would otherwise have been holding
+        // the mutex. With `std::sync::Mutex`, the next `lock()` would
+        // observe a `PoisonError`; with `parking_lot` the next caller just
+        // takes the lock.
+        let panicker = {
+            let p = Arc::clone(&provider);
+            std::thread::spawn(move || {
+                // Force a `MockSource::Sequence` access path equivalent to
+                // the production holder, then panic mid-flight.
+                let _snapshot = p.recorded_requests();
+                panic!("simulated holder-thread failure");
+            })
+        };
+        assert!(panicker.join().is_err(), "worker must have panicked");
+
+        // The main thread can still observe the log.
+        let observed = provider.recorded_requests();
+        assert!(observed.is_empty(), "no requests have been logged yet");
     }
 }

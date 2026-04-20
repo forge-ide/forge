@@ -10,6 +10,11 @@ bytes = "1"
 dirs = "6.0.0"
 forge-core = { path = "../forge-core" }
 futures = "0.3"
+# `parking_lot::Mutex` for `MockProvider` interior state — its guards are not
+# poisoned on holder-thread panic, so a panicking test does not cascade into
+# every subsequent `.lock()` call. Already present transitively via reqwest's
+# dependency tree; declared here for direct use.
+parking_lot = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

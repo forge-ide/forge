@@ -22,6 +22,23 @@ pub struct ReadResult {
 /// the read buffer.
 ///
 /// The path is canonicalized before glob matching to prevent `..` traversal.
+///
+/// # Canonicalization policy (read vs write/edit asymmetry)
+///
+/// `read_file` uses **strict** [`std::fs::canonicalize`], which fails when any
+/// component of `path` is missing or a broken symlink. This is intentional and
+/// asymmetric with [`mutate::write`] / [`mutate::edit`], which use
+/// [`canonicalize_no_symlink`] — a lenient helper that accepts not-yet-existing
+/// targets so a caller can `fs.write` a brand-new file.
+///
+/// Threat-model rationale: a read against a non-existent path can only ever
+/// fail (there is nothing to read), and surfacing the failure as an explicit
+/// `Io` error keeps the trust boundary loud. By contrast, `write` and `edit`
+/// must support file creation — the path-traversal protection there comes from
+/// the explicit symlink-component check in [`canonicalize_no_symlink`] plus
+/// the [`enforce_allowed`] glob match against the resolved parent. Both entry
+/// points still reject `..` traversal because the canonical form is what gets
+/// glob-matched; the asymmetry is purely about whether the leaf must exist.
 pub fn read_file(
     path: &str,
     allowed_paths: &[String],
@@ -63,6 +80,13 @@ pub fn read_file(
 /// Shared helper: return the canonical form of `path` only if every component is
 /// symlink-free. Used by both write and edit to enforce symlink rejection even
 /// when the enclosing directory is allowed.
+///
+/// **Lenient by design.** When `std::fs::canonicalize` fails (typically because
+/// the leaf does not yet exist), this helper falls back to canonicalizing the
+/// parent and joining the leaf name. This is what permits `fs.write` to create
+/// new files — see the canonicalization-policy doc on [`mutate::write`] for
+/// the full rationale and how this differs from [`read_file`]'s strict
+/// canonicalization.
 pub(crate) fn canonicalize_no_symlink(path: &Path) -> std::result::Result<PathBuf, FsError> {
     let mut cursor = PathBuf::new();
     for comp in path.components() {

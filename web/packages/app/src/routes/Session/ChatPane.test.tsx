@@ -13,7 +13,7 @@ import {
 import { setActiveSessionId } from '../../stores/session';
 import { resetApprovalsStore } from '../../stores/approvals';
 import { setInvokeForTesting } from '../../lib/tauri';
-import { ChatPane } from './ChatPane';
+import { ChatPane, MAX_COMPOSER_BYTES } from './ChatPane';
 
 const SID = 'session-chat-test' as SessionId;
 const invokeMock = vi.fn();
@@ -108,19 +108,13 @@ describe('ChatPane rendering', () => {
     expect(card.textContent ?? '').not.toContain('x'.repeat(80));
   });
 
-  it('omits the arg summary span when args_json is unparseable', () => {
-    pushEvent(SID, {
-      kind: 'ToolCallStarted',
-      tool_call_id: 'tc-bad',
-      tool_name: 'broken',
-      args_json: '{ this is not json',
-    });
-    const { getByTestId, queryByTestId } = render(() => <ChatPane />);
-    // Card still renders — the invalid JSON must not crash the component.
-    expect(getByTestId('tool-call-card-tc-bad')).toBeInTheDocument();
-    // No args span.
-    expect(queryByTestId('tool-call-args-tc-bad')).not.toBeInTheDocument();
-  });
+  // F-080 item 6: the prior "unparseable args_json" test was deleted because
+  // `args_json` is produced exclusively by `fromRustEvent`
+  // (`JSON.stringify(ev['args'] ?? null)`) and is contractually valid JSON at
+  // the ChatPane boundary. The defensive `try/catch` blocks that handled
+  // unparseable input were removed in F-080; pinning this test would have
+  // required keeping a dead code path in the component just to satisfy an
+  // unreachable input shape.
 
   it('renders an error turn inline', () => {
     pushEvent(SID, { kind: 'Error', message: 'ECONNREFUSED 127.0.0.1:11434' });
@@ -583,5 +577,130 @@ describe('invoke rejection handling (F-079)', () => {
 
     await flushMicrotasks();
     expect(await findByText(/reject boom/)).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-080 item 5: composer message-byte cap (defense-in-depth)
+// ---------------------------------------------------------------------------
+//
+// The Rust side enforces a 128 KiB cap; the composer caps at 100 KiB so the
+// user gets immediate feedback without an IPC round trip. Both the warning
+// surface and the send-blocking behavior are user-facing contracts.
+describe('Composer message-byte cap (F-080)', () => {
+  it('does not show the overflow warning under the cap', () => {
+    const { getByTestId, queryByTestId } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+    fireEvent.input(textarea, { target: { value: 'hello' } });
+    expect(queryByTestId('composer-overflow-warning')).not.toBeInTheDocument();
+  });
+
+  it('shows the inline overflow warning when the trimmed payload exceeds the cap', () => {
+    const { getByTestId } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+    const overCap = 'a'.repeat(MAX_COMPOSER_BYTES + 1);
+    fireEvent.input(textarea, { target: { value: overCap } });
+    expect(getByTestId('composer-overflow-warning')).toBeInTheDocument();
+  });
+
+  it('blocks send on Enter when over the byte cap', () => {
+    invokeMock.mockReset();
+    const { getByTestId } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+    const overCap = 'a'.repeat(MAX_COMPOSER_BYTES + 1);
+    fireEvent.input(textarea, { target: { value: overCap } });
+    fireEvent.keyDown(textarea, {
+      key: 'Enter',
+      code: 'Enter',
+      shiftKey: false,
+      ctrlKey: false,
+      metaKey: false,
+    });
+    // No `session_send_message` invocation should have been made — the
+    // composer-side cap intercepts the send before it reaches the bridge.
+    const sendCalls = invokeMock.mock.calls.filter(
+      (c) => c[0] === 'session_send_message',
+    );
+    expect(sendCalls).toHaveLength(0);
+  });
+
+  it('counts UTF-8 bytes, not UTF-16 code units (multi-byte characters)', () => {
+    // Each "💥" is 4 UTF-8 bytes but only 2 UTF-16 code units. Picking a count
+    // that is over the cap in bytes but well under it in `String.length` units
+    // proves the implementation uses TextEncoder rather than `.length`.
+    const emoji = '💥';
+    const utf8PerChar = new TextEncoder().encode(emoji).length; // 4
+    const overCount = Math.ceil(MAX_COMPOSER_BYTES / utf8PerChar) + 1;
+    const value = emoji.repeat(overCount);
+    // Sanity-check the corner: byte length over cap, code-unit length under.
+    expect(new TextEncoder().encode(value).length).toBeGreaterThan(MAX_COMPOSER_BYTES);
+
+    invokeMock.mockReset();
+    const { getByTestId } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+    fireEvent.input(textarea, { target: { value } });
+    expect(getByTestId('composer-overflow-warning')).toBeInTheDocument();
+    fireEvent.keyDown(textarea, {
+      key: 'Enter',
+      code: 'Enter',
+      shiftKey: false,
+      ctrlKey: false,
+      metaKey: false,
+    });
+    expect(
+      invokeMock.mock.calls.filter((c) => c[0] === 'session_send_message'),
+    ).toHaveLength(0);
+  });
+
+  it('still sends a payload exactly at the cap', () => {
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue(undefined);
+    const { getByTestId } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+    const atCap = 'a'.repeat(MAX_COMPOSER_BYTES);
+    fireEvent.input(textarea, { target: { value: atCap } });
+    fireEvent.keyDown(textarea, {
+      key: 'Enter',
+      code: 'Enter',
+      shiftKey: false,
+      ctrlKey: false,
+      metaKey: false,
+    });
+    expect(invokeMock).toHaveBeenCalledWith(
+      'session_send_message',
+      expect.objectContaining({ sessionId: SID, text: atCap }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-080 item 6: args_json boundary contract — `fromRustEvent` always
+// produces valid JSON, so removing the defensive try/catches in ChatPane
+// must not regress the path-extraction or rendering behavior.
+// ---------------------------------------------------------------------------
+describe('args_json boundary contract (F-080)', () => {
+  it('renders the path and uses it for whitelist matching when args is a path-bearing object', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-bc-path',
+      tool_name: 'fs.read',
+      args_json: JSON.stringify({ path: '/etc/hosts' }),
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('tool-call-card-tc-bc-path')).toHaveTextContent('/etc/hosts');
+  });
+
+  it('falls back to the stringified payload for non-object args (boundary edge: "null")', () => {
+    // `fromRustEvent` writes `JSON.stringify(ev['args'] ?? null)` so an absent
+    // `args` field arrives here as the literal string "null". The summary
+    // should still render that — no try/catch to swallow it.
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-bc-null',
+      tool_name: 'noargs',
+      args_json: 'null',
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('tool-call-card-tc-bc-null')).toHaveTextContent('null');
   });
 });

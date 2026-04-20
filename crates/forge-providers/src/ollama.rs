@@ -21,6 +21,7 @@
 //! conditions that occur *before* the NDJSON decoder starts and therefore
 //! cannot be caught by its stream-level timers.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::{ChatChunk, ChatMessage, ChatRequest, Provider, StreamErrorKind};
@@ -445,7 +446,12 @@ where
                         if let Some(chunk) = parse_line(trimmed) {
                             return Some((chunk, (framed, cfg, deadline, terminated)));
                         }
-                        // Unparseable but valid-shaped line — keep reading.
+                        // F-080: Unparseable line — surface the failure path
+                        // (invalid JSON vs valid-JSON-unrecognized-shape) so a
+                        // noisy or hostile peer is observable instead of
+                        // silently burning CPU. Rate-limited to bound log cost
+                        // on adversarial streams (see `log_unparseable_line`).
+                        log_unparseable_line(trimmed);
                         continue;
                     }
                 }
@@ -506,6 +512,54 @@ fn parse_line(line: &str) -> Option<ChatChunk> {
     }
 
     None
+}
+
+/// Cap on `log_unparseable_line` emissions per process. A hostile or buggy
+/// peer that produces malformed lines on every chunk would otherwise turn the
+/// log itself into an amplification surface — exactly the CPU-burn condition
+/// the silent-drop finding (F-080 item 2) names. After the cap is hit the
+/// counter still increments so a final summary message can quote the count.
+const MAX_UNPARSEABLE_LOG_EMISSIONS: usize = 16;
+
+/// Per-process count of `log_unparseable_line` calls (both emitted and
+/// suppressed). The first `MAX_UNPARSEABLE_LOG_EMISSIONS` are written to
+/// stderr; one summary line is emitted at the cap; further drops are silent.
+static UNPARSEABLE_LINE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Categorize an unparseable NDJSON line so the warning surfaces *why* the
+/// decoder dropped it. `parse_line` returns `None` in two cases: the line is
+/// not JSON at all, or it parses but does not match any recognized message
+/// shape. Distinguishing the two helps an operator triage between provider
+/// version skew and a hostile peer feeding garbage.
+fn classify_unparseable(line: &str) -> &'static str {
+    match serde_json::from_str::<serde_json::Value>(line) {
+        Ok(_) => "valid-json-unrecognized-shape",
+        Err(_) => "invalid-json",
+    }
+}
+
+fn log_unparseable_line(line: &str) {
+    let prior = UNPARSEABLE_LINE_COUNT.fetch_add(1, Ordering::Relaxed);
+    if prior < MAX_UNPARSEABLE_LOG_EMISSIONS {
+        let kind = classify_unparseable(line);
+        let preview = truncate(line, 120);
+        eprintln!("ollama NDJSON dropped malformed line ({kind}): {preview}");
+    } else if prior == MAX_UNPARSEABLE_LOG_EMISSIONS {
+        eprintln!(
+            "ollama NDJSON dropped malformed line cap reached ({MAX_UNPARSEABLE_LOG_EMISSIONS}); \
+             further drops will be silent"
+        );
+    }
+}
+
+#[cfg(test)]
+fn reset_unparseable_log_counter_for_test() {
+    UNPARSEABLE_LINE_COUNT.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+fn unparseable_log_counter_for_test() -> usize {
+    UNPARSEABLE_LINE_COUNT.load(Ordering::Relaxed)
 }
 
 fn to_ollama_messages(system: &Option<String>, messages: &[ChatMessage]) -> Vec<serde_json::Value> {
@@ -592,6 +646,32 @@ mod tests {
     #[test]
     fn parse_line_malformed_returns_none() {
         assert_eq!(parse_line("not-json"), None);
+    }
+
+    // F-080 item 2: a malformed NDJSON line must not be silently dropped —
+    // the decoder classifies and rate-limit-logs it instead. These tests pin
+    // the classifier behavior; the rate-limit counter is exercised separately
+    // because its global state would couple unrelated tests.
+
+    #[test]
+    fn classify_unparseable_distinguishes_invalid_json_from_unknown_shape() {
+        assert_eq!(classify_unparseable("not-json"), "invalid-json");
+        // Valid JSON but does not match any of `parse_line`'s recognized
+        // shapes (no `done`, no `message.tool_calls`, no `message.content`).
+        assert_eq!(
+            classify_unparseable(r#"{"unrelated":"shape"}"#),
+            "valid-json-unrecognized-shape",
+        );
+    }
+
+    #[test]
+    fn log_unparseable_line_increments_counter_per_call() {
+        // Run serially within this test since the counter is process-global.
+        reset_unparseable_log_counter_for_test();
+        log_unparseable_line("not-json");
+        log_unparseable_line(r#"{"unrelated":"shape"}"#);
+        assert_eq!(unparseable_log_counter_for_test(), 2);
+        reset_unparseable_log_counter_for_test();
     }
 
     #[test]
