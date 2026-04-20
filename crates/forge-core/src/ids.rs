@@ -1,7 +1,16 @@
+use std::sync::Arc;
+
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+// F-107: IDs store their hex payload in `Arc<str>` so `.clone()` on a hot
+// path (orchestrator event emission, per-token AssistantDelta) is a
+// ref-count bump rather than a heap allocation. Public API — constructors,
+// `Display`, `Serialize`/`Deserialize`, `PartialEq`, `Hash` — is unchanged;
+// the wire shape remains a bare JSON string and ts-rs still emits
+// `export type <Id> = string`. See the `*_clone_is_shared_allocation`
+// tests at the bottom of the file for the contract.
 macro_rules! id_type {
     ($(#[$attr:meta])* $name:ident) => {
         id_type!($(#[$attr])* $name, 8);
@@ -10,19 +19,25 @@ macro_rules! id_type {
         $(#[$attr])*
         #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
         #[ts(export, export_to = "../../../web/packages/ipc/src/generated/", type = "string")]
-        pub struct $name(String);
+        // serde's built-in `Deserialize` for `Arc<str>` is gated behind the
+        // `rc` feature (not enabled here), so we go through `String` for the
+        // wire round-trip. The wrap cost only pays at construction time;
+        // cloning stays O(refcount_bump).
+        #[serde(from = "String", into = "String")]
+        pub struct $name(Arc<str>);
 
         impl $name {
             pub fn new() -> Self {
                 let bytes: [u8; $bytes] = rand::thread_rng().gen();
-                Self(bytes.iter().map(|b| format!("{b:02x}")).collect())
+                let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+                Self(Arc::from(hex))
             }
 
             /// Wrap an existing string as this id type. Use when the id was
             /// generated elsewhere (e.g. read from env, a meta file, or a
             /// client message) and the wire shape is just a string.
             pub fn from_string(s: String) -> Self {
-                Self(s)
+                Self(Arc::from(s))
             }
         }
 
@@ -35,6 +50,19 @@ macro_rules! id_type {
         impl std::fmt::Display for $name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 write!(f, "{}", self.0)
+            }
+        }
+
+        // Bridges for `#[serde(from = "String", into = "String")]`.
+        impl From<String> for $name {
+            fn from(s: String) -> Self {
+                Self(Arc::from(s))
+            }
+        }
+
+        impl From<$name> for String {
+            fn from(id: $name) -> Self {
+                id.0.as_ref().to_owned()
             }
         }
     };
@@ -73,7 +101,7 @@ mod tests {
 
     #[test]
     fn session_id_display_is_hex() {
-        let id = SessionId(String::from("deadbeefcafebabe"));
+        let id = SessionId(Arc::from("deadbeefcafebabe"));
         assert_eq!(id.to_string(), "deadbeefcafebabe");
     }
 
@@ -112,6 +140,46 @@ mod tests {
             id.to_string().len(),
             16,
             "SessionId must remain 16 hex chars to match F-057/F-063 validators"
+        );
+    }
+
+    // F-107: cloning an id must be a ref-count bump, not a heap allocation.
+    // Hot-path emission sites in `forge-session::orchestrator` clone IDs
+    // (msg_id, provider_id, call_id) multiple times per streamed token; any
+    // per-clone allocation is observable as allocator pressure on long
+    // responses. We enforce the contract at the type level: identical
+    // byte-pointer after clone == shared backing buffer.
+    #[test]
+    fn message_id_clone_is_shared_allocation() {
+        let id = MessageId::new();
+        let cloned = id.clone();
+        assert_eq!(
+            id.0.as_ptr(),
+            cloned.0.as_ptr(),
+            "MessageId::clone() must share its backing buffer (Arc<str> or equivalent) \
+             to keep per-token cost O(refcount_bump)"
+        );
+    }
+
+    #[test]
+    fn provider_id_clone_is_shared_allocation() {
+        let id = ProviderId::new();
+        let cloned = id.clone();
+        assert_eq!(
+            id.0.as_ptr(),
+            cloned.0.as_ptr(),
+            "ProviderId::clone() must share its backing buffer"
+        );
+    }
+
+    #[test]
+    fn tool_call_id_clone_is_shared_allocation() {
+        let id = ToolCallId::new();
+        let cloned = id.clone();
+        assert_eq!(
+            id.0.as_ptr(),
+            cloned.0.as_ptr(),
+            "ToolCallId::clone() must share its backing buffer"
         );
     }
 }
