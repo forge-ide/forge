@@ -12,8 +12,8 @@ MCP (Model Context Protocol) client and server lifecycle manager. Phase 2 (F-127
 - `McpServerSpec { kind: ServerKind }` — parsed declaration of a single server.
 - `ServerKind::Stdio { command, args, env }` / `ServerKind::Http { url, headers }` — transport-specific shapes.
 - `config::load_workspace(root)` — read `<root>/.mcp.json`.
-- `config::load_user()` — read `~/.config/forge/mcp.json` (XDG-resolved).
-- `config::load_user_from(config_dir)` — test-friendly variant that takes an explicit base directory.
+- `config::load_user()` — read `~/.mcp.json` from the user's home directory.
+- `config::load_user_from(home_dir)` — test-friendly variant that takes an explicit home directory.
 - `config::load_merged(workspace_root, user_config_dir)` — merge both scopes; workspace wins on name collision.
 
 The `mcpServers` schema is the universal proposal (MCP repo discussion #2218). Transport is discriminated by an explicit `"type"` field (`"stdio"` / `"http"`) when present, otherwise inferred from the presence of `command` (stdio) or `url` (http). Unknown fields are rejected.
