@@ -1,0 +1,17 @@
+/*
+ * F-145 — branch gutter thread-line.
+ *
+ * 2px vertical line in `--color-ember-300` running alongside a branched
+ * turn's content. Absolutely positioned inside the turn container
+ * (which must set `position: relative`). Nested branches pass `depth`
+ * to the component and the inline `left` style indents successive lines.
+ */
+
+.branch-gutter {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--color-ember-300, #ff7a30);
+  pointer-events: none;
+}
