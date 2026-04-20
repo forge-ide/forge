@@ -1,6 +1,11 @@
 //! `fs.write` tool: writes a file via [`forge_fs::write`] and returns
 //! `{ ok: true }` or `{ error }`. Preview delegates to
 //! [`forge_fs::write_preview`].
+//!
+//! F-106: `forge_fs::write` is synchronous and can block a tokio worker for
+//! ~100–200 ms on a 10 MB write, stalling concurrent-session streaming on
+//! a shared worker. The write is wrapped in `tokio::task::spawn_blocking`
+//! so the stall is confined to the blocking pool.
 
 use super::{get_optional_str, get_required_str, Tool, ToolCtx};
 use forge_core::ApprovalPreview;
@@ -11,6 +16,7 @@ impl FsWriteTool {
     pub const NAME: &'static str = "fs.write";
 }
 
+#[async_trait::async_trait]
 impl Tool for FsWriteTool {
     fn name(&self) -> &str {
         Self::NAME
@@ -27,23 +33,32 @@ impl Tool for FsWriteTool {
         }
     }
 
-    fn invoke(&self, args: &serde_json::Value, ctx: &ToolCtx) -> serde_json::Value {
+    async fn invoke(&self, args: &serde_json::Value, ctx: &ToolCtx) -> serde_json::Value {
         let path = match get_required_str(args, Self::NAME, "path") {
-            Ok(p) => p,
+            Ok(p) => p.to_owned(),
             Err(e) => return serde_json::json!({ "error": e.to_string() }),
         };
         let content = match get_required_str(args, Self::NAME, "content") {
-            Ok(c) => c,
+            Ok(c) => c.to_owned(),
             Err(e) => return serde_json::json!({ "error": e.to_string() }),
         };
-        match forge_fs::write(
-            path,
-            content,
-            &ctx.allowed_paths,
-            &forge_fs::Limits::default(),
-        ) {
-            Ok(()) => serde_json::json!({ "ok": true }),
-            Err(e) => serde_json::json!({ "error": e.to_string() }),
+        let allowed_paths = ctx.allowed_paths.clone();
+        // F-106: move the synchronous write off the tokio worker.
+        let result = tokio::task::spawn_blocking(move || {
+            forge_fs::write(
+                &path,
+                &content,
+                &allowed_paths,
+                &forge_fs::Limits::default(),
+            )
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => serde_json::json!({ "ok": true }),
+            Ok(Err(e)) => serde_json::json!({ "error": e.to_string() }),
+            Err(join_err) => {
+                serde_json::json!({ "error": format!("fs.write blocking task failed: {join_err}") })
+            }
         }
     }
 }
