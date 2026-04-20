@@ -4,8 +4,11 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::ids::{AgentId, AgentInstanceId, MessageId, ProviderId, ToolCallId};
-use crate::types::{ApprovalScope, CompactTrigger, RosterScope, SessionPersistence};
+use crate::ids::{AgentId, AgentInstanceId, MessageId, ProviderId, StepId, ToolCallId};
+use crate::types::{
+    ApprovalScope, CompactTrigger, RosterScope, SessionPersistence, StepKind, StepOutcome,
+    TokenUsage,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ContextRef {
@@ -141,5 +144,73 @@ pub enum Event {
         at: DateTime<Utc>,
         reason: EndReason,
         archived: bool,
+    },
+    /// F-139: fine-grained step trace — opens a step within a turn.
+    ///
+    /// Emitted by the session turn loop before any `AssistantMessage`,
+    /// `AssistantDelta`, or `ToolCall*` event that logically belongs to
+    /// the step. Every `StepStarted` is terminated by exactly one
+    /// `StepFinished` carrying the same `step_id` (or the session ends
+    /// abnormally and replay consumers treat unterminated steps as
+    /// failed).
+    ///
+    /// `instance_id` is optional because the session-level turn loop
+    /// does not run inside an `AgentInstance` today; F-140 wires the
+    /// `AgentMonitor` through `run_turn` and will populate the field.
+    /// Until then top-level turns emit `instance_id: None`.
+    ///
+    /// Ordering invariant (see `forge-session::orchestrator`):
+    /// `StepStarted` < any `AssistantMessage` / `AssistantDelta` /
+    /// `ToolCallStarted` / `ToolCallApproved` / `ToolCallCompleted` /
+    /// `ToolInvoked` / `ToolReturned` with the same `step_id` <
+    /// `StepFinished`.
+    StepStarted {
+        step_id: StepId,
+        instance_id: Option<AgentInstanceId>,
+        kind: StepKind,
+        started_at: DateTime<Utc>,
+    },
+    /// F-139: fine-grained step trace — closes a step.
+    ///
+    /// `duration_ms` is wall-clock elapsed between the matching
+    /// `StepStarted.started_at` and this event's emission moment.
+    /// `token_usage` is `Some` only when the provider reported per-step
+    /// usage (today always `None` — mock provider doesn't emit usage;
+    /// F-155 populates it).
+    ///
+    /// Terminates the step; no further events may reference the same
+    /// `step_id`.
+    StepFinished {
+        step_id: StepId,
+        outcome: StepOutcome,
+        duration_ms: u64,
+        token_usage: Option<TokenUsage>,
+    },
+    /// F-139: tool invocation observed inside a tool-step.
+    ///
+    /// Emitted at the boundary between approval and execution — after
+    /// `ToolCallApproved` (or the auto-approve emission) and before
+    /// `tool.invoke`. `args_digest` is a short SHA-256 hex prefix of the
+    /// serialized args JSON; downstream UIs correlate it with
+    /// `ToolCallStarted.args` without re-hashing the full payload.
+    /// `tool_id` is the same string key registered on the dispatcher
+    /// (e.g. `"fs.read"`).
+    ToolInvoked {
+        step_id: StepId,
+        tool_call_id: ToolCallId,
+        tool_id: String,
+        args_digest: String,
+    },
+    /// F-139: tool invocation returned.
+    ///
+    /// Emitted immediately after `tool.invoke` completes and before
+    /// `ToolCallCompleted`. `bytes_out` is the length of the serialized
+    /// result JSON in UTF-8 bytes; `ok` is `true` when the result did
+    /// not serialize an `error` field at the top level.
+    ToolReturned {
+        step_id: StepId,
+        tool_call_id: ToolCallId,
+        ok: bool,
+        bytes_out: u64,
     },
 }

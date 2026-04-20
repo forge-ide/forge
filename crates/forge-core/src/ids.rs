@@ -73,6 +73,12 @@ id_type!(WorkspaceId);
 id_type!(AgentId);
 id_type!(ProviderId);
 id_type!(MessageId);
+// F-139: identifies one agent-step within a turn. 64-bit entropy is
+// sufficient — the id space is per-turn (each session owns its own emission
+// cursor) and never used as an authorization handle. Round-trips through a
+// bare JSON string so the Agent Monitor (F-140) can key step rows by
+// string equality without a custom decoder.
+id_type!(StepId);
 // F-067: 128-bit entropy (16 bytes → 32 hex chars). Defense-in-depth
 // against local online guessing when combined with UDS-permission defects
 // (see H8/F-044). Other IDs stay at 64 bits — they're validated at narrower

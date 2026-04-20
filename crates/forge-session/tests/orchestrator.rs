@@ -155,25 +155,31 @@ async fn full_turn_with_tool_call_emits_correct_event_sequence() {
         }
     }
 
-    // Assert the event sequence
+    // Assert the event sequence. F-139 step-trace events are filtered
+    // out here — they're covered by `tests/step_events.rs` and are
+    // orthogonal to the user-visible ordering this test pins.
     let kinds: Vec<&str> = events
         .iter()
-        .map(|e| match e {
-            Event::UserMessage { .. } => "UserMessage",
+        .filter_map(|e| match e {
+            Event::UserMessage { .. } => Some("UserMessage"),
             Event::AssistantMessage {
                 stream_finalised: false,
                 ..
-            } => "AssistantMessage(open)",
+            } => Some("AssistantMessage(open)"),
             Event::AssistantMessage {
                 stream_finalised: true,
                 ..
-            } => "AssistantMessage(final)",
-            Event::AssistantDelta { .. } => "AssistantDelta",
-            Event::ToolCallStarted { .. } => "ToolCallStarted",
-            Event::ToolCallApprovalRequested { .. } => "ToolCallApprovalRequested",
-            Event::ToolCallApproved { .. } => "ToolCallApproved",
-            Event::ToolCallCompleted { .. } => "ToolCallCompleted",
-            _ => "Other",
+            } => Some("AssistantMessage(final)"),
+            Event::AssistantDelta { .. } => Some("AssistantDelta"),
+            Event::ToolCallStarted { .. } => Some("ToolCallStarted"),
+            Event::ToolCallApprovalRequested { .. } => Some("ToolCallApprovalRequested"),
+            Event::ToolCallApproved { .. } => Some("ToolCallApproved"),
+            Event::ToolCallCompleted { .. } => Some("ToolCallCompleted"),
+            Event::StepStarted { .. }
+            | Event::StepFinished { .. }
+            | Event::ToolInvoked { .. }
+            | Event::ToolReturned { .. } => None,
+            _ => Some("Other"),
         })
         .collect();
 
