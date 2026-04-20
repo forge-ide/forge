@@ -5,6 +5,19 @@
 //! tests spawn a real `forge-session` daemon, drive the bridge via
 //! [`SessionBridge`], and capture forwarded events through a generic
 //! [`EventSink`].
+//!
+//! **Locking discipline (F-109):** no function in this file may hold the
+//! `SessionConnections` map lock (`inner`) across an `.await` point. The
+//! map lock serializes every Tauri command's lookup; holding it across a
+//! UDS write stalls concurrent commands on unrelated sessions. The pattern
+//! is always: acquire → capture the per-connection handle (writer `Arc`,
+//! reader `Option`) → drop → await → re-acquire briefly to install state.
+//! The `clippy::await_holding_lock` deny below is structural documentation:
+//! it catches `std::sync::Mutex` regressions even though it does not cover
+//! `tokio::sync::Mutex` (tokio's guards are deliberately excluded from that
+//! lint). Reviewers and the accompanying concurrency regression test are
+//! the enforcement for the tokio case.
+#![deny(clippy::await_holding_lock)]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -171,32 +184,70 @@ impl SessionBridge {
 
     /// Send `Subscribe { since }` to the daemon and spawn a background task
     /// that reads event frames and delivers them to `sink`. Idempotent per
-    /// connection: a second call is a no-op (task already running).
+    /// connection: a second call is a no-op (task already running or in
+    /// flight).
+    ///
+    /// **F-109:** this function must not hold the `SessionConnections` map
+    /// lock across any `.await`. The sequence is:
+    ///
+    /// 1. Lock the map, validate, clone the writer `Arc`, take the reader
+    ///    half (which also acts as a "subscription-in-flight" reservation),
+    ///    drop the lock.
+    /// 2. Await `write_frame` on the per-connection writer mutex.
+    /// 3. Re-acquire the map lock briefly to install the reader task, or —
+    ///    if the write failed — restore the reader so a retry is possible.
+    ///
+    /// A concurrent second call that lands between step 1 and step 3 sees
+    /// `reader: None` and treats the subscription as already in flight; it
+    /// returns `Ok(())` rather than failing with "reader already consumed".
     pub async fn subscribe(
         &self,
         session_id: &str,
         since: u64,
         sink: Arc<dyn EventSink>,
     ) -> Result<()> {
-        let mut map = self.connections.inner.lock().await;
-        let conn = map
-            .get_mut(session_id)
-            .ok_or_else(|| anyhow!("session_subscribe: no active connection for {session_id}"))?;
+        // Step 1: capture per-connection handles under the map lock, then
+        // drop the lock before any `.await`.
+        let (writer, reader) = {
+            let mut map = self.connections.inner.lock().await;
+            let conn = map.get_mut(session_id).ok_or_else(|| {
+                anyhow!("session_subscribe: no active connection for {session_id}")
+            })?;
 
-        if conn.reader_task.is_some() {
-            return Ok(());
-        }
+            // Idempotent in two states: reader_task already spawned, or an
+            // in-flight subscribe has reserved the reader by taking it.
+            if conn.reader_task.is_some() || conn.reader.is_none() {
+                return Ok(());
+            }
 
+            let writer = Arc::clone(&conn.writer);
+            // Reserve the reader under the map lock so a racing call sees
+            // `reader: None` and bails early rather than duplicating the
+            // subscribe frame or fighting for the reader half.
+            let reader = conn.reader.take().expect("reader present per check above");
+            (writer, reader)
+        };
+
+        // Step 2: await the Subscribe frame with the map lock released.
         let sub = IpcMessage::Subscribe(Subscribe { since });
-        {
-            let mut writer = conn.writer.lock().await;
-            write_frame(&mut *writer, &sub).await?;
+        let write_result = {
+            let mut writer_guard = writer.lock().await;
+            write_frame(&mut *writer_guard, &sub).await
+        };
+
+        // Step 3: re-acquire the map lock briefly to either install the
+        // reader task or restore the reader on failure.
+        let mut map = self.connections.inner.lock().await;
+        let conn = map.get_mut(session_id).ok_or_else(|| {
+            anyhow!("session_subscribe: connection for {session_id} disappeared mid-subscribe")
+        })?;
+
+        if let Err(err) = write_result {
+            // Put the reader back so a subsequent subscribe can try again.
+            conn.reader = Some(reader);
+            return Err(err);
         }
 
-        let reader = conn
-            .reader
-            .take()
-            .ok_or_else(|| anyhow!("session_subscribe: reader already consumed"))?;
         let session_id_owned = session_id.to_string();
         let task = tokio::spawn(async move {
             pump_events(reader, session_id_owned, sink).await;
@@ -249,6 +300,21 @@ impl SessionBridge {
             .get(session_id)
             .ok_or_else(|| anyhow!("no active connection for session {session_id}"))?;
         Ok(Arc::clone(&conn.writer))
+    }
+
+    /// Test-only accessor for a session's writer mutex. Used by concurrency
+    /// tests (F-109) to externally hold the writer so a `subscribe()` frame
+    /// write stalls deterministically, then verify that unrelated sessions'
+    /// commands are not blocked behind the `SessionConnections` map lock.
+    ///
+    /// Not used in production paths.
+    #[doc(hidden)]
+    pub async fn writer_arc_for_testing(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<Mutex<OwnedWriteHalf>>> {
+        let map = self.connections.inner.lock().await;
+        map.get(session_id).map(|c| Arc::clone(&c.writer))
     }
 }
 

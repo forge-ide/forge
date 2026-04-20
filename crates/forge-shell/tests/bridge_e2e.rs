@@ -149,6 +149,87 @@ async fn approve_tool_proxies_to_daemon() {
         .expect("reject_tool writes frame");
 }
 
+/// F-109: `subscribe()` must not hold the `SessionConnections` map lock
+/// across its `write_frame().await`. If it does, a concurrent command on a
+/// *different* session blocks behind that lock even though its own writer
+/// is unrelated. This test stalls session A's `write_frame` inside
+/// `subscribe()` by externally holding A's writer mutex, then asserts that
+/// `send_message("B", …)` still completes within a tight timeout.
+///
+/// - Without the fix: `subscribe(A)` holds the map lock while awaiting
+///   `writer_A.lock()`. `send_message(B)` calls `writer_for(B)`, which
+///   tries to acquire the same map lock — deadlocks until A's writer is
+///   released. The test times out.
+/// - With the fix: `subscribe(A)` releases the map lock before awaiting
+///   `writer_A.lock()`. `send_message(B)` grabs the map lock, captures B's
+///   writer, writes the frame, and returns. The assertion holds.
+///
+/// The timeout (500 ms) is two orders of magnitude above the expected
+/// send_message latency on a loopback UDS; any flake here almost certainly
+/// indicates a genuine regression of the locking discipline.
+#[tokio::test]
+async fn subscribe_does_not_block_concurrent_send_on_other_session() {
+    let sock_dir = TempDir::new().unwrap();
+    let sock_a = sock_dir.path().join("a.sock");
+    let sock_b = sock_dir.path().join("b.sock");
+    let _daemon_a = spawn_daemon(&sock_a, "session-a").await;
+    let _daemon_b = spawn_daemon(&sock_b, "session-b").await;
+
+    let bridge = SessionBridge::new(SessionConnections::new());
+    bridge
+        .hello("session-a", Some(&sock_a))
+        .await
+        .expect("hello a");
+    bridge
+        .hello("session-b", Some(&sock_b))
+        .await
+        .expect("hello b");
+
+    // Externally hold session A's writer mutex. Any subsequent call that
+    // tries to lock it will stall until we drop this guard.
+    let writer_a = bridge
+        .writer_arc_for_testing("session-a")
+        .await
+        .expect("writer for a");
+    let writer_a_guard = writer_a.lock().await;
+
+    // Fire subscribe(A) in a background task. Its `write_frame` will hang
+    // waiting for the writer mutex we hold. In the buggy version it would
+    // also be holding the `SessionConnections` map lock.
+    let bridge_clone = bridge.clone();
+    let (tx_a, _rx_a) = mpsc::unbounded_channel();
+    let subscribe_task = tokio::spawn(async move {
+        bridge_clone
+            .subscribe("session-a", 0, Arc::new(ChannelSink { tx: tx_a }))
+            .await
+    });
+
+    // Yield so the subscribe task actually reaches its stall point before
+    // we race send_message against it. A brief sleep is sufficient; the
+    // task only needs to pass through its initial lock-acquire/drop.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // This call must NOT block on session A's stall. Under the fix it
+    // completes in < 1 ms on loopback; the 500 ms timeout is pure safety
+    // margin. Under the bug it blocks until writer_a_guard is dropped.
+    let result = tokio::time::timeout(
+        Duration::from_millis(500),
+        bridge.send_message("session-b", "ping".to_string()),
+    )
+    .await;
+
+    // Drop our hold on writer A so the subscribe task can finish cleanly.
+    drop(writer_a_guard);
+    let _ = subscribe_task.await;
+
+    let send_result = result.expect(
+        "send_message(B) timed out while subscribe(A) was stalled: the \
+         SessionConnections map lock is being held across an .await in \
+         subscribe() (F-109 regression)",
+    );
+    send_result.expect("send_message(B) frame write");
+}
+
 #[tokio::test]
 async fn hello_twice_for_same_session_is_rejected() {
     let sock_dir = TempDir::new().unwrap();
