@@ -23,6 +23,13 @@ import {
 } from '../../stores/approvals';
 import { ApprovalPrompt } from '../../components/ApprovalPrompt/ApprovalPrompt';
 import { WhitelistedPill } from '../../components/ApprovalPrompt/WhitelistedPill';
+import {
+  ContextPicker,
+  detectAtTrigger,
+  type PickerResult,
+  type ContextCategory,
+} from '../../components/ContextPicker';
+import { ContextChip } from '../../components/ContextChip';
 import type { ApprovalScope } from '@forge/ipc';
 import './ChatPane.css';
 
@@ -277,42 +284,247 @@ function utf8ByteLength(text: string): number {
   return new TextEncoder().encode(text).length;
 }
 
-const Composer: Component<{ disabled: boolean; onSend: (text: string) => void }> = (props) => {
+interface InsertedChip {
+  /** Stable id so SolidJS can reconcile chip list updates. */
+  id: string;
+  category: ContextCategory;
+  label: string;
+  value: string;
+}
+
+/**
+ * Remove the active `@text` span from the textarea content when a picker
+ * result is selected (F-141). Exported for direct unit testing — the
+ * integration in Composer calls this while also appending the chip to the
+ * `ctx-chips` row and repositioning the caret.
+ *
+ * The span runs from `triggerStart` (index of the `@`) to `caret`. The
+ * result is the concatenation of the text before `triggerStart` and
+ * after `caret`, plus the new caret position at the join.
+ */
+export function removeAtSpan(
+  text: string,
+  triggerStart: number,
+  caret: number,
+): { text: string; caret: number } {
+  const before = text.slice(0, triggerStart);
+  const after = text.slice(caret);
+  return { text: before + after, caret: before.length };
+}
+
+export interface ComposerProps {
+  disabled: boolean;
+  onSend: (text: string) => void;
+  /**
+   * Optional category-indexed items forwarded to the ContextPicker. F-141
+   * ships with this undefined (the picker shows empty tabs). F-142 will
+   * wire a resolver on top of this prop. Exposed now so component tests
+   * can drive the end-to-end "type @ → pick → chip appears" flow.
+   */
+  items?: Partial<Record<ContextCategory, PickerResult[]>>;
+}
+
+export const Composer: Component<ComposerProps> = (props) => {
   const [text, setText] = createSignal('');
+  const [caret, setCaret] = createSignal(0);
+  const [chips, setChips] = createSignal<InsertedChip[]>([]);
+  // F-141: Esc dismisses the picker but must *retain* the typed `@text`
+  // (spec §7 "close, retain typed text"). We track the dismissed `@`-span
+  // start so the trigger re-opens only after the user edits the text — not
+  // just from a caret move back into the same span.
+  const [dismissedAt, setDismissedAt] = createSignal<number | null>(null);
+  // F-141: the ContextPicker pops open while an active `@token` sits at the
+  // caret. `detectAtTrigger` drives this — whenever the caret or text moves,
+  // we recompute whether we're still in a trigger.
+  const trigger = createMemo(() => {
+    const match = detectAtTrigger(text(), caret());
+    if (!match) return null;
+    if (dismissedAt() === match.start) return null;
+    return match;
+  });
+  const pickerOpen = createMemo(() => trigger() !== null);
+  // Anchor rect used by the ContextPicker for placement. Re-measured on open
+  // and on viewport resize.
+  const [anchorRect, setAnchorRect] = createSignal({
+    top: 0,
+    bottom: 0,
+    left: 0,
+    right: 0,
+  });
+
+  let textareaRef: HTMLTextAreaElement | undefined;
+  let composerRef: HTMLDivElement | undefined;
 
   // Byte length of the *trimmed* value because that is what we actually send.
   const trimmedByteLength = createMemo(() => utf8ByteLength(text().trim()));
   const overCap = createMemo(() => trimmedByteLength() > MAX_COMPOSER_BYTES);
 
-  const handleKeyDown = (e: KeyboardEvent) => {
-    if (e.key !== 'Enter') return;
+  const measureAnchor = () => {
+    if (!composerRef) return;
+    const r = composerRef.getBoundingClientRect();
+    setAnchorRect({ top: r.top, bottom: r.bottom, left: r.left, right: r.right });
+  };
 
-    // Option B: modifier keys = newline, bare Enter = send
-    if (e.shiftKey || e.ctrlKey || e.metaKey) return;
+  createEffect(() => {
+    if (pickerOpen()) {
+      measureAnchor();
+    }
+  });
 
-    e.preventDefault();
+  const handleInput = (e: InputEvent & { currentTarget: HTMLTextAreaElement }) => {
+    const t = e.currentTarget.value;
+    setText(t);
+    setCaret(e.currentTarget.selectionStart ?? t.length);
+    // Any text edit re-arms the trigger — the user's dismiss decision only
+    // applied to the span they dismissed.
+    setDismissedAt(null);
+  };
+
+  const handleSelect = (e: Event & { currentTarget: HTMLTextAreaElement }) => {
+    setCaret(e.currentTarget.selectionStart ?? text().length);
+  };
+
+  const handleSend = () => {
     const value = text().trim();
     if (!value) return;
-    // Block the send if the trimmed payload is over the byte cap. The
-    // inline warning in the bar tells the user *why* nothing happened.
     if (utf8ByteLength(value) > MAX_COMPOSER_BYTES) return;
     props.onSend(value);
     setText('');
+    setCaret(0);
+    // Chips persist across sends intentionally — clearing them on send is
+    // F-142 territory once backend context blocks wire up.
+  };
+
+  const handleKeyDown = (e: KeyboardEvent) => {
+    // When the picker is open it owns Arrow/Enter/Tab/Escape — stop those
+    // from reaching the textarea's send handler. The picker itself installs
+    // a capturing window listener, so we just need to make sure the
+    // textarea-level Enter-to-send doesn't fire while the picker is up.
+    if (pickerOpen()) {
+      if (
+        e.key === 'Enter' ||
+        e.key === 'Escape' ||
+        e.key === 'Tab' ||
+        e.key === 'ArrowUp' ||
+        e.key === 'ArrowDown'
+      ) {
+        return;
+      }
+    }
+    if (e.key !== 'Enter') return;
+    // Option B: modifier keys = newline, bare Enter = send
+    if (e.shiftKey || e.ctrlKey || e.metaKey) return;
+    e.preventDefault();
+    handleSend();
+  };
+
+  const replaceAtSpan = (result: PickerResult) => {
+    // Remove the `@text` span from the textarea and append a chip to the
+    // `ctx-chips` row. The span runs from `trigger.start` to the caret.
+    const t = text();
+    const c = caret();
+    const match = trigger();
+    if (!match) {
+      // Picker was open with no active trigger — append the chip and move
+      // on; the textarea stays as-is.
+      setChips((prev) => [
+        ...prev,
+        {
+          id: `chip-${Date.now()}-${prev.length}`,
+          category: result.category,
+          label: result.label,
+          value: result.value,
+        },
+      ]);
+      return;
+    }
+    const { text: next, caret: nextCaret } = removeAtSpan(t, match.start, c);
+    setText(next);
+    setCaret(nextCaret);
+    setDismissedAt(null);
+    setChips((prev) => [
+      ...prev,
+      {
+        id: `chip-${Date.now()}-${prev.length}`,
+        category: result.category,
+        label: result.label,
+        value: result.value,
+      },
+    ]);
+    // Move the real textarea caret to the join point so subsequent typing
+    // continues where the `@span` was.
+    queueMicrotask(() => {
+      if (textareaRef) {
+        textareaRef.selectionStart = nextCaret;
+        textareaRef.selectionEnd = nextCaret;
+        textareaRef.focus();
+      }
+    });
+  };
+
+  const dismissPicker = () => {
+    // "Esc: close, retain typed text" — the `@text` stays in the textarea.
+    // We suppress re-opening the picker for this particular `@`-span; any
+    // subsequent text edit (via handleInput) clears the suppression.
+    const match = trigger();
+    if (match) {
+      setDismissedAt(match.start);
+      queueMicrotask(() => {
+        if (textareaRef) {
+          textareaRef.focus();
+        }
+      });
+    }
+  };
+
+  const dismissChip = (id: string) => {
+    setChips((prev) => prev.filter((c) => c.id !== id));
   };
 
   return (
-    <div class="composer">
+    <div class="composer" ref={composerRef}>
+      {/* ctx-chips row — chips inserted from the picker live here. The spec
+          places it above the textarea so chips are visually attached to
+          the message being composed. */}
+      <div
+        class="composer__ctx-chips"
+        data-testid="ctx-chips"
+        classList={{ 'composer__ctx-chips--empty': chips().length === 0 }}
+      >
+        <For each={chips()}>
+          {(chip) => (
+            <ContextChip
+              category={chip.category}
+              label={chip.label}
+              onDismiss={() => dismissChip(chip.id)}
+            />
+          )}
+        </For>
+      </div>
       <textarea
         class="composer__textarea"
         data-testid="composer-textarea"
         placeholder="Ask, refine, or @-reference context"
         disabled={props.disabled}
         value={text()}
-        onInput={(e) => setText(e.currentTarget.value)}
+        onInput={handleInput}
+        onSelect={handleSelect}
+        onClick={handleSelect}
+        onKeyUp={handleSelect}
         onKeyDown={handleKeyDown}
         rows={3}
         aria-invalid={overCap() ? true : undefined}
+        ref={textareaRef}
       />
+      <Show when={pickerOpen()}>
+        <ContextPicker
+          query={trigger()!.query}
+          anchorRect={anchorRect()}
+          {...(props.items ? { items: props.items } : {})}
+          onPick={replaceAtSpan}
+          onDismiss={dismissPicker}
+        />
+      </Show>
       <div class="composer__bar">
         <span class="composer__hints">
           <Show

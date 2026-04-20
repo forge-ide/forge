@@ -1,0 +1,47 @@
+/* ---------------------------------------------------------------------------
+   ContextChip — inline pill for the composer's ctx-chips row (F-141)
+   --------------------------------------------------------------------------- */
+
+.ctx-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 2px var(--sp-2);
+  background: var(--color-surface-3);
+  border: 1px solid var(--color-border-2);
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-primary);
+  max-width: 240px;
+}
+
+.ctx-chip__icon {
+  color: var(--color-text-tertiary);
+  flex: 0 0 auto;
+}
+
+.ctx-chip__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ctx-chip__dismiss {
+  background: transparent;
+  border: none;
+  color: var(--color-text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+  flex: 0 0 auto;
+  transition: var(--ease);
+}
+
+.ctx-chip__dismiss:hover {
+  color: var(--color-error);
+}
