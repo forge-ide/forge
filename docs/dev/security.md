@@ -121,13 +121,20 @@ The 500 MiB default lives in `ByteBudget::DEFAULT_BUDGET_BYTES`. Every new tool 
 
 # Supply-chain security
 
-Forge runs three scanners on every PR via `.github/workflows/ci.yml`:
+Forge runs two scanners on every PR via `.github/workflows/ci.yml`:
 
 | Scanner | Scope | Fails CI when |
 |---|---|---|
-| `cargo audit` (`rustsec/audit-check@v2`) | Rust vulnerability advisories (RUSTSEC) | any CVE advisory matches a dep in `Cargo.lock` |
-| `cargo deny check` (`EmbarkStudios/cargo-deny-action@v2`) | licenses, bans, advisories, sources | any rule in [`deny.toml`](../../deny.toml) violates, including expired suppressions |
+| `cargo deny check` (`EmbarkStudios/cargo-deny-action@v2`) | RustSec advisories, licenses, bans, sources | any rule in [`deny.toml`](../../deny.toml) violates, including expired suppressions |
 | `pnpm audit --audit-level moderate` | npm advisories for the web workspace | any moderate-or-higher advisory applies to `web/pnpm-lock.yaml` |
+
+### Why one Rust scanner, not two (F-115)
+
+`cargo deny check advisories` consults the same [RustSec advisory DB](https://github.com/rustsec/advisory-db) that `cargo audit` does, so running both covers an identical advisory surface. An earlier iteration (F-070 / #227) ran both and mirrored the suppression list from `deny.toml` into a second `audit.toml`; the two config formats are incompatible (flat string list vs. inline tables with `reason` / `expires`), so every suppression update had to be made in two places, and CI broke the first time the lists drifted.
+
+`deny.toml` is the richer format — per-advisory `reason`, `expires`, and the same file also carries license, ban, and source rules that `cargo audit` does not cover — so consolidating onto `cargo deny` removes the drift risk without narrowing the advisory surface.
+
+**What would force re-introducing a second scanner:** a scanner appears that consults a DB `cargo deny` cannot reach (e.g. a pre-publish CVE feed with embargoed advisories), or `cargo deny` drops RustSec support. Until one of those lands, the single-tool pattern is the intended design and additions should be rejected at review.
 
 ## Baselines
 
@@ -158,9 +165,8 @@ All workspace crates declare `license = "MIT OR Apache-2.0"` and the repo root s
 ## Triggering an out-of-band scan
 
 ```bash
-cargo audit
 cargo deny check
 ( cd web && pnpm audit --audit-level moderate )
 ```
 
-Pushing to any branch or opening a PR runs all three in CI.
+Pushing to any branch or opening a PR runs both in CI.
