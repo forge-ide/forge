@@ -358,6 +358,39 @@ Requires session started against real Ollama (`--provider ollama:<model>` per th
 
 ---
 
+## UAT-14: Webview CSP enforcement
+
+**Scope:** F-050 (restrictive production Content-Security-Policy, replaces the null policy that shipped with the webview bootstrap).
+**Vehicle:** Playwright spec at `web/packages/app/tests/phase1/uat-csp-meta.spec.ts` (authored alongside F-050; this entry documents the coverage that was previously orphaned from the plan).
+
+| Step | Action | Expected |
+|------|--------|----------|
+| 1 | Load the production-built webview | Response headers / `<meta http-equiv="Content-Security-Policy">` contain the restrictive directive set defined in `forge-shell` Tauri config |
+| 2 | Inject a fixture `<script>alert('xss')</script>` via a DOM attack vector | Browser blocks execution per CSP; no `alert` dialog; console reports the CSP violation |
+| 3 | Attempt an inline-style attack (`<div style="...">` with fixture JS expression) | Blocked by CSP; element renders without the style |
+| 4 | Attempt to fetch an off-allowlist remote origin | Blocked; network tab shows the CSP refusal |
+
+**Failure criteria:** any injected payload executes; any off-allowlist origin loads; CSP directive drifts from the canonical list in `docs/architecture/security.md`.
+
+---
+
+## UAT-15: ApprovalPrompt accessibility
+
+**Scope:** F-088 (`role="alertdialog"` + `aria-live`), F-089 (focus trap + focus restoration). Shipped as part of the Phase 1 frontend polish; this entry makes the accessibility contract explicit after the Phase 1 frontend review flagged it as plan-undocumented.
+**Vehicle:** Playwright + axe-core assertions against the Tauri webview with MockProvider scripting an approval-required tool call.
+
+| Step | Action | Expected |
+|------|--------|----------|
+| 1 | Mock drives `fs.edit` on `src/a.ts`; approval prompt renders inline in the card | Prompt container exposes `role="alertdialog"` with an accessible name (F-088); an `aria-live` polite region announces the prompt to screen readers |
+| 2 | Inspect keyboard focus | Focus lands inside the prompt (first actionable control) automatically when the prompt renders (F-089) |
+| 3 | `Tab` / `Shift+Tab` repeatedly | Focus cycles only within the prompt — focus trap keeps Tab from escaping back to the chat list or composer (F-089) |
+| 4 | `Esc` or Reject | Prompt closes; **focus returns to the element that held it before the prompt opened** (F-089) |
+| 5 | Run axe-core on the session window with an active prompt | Zero violations in the prompt container |
+
+**Failure criteria:** missing `role="alertdialog"` / `aria-live`, Tab escapes the prompt, focus is dropped or restored to an unrelated element, or axe-core reports any violation inside the prompt.
+
+---
+
 ## Primitives covered by unit tests only (not UATs)
 
 These Phase 1 deliverables have no user-visible surface yet. Verification is at the crate level via `cargo test`; they do not get UATs in this plan.
@@ -370,6 +403,7 @@ These Phase 1 deliverables have no user-visible surface yet. Verification is at 
 | `forge_fs::write_preview` / `edit_preview` output shape | F-029 | `cargo test -p forge-fs` |
 | `archive_or_purge` cross-device rename fallback | F-031 | `cargo test -p forge-session archive` |
 | Roadmap doc sync | F-032 | Textual `diff` of `docs/build/roadmap.md` vs GitHub milestone descriptions in CI (prereq, not a UAT) |
+| UDS socket auth / permissions (`XDG_RUNTIME_DIR` requirement, `0o600` socket / `0o700` parent, TOCTOU-safe unlink) | F-044, F-056 | `cargo test -p forge-session uds_socket_permissions uds_bind_symlink_race socket_path_fallback` — backend trust-boundary invariant, no user-facing surface for UAT |
 
 ---
 
