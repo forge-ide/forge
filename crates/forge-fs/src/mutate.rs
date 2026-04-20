@@ -54,7 +54,7 @@ pub struct ApprovalPreview {
 /// # Canonicalization policy (write vs read asymmetry)
 ///
 /// Unlike [`crate::read_file`], which uses strict [`std::fs::canonicalize`],
-/// `write` uses [`crate::canonicalize_no_symlink`] — a lenient helper that
+/// `write` uses `canonicalize_no_symlink` — a lenient helper that
 /// canonicalizes the parent directory and joins the file name, so a
 /// not-yet-existing leaf is permitted. This is required for the
 /// file-creation case; without it `fs.write` could only ever overwrite
@@ -116,7 +116,7 @@ pub fn write(
 ///
 /// # Canonicalization policy (edit vs read asymmetry)
 ///
-/// `edit` uses the same lenient [`crate::canonicalize_no_symlink`] as
+/// `edit` uses the same lenient `canonicalize_no_symlink` as
 /// [`write()`] (not the strict [`std::fs::canonicalize`] used by
 /// [`crate::read_file`]) so the helper is shared across both mutation paths.
 /// `edit` then explicitly re-asserts that the canonical target *is* a file

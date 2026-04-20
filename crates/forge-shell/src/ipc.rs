@@ -94,7 +94,7 @@ pub(crate) fn require_size(field: &str, value: &str, limit_bytes: usize) -> Resu
 /// accepts a webview-supplied socket path; the path is always derived via
 /// [`crate::bridge::default_socket_path`]. Integration tests (which run
 /// against ephemeral tempdir sockets) wire an override through the
-/// `webview-test`-gated [`Self::test_socket_override`] field. The field is
+/// `webview-test`-gated `test_socket_override` field. The field is
 /// absent from production builds entirely.
 pub struct BridgeState {
     pub bridge: SessionBridge,

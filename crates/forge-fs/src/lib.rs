@@ -28,15 +28,15 @@ pub struct ReadResult {
 /// `read_file` uses **strict** [`std::fs::canonicalize`], which fails when any
 /// component of `path` is missing or a broken symlink. This is intentional and
 /// asymmetric with [`mutate::write`] / [`mutate::edit`], which use
-/// [`canonicalize_no_symlink`] — a lenient helper that accepts not-yet-existing
+/// `canonicalize_no_symlink` — a lenient helper that accepts not-yet-existing
 /// targets so a caller can `fs.write` a brand-new file.
 ///
 /// Threat-model rationale: a read against a non-existent path can only ever
 /// fail (there is nothing to read), and surfacing the failure as an explicit
 /// `Io` error keeps the trust boundary loud. By contrast, `write` and `edit`
 /// must support file creation — the path-traversal protection there comes from
-/// the explicit symlink-component check in [`canonicalize_no_symlink`] plus
-/// the [`enforce_allowed`] glob match against the resolved parent. Both entry
+/// the explicit symlink-component check in `canonicalize_no_symlink` plus
+/// the `enforce_allowed` glob match against the resolved parent. Both entry
 /// points still reject `..` traversal because the canonical form is what gets
 /// glob-matched; the asymmetry is purely about whether the leaf must exist.
 pub fn read_file(
