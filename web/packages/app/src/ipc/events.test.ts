@@ -48,9 +48,10 @@ describe('fromRustEvent — non-rendering variants return null', () => {
     },
     { type: 'session_ended', at: '2026-04-18T10:00:00Z', reason: 'UserExit', archived: true },
     { type: 'branch_selected', parent: 'a', selected: 'b' },
-    { type: 'sub_agent_spawned', parent: 'p', child: 'c', from_msg: 'm' },
+    // F-136: sub_agent_spawned + background_agent_completed are now mapped
+    // into renderable SessionEvents (banner mount + terminal flip); they're
+    // asserted in their own positive describes below.
     { type: 'background_agent_started', id: 'ba-1', agent: 'a', at: '2026-04-18T10:00:00Z' },
-    { type: 'background_agent_completed', id: 'ba-1', at: '2026-04-18T10:00:00Z' },
     {
       type: 'usage_tick',
       provider: 'p',
@@ -375,6 +376,84 @@ describe('fromRustEvent — narrowing drops malformed required fields', () => {
         stream_finalised: true,
         text: null,
       }),
+    ).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-136: sub_agent_spawned + background_agent_completed — ChatPane banner
+// wire-up. The Rust shape matches `forge_core::Event::SubAgentSpawned` /
+// `BackgroundAgentCompleted`; event_wire_shape.rs pins it serverside.
+// ---------------------------------------------------------------------------
+
+describe('fromRustEvent — sub_agent_spawned (F-136)', () => {
+  it('maps to SubAgentSpawned with parent/child/from_msg carried through', () => {
+    const rust = {
+      type: 'sub_agent_spawned',
+      parent: 'parent-inst-1',
+      child: 'child-inst-1',
+      from_msg: 'msg-7',
+    };
+    expect(fromRustEvent(rust)).toEqual({
+      kind: 'SubAgentSpawned',
+      parent_instance_id: 'parent-inst-1',
+      child_instance_id: 'child-inst-1',
+      from_msg: 'msg-7',
+    });
+  });
+
+  it('forwards an optional agent_name when the shell enriches the payload', () => {
+    const rust = {
+      type: 'sub_agent_spawned',
+      parent: 'p',
+      child: 'c',
+      from_msg: 'm',
+      agent_name: 'test-writer',
+    };
+    expect(fromRustEvent(rust)).toEqual({
+      kind: 'SubAgentSpawned',
+      parent_instance_id: 'p',
+      child_instance_id: 'c',
+      from_msg: 'm',
+      agent_name: 'test-writer',
+    });
+  });
+
+  it('drops payloads with a non-string parent', () => {
+    expect(
+      fromRustEvent({ type: 'sub_agent_spawned', parent: 7, child: 'c', from_msg: 'm' }),
+    ).toBeNull();
+  });
+
+  it('drops payloads with a non-string child', () => {
+    expect(
+      fromRustEvent({ type: 'sub_agent_spawned', parent: 'p', child: null, from_msg: 'm' }),
+    ).toBeNull();
+  });
+
+  it('drops payloads with a non-string from_msg', () => {
+    expect(
+      fromRustEvent({ type: 'sub_agent_spawned', parent: 'p', child: 'c' }),
+    ).toBeNull();
+  });
+});
+
+describe('fromRustEvent — background_agent_completed (F-136)', () => {
+  it('maps to BackgroundAgentCompleted keyed by instance id', () => {
+    const rust = {
+      type: 'background_agent_completed',
+      id: 'child-inst-1',
+      at: '2026-04-20T10:00:00Z',
+    };
+    expect(fromRustEvent(rust)).toEqual({
+      kind: 'BackgroundAgentCompleted',
+      instance_id: 'child-inst-1',
+    });
+  });
+
+  it('drops payloads missing the id', () => {
+    expect(
+      fromRustEvent({ type: 'background_agent_completed', at: '2026-04-20T10:00:00Z' }),
     ).toBeNull();
   });
 });

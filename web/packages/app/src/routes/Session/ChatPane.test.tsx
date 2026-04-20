@@ -1135,3 +1135,100 @@ describe('ChatPane — persistent approvals (F-036)', () => {
     ).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// F-136: SubAgentBanner inline mount via SubAgentSpawned store event
+// ---------------------------------------------------------------------------
+//
+// The DoD requires ChatPane to listen for `SubAgentSpawned` events and mount
+// a `SubAgentBanner` inline at the message position. The banner also flips
+// running → done when a matching `BackgroundAgentCompleted` arrives (F-137
+// already forwards that event onto the session bus).
+describe('ChatPane — sub-agent banner inline mount (F-136)', () => {
+  it('mounts a SubAgentBanner turn when SubAgentSpawned is pushed to the store', () => {
+    pushEvent(SID, {
+      kind: 'SubAgentSpawned',
+      parent_instance_id: 'parent-inst-1',
+      child_instance_id: 'child-inst-1',
+      from_msg: 'msg-7',
+      agent_name: 'test-writer',
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('sub-agent-banner-child-inst-1')).toBeInTheDocument();
+    expect(
+      getByTestId('sub-agent-banner-header-child-inst-1'),
+    ).toHaveTextContent('test-writer');
+  });
+
+  it('renders the banner inline between surrounding turns in order of arrival', () => {
+    pushEvent(SID, { kind: 'UserMessage', text: 'USER-MARKER', message_id: 'u-1' });
+    pushEvent(SID, {
+      kind: 'SubAgentSpawned',
+      parent_instance_id: 'parent-inst-1',
+      child_instance_id: 'child-inst-2',
+      from_msg: 'u-1',
+      agent_name: 'reviewer',
+    });
+    pushEvent(SID, {
+      kind: 'AssistantMessage',
+      text: 'ASSIST-MARKER',
+      message_id: 'a-1',
+    });
+    const { getByTestId, getByText } = render(() => <ChatPane />);
+    const list = getByTestId('message-list');
+    const banner = getByTestId('sub-agent-banner-child-inst-2');
+    expect(list).toContainElement(banner);
+    // Order: user text precedes banner; assistant text follows it.
+    // Markers are unique so `.textContent` matching doesn't cross-match
+    // the banner's "spawned · reviewer" header.
+    const nodes = Array.from(list.children);
+    const userIdx = nodes.findIndex((n) => n.textContent?.includes('USER-MARKER'));
+    const bannerIdx = nodes.findIndex((n) => n === banner || n.contains(banner));
+    const assistantIdx = nodes.findIndex((n) =>
+      n.textContent?.includes('ASSIST-MARKER'),
+    );
+    expect(userIdx).toBeGreaterThanOrEqual(0);
+    expect(bannerIdx).toBeGreaterThan(userIdx);
+    expect(assistantIdx).toBeGreaterThan(bannerIdx);
+    // Sanity: the assistant text still rendered, so the banner didn't
+    // swallow or replace subsequent turns.
+    expect(getByText('ASSIST-MARKER')).toBeInTheDocument();
+  });
+
+  it('flips a banner from running → done when BackgroundAgentCompleted arrives for the same child id', () => {
+    pushEvent(SID, {
+      kind: 'SubAgentSpawned',
+      parent_instance_id: 'parent-inst-1',
+      child_instance_id: 'child-inst-3',
+      from_msg: 'msg-x',
+      agent_name: 'reviewer',
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    const chip = getByTestId('sub-agent-banner-state-child-inst-3');
+    expect(chip).toHaveAttribute('data-state', 'running');
+
+    pushEvent(SID, {
+      kind: 'BackgroundAgentCompleted',
+      instance_id: 'child-inst-3',
+    });
+    expect(chip).toHaveAttribute('data-state', 'done');
+  });
+
+  it('is idempotent — a duplicate SubAgentSpawned for the same child does not stack banners', () => {
+    pushEvent(SID, {
+      kind: 'SubAgentSpawned',
+      parent_instance_id: 'parent-inst-1',
+      child_instance_id: 'child-inst-4',
+      from_msg: 'msg-a',
+    });
+    pushEvent(SID, {
+      kind: 'SubAgentSpawned',
+      parent_instance_id: 'parent-inst-1',
+      child_instance_id: 'child-inst-4',
+      from_msg: 'msg-a',
+    });
+    const { getAllByTestId } = render(() => <ChatPane />);
+    const banners = getAllByTestId('sub-agent-banner-child-inst-4');
+    expect(banners).toHaveLength(1);
+  });
+});

@@ -31,6 +31,7 @@ import {
   type ContextCategory,
 } from '../../components/ContextPicker';
 import { ContextChip } from '../../components/ContextChip';
+import { SubAgentBanner } from '../../components/SubAgentBanner';
 import type { ProviderId } from '@forge/ipc';
 import {
   buildRegistry,
@@ -821,6 +822,12 @@ export const ChatPane: Component<ChatPaneProps> = (props) => {
                 return <ToolCallCard turn={turn} />;
               case 'error':
                 return <ErrorTurn turn={turn} />;
+              case 'sub_agent_banner':
+                // F-136: inline banner for a spawned child agent. Nested
+                // child turns (future work post-F-140) are threaded through
+                // the banner's `children` prop when they arrive with a
+                // matching `instance_id`; today the list is empty.
+                return <SubAgentBanner turn={turn} />;
             }
           }}
         </For>
