@@ -31,7 +31,7 @@ forge-providers = { path = "../forge-providers" }
 # purely for the outbound Tauri emit path.
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
-tauri = { version = "2", optional = true }
+tauri = { version = "2", optional = true , features = [] }
 tokio = { version = "1", features = ["fs", "net", "io-util", "sync", "time", "rt", "rt-multi-thread", "macros"] }
 
 [dev-dependencies]

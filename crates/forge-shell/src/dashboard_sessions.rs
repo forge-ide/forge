@@ -271,7 +271,7 @@ pub(crate) const INVALID_SESSION_ID_ERROR: &str = "invalid session id";
 ///
 /// F-063 (M11 / T5): the window label `session-{id}` is consumed by
 /// Tauri's capability matcher (`session-*` glob in
-/// `src-tauri/capabilities/default.json`). Without validation an id like
+/// `capabilities/default.json`). Without validation an id like
 /// `../foo` or one containing NUL / whitespace would still match the glob
 /// while producing a label with unexpected semantics. Keeping this helper
 /// in terms of the canonical `SessionId` wire shape means a future format
