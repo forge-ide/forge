@@ -25,8 +25,8 @@ fn make_file(dir: &std::path::Path, name: &str, size: usize) -> String {
 /// must be refused once the budget is exhausted. The error shape carries
 /// the budget identifier so a reviewer (or operator parsing logs) can
 /// distinguish budget exhaustion from any other tool error.
-#[test]
-fn chained_fs_reads_exceeding_budget_are_refused() {
+#[tokio::test]
+async fn chained_fs_reads_exceeding_budget_are_refused() {
     let dir = tempfile::tempdir().unwrap();
     let canonical_root = std::fs::canonicalize(dir.path()).unwrap();
     let allowed = format!("{}/**", canonical_root.to_str().unwrap());
@@ -58,6 +58,7 @@ fn chained_fs_reads_exceeding_budget_are_refused() {
     for path in &paths {
         let result = d
             .dispatch("fs.read", &json!({ "path": path }), &ctx)
+            .await
             .unwrap();
         if result.get("error").is_some() {
             refused += 1;
@@ -93,8 +94,8 @@ fn chained_fs_reads_exceeding_budget_are_refused() {
 /// the budget. Use a write-side observation: a `fs.read` of an
 /// allow-listed file must NOT return content / sha256 once budget is
 /// exhausted; the result must be the budget error only.
-#[test]
-fn dispatcher_short_circuits_after_budget_exhaustion() {
+#[tokio::test]
+async fn dispatcher_short_circuits_after_budget_exhaustion() {
     let dir = tempfile::tempdir().unwrap();
     let canonical_root = std::fs::canonicalize(dir.path()).unwrap();
     let allowed = format!("{}/**", canonical_root.to_str().unwrap());
@@ -114,12 +115,14 @@ fn dispatcher_short_circuits_after_budget_exhaustion() {
     // First call: tool may execute (post-decrement model) and return content.
     let _ = d
         .dispatch("fs.read", &json!({ "path": &path }), &ctx)
+        .await
         .unwrap();
     assert!(budget.is_exhausted(), "budget should be exhausted now");
 
     // Second call: must be short-circuited — no content, only an error.
     let result = d
         .dispatch("fs.read", &json!({ "path": &path }), &ctx)
+        .await
         .unwrap();
     assert!(
         result.get("content").is_none(),
@@ -140,8 +143,8 @@ fn dispatcher_short_circuits_after_budget_exhaustion() {
 /// successfully — the budget check is opt-in so existing tests and
 /// production code paths that haven't been migrated keep working
 /// during rollout.
-#[test]
-fn dispatcher_with_no_budget_runs_unrestricted() {
+#[tokio::test]
+async fn dispatcher_with_no_budget_runs_unrestricted() {
     let dir = tempfile::tempdir().unwrap();
     let canonical_root = std::fs::canonicalize(dir.path()).unwrap();
     let allowed = format!("{}/**", canonical_root.to_str().unwrap());
@@ -158,6 +161,7 @@ fn dispatcher_with_no_budget_runs_unrestricted() {
     for _ in 0..100 {
         let result = d
             .dispatch("fs.read", &json!({ "path": &path }), &ctx)
+            .await
             .unwrap();
         assert!(
             result.get("error").is_none(),

@@ -252,7 +252,7 @@ async fn run_request_loop<P: Provider>(
                                     .await?;
                             }
 
-                            tool.invoke(&args, ctx)
+                            tool.invoke(&args, ctx).await
                         }
                         Err(ToolError::UnknownTool(n)) => {
                             serde_json::json!({ "error": format!("unknown tool '{n}'") })

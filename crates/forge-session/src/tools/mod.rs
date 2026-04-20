@@ -33,10 +33,15 @@ pub struct ToolCtx {
     pub byte_budget: Option<Arc<ByteBudget>>,
 }
 
+/// Tool handler. `invoke` is `async` so filesystem / blocking work can be
+/// wrapped in `tokio::task::spawn_blocking` at the async/sync boundary
+/// (F-106) without blocking a tokio worker thread while a large file
+/// read/write/edit runs for concurrent sessions sharing the worker.
+#[async_trait::async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn approval_preview(&self, args: &serde_json::Value) -> ApprovalPreview;
-    fn invoke(&self, args: &serde_json::Value, ctx: &ToolCtx) -> serde_json::Value;
+    async fn invoke(&self, args: &serde_json::Value, ctx: &ToolCtx) -> serde_json::Value;
 }
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -80,7 +85,7 @@ impl ToolDispatcher {
             .ok_or_else(|| ToolError::UnknownTool(name.to_string()))
     }
 
-    pub fn dispatch(
+    pub async fn dispatch(
         &self,
         name: &str,
         args: &serde_json::Value,
@@ -107,7 +112,7 @@ impl ToolDispatcher {
             }
         }
 
-        let result = tool.invoke(args, ctx);
+        let result = tool.invoke(args, ctx).await;
 
         if let Some(budget) = ctx.byte_budget.as_ref() {
             budget.charge(result_byte_cost(&result));
@@ -163,6 +168,7 @@ mod tests {
         response: serde_json::Value,
     }
 
+    #[async_trait::async_trait]
     impl Tool for StubTool {
         fn name(&self) -> &str {
             self.name
@@ -172,7 +178,7 @@ mod tests {
                 description: format!("stub: {}", self.name),
             }
         }
-        fn invoke(&self, _args: &serde_json::Value, _ctx: &ToolCtx) -> serde_json::Value {
+        async fn invoke(&self, _args: &serde_json::Value, _ctx: &ToolCtx) -> serde_json::Value {
             self.response.clone()
         }
     }
@@ -181,8 +187,8 @@ mod tests {
         ToolCtx::default()
     }
 
-    #[test]
-    fn register_and_dispatch_returns_tool_result() {
+    #[tokio::test]
+    async fn register_and_dispatch_returns_tool_result() {
         let mut d = ToolDispatcher::new();
         d.register(Box::new(StubTool {
             name: "noop",
@@ -190,7 +196,7 @@ mod tests {
         }))
         .unwrap();
 
-        let result = d.dispatch("noop", &json!({}), &empty_ctx()).unwrap();
+        let result = d.dispatch("noop", &json!({}), &empty_ctx()).await.unwrap();
         assert_eq!(result, json!({"ok": true}));
     }
 
@@ -212,10 +218,13 @@ mod tests {
         assert_eq!(err, ToolError::DuplicateName("noop".to_string()));
     }
 
-    #[test]
-    fn dispatch_unknown_tool_returns_error() {
+    #[tokio::test]
+    async fn dispatch_unknown_tool_returns_error() {
         let d = ToolDispatcher::new();
-        let err = d.dispatch("nope", &json!({}), &empty_ctx()).unwrap_err();
+        let err = d
+            .dispatch("nope", &json!({}), &empty_ctx())
+            .await
+            .unwrap_err();
         assert_eq!(err, ToolError::UnknownTool("nope".to_string()));
     }
 
@@ -228,11 +237,14 @@ mod tests {
     // `invoke` rather than coercing missing required args to "" and producing
     // a confusing downstream error from `forge_fs` / sandbox. ----
 
-    #[test]
-    fn fs_read_invoke_errors_explicitly_on_missing_path() {
+    #[tokio::test]
+    async fn fs_read_invoke_errors_explicitly_on_missing_path() {
         let mut d = ToolDispatcher::new();
         d.register(Box::new(FsReadTool)).unwrap();
-        let result = d.dispatch("fs.read", &json!({}), &empty_ctx()).unwrap();
+        let result = d
+            .dispatch("fs.read", &json!({}), &empty_ctx())
+            .await
+            .unwrap();
         assert_eq!(
             result["error"].as_str(),
             Some("tool.fs.read: missing required parameter 'path'"),
@@ -240,12 +252,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fs_write_invoke_errors_explicitly_on_missing_path() {
+    #[tokio::test]
+    async fn fs_write_invoke_errors_explicitly_on_missing_path() {
         let mut d = ToolDispatcher::new();
         d.register(Box::new(FsWriteTool)).unwrap();
         let result = d
             .dispatch("fs.write", &json!({ "content": "hi" }), &empty_ctx())
+            .await
             .unwrap();
         assert_eq!(
             result["error"].as_str(),
@@ -254,8 +267,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fs_write_invoke_errors_explicitly_on_missing_content() {
+    #[tokio::test]
+    async fn fs_write_invoke_errors_explicitly_on_missing_content() {
         let mut d = ToolDispatcher::new();
         d.register(Box::new(FsWriteTool)).unwrap();
         let result = d
@@ -264,6 +277,7 @@ mod tests {
                 &json!({ "path": "/tmp/forge-f074-noop" }),
                 &empty_ctx(),
             )
+            .await
             .unwrap();
         assert_eq!(
             result["error"].as_str(),
@@ -272,8 +286,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fs_write_invoke_allows_empty_content_to_truncate() {
+    #[tokio::test]
+    async fn fs_write_invoke_allows_empty_content_to_truncate() {
         // Empty content must remain a valid request — only missing keys
         // should error. Otherwise the F-074 helper would silently break the
         // legitimate "create empty file" / "truncate" use case.
@@ -295,17 +309,19 @@ mod tests {
                 &json!({ "path": target.to_str().unwrap(), "content": "" }),
                 &ctx,
             )
+            .await
             .unwrap();
         assert_eq!(result["ok"].as_bool(), Some(true), "result: {result}");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "");
     }
 
-    #[test]
-    fn fs_edit_invoke_errors_explicitly_on_missing_path() {
+    #[tokio::test]
+    async fn fs_edit_invoke_errors_explicitly_on_missing_path() {
         let mut d = ToolDispatcher::new();
         d.register(Box::new(FsEditTool)).unwrap();
         let result = d
             .dispatch("fs.edit", &json!({ "patch": "@@ -1 +1 @@" }), &empty_ctx())
+            .await
             .unwrap();
         assert_eq!(
             result["error"].as_str(),
@@ -314,8 +330,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fs_edit_invoke_errors_explicitly_on_missing_patch() {
+    #[tokio::test]
+    async fn fs_edit_invoke_errors_explicitly_on_missing_patch() {
         let mut d = ToolDispatcher::new();
         d.register(Box::new(FsEditTool)).unwrap();
         let result = d
@@ -324,6 +340,7 @@ mod tests {
                 &json!({ "path": "/tmp/forge-f074-noop" }),
                 &empty_ctx(),
             )
+            .await
             .unwrap();
         assert_eq!(
             result["error"].as_str(),
@@ -333,8 +350,8 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn shell_exec_invoke_errors_explicitly_on_missing_command() {
+    #[tokio::test]
+    async fn shell_exec_invoke_errors_explicitly_on_missing_command() {
         let dir = tempfile::tempdir().unwrap();
         let mut d = ToolDispatcher::new();
         d.register(Box::new(ShellExecTool)).unwrap();
@@ -344,7 +361,7 @@ mod tests {
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
             byte_budget: None,
         };
-        let result = d.dispatch("shell.exec", &json!({}), &ctx).unwrap();
+        let result = d.dispatch("shell.exec", &json!({}), &ctx).await.unwrap();
         assert_eq!(
             result["error"].as_str(),
             Some("tool.shell.exec: missing required parameter 'command'"),
@@ -353,8 +370,8 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn shell_exec_invoke_errors_explicitly_on_empty_command() {
+    #[tokio::test]
+    async fn shell_exec_invoke_errors_explicitly_on_empty_command() {
         // shell.exec layers an empty-guard on top of `get_required_str`
         // because spawning `""` is meaningless. The error shape stays
         // unified ("tool.X: missing required parameter 'Y'") so the IPC
@@ -370,6 +387,7 @@ mod tests {
         };
         let result = d
             .dispatch("shell.exec", &json!({ "command": "" }), &ctx)
+            .await
             .unwrap();
         assert_eq!(
             result["error"].as_str(),
@@ -378,8 +396,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fs_write_dispatch_writes_file_and_previews_diff() {
+    #[tokio::test]
+    async fn fs_write_dispatch_writes_file_and_previews_diff() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("out.txt");
         let canonical_parent = std::fs::canonicalize(dir.path()).unwrap();
@@ -398,6 +416,7 @@ mod tests {
                 &json!({"path": target.to_str().unwrap(), "content": "hi"}),
                 &ctx,
             )
+            .await
             .unwrap();
         assert_eq!(result["ok"].as_bool(), Some(true));
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hi");
@@ -409,8 +428,8 @@ mod tests {
         assert!(preview.description.contains("Write file"));
     }
 
-    #[test]
-    fn fs_edit_dispatch_applies_patch_and_previews_diff() {
+    #[tokio::test]
+    async fn fs_edit_dispatch_applies_patch_and_previews_diff() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("src.txt");
         std::fs::write(&target, "alpha\nbeta\n").unwrap();
@@ -434,6 +453,7 @@ mod tests {
                 &json!({"path": target.to_str().unwrap(), "patch": patch}),
                 &ctx,
             )
+            .await
             .unwrap();
         assert_eq!(result["ok"].as_bool(), Some(true));
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "alpha\nBETA\n");
@@ -445,8 +465,8 @@ mod tests {
         assert!(preview.description.contains("Edit file"));
     }
 
-    #[test]
-    fn fs_read_dispatch_returns_content_bytes_sha256() {
+    #[tokio::test]
+    async fn fs_read_dispatch_returns_content_bytes_sha256() {
         let mut file = NamedTempFile::new().unwrap();
         let body = "hello dispatcher";
         file.write_all(body.as_bytes()).unwrap();
@@ -461,7 +481,10 @@ mod tests {
             allowed_paths: vec![allowed],
             ..ToolCtx::default()
         };
-        let result = d.dispatch("fs.read", &json!({"path": path}), &ctx).unwrap();
+        let result = d
+            .dispatch("fs.read", &json!({"path": path}), &ctx)
+            .await
+            .unwrap();
 
         assert_eq!(result["content"].as_str().unwrap(), body);
         assert_eq!(result["bytes"].as_u64().unwrap(), body.len() as u64);
@@ -469,8 +492,8 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn shell_exec_dispatch_runs_command_and_captures_stdout() {
+    #[tokio::test]
+    async fn shell_exec_dispatch_runs_command_and_captures_stdout() {
         let dir = tempfile::tempdir().unwrap();
 
         let mut d = ToolDispatcher::new();
@@ -488,6 +511,7 @@ mod tests {
                 &json!({"command": "/bin/sh", "args": ["-c", "echo hello-sandbox"], "timeout_ms": 5000}),
                 &ctx,
             )
+            .await
             .unwrap();
 
         assert_eq!(result["exit_code"].as_i64(), Some(0), "result: {result}");
@@ -501,8 +525,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shell_exec_dispatch_works_inside_outer_tokio_runtime() {
-        // Regression: Tool::invoke is called from async context in run_turn.
-        // The implementation must not panic attempting to nest runtimes.
+        // Regression: Tool::invoke is now `async` (F-106). Dispatch must
+        // await cleanly on a multi-threaded runtime without the pre-F-106
+        // `block_in_place + block_on` shim.
         let dir = tempfile::tempdir().unwrap();
 
         let mut d = ToolDispatcher::new();
@@ -515,14 +540,13 @@ mod tests {
             byte_budget: None,
         };
 
-        // Run dispatch on a blocking task so we're inside the runtime but
-        // block_in_place is permitted.
         let result = d
             .dispatch(
                 "shell.exec",
                 &json!({"command": "/bin/sh", "args": ["-c", "echo from-async"], "timeout_ms": 5000}),
                 &ctx,
             )
+            .await
             .unwrap();
 
         assert_eq!(result["exit_code"].as_i64(), Some(0), "result: {result}");
@@ -569,11 +593,10 @@ mod tests {
             "timeout_ms": 200,
         });
 
-        let result = tokio::task::spawn_blocking(move || {
-            d.dispatch("shell.exec", &ctx_clone_args, &ctx).unwrap()
-        })
-        .await
-        .unwrap();
+        let result = d
+            .dispatch("shell.exec", &ctx_clone_args, &ctx)
+            .await
+            .unwrap();
 
         assert!(
             result.get("error").is_some(),
@@ -653,8 +676,8 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn shell_exec_dispatch_rejects_cwd_outside_workspace() {
+    #[tokio::test]
+    async fn shell_exec_dispatch_rejects_cwd_outside_workspace() {
         let dir = tempfile::tempdir().unwrap();
 
         let mut d = ToolDispatcher::new();
@@ -677,6 +700,7 @@ mod tests {
                 }),
                 &ctx,
             )
+            .await
             .unwrap();
 
         assert!(
@@ -690,8 +714,8 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn shell_exec_dispatch_accepts_cwd_inside_workspace() {
+    #[tokio::test]
+    async fn shell_exec_dispatch_accepts_cwd_inside_workspace() {
         let dir = tempfile::tempdir().unwrap();
         let sub = dir.path().join("sub");
         std::fs::create_dir(&sub).unwrap();
@@ -716,14 +740,15 @@ mod tests {
                 }),
                 &ctx,
             )
+            .await
             .unwrap();
 
         assert_eq!(result["exit_code"].as_i64(), Some(0), "result: {result}");
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn shell_exec_dispatch_rejects_cwd_via_symlink_escape() {
+    #[tokio::test]
+    async fn shell_exec_dispatch_rejects_cwd_via_symlink_escape() {
         // Symlink inside the workspace pointing outside must be rejected:
         // canonicalize() resolves the symlink, and the post-canonical
         // prefix check catches the escape.
@@ -751,6 +776,7 @@ mod tests {
                 }),
                 &ctx,
             )
+            .await
             .unwrap();
 
         assert!(
@@ -760,8 +786,8 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn shell_exec_clamps_timeout_ms_to_documented_ceiling() {
+    #[tokio::test]
+    async fn shell_exec_clamps_timeout_ms_to_documented_ceiling() {
         // Regression for F-066: a provider may pass an arbitrarily large
         // timeout_ms (up to u64::MAX). Without the clamp, tokio::time::timeout
         // receives a far-future deadline and a shell backgrounding sleeps can
@@ -790,6 +816,7 @@ mod tests {
                 &json!({"command": "/bin/true", "timeout_ms": u64::MAX}),
                 &ctx,
             )
+            .await
             .unwrap();
         let elapsed = started.elapsed();
 
@@ -804,8 +831,8 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn shell_exec_dispatch_clears_daemon_env_by_default() {
+    #[tokio::test]
+    async fn shell_exec_dispatch_clears_daemon_env_by_default() {
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("FORGE_SHELL_EXEC_CANARY", "nope");
 
@@ -824,6 +851,7 @@ mod tests {
                 &json!({"command": "/usr/bin/env", "timeout_ms": 5000}),
                 &ctx,
             )
+            .await
             .unwrap();
         std::env::remove_var("FORGE_SHELL_EXEC_CANARY");
 

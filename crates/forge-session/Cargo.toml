@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 forge-core = { path = "../forge-core" }
 forge-fs = { path = "../forge-fs" }
@@ -26,7 +27,7 @@ thiserror = "1"
 tokio = { version = "1", features = ["net", "io-util", "fs", "rt-multi-thread", "macros", "sync", "process", "time", "signal"] }
 
 [dev-dependencies]
-criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support", "async_tokio"] }
 forge-cli = { path = "../forge-cli" }
 libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -36,6 +37,11 @@ tokio = { version = "1", features = ["rt", "macros", "time", "net", "process"] }
 
 [[bench]]
 name = "orchestrator"
+harness = false
+
+[[bench]]
+name = "tool_invoke"
+path = "benches/tool_invoke.rs"
 harness = false
 
 [[test]]
