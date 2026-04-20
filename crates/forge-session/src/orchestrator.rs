@@ -58,7 +58,11 @@ pub async fn run_turn<P: Provider>(
         .emit(Event::UserMessage {
             id: msg_id.clone(),
             at: Utc::now(),
-            text: text.clone(),
+            // F-112: wrap at the forge-core boundary. When F-108 lands, the
+            // upstream producer will hand us an `Arc<str>` and this becomes a
+            // move; for now `Arc::from` is a single allocation (same count as
+            // the previous `clone`).
+            text: Arc::from(text.as_str()),
             context: vec![],
             branch_parent: None,
         })
@@ -134,7 +138,8 @@ async fn run_request_loop<P: Provider>(
                 model: model.clone(),
                 at: Utc::now(),
                 stream_finalised: false,
-                text: String::new(),
+                // F-112: empty Arc<str> — no allocation (matches `Arc::<str>::from("")`).
+                text: Arc::from(""),
                 branch_parent: None,
                 branch_variant_index: 0,
             })
@@ -156,7 +161,10 @@ async fn run_request_loop<P: Provider>(
                         .emit(Event::AssistantDelta {
                             id: msg_id.clone(),
                             at: Utc::now(),
-                            delta,
+                            // F-112: wrap the per-token String in Arc<str> at this
+                            // boundary. Once F-108 lands, `parse_line` will hand
+                            // us `Arc<str>` directly and this becomes a move.
+                            delta: Arc::from(delta),
                         })
                         .await?;
                 }
@@ -224,7 +232,8 @@ async fn run_request_loop<P: Provider>(
                                                 model: model.clone(),
                                                 at: Utc::now(),
                                                 stream_finalised: true,
-                                                text: assistant_text.clone(),
+                                                // F-112: wrap at boundary.
+                                                text: Arc::from(assistant_text.as_str()),
                                                 branch_parent: None,
                                                 branch_variant_index: 0,
                                             })
@@ -283,7 +292,8 @@ async fn run_request_loop<P: Provider>(
                             model: model.clone(),
                             at: Utc::now(),
                             stream_finalised: true,
-                            text: assistant_text.clone(),
+                            // F-112: wrap at boundary.
+                            text: Arc::from(assistant_text.as_str()),
                             branch_parent: None,
                             branch_variant_index: 0,
                         })
@@ -308,7 +318,8 @@ async fn run_request_loop<P: Provider>(
                             model: model.clone(),
                             at: Utc::now(),
                             stream_finalised: true,
-                            text: assistant_text.clone(),
+                            // F-112: wrap at boundary.
+                            text: Arc::from(assistant_text.as_str()),
                             branch_parent: None,
                             branch_variant_index: 0,
                         })
@@ -329,7 +340,8 @@ async fn run_request_loop<P: Provider>(
                     model: model.clone(),
                     at: Utc::now(),
                     stream_finalised: true,
-                    text: assistant_text.clone(),
+                    // F-112: wrap at boundary.
+                    text: Arc::from(assistant_text.as_str()),
                     branch_parent: None,
                     branch_variant_index: 0,
                 })

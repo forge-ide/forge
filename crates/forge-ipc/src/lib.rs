@@ -52,7 +52,16 @@ pub struct Subscribe {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IpcEvent {
     pub seq: u64,
-    pub event: serde_json::Value,
+    // F-112: typed `Event` (not `serde_json::Value`).
+    //
+    // Previously the emission path was `Event -> serde_json::Value -> bytes`,
+    // which forced serde to walk the dynamic tagged-union `Value` tree once
+    // to construct it and a second time to write it out. Carrying the typed
+    // `Event` directly collapses the pipeline to a single static traversal:
+    // `Event -> bytes`. The wire shape is identical (serde flattens nested
+    // structs the same way regardless of intermediate `Value`), so IPC
+    // peers and the TS adapter see no change.
+    pub event: forge_core::Event,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

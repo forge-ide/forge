@@ -83,7 +83,7 @@ async fn read_since_accepts_legitimate_small_line() {
     let event = Event::AssistantDelta {
         id: MessageId::new(),
         at: Utc::now(),
-        delta: "hello".to_string(),
+        delta: "hello".into(),
     };
     log.append(&event).await.unwrap();
     log.close().await.unwrap();

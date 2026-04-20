@@ -50,8 +50,9 @@ async fn do_handshake(stream: &mut UnixStream) {
 }
 
 fn extract_event(msg: &IpcMessage) -> Option<Event> {
+    // F-112: IpcEvent.event is typed.
     if let IpcMessage::Event(IpcEvent { event, .. }) = msg {
-        serde_json::from_value::<Event>(event.clone()).ok()
+        Some(event.clone())
     } else {
         None
     }
@@ -199,7 +200,8 @@ async fn full_turn_with_tool_call_emits_correct_event_sequence() {
         .iter()
         .filter_map(|e| {
             if let Event::AssistantDelta { delta, .. } = e {
-                Some(delta.as_str())
+                // F-112: `delta: Arc<str>` — `&*delta` is `&str` via Deref.
+                Some(&**delta)
             } else {
                 None
             }
@@ -536,7 +538,8 @@ async fn tool_result_fed_back_to_provider_in_continuation() {
     let continuation_text = events.iter().find_map(|e| {
         if let Event::AssistantDelta { delta, .. } = e {
             if delta.contains("file content") {
-                Some(delta.as_str())
+                // F-112: `delta: Arc<str>` — `&*delta` is `&str` via Deref.
+                Some(&**delta)
             } else {
                 None
             }

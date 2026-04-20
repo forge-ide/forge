@@ -7,11 +7,20 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 anyhow = "1"
 bytes = "1"
+forge-core = { path = "../forge-core" }
 futures = "0.3"
-serde = { version = "1", features = ["derive"] }
+# `rc` is required because `IpcEvent.event: forge_core::Event` contains
+# `Arc<str>` hot fields (F-112) and the framed reader deserializes `IpcEvent`.
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 tokio = { version = "1", features = ["io-util", "net"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 
 [dev-dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+criterion = { version = "0.5", features = ["html_reports"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+
+[[bench]]
+name = "frame"
+harness = false

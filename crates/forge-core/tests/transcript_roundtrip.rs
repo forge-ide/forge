@@ -10,7 +10,8 @@ fn roundtrip_100_events() {
         transcript.append(Event::AssistantDelta {
             id: MessageId::new(),
             at: Utc::now(),
-            delta: format!("delta {i}"),
+            // F-112: `Arc<str>` from owned `String` via `Into`.
+            delta: format!("delta {i}").into(),
         });
     }
 

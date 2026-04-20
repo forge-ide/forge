@@ -27,11 +27,9 @@ async fn connect_with_retry(path: &std::path::Path) -> UnixStream {
 }
 
 fn extract_event(msg: &IpcMessage) -> Option<Event> {
+    // F-112: IpcEvent.event is now typed `Event` — no Value intermediate.
     if let IpcMessage::Event(IpcEvent { event, .. }) = msg {
-        Some(
-            serde_json::from_value::<Event>(event.clone())
-                .expect("forged emitted an unrecognized event variant"),
-        )
+        Some(event.clone())
     } else {
         None
     }

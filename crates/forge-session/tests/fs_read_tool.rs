@@ -42,8 +42,9 @@ async fn do_handshake(stream: &mut UnixStream) {
 }
 
 fn extract_event(msg: &IpcMessage) -> Option<Event> {
+    // F-112: IpcEvent.event is typed.
     if let IpcMessage::Event(IpcEvent { event, .. }) = msg {
-        serde_json::from_value::<Event>(event.clone()).ok()
+        Some(event.clone())
     } else {
         None
     }

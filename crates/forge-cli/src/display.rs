@@ -21,7 +21,10 @@ pub fn format_event(event: &Event) -> Option<String> {
             if delta.is_empty() {
                 None
             } else {
-                Some(delta.clone())
+                // F-112: `delta: Arc<str>` — convert to the owned `String`
+                // this function contracts to return. `to_string()` uses the
+                // `Display` impl on `str`, producing one copy.
+                Some(delta.to_string())
             }
         }
         Event::ToolCallStarted { tool, args, .. } => {

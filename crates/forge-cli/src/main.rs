@@ -168,13 +168,13 @@ async fn session_tail(id: &str) -> Result<()> {
     loop {
         match framed.recv::<IpcMessage>().await? {
             Some(IpcMessage::Event(ipc_event)) => {
-                if let Ok(event) = serde_json::from_value::<Event>(ipc_event.event) {
-                    if let Some(line) = forge_cli::display::format_event(&event) {
-                        println!("{line}");
-                    }
-                    if matches!(event, Event::SessionEnded { .. }) {
-                        break;
-                    }
+                // F-112: IpcEvent.event is typed — no Value decode.
+                let event = ipc_event.event;
+                if let Some(line) = forge_cli::display::format_event(&event) {
+                    println!("{line}");
+                }
+                if matches!(event, Event::SessionEnded { .. }) {
+                    break;
                 }
             }
             None => break,
@@ -271,16 +271,16 @@ async fn run_agent(name: &str, input_source: &str) -> Result<()> {
     loop {
         match framed.recv::<IpcMessage>().await? {
             Some(IpcMessage::Event(ipc_event)) => {
-                if let Ok(event) = serde_json::from_value::<Event>(ipc_event.event) {
-                    if let Some(line) = forge_cli::display::format_event(&event) {
-                        println!("{line}");
+                // F-112: IpcEvent.event is typed — no Value decode.
+                let event = ipc_event.event;
+                if let Some(line) = forge_cli::display::format_event(&event) {
+                    println!("{line}");
+                }
+                if let Event::SessionEnded { reason, .. } = &event {
+                    if matches!(reason, forge_core::EndReason::Error(_)) {
+                        event_exit_code = 1;
                     }
-                    if let Event::SessionEnded { reason, .. } = &event {
-                        if matches!(reason, forge_core::EndReason::Error(_)) {
-                            event_exit_code = 1;
-                        }
-                        break;
-                    }
+                    break;
                 }
             }
             None => break,

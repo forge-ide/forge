@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::ids::{AgentId, AgentInstanceId, MessageId, ProviderId, ToolCallId};
 use crate::types::{ApprovalScope, CompactTrigger, RosterScope, SessionPersistence};
@@ -42,7 +43,11 @@ pub enum Event {
     UserMessage {
         id: MessageId,
         at: DateTime<Utc>,
-        text: String,
+        // F-112: `Arc<str>` for hot per-token IPC fields — cheap clone on fanout,
+        // one allocation at the upstream producer instead of per-subscriber copies.
+        // Serializes identically to `String` (plain JSON string), so the wire
+        // shape pinned by `event_wire_shape.rs` is unchanged.
+        text: Arc<str>,
         context: Vec<ContextRef>,
         branch_parent: Option<MessageId>,
     },
@@ -52,14 +57,14 @@ pub enum Event {
         model: String,
         at: DateTime<Utc>,
         stream_finalised: bool,
-        text: String,
+        text: Arc<str>,
         branch_parent: Option<MessageId>,
         branch_variant_index: u32,
     },
     AssistantDelta {
         id: MessageId,
         at: DateTime<Utc>,
-        delta: String,
+        delta: Arc<str>,
     },
     BranchSelected {
         parent: MessageId,

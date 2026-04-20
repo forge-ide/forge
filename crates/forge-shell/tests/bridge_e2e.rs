@@ -103,9 +103,11 @@ async fn send_message_forwards_events_end_to_end() {
         match tokio::time::timeout(remaining, rx.recv()).await {
             Ok(Some(payload)) => {
                 assert_eq!(payload.session_id, "send-session");
-                let event: Event = serde_json::from_value(payload.event).unwrap();
-                if let Event::UserMessage { text, .. } = event {
-                    assert_eq!(text, "hello world");
+                // F-112: `payload.event` is typed `Event` — no `from_value` needed.
+                if let Event::UserMessage { text, .. } = payload.event {
+                    // `Arc<str>` derefs to `str`; explicit `&*` gives a `&str`
+                    // that matches the `&str` literal for `PartialEq`.
+                    assert_eq!(&*text, "hello world");
                     saw_user_message = true;
                     break;
                 }
