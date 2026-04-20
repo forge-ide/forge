@@ -70,7 +70,7 @@ Because the cap is uid-wide, two sandboxes started on the same daemon **do not**
 
 ## Webview Content Security Policy (F-050)
 
-The Tauri webview enforces a restrictive CSP. The production source of truth is `crates/forge-shell/src-tauri/tauri.conf.json` under `app.security.csp`; `web/packages/app/index.html` carries an identical `<meta http-equiv="Content-Security-Policy">` so the Vite dev server and the Playwright harness — neither of which read `tauri.conf.json` — apply the same policy. **Both files must stay in sync.**
+The Tauri webview enforces a restrictive CSP. The production source of truth is `crates/forge-shell/tauri.conf.json` under `app.security.csp`; `web/packages/app/index.html` carries an identical `<meta http-equiv="Content-Security-Policy">` so the Vite dev server and the Playwright harness — neither of which read `tauri.conf.json` — apply the same policy. **Both files must stay in sync.**
 
 Current policy:
 

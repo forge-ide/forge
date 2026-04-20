@@ -79,6 +79,6 @@ pub fn run() -> Result<()> {
             manager.open_dashboard()?;
             Ok(())
         })
-        .run(tauri::generate_context!("src-tauri/tauri.conf.json"))
+        .run(tauri::generate_context!("tauri.conf.json"))
         .context("tauri runtime exited with an error")
 }

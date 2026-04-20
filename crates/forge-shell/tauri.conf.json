@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "dev.forge-ide.forge",
   "build": {
-    "frontendDist": "../../../web/packages/app/dist",
-    "beforeBuildCommand": "pnpm --filter app build",
-    "beforeDevCommand": "pnpm --filter app dev",
+    "frontendDist": "../../web/packages/app/dist",
+    "beforeBuildCommand": "pnpm -C ../web --filter app build",
+    "beforeDevCommand": "pnpm -C ../web --filter app dev",
     "devUrl": "http://localhost:5173"
   },
   "app": {
