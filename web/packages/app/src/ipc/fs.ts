@@ -68,3 +68,37 @@ export async function tree(
     depth,
   });
 }
+
+/**
+ * F-126: atomically rename / move `from` -> `to`. Both paths must resolve
+ * inside the session's cached workspace root; the shell-side `forge-fs`
+ * allowlist rejects any out-of-sandbox path. The webview does NOT pass
+ * `workspace_root` — same server-side-cache security model as F-122's
+ * `read_file` / `write_file` / `tree`.
+ */
+export async function renamePath(
+  sessionId: SessionId,
+  from: string,
+  to: string,
+): Promise<void> {
+  await invoke('rename_path', {
+    sessionId,
+    from,
+    to,
+  });
+}
+
+/**
+ * F-126: delete the entry at `path`. Files are removed via `remove_file`;
+ * directories are removed recursively via `remove_dir_all`. Symlink
+ * components are rejected before any filesystem mutation.
+ */
+export async function deletePath(
+  sessionId: SessionId,
+  path: string,
+): Promise<void> {
+  await invoke('delete_path', {
+    sessionId,
+    path,
+  });
+}
