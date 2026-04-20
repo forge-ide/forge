@@ -1,4 +1,4 @@
-import { type Component, createSignal, onCleanup, onMount } from 'solid-js';
+import { type Component, Show, createSignal, onCleanup, onMount } from 'solid-js';
 import { useParams } from '@solidjs/router';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { ProviderId, SessionId } from '@forge/ipc';
@@ -9,6 +9,7 @@ import {
   sessionSubscribe,
 } from '../../ipc/session';
 import {
+  activeWorkspaceRoot,
   setActiveSessionId,
   setActiveWorkspaceRoot,
   setSessionEvents,
@@ -20,6 +21,8 @@ import { seedPersistentApprovals } from '../../stores/approvals';
 import { PaneHeader } from './PaneHeader';
 import { ChatPane } from './ChatPane';
 import { usePaneWidth } from '../../layout/usePaneWidth';
+import { ActivityBar, type ActivityId } from '../../shell/ActivityBar';
+import { FilesSidebar } from '../../shell/FilesSidebar';
 import './SessionWindow.css';
 
 /**
@@ -118,25 +121,78 @@ export const SessionWindow: Component = () => {
   const [paneEl, setPaneEl] = createSignal<HTMLElement | null>(null);
   const { compactness } = usePaneWidth(paneEl);
 
+  // F-126: activity-bar + files-sidebar chrome. `activeActivity` is `null`
+  // when the sidebar is hidden (default) and an activity id when visible.
+  // `Cmd/Ctrl+Shift+E` toggles the files sidebar without routing through
+  // the activity bar click handler so the shortcut works even when the
+  // activity bar is keyboard-focused elsewhere.
+  const [activeActivity, setActiveActivity] = createSignal<ActivityId | null>(null);
+
+  const toggleFiles = (): void => {
+    setActiveActivity((prev) => (prev === 'files' ? null : 'files'));
+  };
+
+  const onActivitySelect = (id: ActivityId): void => {
+    // Only 'files' is wired in F-126. Search/Git are placeholders.
+    if (id !== 'files') return;
+    toggleFiles();
+  };
+
+  const onShortcut = (e: KeyboardEvent): void => {
+    // Cmd/Ctrl+Shift+E toggles the files sidebar. Match Mac's `Meta` and
+    // Windows/Linux `Ctrl` on the same binding, matching the issue's
+    // platform-agnostic spec.
+    const mod = e.metaKey || e.ctrlKey;
+    if (mod && e.shiftKey && (e.key === 'E' || e.key === 'e')) {
+      e.preventDefault();
+      toggleFiles();
+    }
+  };
+
+  onMount(() => {
+    window.addEventListener('keydown', onShortcut);
+  });
+  onCleanup(() => {
+    window.removeEventListener('keydown', onShortcut);
+  });
+
   return (
     <main class="session-window">
-      <section
-        class="session-window__pane"
-        aria-label="Session pane"
-        ref={setPaneEl}
-      >
-        <PaneHeader
-          subject={subject()}
-          providerId={providerId()}
-          providerLabel={providerLabel()}
-          costLabel={costLabel()}
-          compactness={compactness()}
-          onClose={handleClose}
+      <div class="session-window__chrome">
+        <ActivityBar
+          active={activeActivity()}
+          onSelect={onActivitySelect}
         />
-        <div class="session-window__pane-body">
-          <ChatPane />
-        </div>
-      </section>
+        <Show when={activeActivity() === 'files' && activeWorkspaceRoot() !== null}>
+          <FilesSidebar
+            sessionId={sessionId()}
+            workspaceRoot={activeWorkspaceRoot() as string}
+            onOpen={(_path) => {
+              // F-126 scope lands the wiring; F-126+ will route through the
+              // layout store to open an EditorPane in the main area. For
+              // now we close the sidebar to signal the action registered.
+              setActiveActivity(null);
+            }}
+          />
+        </Show>
+        <section
+          class="session-window__pane"
+          aria-label="Session pane"
+          ref={setPaneEl}
+        >
+          <PaneHeader
+            subject={subject()}
+            providerId={providerId()}
+            providerLabel={providerLabel()}
+            costLabel={costLabel()}
+            compactness={compactness()}
+            onClose={handleClose}
+          />
+          <div class="session-window__pane-body">
+            <ChatPane />
+          </div>
+        </section>
+      </div>
     </main>
   );
 };

@@ -8,8 +8,13 @@ mod limits;
 mod mutate;
 mod tree;
 pub use limits::Limits;
-pub use mutate::{edit, edit_preview, write, write_bytes, write_preview, ApprovalPreview, FsError};
-pub use tree::{list_tree, list_tree_with_limit, NodeKind, TreeNode, DEFAULT_MAX_ENTRIES};
+pub use mutate::{
+    delete, edit, edit_preview, rename, write, write_bytes, write_preview, ApprovalPreview, FsError,
+};
+pub use tree::{
+    list_tree, list_tree_gitignored, list_tree_gitignored_with_limit, list_tree_with_limit,
+    NodeKind, TreeNode, DEFAULT_MAX_ENTRIES,
+};
 
 /// Internal entry points exposed solely for the `benches/mutate.rs` allocation
 /// guard. Not part of the public API — do not depend on anything in here.

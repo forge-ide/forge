@@ -7,6 +7,13 @@
   font-family: var(--font-body);
 }
 
+/* F-126: chrome row — activity bar + optional sidebar + main pane column. */
+.session-window__chrome {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .session-window__pane {
   display: flex;
   flex-direction: column;

@@ -50,6 +50,16 @@ describe('SessionWindow', () => {
     resetMessagesStore();
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === 'session_hello') return helloAck;
+      // F-126: the FilesSidebar calls `tree` when the sidebar opens; return
+      // a minimal empty-root shape so the component mounts cleanly.
+      if (cmd === 'tree') {
+        return {
+          name: 'ws',
+          path: '/ws',
+          kind: 'Dir',
+          children: [],
+        };
+      }
       return undefined;
     });
     setInvokeForTesting(invokeMock as never);
@@ -213,5 +223,59 @@ describe('SessionWindow', () => {
 
     const list = await findByTestId('message-list');
     await waitFor(() => expect(list.textContent).toContain('hello from the wire'));
+  });
+
+  // -----------------------------------------------------------------------
+  // F-126: activity bar + files sidebar
+  // -----------------------------------------------------------------------
+
+  it('renders the activity bar alongside the pane', async () => {
+    const { findByTestId } = renderAt('/session/abc123');
+    const bar = await findByTestId('activity-bar');
+    expect(bar).toBeInTheDocument();
+    expect(await findByTestId('activity-bar-files')).toBeInTheDocument();
+  });
+
+  it('keeps the files sidebar hidden by default', async () => {
+    const { findByTestId, queryByTestId } = renderAt('/session/abc123');
+    await findByTestId('activity-bar');
+    expect(queryByTestId('files-sidebar')).toBeNull();
+  });
+
+  it('toggles the files sidebar when Cmd+Shift+E fires after the workspace is known', async () => {
+    const { findByTestId, queryByTestId } = renderAt('/session/abc123');
+    // Wait for session_hello → activeWorkspaceRoot populated, and the
+    // activity bar rendered.
+    await findByTestId('activity-bar');
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith('session_hello', {
+        sessionId: 'abc123',
+      }),
+    );
+
+    window.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'E', metaKey: true, shiftKey: true }),
+    );
+    await findByTestId('files-sidebar');
+
+    window.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'E', metaKey: true, shiftKey: true }),
+    );
+    await waitFor(() => expect(queryByTestId('files-sidebar')).toBeNull());
+  });
+
+  it('toggles the files sidebar when the activity bar Files button is clicked', async () => {
+    const { findByTestId, queryByTestId } = renderAt('/session/abc123');
+    await findByTestId('activity-bar');
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith('session_hello', {
+        sessionId: 'abc123',
+      }),
+    );
+    const files = await findByTestId('activity-bar-files');
+    files.click();
+    await findByTestId('files-sidebar');
+    files.click();
+    await waitFor(() => expect(queryByTestId('files-sidebar')).toBeNull());
   });
 });

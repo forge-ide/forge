@@ -390,6 +390,8 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         lsp_start,
         lsp_stop,
         lsp_send,
+        rename_path,
+        delete_path,
     ])
 }
 
@@ -1374,7 +1376,14 @@ pub async fn tree<R: Runtime>(
     // workspaces Forge targets; the entry budget inside `forge-fs` is the
     // second line of defense.
     let requested = depth.unwrap_or(6).min(16);
-    let node = forge_fs::list_tree(&root, &allowed, requested).map_err(|e| e.to_string())?;
+    // F-126: the FilesSidebar uses `tree` to render the workspace; honor
+    // `.gitignore` (plus `.ignore`, global gitignore, parent chains, and
+    // hidden files) via the `ignore` crate so the sidebar matches what a
+    // developer sees in VS Code. The non-ignored `list_tree` is retained
+    // in `forge-fs` for other callers (e.g. agent tool paths that may need
+    // to inspect gitignored files).
+    let node =
+        forge_fs::list_tree_gitignored(&root, &allowed, requested).map_err(|e| e.to_string())?;
     Ok(TreeNodeDto::from(node))
 }
 
@@ -1633,4 +1642,68 @@ pub async fn lsp_send<R: Runtime>(
     let caller_label = webview.label().to_string();
     let transport = state.owned_transport(&server, &caller_label)?;
     transport.send(message).await.map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// F-126: filesystem mutation commands for the FilesSidebar context menu.
+//
+// `rename_path` and `delete_path` are siblings of F-122's `read_file` /
+// `write_file` / `tree`. They inherit the same authz + sandbox posture:
+//
+// 1. Session-scoped `require_window_label` gate — the FilesSidebar only
+//    renders inside a session window.
+// 2. Server-side cached `workspace_root` lookup (via `cached_workspace_root`,
+//    the same helper F-122's commands use). The webview does NOT supply a
+//    `workspace_root` parameter — a lying webview cannot widen its sandbox.
+// 3. Path sandbox enforced by `forge-fs::rename` / `forge-fs::delete`, which
+//    glob-match canonicalized inputs against the workspace allowlist.
+//
+// Appended at EOF per the concurrent-worktree convention (F-137 / F-144 are
+// touching adjacent code simultaneously; keeping new additions at the bottom
+// minimizes rebase conflicts).
+// ---------------------------------------------------------------------------
+
+/// Rename / move `from` → `to` inside the session's workspace. Both paths
+/// go through the `forge-fs` allowlist; a rename that would move an entry
+/// outside the workspace (or move an outside entry in) is rejected with a
+/// path-denied error.
+///
+/// Clobbering an existing destination is refused — the UI collects a fresh
+/// name up-front, and a silent overwrite would break the audit trail.
+#[tauri::command]
+pub async fn rename_path<R: Runtime>(
+    session_id: String,
+    from: String,
+    to: String,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+) -> Result<(), String> {
+    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_size("from", &from, MAX_FS_PATH_BYTES)?;
+    require_size("to", &to, MAX_FS_PATH_BYTES)?;
+
+    let workspace = cached_workspace_root(&state, &session_id).await?;
+    let allowed = workspace_allowlist(&workspace);
+    let limits = forge_fs::Limits::default();
+    forge_fs::rename(&from, &to, &allowed, &limits).map_err(|e| e.to_string())
+}
+
+/// Delete the entry at `path` inside the session's workspace. Files are
+/// removed via `remove_file`; directories are removed recursively via
+/// `remove_dir_all`. Symlinked path components are rejected before any
+/// filesystem mutation happens.
+#[tauri::command]
+pub async fn delete_path<R: Runtime>(
+    session_id: String,
+    path: String,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+) -> Result<(), String> {
+    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_size("path", &path, MAX_FS_PATH_BYTES)?;
+
+    let workspace = cached_workspace_root(&state, &session_id).await?;
+    let allowed = workspace_allowlist(&workspace);
+    let limits = forge_fs::Limits::default();
+    forge_fs::delete(&path, &allowed, &limits).map_err(|e| e.to_string())
 }
