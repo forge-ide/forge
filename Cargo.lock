@@ -1099,7 +1099,7 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
 name = "forge-agents"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "gray_matter",
@@ -1109,7 +1109,7 @@ dependencies = [
 
 [[package]]
 name = "forge-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1125,7 +1125,7 @@ dependencies = [
 
 [[package]]
 name = "forge-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1141,7 +1141,7 @@ dependencies = [
 
 [[package]]
 name = "forge-fs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "glob",
@@ -1154,7 +1154,7 @@ dependencies = [
 
 [[package]]
 name = "forge-ipc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1170,19 +1170,19 @@ dependencies = [
 
 [[package]]
 name = "forge-lsp"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "forge-mcp"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "forge-oci"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "forge-providers"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1202,7 +1202,7 @@ dependencies = [
 
 [[package]]
 name = "forge-session"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1225,7 +1225,7 @@ dependencies = [
 
 [[package]]
 name = "forge-shell"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1247,7 +1247,7 @@ dependencies = [
 
 [[package]]
 name = "forge-term"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "form_urlencoded"
