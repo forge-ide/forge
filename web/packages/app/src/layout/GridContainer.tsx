@@ -1,5 +1,7 @@
-import { type Component, type JSX, Match, Switch } from 'solid-js';
+import { type Component, type JSX, Match, Show, Switch } from 'solid-js';
 import { SplitPane } from './SplitPane';
+import { DropZoneOverlay } from './DropZoneOverlay';
+import type { DragState } from './useDragToDock';
 
 /**
  * A terminal node in the layout tree. `render` produces the pane body for
@@ -36,6 +38,13 @@ export interface GridContainerProps {
    * and tree mutation. GridContainer keeps no state of its own.
    */
   onRatioChange: (id: string, next: number) => void;
+  /**
+   * Active drag-to-dock state, threaded from `useDragToDock`. When set,
+   * GridContainer paints a `DropZoneOverlay` on the targeted leaf so the
+   * hovered zone gets the §3.6 ember tint. Optional — omit when drag
+   * isn't wired up (e.g. unit tests for ratio behavior).
+   */
+  dragState?: DragState | null;
 }
 
 /**
@@ -43,28 +52,50 @@ export interface GridContainerProps {
  * one `SplitPane`; each leaf renders via its callback. GridContainer is a
  * pure function of its props — the tree walks parent-side, which keeps
  * persistence (F-120) and drag-to-dock (F-118) trivial to layer on later.
+ *
+ * F-118 layered the optional `dragState` prop here so the drop-zone overlay
+ * co-locates with the leaves. Tree mutation still happens outside — the
+ * `useDragToDock` hook calls `applyDockDrop` and hands the result back to
+ * the parent via `onTreeChange`. GridContainer stays stateless.
  */
 export const GridContainer: Component<GridContainerProps> = (props) => {
-  return <GridNode node={props.tree} onRatioChange={props.onRatioChange} />;
+  return (
+    <GridNode
+      node={props.tree}
+      onRatioChange={props.onRatioChange}
+      dragState={() => props.dragState ?? null}
+    />
+  );
 };
 
 const GridNode: Component<{
   node: LayoutNode;
   onRatioChange: (id: string, next: number) => void;
+  dragState: () => DragState | null;
 }> = (props) => {
   return (
     <Switch>
       <Match when={props.node.kind === 'leaf' && (props.node as LeafNode)}>
-        {(leaf) => (
-          <div
-            class="grid-leaf"
-            data-testid={`grid-leaf-${leaf().id}`}
-            data-leaf-id={leaf().id}
-            style={{ width: '100%', height: '100%' }}
-          >
-            {leaf().render()}
-          </div>
-        )}
+        {(leaf) => {
+          const activeZone = () => {
+            const s = props.dragState();
+            return s !== null && s.targetId === leaf().id ? s.zone : null;
+          };
+          const showOverlay = () => props.dragState() !== null;
+          return (
+            <div
+              class="grid-leaf"
+              data-testid={`grid-leaf-${leaf().id}`}
+              data-leaf-id={leaf().id}
+              style={{ width: '100%', height: '100%', position: 'relative' }}
+            >
+              {leaf().render()}
+              <Show when={showOverlay()}>
+                <DropZoneOverlay activeZone={activeZone()} />
+              </Show>
+            </div>
+          );
+        }}
       </Match>
       <Match when={props.node.kind === 'split' && (props.node as SplitNode)}>
         {(split) => (
@@ -73,8 +104,16 @@ const GridNode: Component<{
             ratio={split().ratio}
             onRatioChange={(next) => props.onRatioChange(split().id, next)}
           >
-            <GridNode node={split().a} onRatioChange={props.onRatioChange} />
-            <GridNode node={split().b} onRatioChange={props.onRatioChange} />
+            <GridNode
+              node={split().a}
+              onRatioChange={props.onRatioChange}
+              dragState={props.dragState}
+            />
+            <GridNode
+              node={split().b}
+              onRatioChange={props.onRatioChange}
+              dragState={props.dragState}
+            />
           </SplitPane>
         )}
       </Match>

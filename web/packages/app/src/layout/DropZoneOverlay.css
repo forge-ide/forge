@@ -1,0 +1,63 @@
+/*
+ * DropZoneOverlay — translucent drop targets shown over a pane during a
+ * drag-to-dock interaction. The overlay sits on top of its pane and paints
+ * five zones (top, bottom, left, right, center) per layout-panes.md §3.6.
+ * Hovering a zone highlights it at 12% ember; the others stay invisible so
+ * the resting state doesn't wash out the pane contents.
+ */
+
+.drop-zone-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.drop-zone-overlay__zone {
+  position: absolute;
+  background: transparent;
+  transition: background 80ms ease;
+  pointer-events: none;
+}
+
+.drop-zone-overlay__zone--active {
+  /* §3.6: drop zones highlight with rgba(255,74,18,0.12) during drag. */
+  background: rgba(255, 74, 18, 0.12);
+  border: 1px dashed var(--color-ember-400);
+}
+
+/* Zone geometry matches EDGE_ZONE_FRACTION = 0.25 in dockDrop.ts. */
+.drop-zone-overlay__zone--top {
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 25%;
+}
+
+.drop-zone-overlay__zone--bottom {
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 25%;
+}
+
+.drop-zone-overlay__zone--left {
+  top: 25%;
+  bottom: 25%;
+  left: 0;
+  width: 25%;
+}
+
+.drop-zone-overlay__zone--right {
+  top: 25%;
+  bottom: 25%;
+  right: 0;
+  width: 25%;
+}
+
+.drop-zone-overlay__zone--center {
+  top: 25%;
+  bottom: 25%;
+  left: 25%;
+  right: 25%;
+}
