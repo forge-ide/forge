@@ -83,3 +83,7 @@ path = "tests/uds_bind_symlink_race.rs"
 [[test]]
 name = "session_error"
 path = "tests/session_error.rs"
+
+[[test]]
+name = "rerun_replace"
+path = "tests/rerun_replace.rs"

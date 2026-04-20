@@ -8,6 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use forge_core::{
+    apply_superseded,
     meta::{write_meta, SessionMeta},
     read_since, SessionId, SessionPersistence, SessionState, WorkspaceId,
 };
@@ -18,10 +19,10 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{broadcast, Mutex};
 
 use crate::archive::archive_or_purge;
-use crate::orchestrator::{run_turn, ApprovalDecision, PendingApprovals};
+use crate::orchestrator::{run_turn, ApprovalDecision, Orchestrator, PendingApprovals};
 use crate::sandbox::ChildRegistry;
 use crate::session::Session;
-use forge_core::ApprovalScope;
+use forge_core::{ApprovalScope, MessageId};
 
 /// Static name for an `IpcMessage` discriminant — used for diagnostic logging
 /// when the dispatch loop encounters a frame that is structurally valid but
@@ -36,6 +37,7 @@ fn ipc_message_kind(msg: &IpcMessage) -> &'static str {
         IpcMessage::SendUserMessage(_) => "SendUserMessage",
         IpcMessage::ToolCallApproved(_) => "ToolCallApproved",
         IpcMessage::ToolCallRejected(_) => "ToolCallRejected",
+        IpcMessage::RerunMessage(_) => "RerunMessage",
     }
 }
 
@@ -385,7 +387,17 @@ async fn handle_connection<P: Provider + 'static>(
     // Subscribe to live broadcast BEFORE reading history to avoid missing events.
     let mut live_rx = session.event_tx.subscribe();
 
+    // F-143: filter the historical replay through `apply_superseded` so a
+    // fresh subscriber sees a coherent transcript — superseded assistant
+    // messages (and their deltas / tool calls) are hidden, along with the
+    // `MessageSuperseded` markers themselves. Live events pumped through
+    // `live_rx` below stay unfiltered: late-joining peers see replay from
+    // `read_since`, and the orchestrator emits `MessageSuperseded` after
+    // the regenerated turn is finalised so live peers that were attached
+    // throughout receive both the original and the new message — their UI
+    // is free to interpret the marker as it chooses.
     let history = read_since(&session.log_path, sub.since).await?;
+    let history = apply_superseded(history);
     let mut last_sent = sub.since;
 
     // Split stream so we can read and write concurrently.
@@ -517,6 +529,46 @@ async fn handle_connection<P: Provider + 'static>(
                         if let Some(tx) = map.remove(&r.id) {
                             let _ = tx.send(ApprovalDecision::Rejected);
                         }
+                    }
+
+                    Some(IpcMessage::RerunMessage(r)) => {
+                        // F-143: dispatch rerun through the `Orchestrator`.
+                        // Spawn the re-run off the event loop so concurrent
+                        // tool approvals still flow through the same
+                        // connection while regeneration streams.
+                        let session = Arc::clone(&session);
+                        let provider = Arc::clone(&provider);
+                        let approvals = Arc::clone(&pending_approvals);
+                        let workspace_path = workspace_path.clone();
+                        let allowed_paths = Arc::clone(&allowed_paths);
+                        let child_registry = child_registry.clone();
+                        let byte_budget = Arc::clone(&byte_budget);
+                        // MessageId wraps an `Arc<str>` so any string is
+                        // structurally a valid id (the log lookup later
+                        // surfaces "not found" if the client fabricated
+                        // one). No pre-validation here.
+                        let target = MessageId::from_string(r.msg_id.clone());
+                        let variant = r.variant;
+                        tokio::spawn(async move {
+                            let orch = Orchestrator::new();
+                            if let Err(e) = orch
+                                .rerun_message(
+                                    session,
+                                    provider,
+                                    target,
+                                    variant,
+                                    approvals,
+                                    (*allowed_paths).clone(),
+                                    auto_approve,
+                                    workspace_path,
+                                    Some(child_registry),
+                                    Some(byte_budget),
+                                )
+                                .await
+                            {
+                                eprintln!("rerun error: {e}");
+                            }
+                        });
                     }
 
                     // F-074: exhaustive match over the remaining

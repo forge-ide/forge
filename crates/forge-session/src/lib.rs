@@ -11,3 +11,4 @@ pub mod socket_path;
 pub mod tools;
 
 pub use error::SessionError;
+pub use orchestrator::Orchestrator;

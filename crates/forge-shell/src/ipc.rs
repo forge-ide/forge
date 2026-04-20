@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use forge_core::ApprovalScope;
+use forge_core::{ApprovalScope, RerunVariant};
 use forge_ipc::HelloAck;
 use tauri::{AppHandle, Emitter, EventTarget, Manager, Runtime, State, Webview};
 
@@ -51,6 +51,10 @@ pub(crate) const LABEL_MISMATCH_ERROR: &str = "forbidden: window label mismatch"
 pub(crate) const MAX_MESSAGE_TEXT_BYTES: usize = 128 * 1024;
 pub(crate) const MAX_TOOL_CALL_ID_BYTES: usize = 64;
 pub(crate) const MAX_REJECT_REASON_BYTES: usize = 1024;
+/// F-143: cap on the `msg_id` string accepted by `rerun_message`. `MessageId`
+/// hex is 16 chars; 64 bytes leaves room for the wrapper/URL-safe variants
+/// without permitting unbounded growth if a compromised webview lies.
+pub(crate) const MAX_MESSAGE_ID_BYTES: usize = 64;
 
 /// F-068 / L4 (T7): error returned when a session command's untyped-string
 /// input exceeds its byte cap. Tests assert against the literal fragments
@@ -250,6 +254,37 @@ pub async fn session_approve_tool<R: Runtime>(
         .map_err(|e| e.to_string())
 }
 
+/// F-143: re-run an assistant message. Phase 1 dispatches only
+/// `RerunVariant::Replace`; `Branch` (F-144) and `Fresh` (F-145) return an
+/// error today rather than silently no-op, so a UI that ships Branch before
+/// the daemon supports it learns fast.
+#[tauri::command]
+pub async fn rerun_message<R: Runtime>(
+    session_id: String,
+    msg_id: String,
+    variant: RerunVariant,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+) -> Result<(), String> {
+    require_window_label(&webview, &format!("session-{session_id}"))?;
+    // F-068 / L4: bound `msg_id` before the bridge allocates a frame. The
+    // variant is typed (forge_core::RerunVariant) — serde rejects any
+    // non-variant at Tauri arg deserialization, so no byte cap is needed.
+    require_size("msg_id", &msg_id, MAX_MESSAGE_ID_BYTES)?;
+    match variant {
+        RerunVariant::Replace => state
+            .bridge
+            .rerun_message(&session_id, msg_id, variant)
+            .await
+            .map_err(|e| e.to_string()),
+        // Branch / Fresh return errors here (not silent no-ops) so a UI that
+        // invokes them before F-144/F-145 ship gets a loud signal instead of
+        // a hanging command.
+        RerunVariant::Branch => Err("rerun_message: Branch variant not implemented (F-144)".into()),
+        RerunVariant::Fresh => Err("rerun_message: Fresh variant not implemented (F-145)".into()),
+    }
+}
+
 #[tauri::command]
 pub async fn session_reject_tool<R: Runtime>(
     session_id: String,
@@ -272,7 +307,7 @@ pub async fn session_reject_tool<R: Runtime>(
         .map_err(|e| e.to_string())
 }
 
-/// Returns a fully-wired invoke handler registering all five session bridge
+/// Returns a fully-wired invoke handler registering all session bridge
 /// commands. Called from `window_manager::run` when building the Tauri app.
 pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync>
 {
@@ -282,6 +317,7 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         session_send_message,
         session_approve_tool,
         session_reject_tool,
+        rerun_message,
     ])
 }
 

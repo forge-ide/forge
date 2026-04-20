@@ -2,11 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::Utc;
 use forge_core::{
+    apply_superseded,
     ids::{MessageId, ProviderId, ToolCallId},
-    ApprovalScope, ApprovalSource, Event,
+    read_since, ApprovalScope, ApprovalSource, Event, RerunVariant,
 };
 use forge_providers::{ChatBlock, ChatChunk, ChatMessage, ChatRequest, ChatRole, Provider};
 use futures::StreamExt;
@@ -113,8 +114,12 @@ pub async fn run_turn<P: Provider>(
 /// On tool calls: waits for approval, executes stub, appends result to the
 /// next request, and continues until the provider returns `Done` with no
 /// pending tool calls.
+///
+/// `pub(crate)` so rerun paths (F-143+) can reuse the loop with a pre-built
+/// `ChatRequest` and a pre-chosen `msg_id`, instead of going through
+/// [`run_turn`] which synthesizes a fresh `UserMessage` event.
 #[allow(clippy::too_many_arguments)]
-async fn run_request_loop<P: Provider>(
+pub(crate) async fn run_request_loop<P: Provider>(
     session: Arc<Session>,
     provider: Arc<P>,
     mut req: ChatRequest,
@@ -363,4 +368,240 @@ async fn run_request_loop<P: Provider>(
             content: tr_blocks,
         });
     }
+}
+
+// ── F-143: Orchestrator + rerun_message ────────────────────────────────────
+
+/// Top-level entry point for session-level operations that span beyond a
+/// single user turn — today only `rerun_message`; F-144 (Branch) and
+/// F-145 (Fresh) will extend it.
+///
+/// The type is zero-sized on purpose: it is a namespace / trait-like façade
+/// for the operations documented in `docs/architecture/ipc-contracts.md §4.1`
+/// and keeps `run_turn` (the per-turn free function used by `server.rs`)
+/// untouched. When later features accumulate shared state, the struct can
+/// carry fields without breaking the call-site shape.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Orchestrator;
+
+impl Orchestrator {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// F-143: re-run an existing assistant message.
+    ///
+    /// For [`RerunVariant::Replace`]:
+    ///   1. Read the event log and filter prior supersede markers so reruns
+    ///      don't compound.
+    ///   2. Reconstruct the provider request from events up to — but not
+    ///      including — `msg_id`'s assistant turn.
+    ///   3. Drive [`run_request_loop`] with a fresh `new_id` to regenerate
+    ///      the response.
+    ///   4. After the regenerated assistant message is finalised, emit
+    ///      [`Event::MessageSuperseded { old_id: msg_id, new_id }`] so
+    ///      replay consumers hide the original.
+    ///
+    /// Ordering matters: the `MessageSuperseded` marker is emitted *after*
+    /// the new assistant message is finalised. If regeneration errors
+    /// mid-stream, the marker is never written and the original message
+    /// stays visible — we don't point the UI at a half-written new_id.
+    ///
+    /// Branch / Fresh return an error today; they land in F-144 / F-145.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn rerun_message<P: Provider>(
+        &self,
+        session: Arc<crate::session::Session>,
+        provider: Arc<P>,
+        msg_id: MessageId,
+        variant: RerunVariant,
+        pending_approvals: PendingApprovals,
+        allowed_paths: Vec<String>,
+        auto_approve: bool,
+        workspace_root: Option<std::path::PathBuf>,
+        child_registry: Option<crate::sandbox::ChildRegistry>,
+        byte_budget: Option<Arc<crate::byte_budget::ByteBudget>>,
+    ) -> Result<MessageId> {
+        match variant {
+            RerunVariant::Replace => {
+                self.rerun_replace(
+                    session,
+                    provider,
+                    msg_id,
+                    pending_approvals,
+                    allowed_paths,
+                    auto_approve,
+                    workspace_root,
+                    child_registry,
+                    byte_budget,
+                )
+                .await
+            }
+            RerunVariant::Branch => Err(anyhow!(
+                "rerun_message: Branch variant not implemented (F-144)"
+            )),
+            RerunVariant::Fresh => Err(anyhow!(
+                "rerun_message: Fresh variant not implemented (F-145)"
+            )),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn rerun_replace<P: Provider>(
+        &self,
+        session: Arc<crate::session::Session>,
+        provider: Arc<P>,
+        target: MessageId,
+        pending_approvals: PendingApprovals,
+        allowed_paths: Vec<String>,
+        auto_approve: bool,
+        workspace_root: Option<std::path::PathBuf>,
+        child_registry: Option<crate::sandbox::ChildRegistry>,
+        byte_budget: Option<Arc<crate::byte_budget::ByteBudget>>,
+    ) -> Result<MessageId> {
+        // Read the log up to the current tip; filter prior supersede markers
+        // so a second rerun doesn't rebuild context from already-hidden
+        // messages.
+        let history = read_since(&session.log_path, 0)
+            .await
+            .map_err(|e| anyhow!("rerun_replace: read event log: {e}"))?;
+        let history = apply_superseded(history);
+
+        let req = build_request_up_to(&history, &target)?;
+
+        // Register the same tool dispatcher `run_turn` uses — rerun must be
+        // able to re-execute tool calls if the regenerated stream emits
+        // them.
+        let mut dispatcher = crate::tools::ToolDispatcher::new();
+        dispatcher
+            .register(Box::new(crate::tools::FsReadTool))
+            .expect("fs.read must register on a fresh dispatcher");
+        dispatcher
+            .register(Box::new(crate::tools::FsWriteTool))
+            .expect("fs.write must register on a fresh dispatcher");
+        dispatcher
+            .register(Box::new(crate::tools::FsEditTool))
+            .expect("fs.edit must register on a fresh dispatcher");
+        dispatcher
+            .register(Box::new(crate::tools::ShellExecTool))
+            .expect("shell.exec must register on a fresh dispatcher");
+        let ctx = crate::tools::ToolCtx {
+            allowed_paths,
+            workspace_root,
+            child_registry,
+            byte_budget,
+        };
+
+        let new_id = MessageId::new();
+        run_request_loop(
+            Arc::clone(&session),
+            provider,
+            req,
+            new_id.clone(),
+            pending_approvals,
+            &dispatcher,
+            &ctx,
+            auto_approve,
+        )
+        .await?;
+
+        // Emit the supersede marker only after regeneration succeeded. If
+        // run_request_loop returned Err, we bailed above — the original
+        // assistant message remains authoritative in the transcript.
+        session
+            .emit(Event::MessageSuperseded {
+                old_id: target,
+                new_id: new_id.clone(),
+            })
+            .await?;
+
+        Ok(new_id)
+    }
+}
+
+/// Walk `history` (a superseded-filtered `(seq, Event)` replay) and
+/// rebuild the [`ChatRequest`] that was in front of the provider when
+/// `target` was produced.
+///
+/// Rules:
+/// - Events up to and including the `UserMessage` immediately preceding
+///   `target`'s assistant turn are translated to `ChatMessage`s.
+/// - `target`'s own assistant turn (including its deltas, tool calls,
+///   tool results, and the terminal `AssistantMessage { stream_finalised:
+///   true }`) is dropped.
+/// - Unknown/non-conversation events (SessionStarted, UsageTick, etc.)
+///   are skipped.
+fn build_request_up_to(history: &[(u64, Event)], target: &MessageId) -> Result<ChatRequest> {
+    let mut messages: Vec<ChatMessage> = Vec::new();
+    let mut finalised_assistant_text: HashMap<MessageId, String> = HashMap::new();
+    let mut current_assistant: Option<MessageId> = None;
+
+    for (_, ev) in history {
+        match ev {
+            Event::UserMessage { text, .. } => {
+                // A UserMessage implicitly closes any open assistant turn.
+                if let Some(id) = current_assistant.take() {
+                    flush_assistant(&mut messages, &id, &finalised_assistant_text);
+                }
+                messages.push(ChatMessage {
+                    role: ChatRole::User,
+                    content: vec![ChatBlock::Text(text.to_string())],
+                });
+            }
+            Event::AssistantMessage {
+                id,
+                stream_finalised,
+                text,
+                ..
+            } => {
+                if id == target {
+                    // We've reached the target's turn — stop **before** it.
+                    // Anything already flushed is the reconstructed context.
+                    return finalise_request(messages);
+                }
+                current_assistant = Some(id.clone());
+                if *stream_finalised {
+                    finalised_assistant_text.insert(id.clone(), text.to_string());
+                }
+            }
+            _ => {
+                // Skip deltas, tool call events, etc. The finalised
+                // AssistantMessage text is authoritative for context
+                // reconstruction; per-delta replay is unnecessary here.
+            }
+        }
+    }
+
+    // Target not found in history — this is a client/server state drift.
+    Err(anyhow!(
+        "rerun_message: target message {target:?} not found in session log"
+    ))
+}
+
+fn flush_assistant(
+    messages: &mut Vec<ChatMessage>,
+    id: &MessageId,
+    finalised: &HashMap<MessageId, String>,
+) {
+    if let Some(text) = finalised.get(id) {
+        messages.push(ChatMessage {
+            role: ChatRole::Assistant,
+            content: vec![ChatBlock::Text(text.clone())],
+        });
+    }
+}
+
+fn finalise_request(messages: Vec<ChatMessage>) -> Result<ChatRequest> {
+    // The request must contain at least the preceding UserMessage. If the
+    // target was the very first event (shouldn't happen — an assistant
+    // message always follows a user turn) we return an informative error.
+    if messages.is_empty() {
+        return Err(anyhow!(
+            "rerun_message: no conversation context before target message"
+        ));
+    }
+    Ok(ChatRequest {
+        system: None,
+        messages,
+    })
 }

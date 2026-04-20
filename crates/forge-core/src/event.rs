@@ -70,6 +70,17 @@ pub enum Event {
         parent: MessageId,
         selected: MessageId,
     },
+    /// F-143: emitted after a successful re-run (Replace variant) to mark
+    /// `old_id`'s assistant message as logically superseded by `new_id`.
+    ///
+    /// The event log itself is append-only — the superseded events remain on
+    /// disk. Replay filters (see `forge_core::apply_superseded`) consult
+    /// these markers so late-joining subscribers see a coherent transcript
+    /// where the regenerated message takes the original's place.
+    MessageSuperseded {
+        old_id: MessageId,
+        new_id: MessageId,
+    },
     ToolCallStarted {
         id: ToolCallId,
         msg: MessageId,

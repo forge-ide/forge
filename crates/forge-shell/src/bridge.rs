@@ -24,10 +24,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use forge_core::ApprovalScope;
+use forge_core::{ApprovalScope, RerunVariant};
 use forge_ipc::{
-    read_frame, write_frame, ClientInfo, Hello, HelloAck, IpcMessage, SendUserMessage, Subscribe,
-    ToolCallApproved, ToolCallRejected, PROTO_VERSION,
+    read_frame, write_frame, ClientInfo, Hello, HelloAck, IpcMessage, RerunMessage,
+    SendUserMessage, Subscribe, ToolCallApproved, ToolCallRejected, PROTO_VERSION,
 };
 use serde::Serialize;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -298,6 +298,21 @@ impl SessionBridge {
         let writer = self.writer_for(session_id).await?;
         let mut writer = writer.lock().await;
         let frame = IpcMessage::ToolCallRejected(ToolCallRejected { id, reason });
+        write_frame(&mut *writer, &frame).await
+    }
+
+    /// F-143: forward a `rerun_message` request to the session daemon.
+    /// Branch/Fresh variants will be wired in F-144/F-145 — the daemon
+    /// rejects them today, so callers should gate on `variant == Replace`.
+    pub async fn rerun_message(
+        &self,
+        session_id: &str,
+        msg_id: String,
+        variant: RerunVariant,
+    ) -> Result<()> {
+        let writer = self.writer_for(session_id).await?;
+        let mut writer = writer.lock().await;
+        let frame = IpcMessage::RerunMessage(RerunMessage { msg_id, variant });
         write_frame(&mut *writer, &frame).await
     }
 
