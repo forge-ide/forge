@@ -1,0 +1,509 @@
+/* Agent Monitor (F-140). Three-column grid per `docs/ui-specs/agent-monitor.md`.
+ * All colors come from ../../../design/src/tokens.css; no raw hex. */
+
+.agent-monitor {
+  display: grid;
+  grid-template-columns: 280px 1fr 340px;
+  height: 100%;
+  min-height: 100vh;
+  background: var(--color-bg);
+  color: var(--color-text-primary);
+  font-family: var(--font-body);
+}
+
+/* ─── Left column: list ────────────────────────────────────────────────── */
+
+.agent-monitor__list {
+  border-right: 1px solid var(--color-border-1);
+  padding: var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  overflow-y: auto;
+}
+
+.agent-monitor__filters {
+  display: flex;
+  gap: var(--sp-3);
+  border-bottom: 1px solid var(--color-border-1);
+  padding-bottom: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.agent-monitor__filter {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  padding: var(--sp-1) 0;
+  margin: 0;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  transition: color var(--ease);
+  position: relative;
+}
+
+.agent-monitor__filter:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
+}
+
+.agent-monitor__filter--active {
+  color: var(--color-text-primary);
+}
+
+.agent-monitor__filter--active::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -3px;
+  height: 2px;
+  background: var(--color-ember-400);
+}
+
+.agent-monitor__rows {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.agent-monitor__row {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-left: 2px solid transparent;
+  padding: var(--sp-2) var(--sp-3);
+  text-align: left;
+  color: var(--color-text-primary);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  width: 100%;
+  cursor: pointer;
+  transition:
+    background var(--ease),
+    border-color var(--ease);
+}
+
+.agent-monitor__row:hover {
+  background: var(--color-surface-2);
+}
+
+.agent-monitor__row:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
+}
+
+.agent-monitor__row--active {
+  background: var(--color-surface-2);
+  border-left-color: var(--color-ember-400);
+}
+
+.agent-monitor__row-name {
+  font-family: var(--font-body);
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.agent-monitor__row-pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-warning);
+  flex-shrink: 0;
+  display: inline-block;
+  position: relative;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .agent-monitor__row--running .agent-monitor__row-pulse::after {
+    content: '';
+    position: absolute;
+    inset: -3px;
+    border-radius: 50%;
+    border: 1px solid var(--color-warning);
+    animation: agent-monitor-pulse 2s ease-in-out infinite;
+  }
+}
+
+@keyframes agent-monitor-pulse {
+  0% {
+    opacity: 1;
+    transform: scale(0.8);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.6);
+  }
+}
+
+.agent-monitor__row-meta {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-text-secondary);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.agent-monitor__progress {
+  height: 3px;
+  background: var(--color-surface-2);
+  display: block;
+  width: 100%;
+  position: relative;
+}
+
+.agent-monitor__progress-fill {
+  display: block;
+  height: 100%;
+  background: var(--color-text-tertiary);
+  transition: width var(--ease);
+}
+
+.agent-monitor__progress[data-state='running'] .agent-monitor__progress-fill {
+  background: var(--color-warning);
+}
+
+.agent-monitor__progress[data-state='done'] .agent-monitor__progress-fill {
+  background: var(--color-success);
+}
+
+.agent-monitor__progress[data-state='error'] .agent-monitor__progress-fill {
+  background: var(--color-error);
+}
+
+.agent-monitor__empty {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin: var(--sp-4) 0;
+}
+
+/* ─── Middle column: trace ─────────────────────────────────────────────── */
+
+.agent-monitor__trace {
+  padding: var(--sp-5);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.agent-monitor__trace-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  border-bottom: 1px solid var(--color-border-1);
+  padding-bottom: var(--sp-3);
+}
+
+.agent-monitor__trace-name {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 500;
+  margin: 0;
+  letter-spacing: 0.02em;
+}
+
+.agent-monitor__trace-id {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-text-secondary);
+}
+
+.agent-monitor__steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  position: relative;
+}
+
+.agent-monitor__steps::before {
+  content: '';
+  position: absolute;
+  left: 7px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--color-border-1);
+}
+
+.agent-monitor__step {
+  position: relative;
+}
+
+.agent-monitor__step-btn {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  padding: var(--sp-2);
+  margin: 0;
+  width: 100%;
+  text-align: left;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  cursor: pointer;
+  color: var(--color-text-primary);
+  font-family: var(--font-body);
+}
+
+.agent-monitor__step-btn:hover {
+  background: var(--color-surface-2);
+}
+
+.agent-monitor__step-btn:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
+}
+
+.agent-monitor__step-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--color-success);
+  flex-shrink: 0;
+  margin-top: 2px;
+  position: relative;
+  z-index: 1;
+}
+
+.agent-monitor__step-dot--running {
+  background: var(--color-warning);
+}
+
+.agent-monitor__step-dot--error {
+  background: var(--color-error);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .agent-monitor__step-dot--running::after {
+    content: '';
+    position: absolute;
+    inset: -4px;
+    border-radius: 50%;
+    border: 2px solid var(--color-warning);
+    animation: agent-monitor-pulse 2s ease-in-out infinite;
+  }
+}
+
+.agent-monitor__step-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  flex: 1;
+}
+
+.agent-monitor__step-chip {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  padding: 2px var(--sp-2);
+  border-radius: var(--r-sm);
+  align-self: flex-start;
+  background: var(--color-surface-2);
+  color: var(--color-text-secondary);
+}
+
+/* Step-kind chip palette — mirrors the table in agent-monitor.md §9.2,
+ * using the closest available tokens so we don't introduce raw hex. */
+.agent-monitor__step-chip[data-kind='tool'] {
+  background: var(--color-warning-bg);
+  color: var(--color-ember-100);
+}
+
+.agent-monitor__step-chip[data-kind='model'] {
+  background: var(--color-surface-2);
+  color: var(--color-text-secondary);
+}
+
+.agent-monitor__step-chip[data-kind='spawn'] {
+  background: var(--color-error-bg);
+  color: var(--color-ember-300);
+}
+
+.agent-monitor__step-chip[data-kind='plan'] {
+  background: var(--color-info-bg);
+  color: var(--color-info);
+}
+
+.agent-monitor__step-chip[data-kind='wait'] {
+  background: var(--color-surface-2);
+  color: var(--color-text-tertiary);
+}
+
+.agent-monitor__step-title {
+  font-size: 13px;
+  color: var(--color-text-primary);
+}
+
+/* ─── Right column: inspector ──────────────────────────────────────────── */
+
+.agent-monitor__inspector {
+  border-left: 1px solid var(--color-border-1);
+  padding: var(--sp-5);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+  background: var(--color-surface-1);
+}
+
+.agent-monitor__inspector-heading {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+  margin: 0 0 var(--sp-3) 0;
+}
+
+.agent-monitor__def {
+  display: grid;
+  grid-template-columns: 80px 1fr;
+  row-gap: var(--sp-2);
+  column-gap: var(--sp-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  margin: 0;
+}
+
+.agent-monitor__def dt {
+  color: var(--color-text-secondary);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.agent-monitor__def dd {
+  margin: 0;
+  color: var(--color-text-primary);
+  word-break: break-all;
+}
+
+.agent-monitor__pills {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.agent-monitor__pill {
+  padding: 2px var(--sp-2);
+  border-radius: var(--r-sm);
+  background: var(--color-surface-2);
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.agent-monitor__pill--mono {
+  font-family: var(--font-mono);
+}
+
+.agent-monitor__stop {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--color-error-border);
+  color: var(--color-error);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  padding: var(--sp-2) var(--sp-4);
+  cursor: pointer;
+  transition:
+    background var(--ease),
+    color var(--ease);
+}
+
+.agent-monitor__stop:hover {
+  background: var(--color-error-bg);
+  color: var(--color-ember-300);
+}
+
+.agent-monitor__stop:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
+}
+
+/* ─── Drawer ───────────────────────────────────────────────────────────── */
+
+.agent-monitor__drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 420px;
+  background: var(--color-surface-1);
+  border-left: 1px solid var(--color-border-2);
+  padding: var(--sp-5);
+  box-shadow: -4px 0 16px rgba(0, 0, 0, 0.3);
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  overflow-y: auto;
+}
+
+.agent-monitor__drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  border-bottom: 1px solid var(--color-border-1);
+  padding-bottom: var(--sp-3);
+}
+
+.agent-monitor__drawer-head h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 500;
+}
+
+.agent-monitor__drawer-close {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--color-text-secondary);
+  font-size: 20px;
+  cursor: pointer;
+  padding: 0;
+  width: 24px;
+  height: 24px;
+  line-height: 20px;
+}
+
+.agent-monitor__drawer-close:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
+}
+
+.agent-monitor__drawer-preview {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border-1);
+  border-radius: var(--r-sm);
+  padding: var(--sp-3);
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
