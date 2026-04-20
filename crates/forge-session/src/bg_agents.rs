@@ -1,0 +1,425 @@
+//! Background-agent lifecycle (F-137).
+//!
+//! Top-level user-initiated agents that run alongside the active chat and
+//! surface completion in the Agent Monitor (see `docs/product/ai-ux.md` §10.6).
+//! Distinct from sub-agents (F-134 / `agent.spawn`): a sub-agent is spawned
+//! *by* an agent as part of orchestration and appears inline in the parent's
+//! chat thread; a background agent is spawned *by the user* and lives in the
+//! Agent Monitor pane.
+//!
+//! This module owns the bookkeeping set of background `AgentInstanceId`s and
+//! drives two session-event emissions per instance: `BackgroundAgentStarted`
+//! on successful spawn, `BackgroundAgentCompleted` when the underlying
+//! orchestrator instance enters a terminal state. The registry speaks
+//! `forge_core::Event` on a local `broadcast::Sender` so the shell-side IPC
+//! bridge can forward them to the webview under the same `session:event`
+//! channel the daemon already uses — no new event name, no new protocol.
+//!
+//! Promotion (moving a background agent into a main chat pane) removes the id
+//! from the tracked set. The UI-level pane rebind — stitching the existing
+//! transcript into a new chat pane without transcript loss — is a frontend
+//! concern landing with the Agent Monitor work; the lifecycle invariant the
+//! DoD pins here is observable state, not pane geometry. See the
+//! `promote_removes_from_list` test below for the exact assertion.
+
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use chrono::Utc;
+use forge_agents::{
+    AgentDef, AgentInstance, AgentScope, InitialPrompt, Orchestrator, SpawnContext,
+};
+use forge_core::{ids::AgentId, AgentInstanceId, Event};
+use futures::StreamExt;
+use serde::{Deserialize, Serialize};
+use tokio::sync::{broadcast, Mutex};
+
+/// Channel capacity for the background-agent event bus. Matches
+/// `forge-session`'s `Session::event_tx` capacity (1024). A dropped
+/// subscriber is a non-fatal warmup state — the event is still registered
+/// in the in-memory set and a subsequent `list_background_agents` call
+/// observes the current running set.
+const EVENT_BUS_CAPACITY: usize = 1024;
+
+/// Snapshot row returned by [`BackgroundAgentRegistry::list`]. `agent_name`
+/// mirrors the `AgentDef.name` the user started; `state` is one of the
+/// lifecycle states `Running` / `Completed` / `Failed` so the UI can render
+/// the same status pill the Agent Monitor shows for live agents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BgAgentSummary {
+    pub id: AgentInstanceId,
+    pub agent_name: String,
+    pub state: BgAgentState,
+}
+
+/// Three-way lifecycle tag. Collapses `forge_agents::InstanceState`'s
+/// `Failed { reason }` to `Failed` without the reason — the reason already
+/// rides the `forge_agents::AgentEvent::Failed` stream the registry listens
+/// to, and exposing it here would force the UI to render arbitrary server
+/// strings next to each row. A dedicated "why did this fail?" UI can read the
+/// event log directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BgAgentState {
+    Running,
+    Completed,
+    Failed,
+}
+
+/// Error type for registry operations. Kept local and small; the Tauri command
+/// layer renders it through `Display`, matching the `Err(String)` wire shape
+/// the other `ipc.rs` commands use.
+#[derive(Debug, thiserror::Error)]
+pub enum BgAgentError {
+    #[error("unknown agent '{0}'")]
+    UnknownAgent(String),
+    #[error("spawn failed: {0}")]
+    Spawn(#[from] forge_agents::Error),
+}
+
+/// Background-agent lifecycle owner.
+///
+/// One instance per session. Holds a handle to the session's shared
+/// [`Orchestrator`] (so `agent.spawn` sub-agents and user-initiated
+/// background agents live in the same orchestrator registry), the agent
+/// defs the `start` call resolves `agent_name` against, and a local
+/// broadcast channel the caller subscribes to for the two
+/// `BackgroundAgent*` session events.
+pub struct BackgroundAgentRegistry {
+    orchestrator: Arc<Orchestrator>,
+    agent_defs: Arc<Vec<AgentDef>>,
+    tracked: Arc<Mutex<HashSet<AgentInstanceId>>>,
+    events: broadcast::Sender<Event>,
+}
+
+impl BackgroundAgentRegistry {
+    /// Construct a new registry bound to `orchestrator` and `agent_defs`.
+    /// The returned instance starts empty — call [`Self::start`] to spawn a
+    /// background agent and [`Self::events`] to subscribe to lifecycle
+    /// events.
+    pub fn new(orchestrator: Arc<Orchestrator>, agent_defs: Arc<Vec<AgentDef>>) -> Self {
+        let (events, _rx) = broadcast::channel(EVENT_BUS_CAPACITY);
+        Self {
+            orchestrator,
+            agent_defs,
+            tracked: Arc::new(Mutex::new(HashSet::new())),
+            events,
+        }
+    }
+
+    /// Subscribe to background-agent lifecycle events. Each subscriber gets
+    /// its own receiver; the stream emits `forge_core::Event::BackgroundAgentStarted`
+    /// once per successful spawn and `BackgroundAgentCompleted` once per
+    /// terminal transition (whether the orchestrator reported
+    /// `Completed` or `Failed` — both collapse to the completion event).
+    pub fn events(&self) -> broadcast::Receiver<Event> {
+        self.events.subscribe()
+    }
+
+    /// Start a new background agent by name.
+    ///
+    /// 1. Resolves `agent_name` against the registry's defs; returns
+    ///    [`BgAgentError::UnknownAgent`] on miss.
+    /// 2. Subscribes to the orchestrator's lifecycle stream **before**
+    ///    calling `spawn` — the stream is a bounded broadcast, so a late
+    ///    subscriber would miss a fast `Completed` event.
+    /// 3. Calls `orchestrator.spawn` under `AgentScope::User` with the
+    ///    caller-supplied `prompt` threaded via `SpawnContext::with_prompt`
+    ///    (F-134 mandate plumbing).
+    /// 4. Inserts the new instance id into the tracked set.
+    /// 5. Emits `Event::BackgroundAgentStarted` on the local channel.
+    /// 6. Spawns a detached task that forwards the terminal event for this
+    ///    instance from the orchestrator's stream onto the local channel as
+    ///    `Event::BackgroundAgentCompleted` and removes the id from the
+    ///    tracked set. The task also exits when the stream lags or closes —
+    ///    a missed completion leaves the id in `tracked` rather than
+    ///    panicking, which is the right failure mode for an idle UI: the
+    ///    user can still issue `promote`, and `list` reports the last-known
+    ///    state.
+    pub async fn start(
+        &self,
+        agent_name: &str,
+        prompt: InitialPrompt,
+    ) -> Result<AgentInstanceId, BgAgentError> {
+        let def = self
+            .agent_defs
+            .iter()
+            .find(|d| d.name == agent_name)
+            .cloned()
+            .ok_or_else(|| BgAgentError::UnknownAgent(agent_name.to_string()))?;
+
+        // Subscribe BEFORE spawn. `Orchestrator::state_stream` is a bounded
+        // broadcast — a late subscriber (e.g. `spawn → tokio::spawn(listener)`)
+        // would race a fast `stop(id)` in between and miss the terminal
+        // event. Capturing the stream up-front closes the window.
+        let mut stream = self.orchestrator.state_stream();
+
+        let ctx = SpawnContext {
+            scope: AgentScope::User,
+            initial_prompt: Some(prompt),
+        };
+        let instance: AgentInstance = self.orchestrator.spawn(def, ctx).await?;
+        let id = instance.id.clone();
+
+        self.tracked.lock().await.insert(id.clone());
+
+        // `broadcast::Sender::send` errors only when no subscribers are
+        // attached — a valid warmup state for an embedded registry whose
+        // events only matter once a webview has subscribed.
+        let _ = self.events.send(Event::BackgroundAgentStarted {
+            id: id.clone(),
+            agent: AgentId::new(),
+            at: Utc::now(),
+        });
+
+        // Forwarder: watch the orchestrator stream for this instance's
+        // terminal event. Exits after the first match or on stream close.
+        // Cloned handles so the task outlives `&self`.
+        let target_id = id.clone();
+        let events = self.events.clone();
+        let tracked = Arc::clone(&self.tracked);
+        tokio::spawn(async move {
+            while let Some(next) = stream.next().await {
+                let event = match next {
+                    Ok(e) => e,
+                    // `Lagged` means this forwarder missed events; `Closed`
+                    // means the orchestrator went away. Either case, we bail
+                    // and leave `tracked` as-is so `list_background_agents`
+                    // still renders the last-known state rather than
+                    // silently dropping the row.
+                    Err(_) => return,
+                };
+                let (terminal_id, is_terminal) = match &event {
+                    forge_agents::AgentEvent::Completed { id, .. } => (id.clone(), true),
+                    forge_agents::AgentEvent::Failed { id, .. } => (id.clone(), true),
+                    _ => continue,
+                };
+                if terminal_id != target_id {
+                    continue;
+                }
+                if is_terminal {
+                    tracked.lock().await.remove(&target_id);
+                    let _ = events.send(Event::BackgroundAgentCompleted {
+                        id: target_id.clone(),
+                        at: Utc::now(),
+                    });
+                    return;
+                }
+            }
+        });
+
+        Ok(id)
+    }
+
+    /// Promote a background agent to an "active chat" view. Removes the id
+    /// from the tracked set so `list` no longer surfaces it as a background
+    /// agent. The underlying orchestrator instance is **not** stopped —
+    /// promotion is a UX re-attribution, not a lifecycle transition, so the
+    /// agent keeps running under the same `AgentInstanceId` in a regular
+    /// chat pane. Idempotent: promoting an unknown or already-promoted id
+    /// is a successful no-op.
+    pub async fn promote(&self, id: &AgentInstanceId) {
+        self.tracked.lock().await.remove(id);
+    }
+
+    /// Snapshot of every currently-tracked background agent. Ordering is
+    /// arbitrary (HashSet-backed) — the UI is expected to sort on
+    /// `agent_name` or start-time as it sees fit.
+    pub async fn list(&self) -> Vec<BgAgentSummary> {
+        let tracked = self.tracked.lock().await.clone();
+        let mut out = Vec::with_capacity(tracked.len());
+        for id in tracked {
+            if let Some(inst) = self.orchestrator.get(&id).await {
+                let state = match inst.state {
+                    forge_agents::InstanceState::Running => BgAgentState::Running,
+                    forge_agents::InstanceState::Completed => BgAgentState::Completed,
+                    forge_agents::InstanceState::Failed { .. } => BgAgentState::Failed,
+                };
+                out.push(BgAgentSummary {
+                    id: inst.id,
+                    agent_name: inst.def.name,
+                    state,
+                });
+            }
+        }
+        out
+    }
+
+    /// Test / embedder accessor so the caller can drive orchestrator
+    /// lifecycle transitions directly (there is no step-executor yet).
+    /// Integration tests use this to call `orchestrator.stop(id)` and
+    /// observe the registry's forwarder emit
+    /// `Event::BackgroundAgentCompleted`.
+    pub fn orchestrator(&self) -> &Arc<Orchestrator> {
+        &self.orchestrator
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use forge_agents::Isolation;
+
+    fn def(name: &str) -> AgentDef {
+        AgentDef {
+            name: name.to_string(),
+            description: None,
+            body: String::new(),
+            allowed_paths: vec![],
+            isolation: Isolation::Process,
+        }
+    }
+
+    async fn fresh() -> BackgroundAgentRegistry {
+        let orch = Arc::new(Orchestrator::new());
+        let defs = Arc::new(vec![def("writer"), def("reviewer")]);
+        BackgroundAgentRegistry::new(orch, defs)
+    }
+
+    #[tokio::test]
+    async fn start_registers_instance_and_emits_started_event() {
+        let reg = fresh().await;
+        let mut rx = reg.events();
+
+        let id = reg.start("writer", Arc::from("go")).await.unwrap();
+
+        let first = rx.recv().await.unwrap();
+        match first {
+            Event::BackgroundAgentStarted { id: ev_id, .. } => {
+                assert_eq!(ev_id, id, "started event must carry the spawned id");
+            }
+            other => panic!("expected BackgroundAgentStarted, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn start_forwards_prompt_onto_registered_instance() {
+        let reg = fresh().await;
+        let id = reg.start("writer", Arc::from("draft intro")).await.unwrap();
+
+        let inst = reg.orchestrator().get(&id).await.expect("registered");
+        assert_eq!(
+            inst.initial_prompt.as_deref(),
+            Some("draft intro"),
+            "Registry::start must thread the prompt onto AgentInstance.initial_prompt \
+             (F-137 mandate)"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_agent_returns_typed_error() {
+        let reg = fresh().await;
+        let err = reg
+            .start("does-not-exist", Arc::from(""))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BgAgentError::UnknownAgent(ref n) if n == "does-not-exist"));
+    }
+
+    #[tokio::test]
+    async fn list_returns_running_instance_after_start() {
+        let reg = fresh().await;
+        let id = reg.start("writer", Arc::from("p")).await.unwrap();
+
+        let rows = reg.list().await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id);
+        assert_eq!(rows[0].agent_name, "writer");
+        assert_eq!(rows[0].state, BgAgentState::Running);
+    }
+
+    #[tokio::test]
+    async fn promote_removes_from_list() {
+        // Observable contract: promotion is a tracking-set transition, not a
+        // lifecycle transition. Post-promote the id disappears from `list`,
+        // but `orchestrator.get` still returns the instance (still running
+        // under the same id) — a UI-level pane rebind is a follow-up.
+        let reg = fresh().await;
+        let id = reg.start("writer", Arc::from("p")).await.unwrap();
+        assert_eq!(reg.list().await.len(), 1);
+
+        reg.promote(&id).await;
+
+        assert!(
+            reg.list().await.is_empty(),
+            "promote must remove the id from list() results"
+        );
+        assert!(
+            reg.orchestrator().get(&id).await.is_some(),
+            "promote is UX re-attribution; the orchestrator instance stays alive"
+        );
+    }
+
+    #[tokio::test]
+    async fn promote_unknown_id_is_a_noop() {
+        let reg = fresh().await;
+        reg.promote(&AgentInstanceId::new()).await;
+        assert!(reg.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn completion_event_fires_when_orchestrator_stops_instance() {
+        // Proves the forwarder wiring: driving `orchestrator.stop(id)`
+        // causes the registry to emit `BackgroundAgentCompleted` on its
+        // local bus and drop the id from `tracked`.
+        let reg = fresh().await;
+        let mut rx = reg.events();
+        let id = reg.start("writer", Arc::from("p")).await.unwrap();
+
+        // Drain the Started event so the next recv() is unambiguously the Completed.
+        match rx.recv().await.unwrap() {
+            Event::BackgroundAgentStarted { .. } => {}
+            other => panic!("expected Started, got {other:?}"),
+        }
+
+        // Drive the orchestrator to terminal state directly; the forwarder
+        // picks this up and converts to `BackgroundAgentCompleted`.
+        reg.orchestrator().stop(&id).await.unwrap();
+
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("BackgroundAgentCompleted must arrive within the timeout")
+            .expect("forwarder must not drop the completion event");
+
+        match completed {
+            Event::BackgroundAgentCompleted { id: ev_id, .. } => {
+                assert_eq!(ev_id, id, "completion id must match the started id");
+            }
+            other => panic!("expected BackgroundAgentCompleted, got {other:?}"),
+        }
+
+        // List must no longer include the id — forwarder cleared `tracked`.
+        assert!(
+            reg.list().await.is_empty(),
+            "completed background agent must drop from list"
+        );
+    }
+
+    #[tokio::test]
+    async fn failure_path_also_fires_completion_event() {
+        // `BackgroundAgentCompleted` intentionally collapses both the
+        // `Completed` and `Failed` orchestrator-level terminals into a
+        // single user-visible event — the UI renders "completed" as a
+        // neutral end-of-life marker and surfaces the failure reason via a
+        // separate inspection (the event log), matching the wire shape
+        // pinned in `forge_core::Event::BackgroundAgentCompleted { id, at }`.
+        let reg = fresh().await;
+        let mut rx = reg.events();
+        let id = reg.start("writer", Arc::from("p")).await.unwrap();
+
+        let _ = rx.recv().await; // drain Started
+
+        reg.orchestrator()
+            .fail(&id, "boom".to_string())
+            .await
+            .unwrap();
+
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("a completion event must fire even on Failed")
+            .expect("forwarder must not drop the event");
+
+        assert!(
+            matches!(completed, Event::BackgroundAgentCompleted { id: ev_id, .. } if ev_id == id),
+        );
+    }
+}
