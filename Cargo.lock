@@ -1143,11 +1143,14 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "dirs 6.0.0",
  "forge-core",
  "forge-ipc",
+ "forge-mcp",
  "libc",
  "serde",
  "serde_json",
+ "similar",
  "tempfile",
  "tokio",
 ]
@@ -1229,6 +1232,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "toml 0.8.23",
  "tracing",
  "wiremock",
 ]

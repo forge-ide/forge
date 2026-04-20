@@ -9,10 +9,11 @@
 //! - [`transport`]: stdio (F-128) and http (F-129) connections.
 //! - Lifecycle manager (F-130) builds on top.
 
+pub mod import;
 pub mod transport;
 
 use anyhow::{anyhow, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs,
@@ -126,6 +127,59 @@ fn resolve_transport(declared: Option<&str>, raw: &RawServer) -> Result<Transpor
             )),
         },
     }
+}
+
+/// Emit a universal `.mcp.json` document — `{ "mcpServers": { ... } }` —
+/// for a prepared server map. Used by `forge mcp import` to render both
+/// the proposed output file and the diff target.
+pub fn render_universal(servers: &BTreeMap<String, McpServerSpec>) -> Result<String> {
+    #[derive(Serialize)]
+    struct Doc<'a> {
+        #[serde(rename = "mcpServers")]
+        servers: BTreeMap<&'a str, Entry<'a>>,
+    }
+
+    #[derive(Serialize)]
+    #[serde(untagged)]
+    enum Entry<'a> {
+        Stdio {
+            command: &'a str,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            args: Vec<&'a str>,
+            #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+            env: BTreeMap<&'a str, &'a str>,
+        },
+        Http {
+            url: &'a str,
+            #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+            headers: BTreeMap<&'a str, &'a str>,
+        },
+    }
+
+    let mut doc = Doc {
+        servers: BTreeMap::new(),
+    };
+    for (name, spec) in servers {
+        let entry = match &spec.kind {
+            ServerKind::Stdio { command, args, env } => Entry::Stdio {
+                command: command.as_str(),
+                args: args.iter().map(String::as_str).collect(),
+                env: env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect(),
+            },
+            ServerKind::Http { url, headers } => Entry::Http {
+                url: url.as_str(),
+                headers: headers
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect(),
+            },
+        };
+        doc.servers.insert(name.as_str(), entry);
+    }
+
+    let mut out = serde_json::to_string_pretty(&doc).context("serializing universal .mcp.json")?;
+    out.push('\n');
+    Ok(out)
 }
 
 pub mod config {
@@ -378,6 +432,42 @@ mod tests {
             msg.contains("transport"),
             "error should explain missing transport: {msg}"
         );
+    }
+
+    #[test]
+    fn render_universal_round_trips_through_config_loader() {
+        use crate::render_universal;
+
+        let tmp = TempDir::new().unwrap();
+        let mut servers: BTreeMap<String, McpServerSpec> = BTreeMap::new();
+        servers.insert(
+            "stdio-srv".into(),
+            McpServerSpec {
+                kind: ServerKind::Stdio {
+                    command: "npx".into(),
+                    args: vec!["-y".into(), "@scope/server".into()],
+                    env: {
+                        let mut m = BTreeMap::new();
+                        m.insert("LOG".to_string(), "info".to_string());
+                        m
+                    },
+                },
+            },
+        );
+        servers.insert(
+            "http-srv".into(),
+            McpServerSpec {
+                kind: ServerKind::Http {
+                    url: "https://example.com/mcp".into(),
+                    headers: BTreeMap::new(),
+                },
+            },
+        );
+
+        let rendered = render_universal(&servers).unwrap();
+        write(&tmp.path().join(".mcp.json"), &rendered);
+        let parsed = config::load_workspace(tmp.path()).unwrap();
+        assert_eq!(parsed, servers);
     }
 
     #[test]

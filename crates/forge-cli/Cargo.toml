@@ -16,11 +16,18 @@ path = "src/main.rs"
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
+# Home-dir resolution for `forge mcp import` auto-detect (F-131). Matches
+# the version already used in forge-mcp so Cargo.lock doesn't grow a second.
+dirs = "6.0.0"
 forge-core = { path = "../forge-core" }
 forge-ipc = { path = "../forge-ipc" }
+forge-mcp = { path = "../forge-mcp" }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Unified-diff rendering for the dry-run output of `forge mcp import`
+# (F-131). `similar` is the workspace's usual choice for text diffs.
+similar = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "io-std", "fs", "io-util"] }
 
 [dev-dependencies]

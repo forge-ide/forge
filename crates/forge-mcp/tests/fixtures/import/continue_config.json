@@ -1,0 +1,15 @@
+{
+  "models": [{ "provider": "openai", "model": "gpt-4o" }],
+  "contextProviders": [],
+  "mcpServers": {
+    "sqlite": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "mcp-sqlite", "/tmp/app.db"]
+    },
+    "remote-sse": {
+      "type": "sse",
+      "url": "https://continue.example/mcp"
+    }
+  }
+}
