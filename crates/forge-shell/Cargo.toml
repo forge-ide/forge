@@ -25,6 +25,7 @@ dirs = "5"
 forge-core = { path = "../forge-core" }
 forge-fs = { path = "../forge-fs" }
 forge-ipc = { path = "../forge-ipc" }
+forge-lsp = { path = "../forge-lsp" }
 forge-providers = { path = "../forge-providers" }
 forge-term = { path = "../forge-term" }
 # `rc`: `SessionEventPayload.event` embeds `forge_core::Event`, whose hot

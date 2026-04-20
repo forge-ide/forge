@@ -1201,6 +1201,21 @@ dependencies = [
 [[package]]
 name = "forge-lsp"
 version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "dirs 5.0.1",
+ "hex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "wiremock",
+]
 
 [[package]]
 name = "forge-mcp"
@@ -1277,6 +1292,7 @@ dependencies = [
  "forge-core",
  "forge-fs",
  "forge-ipc",
+ "forge-lsp",
  "forge-providers",
  "forge-session",
  "forge-term",
