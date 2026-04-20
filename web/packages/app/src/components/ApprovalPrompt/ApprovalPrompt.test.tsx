@@ -183,7 +183,7 @@ describe('Scope selection — button clicks', () => {
     const onApprove = vi.fn();
     const { getByTestId } = renderPrompt({ onApprove });
     fireEvent.click(getByTestId('approve-once-btn'));
-    expect(onApprove).toHaveBeenCalledWith('Once', undefined);
+    expect(onApprove).toHaveBeenCalledWith('Once', 'session', undefined);
   });
 
   it('calls onApprove with Once from scope menu', () => {
@@ -191,7 +191,7 @@ describe('Scope selection — button clicks', () => {
     const { getByTestId } = renderPrompt({ onApprove });
     fireEvent.click(getByTestId('approve-dropdown-btn'));
     fireEvent.click(getByTestId('scope-once-btn'));
-    expect(onApprove).toHaveBeenCalledWith('Once', undefined);
+    expect(onApprove).toHaveBeenCalledWith('Once', 'session', undefined);
   });
 
   it('calls onApprove with ThisFile from scope menu', () => {
@@ -199,7 +199,7 @@ describe('Scope selection — button clicks', () => {
     const { getByTestId } = renderPrompt({ onApprove });
     fireEvent.click(getByTestId('approve-dropdown-btn'));
     fireEvent.click(getByTestId('scope-file-btn'));
-    expect(onApprove).toHaveBeenCalledWith('ThisFile', undefined);
+    expect(onApprove).toHaveBeenCalledWith('ThisFile', 'session', undefined);
   });
 
   it('opens pattern editor when ThisPattern is selected', () => {
@@ -226,7 +226,7 @@ describe('Scope selection — button clicks', () => {
     const input = getByTestId('pattern-input') as HTMLInputElement;
     fireEvent.input(input, { target: { value: '/src/**' } });
     fireEvent.click(getByTestId('pattern-confirm-btn'));
-    expect(onApprove).toHaveBeenCalledWith('ThisPattern', '/src/**');
+    expect(onApprove).toHaveBeenCalledWith('ThisPattern', 'session', '/src/**');
   });
 
   it('cancels pattern editor without calling onApprove', () => {
@@ -244,7 +244,7 @@ describe('Scope selection — button clicks', () => {
     const { getByTestId } = renderPrompt({ onApprove });
     fireEvent.click(getByTestId('approve-dropdown-btn'));
     fireEvent.click(getByTestId('scope-tool-btn'));
-    expect(onApprove).toHaveBeenCalledWith('ThisTool', undefined);
+    expect(onApprove).toHaveBeenCalledWith('ThisTool', 'session', undefined);
   });
 
   it('calls onReject when reject button is clicked', () => {
@@ -278,21 +278,21 @@ describe('Keyboard shortcuts', () => {
     const onApprove = vi.fn();
     const { container } = renderPrompt({ onApprove });
     fireEvent.keyDown(container, { key: 'a' });
-    expect(onApprove).toHaveBeenCalledWith('Once', undefined);
+    expect(onApprove).toHaveBeenCalledWith('Once', 'session', undefined);
   });
 
   it('Enter key calls onApprove with Once', () => {
     const onApprove = vi.fn();
     const { container } = renderPrompt({ onApprove });
     fireEvent.keyDown(container, { key: 'Enter' });
-    expect(onApprove).toHaveBeenCalledWith('Once', undefined);
+    expect(onApprove).toHaveBeenCalledWith('Once', 'session', undefined);
   });
 
   it('F key calls onApprove with ThisFile for fs.edit', () => {
     const onApprove = vi.fn();
     const { container } = renderPrompt({ onApprove, toolName: 'fs.edit', argsJson: FS_EDIT_ARGS });
     fireEvent.keyDown(container, { key: 'f' });
-    expect(onApprove).toHaveBeenCalledWith('ThisFile', undefined);
+    expect(onApprove).toHaveBeenCalledWith('ThisFile', 'session', undefined);
   });
 
   it('F key does nothing for shell.exec (no file scopes)', () => {
@@ -328,7 +328,7 @@ describe('Keyboard shortcuts', () => {
     const onApprove = vi.fn();
     const { container } = renderPrompt({ onApprove });
     fireEvent.keyDown(container, { key: 't' });
-    expect(onApprove).toHaveBeenCalledWith('ThisTool', undefined);
+    expect(onApprove).toHaveBeenCalledWith('ThisTool', 'session', undefined);
   });
 
   it('Escape key closes pattern editor', () => {
@@ -459,5 +459,74 @@ describe('Focus management — focus restoration (F-089)', () => {
     trigger.remove();
 
     expect(() => unmount()).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-036: persistence level toggle
+// ---------------------------------------------------------------------------
+
+describe('Persistence level toggle (F-036)', () => {
+  it('renders a level toggle group with Session / Workspace / User buttons', () => {
+    const { getByTestId } = renderPrompt();
+    expect(getByTestId('level-toggle')).toBeInTheDocument();
+    expect(getByTestId('level-session-btn')).toBeInTheDocument();
+    expect(getByTestId('level-workspace-btn')).toBeInTheDocument();
+    expect(getByTestId('level-user-btn')).toBeInTheDocument();
+  });
+
+  it('defaults to Session', () => {
+    const { getByTestId } = renderPrompt();
+    expect(getByTestId('level-session-btn')).toHaveAttribute('aria-checked', 'true');
+    expect(getByTestId('level-workspace-btn')).toHaveAttribute('aria-checked', 'false');
+    expect(getByTestId('level-user-btn')).toHaveAttribute('aria-checked', 'false');
+  });
+
+  it('selecting Workspace threads level into onApprove for ThisFile', () => {
+    const onApprove = vi.fn();
+    const { getByTestId } = renderPrompt({ onApprove });
+    fireEvent.click(getByTestId('level-workspace-btn'));
+    fireEvent.click(getByTestId('approve-dropdown-btn'));
+    fireEvent.click(getByTestId('scope-file-btn'));
+    expect(onApprove).toHaveBeenCalledWith('ThisFile', 'workspace', undefined);
+  });
+
+  it('selecting User threads level into onApprove for ThisTool', () => {
+    const onApprove = vi.fn();
+    const { getByTestId } = renderPrompt({ onApprove });
+    fireEvent.click(getByTestId('level-user-btn'));
+    fireEvent.click(getByTestId('approve-dropdown-btn'));
+    fireEvent.click(getByTestId('scope-tool-btn'));
+    expect(onApprove).toHaveBeenCalledWith('ThisTool', 'user', undefined);
+  });
+
+  it('selecting User threads level into onApprove for ThisPattern', () => {
+    const onApprove = vi.fn();
+    const { getByTestId } = renderPrompt({ onApprove });
+    fireEvent.click(getByTestId('level-user-btn'));
+    fireEvent.click(getByTestId('approve-dropdown-btn'));
+    fireEvent.click(getByTestId('scope-pattern-btn'));
+    const input = getByTestId('pattern-input') as HTMLInputElement;
+    fireEvent.input(input, { target: { value: '/src/*' } });
+    fireEvent.click(getByTestId('pattern-confirm-btn'));
+    expect(onApprove).toHaveBeenCalledWith('ThisPattern', 'user', '/src/*');
+  });
+
+  it('collapses Workspace selection to Session for a one-shot Approve', () => {
+    // A Once approval has nothing to persist — even if Workspace is active,
+    // the effective level must be 'session'.
+    const onApprove = vi.fn();
+    const { getByTestId } = renderPrompt({ onApprove });
+    fireEvent.click(getByTestId('level-workspace-btn'));
+    fireEvent.click(getByTestId('approve-once-btn'));
+    expect(onApprove).toHaveBeenCalledWith('Once', 'session', undefined);
+  });
+
+  it('updates aria-checked when level changes', () => {
+    const { getByTestId } = renderPrompt();
+    fireEvent.click(getByTestId('level-user-btn'));
+    expect(getByTestId('level-session-btn')).toHaveAttribute('aria-checked', 'false');
+    expect(getByTestId('level-workspace-btn')).toHaveAttribute('aria-checked', 'false');
+    expect(getByTestId('level-user-btn')).toHaveAttribute('aria-checked', 'true');
   });
 });

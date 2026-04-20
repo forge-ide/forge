@@ -9,6 +9,7 @@ import {
   revokeWhitelistEntry,
   getApprovalWhitelist,
   resetApprovalsStore,
+  seedPersistentApprovals,
 } from './approvals';
 
 const SID = 'session-approvals-test' as SessionId;
@@ -134,25 +135,38 @@ describe('matchWhitelistKey', () => {
 // ---------------------------------------------------------------------------
 
 describe('addWhitelistEntry', () => {
-  it('adds a ThisFile entry and records label', () => {
+  it('adds a ThisFile entry with session level by default', () => {
     addWhitelistEntry(SID, 'ThisFile', 'fs.write', '/src/foo.ts');
     const wl = getApprovalWhitelist(SID);
     expect('file:fs.write:/src/foo.ts' in wl.entries).toBe(true);
-    expect(wl.entries['file:fs.write:/src/foo.ts']).toBe('this file');
+    expect(wl.entries['file:fs.write:/src/foo.ts']?.label).toBe('this file');
+    expect(wl.entries['file:fs.write:/src/foo.ts']?.level).toBe('session');
   });
 
   it('adds a ThisPattern entry with explicit pattern', () => {
     addWhitelistEntry(SID, 'ThisPattern', 'fs.edit', '/src/foo.ts', '/src/*');
     const wl = getApprovalWhitelist(SID);
     expect('pattern:fs.edit:/src/*' in wl.entries).toBe(true);
-    expect(wl.entries['pattern:fs.edit:/src/*']).toBe('pattern /src/*');
+    expect(wl.entries['pattern:fs.edit:/src/*']?.label).toBe('pattern /src/*');
   });
 
   it('adds a ThisTool entry', () => {
     addWhitelistEntry(SID, 'ThisTool', 'shell.exec', '');
     const wl = getApprovalWhitelist(SID);
     expect('tool:shell.exec' in wl.entries).toBe(true);
-    expect(wl.entries['tool:shell.exec']).toBe('this tool');
+    expect(wl.entries['tool:shell.exec']?.label).toBe('this tool');
+  });
+
+  it('records the passed level (workspace)', () => {
+    addWhitelistEntry(SID, 'ThisTool', 'fs.write', '', undefined, 'workspace');
+    const wl = getApprovalWhitelist(SID);
+    expect(wl.entries['tool:fs.write']?.level).toBe('workspace');
+  });
+
+  it('records the passed level (user)', () => {
+    addWhitelistEntry(SID, 'ThisTool', 'shell.exec', '', undefined, 'user');
+    const wl = getApprovalWhitelist(SID);
+    expect(wl.entries['tool:shell.exec']?.level).toBe('user');
   });
 
   it('returns the generated key', () => {
@@ -180,5 +194,55 @@ describe('multi-session isolation', () => {
     addWhitelistEntry(SID, 'ThisTool', 'fs.write', '');
     expect('tool:fs.write' in getApprovalWhitelist(SID).entries).toBe(true);
     expect('tool:fs.write' in getApprovalWhitelist(SID2).entries).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// seedPersistentApprovals (F-036)
+// ---------------------------------------------------------------------------
+
+describe('seedPersistentApprovals', () => {
+  it('populates the whitelist from persistent entries', () => {
+    seedPersistentApprovals(SID, [
+      {
+        scope_key: 'tool:fs.write',
+        tool_name: 'fs.write',
+        label: 'this tool',
+        level: 'workspace',
+      },
+      {
+        scope_key: 'file:fs.edit:/src/foo.ts',
+        tool_name: 'fs.edit',
+        label: 'this file',
+        level: 'user',
+      },
+    ]);
+
+    const wl = getApprovalWhitelist(SID);
+    expect(wl.entries['tool:fs.write']).toEqual({ label: 'this tool', level: 'workspace' });
+    expect(wl.entries['file:fs.edit:/src/foo.ts']).toEqual({
+      label: 'this file',
+      level: 'user',
+    });
+  });
+
+  it('merges additively with existing session entries', () => {
+    addWhitelistEntry(SID, 'ThisTool', 'shell.exec', '');
+    seedPersistentApprovals(SID, [
+      {
+        scope_key: 'tool:fs.write',
+        tool_name: 'fs.write',
+        label: 'this tool',
+        level: 'workspace',
+      },
+    ]);
+    const wl = getApprovalWhitelist(SID);
+    expect(wl.entries['tool:shell.exec']?.level).toBe('session');
+    expect(wl.entries['tool:fs.write']?.level).toBe('workspace');
+  });
+
+  it('is a no-op with an empty list', () => {
+    seedPersistentApprovals(SID, []);
+    expect(Object.keys(getApprovalWhitelist(SID).entries)).toEqual([]);
   });
 });

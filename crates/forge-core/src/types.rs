@@ -33,6 +33,21 @@ pub enum ApprovalScope {
     ThisTool,
 }
 
+/// F-036: persistence tier for an approval.
+///
+/// `Session` stays in memory for the current session only; `Workspace` writes
+/// to `<root>/.forge/approvals.toml`; `User` writes to `{config_dir}/forge/approvals.toml`.
+/// Serialized lowercase on the wire so the frontend store can keep its
+/// existing `'session' | 'workspace' | 'user'` string union.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub enum ApprovalLevel {
+    Session,
+    Workspace,
+    User,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
 pub enum CompactTrigger {
@@ -107,5 +122,36 @@ mod tests {
             let decoded: ApprovalScope = serde_json::from_str(&json).unwrap();
             assert_eq!(v, decoded);
         }
+    }
+
+    #[test]
+    fn approval_level_serde_roundtrip() {
+        for v in [
+            ApprovalLevel::Session,
+            ApprovalLevel::Workspace,
+            ApprovalLevel::User,
+        ] {
+            let json = serde_json::to_string(&v).unwrap();
+            let decoded: ApprovalLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(v, decoded);
+        }
+    }
+
+    #[test]
+    fn approval_level_serializes_lowercase() {
+        // Frontend stores `level: 'session' | 'workspace' | 'user'`. Lock the
+        // wire shape so a rename on the Rust side surfaces as a test failure.
+        assert_eq!(
+            serde_json::to_string(&ApprovalLevel::Session).unwrap(),
+            "\"session\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ApprovalLevel::Workspace).unwrap(),
+            "\"workspace\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ApprovalLevel::User).unwrap(),
+            "\"user\""
+        );
     }
 }

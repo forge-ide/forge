@@ -3,17 +3,20 @@ import { useParams } from '@solidjs/router';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { ProviderId, SessionId } from '@forge/ipc';
 import {
+  getPersistentApprovals,
   onSessionEvent,
   sessionHello,
   sessionSubscribe,
 } from '../../ipc/session';
 import {
   setActiveSessionId,
+  setActiveWorkspaceRoot,
   setSessionEvents,
   setSessions,
 } from '../../stores/session';
 import { pushEvent } from '../../stores/messages';
 import { fromRustEvent } from '../../ipc/events';
+import { seedPersistentApprovals } from '../../stores/approvals';
 import { PaneHeader } from './PaneHeader';
 import { ChatPane } from './ChatPane';
 import './SessionWindow.css';
@@ -38,8 +41,22 @@ export const SessionWindow: Component = () => {
 
     void (async () => {
       try {
-        await sessionHello(id);
+        const ack = await sessionHello(id);
+        // F-036: remember the workspace root from the HelloAck so the
+        // ApprovalPrompt / WhitelistedPill code paths can pass it to the
+        // persistent-approval commands without re-querying.
+        setActiveWorkspaceRoot(ack.workspace);
         await sessionSubscribe(id);
+        // F-036: seed the per-session whitelist with any persisted
+        // workspace/user approvals for the active workspace. Failure here is
+        // non-fatal — the session still runs, users just won't see auto-
+        // approvals until they reload. Log and continue.
+        try {
+          const persisted = await getPersistentApprovals(ack.workspace);
+          seedPersistentApprovals(id, persisted);
+        } catch (seedErr) {
+          console.error('get_persistent_approvals failed', seedErr);
+        }
       } catch (err) {
         console.error('session_hello/subscribe failed', err);
       }
@@ -72,6 +89,7 @@ export const SessionWindow: Component = () => {
       unlisten = null;
     }
     setActiveSessionId(null);
+    setActiveWorkspaceRoot(null);
   });
 
   const handleClose = () => {

@@ -1158,6 +1158,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "dirs 5.0.1",
  "rand 0.8.6",
  "serde",
  "serde_json",
@@ -1278,6 +1279,7 @@ dependencies = [
  "tauri-build",
  "tempfile",
  "tokio",
+ "ts-rs",
  "wiremock",
 ]
 

@@ -42,7 +42,9 @@
 | **This pattern** | Approve this tool for a glob that matches this path (e.g. `./src/*`). User can edit the pattern before confirming. |
 | **This tool** | Approve this tool type entirely for the session (e.g. all `fs.write`). |
 
-All whitelist scopes (file/pattern/tool) are **session-local** — they reset when the session ends. No persistent whitelists.
+**Persistence level (F-036).** Alongside the scope menu, a three-way toggle picks where any scope > Once is stored: **Session** (in-memory, default), **Workspace** (`<root>/.forge/approvals.toml`), or **User** (`{config_dir}/forge/approvals.toml`). A one-shot Once approval ignores the toggle — there is nothing to persist. Workspace entries win over User on the same `scope_key` when both are present. Approvals at Workspace/User level survive session restart and seed the in-memory whitelist on session init.
+
+The whitelisted pill renders the provenance in its label: `whitelisted · this file · workspace` or `· user`. Revoke from the pill removes the entry from the matching config file for Workspace/User; Session revokes stay in memory.
 
 ### 10.2 Keyboard
 

@@ -7,20 +7,21 @@ import {
   createMemo,
 } from 'solid-js';
 import { invoke } from '../../lib/tauri';
-import { activeSessionId } from '../../stores/session';
+import { activeSessionId, activeWorkspaceRoot } from '../../stores/session';
 import {
   getMessagesState,
   pushEvent,
   setAwaitingResponse,
   type ChatTurn,
 } from '../../stores/messages';
-import type { SessionId } from '@forge/ipc';
+import type { ApprovalLevel, ApprovalScope, SessionId } from '@forge/ipc';
 import {
   getApprovalWhitelist,
   addWhitelistEntry,
   revokeWhitelistEntry,
   matchWhitelistKey,
 } from '../../stores/approvals';
+import { removeApproval, saveApproval } from '../../ipc/session';
 import { ApprovalPrompt } from '../../components/ApprovalPrompt/ApprovalPrompt';
 import { WhitelistedPill } from '../../components/ApprovalPrompt/WhitelistedPill';
 import {
@@ -30,7 +31,6 @@ import {
   type ContextCategory,
 } from '../../components/ContextPicker';
 import { ContextChip } from '../../components/ContextChip';
-import type { ApprovalScope } from '@forge/ipc';
 import './ChatPane.css';
 
 // ---------------------------------------------------------------------------
@@ -115,12 +115,16 @@ const ToolCallCard: Component<{ turn: Extract<ChatTurn, { type: 'tool_placeholde
     return matchWhitelistKey(keys, props.turn.tool_name, path);
   });
 
-  const whitelistLabel = createMemo(() => {
+  const whitelistEntry = createMemo(() => {
     const id = sessionId();
     const key = whitelistKey();
     if (!id || !key) return null;
     return getApprovalWhitelist(id).entries[key] ?? null;
   });
+
+  const whitelistLabel = () => whitelistEntry()?.label ?? null;
+  const whitelistLevel = (): ApprovalLevel =>
+    whitelistEntry()?.level ?? 'session';
 
   // Auto-approve when whitelist matches
   createEffect(() => {
@@ -139,14 +143,47 @@ const ToolCallCard: Component<{ turn: Extract<ChatTurn, { type: 'tool_placeholde
     }).catch((err) => reportInvokeError(id, 'session_approve_tool', err));
   });
 
-  const handleApprove = (scope: ApprovalScope, pattern?: string) => {
+  // F-036: scope > Once approvals at workspace/user level need to persist on
+  // disk too. We do the in-memory add first (so the UI reacts instantly) and
+  // then the IPC save; failures surface as an inline error turn but don't
+  // roll back the session-level entry — the user already approved the call.
+  const handleApprove = (
+    scope: ApprovalScope,
+    level: ApprovalLevel,
+    pattern?: string,
+  ) => {
     const id = sessionId();
     if (!id) return;
 
     // Record whitelist for scopes > Once
     if (scope !== 'Once') {
       const path = extractPath(props.turn.args_json);
-      addWhitelistEntry(id, scope, props.turn.tool_name, path, pattern);
+      const key = addWhitelistEntry(
+        id,
+        scope,
+        props.turn.tool_name,
+        path,
+        pattern,
+        level,
+      );
+
+      // Persist for workspace/user levels. Session-level stays in-memory.
+      if (level !== 'session') {
+        const root = activeWorkspaceRoot();
+        if (root) {
+          const label = getApprovalWhitelist(id).entries[key]?.label ?? '';
+          void saveApproval(
+            { scope_key: key, tool_name: props.turn.tool_name, label },
+            level,
+            root,
+          ).catch((err) => reportInvokeError(id, 'save_approval', err));
+        } else {
+          // No workspace root — log and fall back to session-only. Surfaces
+          // as a warning, not a user-visible error, because the call itself
+          // is still being approved; only the persistence failed.
+          console.warn('save_approval skipped — no active workspace root');
+        }
+      }
     }
 
     invoke('session_approve_tool', {
@@ -165,11 +202,25 @@ const ToolCallCard: Component<{ turn: Extract<ChatTurn, { type: 'tool_placeholde
     }).catch((err) => reportInvokeError(id, 'session_reject_tool', err));
   };
 
+  // F-036: revoke removes from the in-memory whitelist and — for persistent
+  // tiers — from the corresponding config file. The IPC call is fire-and-forget
+  // for the UI (the pill is already gone by the time the rename completes).
   const handleRevoke = () => {
     const id = sessionId();
     const key = whitelistKey();
     if (!id || !key) return;
+    const level = whitelistLevel();
     revokeWhitelistEntry(id, key);
+    if (level !== 'session') {
+      const root = activeWorkspaceRoot();
+      if (root) {
+        void removeApproval(key, level, root).catch((err) =>
+          reportInvokeError(id, 'remove_approval', err),
+        );
+      } else {
+        console.warn('remove_approval skipped — no active workspace root');
+      }
+    }
   };
 
   return (
@@ -204,7 +255,11 @@ const ToolCallCard: Component<{ turn: Extract<ChatTurn, { type: 'tool_placeholde
 
         {/* Whitelisted pill when auto-approved */}
         <Show when={whitelistKey() !== null && whitelistLabel() !== null}>
-          <WhitelistedPill label={whitelistLabel()!} onRevoke={handleRevoke} />
+          <WhitelistedPill
+            label={whitelistLabel()!}
+            level={whitelistLevel()}
+            onRevoke={handleRevoke}
+          />
         </Show>
 
         {/* Status label (hidden when awaiting — prompt fills that role) */}
