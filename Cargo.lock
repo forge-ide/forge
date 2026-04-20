@@ -1247,6 +1247,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "criterion",
+ "forge-agents",
  "forge-cli",
  "forge-core",
  "forge-fs",

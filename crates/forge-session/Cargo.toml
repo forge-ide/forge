@@ -16,6 +16,7 @@ path = "src/main.rs"
 anyhow = "1"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+forge-agents = { path = "../forge-agents" }
 forge-core = { path = "../forge-core" }
 forge-fs = { path = "../forge-fs" }
 forge-ipc = { path = "../forge-ipc" }
