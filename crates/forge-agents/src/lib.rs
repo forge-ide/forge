@@ -1,87 +1,35 @@
-use anyhow::{bail, Context, Result};
-use gray_matter::{engine::YAML, Matter, ParsedEntity};
-use serde::Deserialize;
+//! `forge-agents` — agent definitions, the `.agents/*.md` loader, and the
+//! runtime orchestrator.
+//!
+//! The loader merges workspace and user-home agent definitions; the runtime
+//! orchestrator instantiates them into live [`AgentInstance`]s and forwards
+//! their lifecycle on a broadcast stream. See:
+//!
+//! - `docs/architecture/crate-architecture.md` §3.4 for the design
+//! - `docs/design/ai-patterns.md` for the UX vocabulary
+
+mod def;
+mod error;
+mod orchestrator;
+
 use std::{fs, path::Path};
 
-/// Canonical agent definition parsed from a Markdown file with YAML frontmatter.
-///
-/// `name` defaults to the file stem when frontmatter is absent or omits it,
-/// `body` holds the prompt content with the frontmatter stripped, and
-/// `allowed_paths` scopes filesystem access for tools the agent may invoke.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AgentDef {
-    pub name: String,
-    pub description: Option<String>,
-    pub body: String,
-    pub allowed_paths: Vec<String>,
-}
+pub use def::{AgentDef, Isolation};
+pub use error::{Error, Result};
+pub use orchestrator::{
+    AgentEvent, AgentInstance, AgentScope, InstanceState, Orchestrator, SpawnContext,
+};
 
-#[derive(Deserialize, Default)]
-struct Frontmatter {
-    name: Option<String>,
-    description: Option<String>,
-    isolation: Option<String>,
-    allowed_paths: Option<Vec<String>>,
-}
-
-fn parse_agent_file(path: &Path) -> Result<AgentDef> {
-    let raw = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-
-    let matter = Matter::<YAML>::new();
-    let parsed: ParsedEntity<Frontmatter> = matter
-        .parse(&raw)
-        .with_context(|| format!("parsing frontmatter in {}", path.display()))?;
-
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown")
-        .to_string();
-
-    match parsed.data {
-        Some(fm) => {
-            if fm.isolation.as_deref() == Some("trusted") {
-                bail!(
-                    "isolation: trusted is not allowed for user-defined agents ({})",
-                    path.display()
-                );
-            }
-            Ok(AgentDef {
-                name: fm.name.unwrap_or(stem),
-                description: fm.description,
-                body: parsed.content,
-                allowed_paths: fm.allowed_paths.unwrap_or_default(),
-            })
-        }
-        None => Ok(AgentDef {
-            name: stem,
-            description: None,
-            body: parsed.content,
-            allowed_paths: vec![],
-        }),
-    }
-}
-
-fn load_from_dir(dir: &Path) -> Result<Vec<AgentDef>> {
-    if !dir.exists() {
-        return Ok(vec![]);
-    }
-    let mut paths: Vec<_> = fs::read_dir(dir)?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
-        .collect();
-    paths.sort();
-    paths.iter().map(|p| parse_agent_file(p)).collect()
-}
+use def::load_from_dir;
 
 /// Load agents from `<workspace_root>/.agents/*.md`, returning an empty vec if the directory is absent.
-pub fn load_workspace_agents(workspace_root: &Path) -> Result<Vec<AgentDef>> {
-    load_from_dir(&workspace_root.join(".agents"))
+pub fn load_workspace_agents(workspace_root: &Path) -> anyhow::Result<Vec<AgentDef>> {
+    load_from_dir(&workspace_root.join(".agents")).map_err(anyhow::Error::from)
 }
 
 /// Load agents from `<user_home>/.agents/*.md`, returning an empty vec if the directory is absent.
-pub fn load_user_agents(user_home: &Path) -> Result<Vec<AgentDef>> {
-    load_from_dir(&user_home.join(".agents"))
+pub fn load_user_agents(user_home: &Path) -> anyhow::Result<Vec<AgentDef>> {
+    load_from_dir(&user_home.join(".agents")).map_err(anyhow::Error::from)
 }
 
 /// Load and merge user-home and workspace-local agent definitions.
@@ -90,7 +38,7 @@ pub fn load_user_agents(user_home: &Path) -> Result<Vec<AgentDef>> {
 /// that on a name collision the workspace definition replaces the user one,
 /// and workspace-only agents are appended. This lets a project pin or override
 /// agents without editing the user's home directory.
-pub fn load_agents(workspace_root: &Path, user_home: &Path) -> Result<Vec<AgentDef>> {
+pub fn load_agents(workspace_root: &Path, user_home: &Path) -> anyhow::Result<Vec<AgentDef>> {
     let workspace = load_workspace_agents(workspace_root)?;
     let mut merged = load_user_agents(user_home)?;
 
@@ -104,7 +52,7 @@ pub fn load_agents(workspace_root: &Path, user_home: &Path) -> Result<Vec<AgentD
 }
 
 /// Read `<workspace_root>/AGENTS.md` if present, returning `Ok(None)` when the file is absent.
-pub fn load_agents_md(workspace_root: &Path) -> Result<Option<String>> {
+pub fn load_agents_md(workspace_root: &Path) -> anyhow::Result<Option<String>> {
     let path = workspace_root.join("AGENTS.md");
     if path.exists() {
         Ok(Some(fs::read_to_string(path)?))
@@ -124,7 +72,7 @@ pub struct AgentLoader {
 
 impl AgentLoader {
     /// Load workspace + user agents and the workspace `AGENTS.md` in one pass.
-    pub fn load(workspace_root: &Path, user_home: &Path) -> Result<Self> {
+    pub fn load(workspace_root: &Path, user_home: &Path) -> anyhow::Result<Self> {
         Ok(Self {
             agents: load_agents(workspace_root, user_home)?,
             agents_md: load_agents_md(workspace_root)?,
