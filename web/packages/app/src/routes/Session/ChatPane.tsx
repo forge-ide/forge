@@ -31,6 +31,15 @@ import {
   type ContextCategory,
 } from '../../components/ContextPicker';
 import { ContextChip } from '../../components/ContextChip';
+import type { ProviderId } from '@forge/ipc';
+import {
+  buildRegistry,
+  listCandidates,
+  resolveChips,
+  type BuildRegistryDeps,
+  type ResolverRegistry,
+} from '../../context/resolvers';
+import { readFile as defaultReadFile } from '../../ipc/fs';
 import './ChatPane.css';
 
 // ---------------------------------------------------------------------------
@@ -339,7 +348,7 @@ function utf8ByteLength(text: string): number {
   return new TextEncoder().encode(text).length;
 }
 
-interface InsertedChip {
+export interface InsertedChip {
   /** Stable id so SolidJS can reconcile chip list updates. */
   id: string;
   category: ContextCategory;
@@ -369,14 +378,31 @@ export function removeAtSpan(
 
 export interface ComposerProps {
   disabled: boolean;
-  onSend: (text: string) => void;
   /**
-   * Optional category-indexed items forwarded to the ContextPicker. F-141
-   * ships with this undefined (the picker shows empty tabs). F-142 will
-   * wire a resolver on top of this prop. Exposed now so component tests
-   * can drive the end-to-end "type @ → pick → chip appears" flow.
+   * Send handler. Receives the trimmed text and the currently-attached chips.
+   * F-142 routes chips through a resolver registry (`onSend` in `ChatPane`
+   * builds the provider-shaped context prefix) — callers that want the raw
+   * string path can ignore `chips`.
+   */
+  onSend: (text: string, chips: InsertedChip[]) => void;
+  /**
+   * Optional category-indexed items forwarded to the ContextPicker. Exposed
+   * for tests that drive the end-to-end "type @ → pick → chip appears" flow
+   * without booting the resolver registry.
    */
   items?: Partial<Record<ContextCategory, PickerResult[]>>;
+  /**
+   * F-142: resolver registry. When present, the composer fetches live picker
+   * results from `listCandidates(registry, query)` on every query change.
+   * `items` (if also present) wins — tests can pin the list without stubbing
+   * the registry.
+   */
+  registry?: ResolverRegistry;
+  /**
+   * F-142: hover preview loader for file chips. Injected into `ContextChip`;
+   * production passes `readFile(sessionId, path)`, tests pass a stub.
+   */
+  loadFilePreview?: (path: string) => Promise<string>;
 }
 
 export const Composer: Component<ComposerProps> = (props) => {
@@ -414,6 +440,31 @@ export const Composer: Component<ComposerProps> = (props) => {
   const trimmedByteLength = createMemo(() => utf8ByteLength(text().trim()));
   const overCap = createMemo(() => trimmedByteLength() > MAX_COMPOSER_BYTES);
 
+  // F-142: live items populated from the resolver registry. Every query
+  // change fires a fan-out through `listCandidates`; the latest successful
+  // result wins. When no registry is wired, `items()` stays `undefined` and
+  // the picker renders empty tabs (or consumes `props.items` for tests).
+  const [registryItems, setRegistryItems] = createSignal<
+    Partial<Record<ContextCategory, PickerResult[]>> | undefined
+  >(undefined);
+  // Guard against races: the newest query wins when multiple in-flight
+  // promises resolve out of order.
+  let listToken = 0;
+
+  createEffect(() => {
+    const registry = props.registry;
+    if (!registry) return;
+    const match = trigger();
+    const query = match ? match.query : '';
+    const token = ++listToken;
+    void listCandidates(registry, query).then((items) => {
+      if (token !== listToken) return;
+      setRegistryItems(items);
+    });
+  });
+
+  const effectiveItems = createMemo(() => props.items ?? registryItems());
+
   const measureAnchor = () => {
     if (!composerRef) return;
     const r = composerRef.getBoundingClientRect();
@@ -443,11 +494,13 @@ export const Composer: Component<ComposerProps> = (props) => {
     const value = text().trim();
     if (!value) return;
     if (utf8ByteLength(value) > MAX_COMPOSER_BYTES) return;
-    props.onSend(value);
+    const attached = chips();
+    props.onSend(value, attached);
     setText('');
     setCaret(0);
-    // Chips persist across sends intentionally — clearing them on send is
-    // F-142 territory once backend context blocks wire up.
+    // F-142: chips are consumed on send. The caller (ChatPane) resolves and
+    // prepends them to the message text through the provider adapter.
+    setChips([]);
   };
 
   const handleKeyDown = (e: KeyboardEvent) => {
@@ -551,6 +604,10 @@ export const Composer: Component<ComposerProps> = (props) => {
             <ContextChip
               category={chip.category}
               label={chip.label}
+              value={chip.value}
+              {...(props.loadFilePreview !== undefined
+                ? { loadPreview: props.loadFilePreview }
+                : {})}
               onDismiss={() => dismissChip(chip.id)}
             />
           )}
@@ -575,7 +632,7 @@ export const Composer: Component<ComposerProps> = (props) => {
         <ContextPicker
           query={trigger()!.query}
           anchorRect={anchorRect()}
-          {...(props.items ? { items: props.items } : {})}
+          {...(effectiveItems() ? { items: effectiveItems()! } : {})}
           onPick={replaceAtSpan}
           onDismiss={dismissPicker}
         />
@@ -620,13 +677,54 @@ export const Composer: Component<ComposerProps> = (props) => {
 // ChatPane root
 // ---------------------------------------------------------------------------
 
-export const ChatPane: Component = () => {
+/**
+ * ChatPane props — the default component reads the active session + provider
+ * from stores, but tests can inject a fixed registry / provider to avoid
+ * touching global state.
+ */
+export interface ChatPaneProps {
+  /** F-142: override the default resolver registry built from active-session
+   *  state. Tests pass a stub; production leaves it undefined. */
+  registry?: ResolverRegistry;
+  /** F-142: active provider for `adaptContextBlocks`. Production passes the
+   *  user's selected provider id; tests can pin a flavour. */
+  providerId?: ProviderId | null;
+}
+
+export const ChatPane: Component<ChatPaneProps> = (props) => {
   const sessionId = () => activeSessionId();
   const state = createMemo(() => {
     const id = sessionId();
     if (!id) return { turns: [], awaitingResponse: false, streamingMessageId: null };
     return getMessagesState(id);
   });
+
+  // F-142: default registry — builds resolvers lazily from the active session
+  // and workspace root. Resolvers that need data we don't have (active
+  // selection, focused terminal, transcripts of sibling agents) are absent
+  // for v1 and their tabs show "No results"; spec §7.2-§7.7 allows this.
+  const defaultRegistry = createMemo<ResolverRegistry>(() => {
+    const id = sessionId();
+    const root = activeWorkspaceRoot();
+    if (!id || !root) return {};
+    const deps: BuildRegistryDeps = {
+      file: { sessionId: id, workspaceRoot: root },
+      directory: { sessionId: id, workspaceRoot: root },
+      url: {},
+    };
+    return buildRegistry(deps);
+  });
+  const registry = (): ResolverRegistry => props.registry ?? defaultRegistry();
+
+  // F-142: lazy file preview loader. Chips are free-standing, so we
+  // snapshot the session at preview time rather than closing over the live
+  // signal — a stale sessionId is preferable to a null crash mid-hover.
+  const loadFilePreview = async (path: string): Promise<string> => {
+    const id = sessionId();
+    if (!id) return '';
+    const file = await defaultReadFile(id, path);
+    return file.content;
+  };
 
   let listRef: HTMLDivElement | undefined;
   // Track whether the user has scrolled up (released auto-pin)
@@ -656,18 +754,35 @@ export const ChatPane: Component = () => {
     setUserScrolledUp(!atBottom);
   };
 
-  const handleSend = (text: string) => {
+  const handleSend = (text: string, chips: InsertedChip[]) => {
     const id = sessionId();
     if (!id) return;
     setAwaitingResponse(id, true);
     // Re-pin on new user message
     setUserScrolledUp(false);
-    // On rejection, the Error event handler in the messages store rolls back
-    // both `awaitingResponse` and `streamingMessageId`, re-enabling the
-    // composer and surfacing the failure as an inline error turn.
-    invoke('session_send_message', { sessionId: id, text }).catch((err) =>
-      reportInvokeError(id, 'session_send_message', err),
-    );
+
+    const sendText = (body: string): void => {
+      invoke('session_send_message', { sessionId: id, text: body }).catch(
+        (err) => reportInvokeError(id, 'session_send_message', err),
+      );
+    };
+
+    // F-142: resolve chips through the registry and prepend the provider-
+    // shaped context to the user's text. The current IPC boundary
+    // (`session_send_message`) takes a single `text` string; compact shape
+    // above that boundary is the pragmatic v1 wire until a structured
+    // `context_blocks` field lands server-side.
+    if (chips.length === 0) {
+      // Fast path — keep the no-chip send synchronous so callers that dispatch
+      // an Enter and check `invoke` on the next tick (the existing composer
+      // contract) observe the call without awaiting a promise chain.
+      sendText(text);
+      return;
+    }
+    const providerId = props.providerId ?? null;
+    void resolveChips(registry(), chips, providerId).then((prefix) => {
+      sendText(prefix.length > 0 ? `${prefix}\n\n${text}` : text);
+    });
   };
 
   return (
@@ -719,6 +834,8 @@ export const ChatPane: Component = () => {
       <Composer
         disabled={state().awaitingResponse || state().streamingMessageId !== null}
         onSend={handleSend}
+        registry={registry()}
+        loadFilePreview={loadFilePreview}
       />
     </section>
   );

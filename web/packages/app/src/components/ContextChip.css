@@ -45,3 +45,48 @@
 .ctx-chip__dismiss:hover {
   color: var(--color-error);
 }
+
+/* ---------------------------------------------------------------------------
+   F-142 — lazy file preview popover (hover-expanded, read-only)
+   --------------------------------------------------------------------------- */
+
+.ctx-chip {
+  position: relative;
+}
+
+.ctx-chip__preview {
+  position: absolute;
+  bottom: calc(100% + var(--sp-1));
+  left: 0;
+  z-index: 10;
+  max-width: 480px;
+  max-height: 320px;
+  overflow: auto;
+  padding: var(--sp-2);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border-2);
+  border-radius: var(--r-sm);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-primary);
+  white-space: pre;
+  pointer-events: none;
+}
+
+.ctx-chip__preview-body {
+  margin: 0;
+  white-space: pre;
+}
+
+.ctx-chip__preview-loading,
+.ctx-chip__preview-error {
+  display: block;
+  color: var(--color-text-tertiary);
+  font-style: italic;
+}
+
+.ctx-chip__preview-error {
+  color: var(--color-error);
+  font-style: normal;
+}
