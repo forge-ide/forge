@@ -22,7 +22,65 @@ use crate::archive::archive_or_purge;
 use crate::orchestrator::{run_turn, ApprovalDecision, Orchestrator, PendingApprovals};
 use crate::sandbox::ChildRegistry;
 use crate::session::Session;
+use crate::tools::AgentRuntime;
 use forge_core::{ApprovalScope, MessageId};
+
+/// F-140: build the per-session `AgentRuntime` or surface a soft failure.
+///
+/// Returns `None` when the agent-def load fails or no defs resolve; the
+/// session stays usable but `agent.spawn` returns the existing "agent
+/// runtime not configured" shape. The root-instance spawn itself cannot
+/// fail today (orchestrator only rejects `Isolation::Trusted` under
+/// `AgentScope::User`; the synthesized root uses `Isolation::Process`),
+/// so we unwrap the spawn error into an `eprintln` rather than
+/// propagating.
+async fn build_agent_runtime(workspace_path: Option<&Path>) -> Option<AgentRuntime> {
+    let user_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    // Workspace-anchored load when we have one; fall back to user-only so
+    // embedder-less sessions (tests, ephemeral CLI runs) still get agent
+    // defs the user has authored.
+    let defs = match workspace_path {
+        Some(ws) => forge_agents::load_agents(ws, &user_home),
+        None => forge_agents::load_user_agents(&user_home),
+    };
+    let defs = match defs {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("agent runtime: skipping (load_agents failed: {e})");
+            return None;
+        }
+    };
+
+    let orchestrator = Arc::new(forge_agents::Orchestrator::new());
+    // Synthesize a root `AgentDef` that represents "the session itself" —
+    // the parent of every top-level `agent.spawn`. The name is a stable
+    // internal marker so Agent Monitor consumers can recognise the root;
+    // `Isolation::Process` is chosen so the orchestrator's User-scope
+    // guard accepts the spawn.
+    let root_def = forge_agents::AgentDef {
+        name: "session".to_string(),
+        description: Some("session root".to_string()),
+        body: String::new(),
+        allowed_paths: vec![],
+        isolation: forge_agents::Isolation::Process,
+    };
+    let root_instance = match orchestrator
+        .spawn(root_def, forge_agents::SpawnContext::user())
+        .await
+    {
+        Ok(inst) => inst,
+        Err(e) => {
+            eprintln!("agent runtime: session-root spawn failed: {e}");
+            return None;
+        }
+    };
+
+    Some(AgentRuntime {
+        orchestrator,
+        agent_defs: Arc::new(defs),
+        parent_instance_id: root_instance.id,
+    })
+}
 
 /// Static name for an `IpcMessage` discriminant — used for diagnostic logging
 /// when the dispatch loop encounters a frame that is structurally valid but
@@ -224,6 +282,21 @@ pub async fn serve_with_session<P: Provider + 'static>(
         },
         None => None,
     };
+
+    // F-140: session-scoped agent runtime so live turns can actually spawn
+    // sub-agents via `agent.spawn`.
+    //
+    // One `forge_agents::Orchestrator` lives for the session's lifetime,
+    // shared across every turn so the Agent Monitor subscribes once and
+    // sees every spawn. We pre-register a "session root" `AgentInstance`
+    // whose id becomes the stable `parent_instance_id` for every
+    // top-level spawn and the `StepStarted.instance_id` for every turn
+    // loop emission. Agent defs are loaded once from `<workspace>/.agents`
+    // + `<home>/.agents` — a failed load downgrades the runtime to
+    // `None` so a filesystem blip never kills the whole session, it just
+    // reverts to the pre-F-140 "agent runtime not configured" behaviour.
+    let agent_runtime: Option<AgentRuntime> = build_agent_runtime(workspace_path.as_deref()).await;
+    let agent_runtime = Arc::new(agent_runtime);
     let workspace = Arc::new(
         workspace
             .map(|w| w.display().to_string())
@@ -261,6 +334,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
             child_registry,
             byte_budget,
             agents_md,
+            agent_runtime,
         )
         .await;
     }
@@ -316,6 +390,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
                 let child_registry = child_registry.clone();
                 let byte_budget = Arc::clone(&byte_budget);
                 let agents_md = agents_md.clone();
+                let agent_runtime = Arc::clone(&agent_runtime);
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(
                         stream,
@@ -331,6 +406,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
                         child_registry,
                         byte_budget,
                         agents_md,
+                        agent_runtime,
                     )
                     .await
                     {
@@ -381,6 +457,7 @@ async fn handle_connection<P: Provider + 'static>(
     child_registry: ChildRegistry,
     byte_budget: Arc<crate::byte_budget::ByteBudget>,
     agents_md: Option<Arc<str>>,
+    agent_runtime: Arc<Option<AgentRuntime>>,
 ) -> Result<()> {
     // ── Handshake ──────────────────────────────────────────────────────────────
     let msg = forge_ipc::read_frame(&mut stream).await?;
@@ -485,6 +562,7 @@ async fn handle_connection<P: Provider + 'static>(
                         let child_registry = child_registry.clone();
                         let byte_budget = Arc::clone(&byte_budget);
                         let agents_md = agents_md.clone();
+                        let agent_runtime = (*agent_runtime).clone();
                         tokio::spawn(async move {
                             let result = run_turn(
                                 Arc::clone(&session),
@@ -497,6 +575,7 @@ async fn handle_connection<P: Provider + 'static>(
                                 Some(child_registry),
                                 Some(byte_budget),
                                 agents_md,
+                                agent_runtime,
                             ).await;
                             if let Err(e) = &result {
                                 eprintln!("turn error: {e}");
@@ -569,6 +648,7 @@ async fn handle_connection<P: Provider + 'static>(
                         let allowed_paths = Arc::clone(&allowed_paths);
                         let child_registry = child_registry.clone();
                         let byte_budget = Arc::clone(&byte_budget);
+                        let agent_runtime = (*agent_runtime).clone();
                         // MessageId wraps an `Arc<str>` so any string is
                         // structurally a valid id (the log lookup later
                         // surfaces "not found" if the client fabricated
@@ -589,6 +669,7 @@ async fn handle_connection<P: Provider + 'static>(
                                     workspace_path,
                                     Some(child_registry),
                                     Some(byte_budget),
+                                    agent_runtime,
                                 )
                                 .await
                             {

@@ -16,6 +16,7 @@ path = "src/main.rs"
 anyhow = "1"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+dirs = "6.0.0"
 forge-agents = { path = "../forge-agents" }
 forge-core = { path = "../forge-core" }
 forge-fs = { path = "../forge-fs" }
@@ -94,6 +95,10 @@ path = "tests/rerun_replace.rs"
 [[test]]
 name = "agent_spawn"
 path = "tests/agent_spawn.rs"
+
+[[test]]
+name = "agent_spawn_live"
+path = "tests/agent_spawn_live.rs"
 
 [[test]]
 name = "step_events"

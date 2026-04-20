@@ -1472,6 +1472,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "criterion",
+ "dirs 6.0.0",
  "forge-agents",
  "forge-cli",
  "forge-core",
