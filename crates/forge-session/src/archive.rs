@@ -49,14 +49,20 @@ fn archived_destination(session_dir: &Path) -> Result<PathBuf> {
 }
 
 async fn move_dir(src: &Path, dst: &Path) -> Result<()> {
-    move_dir_with_rename(src, dst, |s, d| std::fs::rename(s, d)).await
+    // Async rename keeps the tokio worker unblocked; large session directories
+    // on cross-device renames can otherwise stall for 50-500 ms (F-110).
+    handle_rename_result(tokio::fs::rename(src, dst).await, src, dst).await
 }
 
 async fn move_dir_with_rename<F>(src: &Path, dst: &Path, rename: F) -> Result<()>
 where
     F: FnOnce(&Path, &Path) -> io::Result<()>,
 {
-    match rename(src, dst) {
+    handle_rename_result(rename(src, dst), src, dst).await
+}
+
+async fn handle_rename_result(rename_result: io::Result<()>, src: &Path, dst: &Path) -> Result<()> {
+    match rename_result {
         Ok(()) => Ok(()),
         Err(e) if is_cross_device(&e) => {
             copy_dir_all(src, dst).await?;
