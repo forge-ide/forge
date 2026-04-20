@@ -8,6 +8,8 @@
 //!
 //! [crate_manager]: https://docs.rs/forge-mcp/latest/forge_mcp/
 
+pub mod http;
 pub mod stdio;
 
+pub use http::{Http, HttpEvent};
 pub use stdio::{Stdio, StdioEvent};

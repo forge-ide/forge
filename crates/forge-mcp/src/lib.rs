@@ -6,7 +6,7 @@
 //!
 //! - [`McpServerSpec`] / [`ServerKind`]: typed on-disk declarations (F-127).
 //! - [`config`]: workspace- and user-scope loaders (F-127).
-//! - [`transport`]: stdio (F-128) and, later, http (F-129) connections.
+//! - [`transport`]: stdio (F-128) and http (F-129) connections.
 //! - Lifecycle manager (F-130) builds on top.
 
 pub mod transport;
