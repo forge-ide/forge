@@ -19,6 +19,23 @@ The Forge desktop UI: a Solid + Vite + TypeScript single-page app loaded by the 
 - `src/styles/` — app-level CSS that consumes `@forge/design`'s tokens.
 - Scripts: `pnpm dev` (Vite dev server), `pnpm build`, `pnpm test` (Vitest), `pnpm test:e2e` (Playwright), `pnpm typecheck`.
 
+## Monaco iframe (F-122)
+
+The `EditorPane` component embeds the `monaco-host` iframe (F-121) at `/monaco-host/index.html`. That package builds in isolation (separate Vite config with `base: './'` so emitted asset URLs are relative) and is wired into this app via:
+
+- `pnpm predev` / `pnpm prebuild` — build `monaco-host` and run `scripts/sync-monaco-host.mjs`
+- `scripts/sync-monaco-host.mjs` — copies `web/packages/monaco-host/dist/` into `web/packages/app/public/monaco-host/`
+
+Vite serves `public/*` at the bundle root, so `/monaco-host/index.html` resolves in all three surfaces:
+
+- `pnpm --filter app dev` (Vite dev server)
+- `pnpm --filter app build` (static bundle under `app/dist/`)
+- `cargo tauri dev` / release bundle (Tauri loads `app/dist` as `tauri://localhost/…`)
+
+The copied tree is gitignored (`web/packages/app/public/monaco-host/`) — the source of truth is the monaco-host package. If you change that package, the predev/prebuild hook rebuilds it on the next `dev`/`build`.
+
+The three session-scoped filesystem commands backing this pane — `read_file`, `write_file`, `tree` — look up the workspace root from a server-side cache (`SessionConnections.workspace_root`) populated at `session_hello` time. The webview never supplies a `workspace_root` parameter, so a compromised or buggy webview cannot widen its filesystem sandbox. See `crates/forge-shell/src/ipc.rs` F-122 block for the authority.
+
 ## Further reading
 
 - [Frontend architecture](../../../docs/frontend/architecture.md)

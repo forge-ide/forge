@@ -79,6 +79,9 @@ pub fn run() -> Result<()> {
             crate::ipc::terminal_write,
             crate::ipc::terminal_resize,
             crate::ipc::terminal_kill,
+            crate::ipc::read_file,
+            crate::ipc::write_file,
+            crate::ipc::tree,
         ])
         .setup(|app| {
             crate::ipc::manage_bridge(&app.handle().clone());

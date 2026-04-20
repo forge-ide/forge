@@ -9,6 +9,11 @@ web/**/dist/
 web/**/.vite/
 *.tsbuildinfo
 
+# F-122: monaco-host build output is copied into app/public at predev/prebuild
+# time. Tracking it would duplicate the source of truth; the copy is
+# deterministic from `web/packages/monaco-host/dist/`.
+web/packages/app/public/monaco-host/
+
 # Playwright build artifacts
 web/**/playwright-report/
 web/**/test-results/
