@@ -43,6 +43,10 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 tauri = { version = "2", optional = true , features = [] }
 tokio = { version = "1", features = ["fs", "net", "io-util", "sync", "time", "rt", "rt-multi-thread", "macros"] }
+# F-151: `set_setting` applies scalar updates against the raw TOML tree of
+# `settings.toml` and round-trips through the canonical serializer to land
+# on disk.
+toml = "0.8"
 ts-rs = "12"
 
 [dev-dependencies]
