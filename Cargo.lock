@@ -1274,6 +1274,7 @@ dependencies = [
  "forge-ipc",
  "forge-providers",
  "forge-session",
+ "forge-term",
  "png",
  "serde",
  "serde_json",

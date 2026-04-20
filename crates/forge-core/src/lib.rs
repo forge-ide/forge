@@ -14,7 +14,7 @@ pub use error::{ForgeError, Result};
 pub use event::{ApprovalPreview, ApprovalSource, ContextRef, EndReason, Event};
 pub use event_log::{read_since, EventLog, MAX_LINE_BYTES};
 pub use ids::{
-    AgentId, AgentInstanceId, MessageId, ProviderId, SessionId, ToolCallId, WorkspaceId,
+    AgentId, AgentInstanceId, MessageId, ProviderId, SessionId, TerminalId, ToolCallId, WorkspaceId,
 };
 pub use transcript::{apply_superseded, Transcript};
 pub use types::{
