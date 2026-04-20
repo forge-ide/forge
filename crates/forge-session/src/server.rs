@@ -38,6 +38,7 @@ fn ipc_message_kind(msg: &IpcMessage) -> &'static str {
         IpcMessage::ToolCallApproved(_) => "ToolCallApproved",
         IpcMessage::ToolCallRejected(_) => "ToolCallRejected",
         IpcMessage::RerunMessage(_) => "RerunMessage",
+        IpcMessage::SelectBranch(_) => "SelectBranch",
     }
 }
 
@@ -554,10 +555,12 @@ async fn handle_connection<P: Provider + 'static>(
                     }
 
                     Some(IpcMessage::RerunMessage(r)) => {
-                        // F-143: dispatch rerun through the `Orchestrator`.
-                        // Spawn the re-run off the event loop so concurrent
-                        // tool approvals still flow through the same
-                        // connection while regeneration streams.
+                        // F-143 / F-144: dispatch rerun through the
+                        // `Orchestrator`. All three variants (Replace,
+                        // Branch, Fresh) are wired. Spawn off the event
+                        // loop so concurrent tool approvals still flow
+                        // through the same connection while regeneration
+                        // streams.
                         let session = Arc::clone(&session);
                         let provider = Arc::clone(&provider);
                         let approvals = Arc::clone(&pending_approvals);
@@ -589,6 +592,24 @@ async fn handle_connection<P: Provider + 'static>(
                                 .await
                             {
                                 eprintln!("rerun error: {e}");
+                            }
+                        });
+                    }
+
+                    Some(IpcMessage::SelectBranch(s)) => {
+                        // F-144: activate a specific branch variant. Spawned
+                        // off the event loop like rerun so the connection
+                        // stays responsive if the log scan is slow on a
+                        // large session.
+                        let session = Arc::clone(&session);
+                        let parent = MessageId::from_string(s.parent_id.clone());
+                        let variant_index = s.variant_index;
+                        tokio::spawn(async move {
+                            let orch = Orchestrator::new();
+                            if let Err(e) =
+                                orch.select_branch(session, parent, variant_index).await
+                            {
+                                eprintln!("select_branch error: {e}");
                             }
                         });
                     }

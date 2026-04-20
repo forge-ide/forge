@@ -23,17 +23,33 @@ pub enum IpcMessage {
     ToolCallRejected(ToolCallRejected),
     /// F-143: client → session request to re-run an assistant message.
     RerunMessage(RerunMessage),
+    /// F-144: client → session request to activate a specific branch variant.
+    SelectBranch(SelectBranch),
 }
 
 /// Client → session: re-run the assistant message with `msg_id` using the
-/// given `variant`. Phase 1 only dispatches [`RerunVariant::Replace`]; Branch
-/// and Fresh return an error until F-144/F-145 land.
+/// given `variant`. All three variants (`Replace`, `Branch`, `Fresh`) are
+/// wired as of F-144.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RerunMessage {
     /// Target assistant message to re-run. Wire shape is the canonical
     /// `MessageId` string to stay symmetric with `ToolCallApproved.id`.
     pub msg_id: String,
     pub variant: RerunVariant,
+}
+
+/// Client → session: activate a specific branch variant for replay / UI.
+///
+/// `parent` is the branch-point message id (the root variant's own id). The
+/// daemon resolves `variant_index` against the event log: `0` refers to the
+/// root itself; `N >= 1` refers to the `AssistantMessage` with
+/// `branch_parent == Some(parent)` and `branch_variant_index == N`. On a
+/// successful resolve, the daemon emits `Event::BranchSelected { parent,
+/// selected }` where `selected` is the resolved MessageId.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SelectBranch {
+    pub parent_id: String,
+    pub variant_index: u32,
 }
 
 /// Client → session: send a user message to start a new turn.

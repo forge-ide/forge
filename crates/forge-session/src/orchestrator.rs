@@ -157,6 +157,8 @@ pub async fn run_turn<P: Provider>(
         provider,
         initial_req,
         msg_id,
+        None, // branch_parent — top-level turns are never a branch variant
+        0,    // branch_variant_index — root position
         pending_approvals,
         &dispatcher,
         &ctx,
@@ -173,12 +175,21 @@ pub async fn run_turn<P: Provider>(
 /// `pub(crate)` so rerun paths (F-143+) can reuse the loop with a pre-built
 /// `ChatRequest` and a pre-chosen `msg_id`, instead of going through
 /// [`run_turn`] which synthesizes a fresh `UserMessage` event.
+///
+/// `branch_parent` / `branch_variant_index` (F-144) are threaded onto every
+/// `AssistantMessage` event this loop emits for `msg_id`:
+///   * `None` / `0` — top-level turn or the root variant of a branch point.
+///   * `Some(root_id)` / `N >= 1` — a Branch-rerun generation; both the
+///     original and this new message co-exist in the transcript. Consumers
+///     choose which to display via `BranchSelected`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_request_loop<P: Provider>(
     session: Arc<Session>,
     provider: Arc<P>,
     mut req: ChatRequest,
     msg_id: MessageId,
+    branch_parent: Option<MessageId>,
+    branch_variant_index: u32,
     pending_approvals: PendingApprovals,
     dispatcher: &ToolDispatcher,
     ctx: &ToolCtx,
@@ -220,8 +231,8 @@ pub(crate) async fn run_request_loop<P: Provider>(
                 stream_finalised: false,
                 // F-112: empty Arc<str> — no allocation (matches `Arc::<str>::from("")`).
                 text: Arc::from(""),
-                branch_parent: None,
-                branch_variant_index: 0,
+                branch_parent: branch_parent.clone(),
+                branch_variant_index,
             })
             .await?;
 
@@ -346,8 +357,8 @@ pub(crate) async fn run_request_loop<P: Provider>(
                                                 stream_finalised: true,
                                                 // F-112: wrap at boundary.
                                                 text: Arc::from(assistant_text.as_str()),
-                                                branch_parent: None,
-                                                branch_variant_index: 0,
+                                                branch_parent: branch_parent.clone(),
+                                                branch_variant_index,
                                             })
                                             .await?;
                                         // Close the Model step too so the
@@ -496,8 +507,8 @@ pub(crate) async fn run_request_loop<P: Provider>(
                             stream_finalised: true,
                             // F-112: wrap at boundary.
                             text: Arc::from(assistant_text.as_str()),
-                            branch_parent: None,
-                            branch_variant_index: 0,
+                            branch_parent: branch_parent.clone(),
+                            branch_variant_index,
                         })
                         .await?;
 
@@ -535,8 +546,8 @@ pub(crate) async fn run_request_loop<P: Provider>(
                             stream_finalised: true,
                             // F-112: wrap at boundary.
                             text: Arc::from(assistant_text.as_str()),
-                            branch_parent: None,
-                            branch_variant_index: 0,
+                            branch_parent: branch_parent.clone(),
+                            branch_variant_index,
                         })
                         .await?;
                     // F-139: close the Model step with an Error outcome
@@ -570,8 +581,8 @@ pub(crate) async fn run_request_loop<P: Provider>(
                     stream_finalised: true,
                     // F-112: wrap at boundary.
                     text: Arc::from(assistant_text.as_str()),
-                    branch_parent: None,
-                    branch_variant_index: 0,
+                    branch_parent: branch_parent.clone(),
+                    branch_variant_index,
                 })
                 .await?;
             // F-139: close Model step on the no-Done exit path too.
@@ -621,25 +632,30 @@ impl Orchestrator {
         Self
     }
 
-    /// F-143: re-run an existing assistant message.
+    /// Re-run an existing assistant message.
     ///
-    /// For [`RerunVariant::Replace`]:
-    ///   1. Read the event log and filter prior supersede markers so reruns
-    ///      don't compound.
-    ///   2. Reconstruct the provider request from events up to — but not
-    ///      including — `msg_id`'s assistant turn.
-    ///   3. Drive `run_request_loop` with a fresh `new_id` to regenerate
-    ///      the response.
-    ///   4. After the regenerated assistant message is finalised, emit
-    ///      `Event::MessageSuperseded { old_id: msg_id, new_id }` so
-    ///      replay consumers hide the original.
+    /// Three variants (see [`RerunVariant`]):
     ///
-    /// Ordering matters: the `MessageSuperseded` marker is emitted *after*
-    /// the new assistant message is finalised. If regeneration errors
-    /// mid-stream, the marker is never written and the original message
-    /// stays visible — we don't point the UI at a half-written new_id.
+    /// * [`RerunVariant::Replace`] (F-143) — truncate logically at `msg_id`'s
+    ///   assistant turn, regenerate, and emit `MessageSuperseded` so replay
+    ///   hides the original.
+    /// * [`RerunVariant::Branch`] (F-144) — keep both versions. Spawns a
+    ///   new `AssistantMessage` with `branch_parent` threaded to the target's
+    ///   branch root and `branch_variant_index = prev_max + 1`. Both the
+    ///   original and the new message remain visible in replay; consumers
+    ///   pick which to display via `BranchSelected`.
+    /// * [`RerunVariant::Fresh`] (F-144) — truncate back to the originating
+    ///   user message (discarding intermediate turns / tool calls) and
+    ///   regenerate from that user message alone. The new AssistantMessage
+    ///   is a new root (`branch_parent = None`); the original turn is
+    ///   superseded via `MessageSuperseded`.
     ///
-    /// Branch / Fresh return an error today; they land in F-144 / F-145.
+    /// Ordering matters for Replace / Fresh: the `MessageSuperseded` marker
+    /// is emitted *after* the new assistant message is finalised. If
+    /// regeneration errors mid-stream the marker is never written and the
+    /// original message stays authoritative — we don't point the UI at a
+    /// half-written new_id. For Branch the original is never hidden, so
+    /// no supersede marker is emitted.
     #[allow(clippy::too_many_arguments)]
     pub async fn rerun_message<P: Provider>(
         &self,
@@ -669,12 +685,34 @@ impl Orchestrator {
                 )
                 .await
             }
-            RerunVariant::Branch => Err(anyhow!(
-                "rerun_message: Branch variant not implemented (F-144)"
-            )),
-            RerunVariant::Fresh => Err(anyhow!(
-                "rerun_message: Fresh variant not implemented (F-145)"
-            )),
+            RerunVariant::Branch => {
+                self.rerun_branch(
+                    session,
+                    provider,
+                    msg_id,
+                    pending_approvals,
+                    allowed_paths,
+                    auto_approve,
+                    workspace_root,
+                    child_registry,
+                    byte_budget,
+                )
+                .await
+            }
+            RerunVariant::Fresh => {
+                self.rerun_fresh(
+                    session,
+                    provider,
+                    msg_id,
+                    pending_approvals,
+                    allowed_paths,
+                    auto_approve,
+                    workspace_root,
+                    child_registry,
+                    byte_budget,
+                )
+                .await
+            }
         }
     }
 
@@ -739,6 +777,10 @@ impl Orchestrator {
             provider,
             req,
             new_id.clone(),
+            // Replace does not create a branch — the regenerated message
+            // takes the original's place rather than sitting alongside it.
+            None,
+            0,
             pending_approvals,
             &dispatcher,
             &ctx,
@@ -757,6 +799,224 @@ impl Orchestrator {
             .await?;
 
         Ok(new_id)
+    }
+
+    /// F-144: re-run producing a new Branch sibling of `target`.
+    ///
+    /// Semantics (per `docs/ui-specs/branching.md §15.1` and CONCEPT.md
+    /// §10.3 "Branch"):
+    ///   1. Read + filter history. Compute the branch root:
+    ///      `root = target.branch_parent.unwrap_or(target)`. This coalesces
+    ///      "branch of a branch" so every variant of the same original
+    ///      response threads to the same root id (otherwise chained branches
+    ///      would form a tree rather than a flat list of siblings).
+    ///   2. Walk the filtered history to find `prev_max`, the highest
+    ///      `branch_variant_index` among any `AssistantMessage` with
+    ///      `branch_parent.unwrap_or(id) == root`. The root itself sits at
+    ///      variant 0; the first Branch re-run produces variant 1.
+    ///   3. Rebuild the provider request up to `target` via the same
+    ///      `build_request_up_to` helper Replace uses — a branch is a
+    ///      sibling generation from the same prompt state.
+    ///   4. Drive `run_request_loop` with `branch_parent = Some(root)` and
+    ///      `branch_variant_index = prev_max + 1`. No supersede marker is
+    ///      emitted — both the original and the new sibling stay visible
+    ///      in replay; consumers choose which to display via
+    ///      `BranchSelected` (emitted separately by `select_branch`).
+    #[allow(clippy::too_many_arguments)]
+    async fn rerun_branch<P: Provider>(
+        &self,
+        session: Arc<crate::session::Session>,
+        provider: Arc<P>,
+        target: MessageId,
+        pending_approvals: PendingApprovals,
+        allowed_paths: Vec<String>,
+        auto_approve: bool,
+        workspace_root: Option<std::path::PathBuf>,
+        child_registry: Option<crate::sandbox::ChildRegistry>,
+        byte_budget: Option<Arc<crate::byte_budget::ByteBudget>>,
+    ) -> Result<MessageId> {
+        let history = read_since(&session.log_path, 0)
+            .await
+            .map_err(|e| anyhow!("rerun_branch: read event log: {e}"))?;
+        let history = apply_superseded(history);
+
+        // Resolve the branch root. `target.branch_parent ?? target.id` —
+        // spec §15.1. Also capture `prev_max`, the highest variant index
+        // already at this branch point (root sits at 0 implicitly).
+        let (root, prev_max) = find_branch_root_and_max(&history, &target)?;
+        let next_index = prev_max
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("rerun_branch: branch_variant_index overflow"))?;
+
+        let req = build_request_up_to(&history, &target)?;
+
+        let mut dispatcher = crate::tools::ToolDispatcher::new();
+        dispatcher
+            .register(Box::new(crate::tools::FsReadTool))
+            .expect("fs.read must register on a fresh dispatcher");
+        dispatcher
+            .register(Box::new(crate::tools::FsWriteTool))
+            .expect("fs.write must register on a fresh dispatcher");
+        dispatcher
+            .register(Box::new(crate::tools::FsEditTool))
+            .expect("fs.edit must register on a fresh dispatcher");
+        dispatcher
+            .register(Box::new(crate::tools::ShellExecTool))
+            .expect("shell.exec must register on a fresh dispatcher");
+        dispatcher
+            .register(Box::new(crate::tools::AgentSpawnTool))
+            .expect("agent.spawn must register on a fresh dispatcher");
+        let ctx = crate::tools::ToolCtx {
+            allowed_paths,
+            workspace_root,
+            child_registry,
+            byte_budget,
+            agent_ctx: None,
+        };
+
+        let new_id = MessageId::new();
+        run_request_loop(
+            Arc::clone(&session),
+            provider,
+            req,
+            new_id.clone(),
+            Some(root),
+            next_index,
+            pending_approvals,
+            &dispatcher,
+            &ctx,
+            auto_approve,
+        )
+        .await?;
+
+        // Branch does not emit MessageSuperseded: both versions co-exist.
+        Ok(new_id)
+    }
+
+    /// F-144: re-run discarding intermediate turns — the "Fresh" variant.
+    ///
+    /// Semantics (per CONCEPT.md §10.3 "Fresh"): regenerate from the
+    /// originating user message alone, losing all intermediate tool calls
+    /// and sub-agent context. The new AssistantMessage is a new root
+    /// (`branch_parent = None`); the original target assistant turn is
+    /// logically superseded via `MessageSuperseded` so replay consumers
+    /// hide it.
+    ///
+    /// Steps:
+    ///   1. Read + filter history.
+    ///   2. Locate the `UserMessage` that immediately precedes `target`'s
+    ///      assistant turn; build a one-message `ChatRequest` from it.
+    ///      This is the key behavioural difference from Replace (which
+    ///      carries *all* prior turns) — Fresh discards everything between
+    ///      the user message and the target.
+    ///   3. Drive `run_request_loop` with root branch metadata (None / 0).
+    ///   4. Emit `MessageSuperseded { old_id: target, new_id }` on success
+    ///      so a fresh subscriber sees only the regenerated message.
+    ///
+    /// Ordering invariant matches Replace: if the regenerated stream errors
+    /// mid-flight, the supersede marker is never emitted and the original
+    /// message stays authoritative.
+    #[allow(clippy::too_many_arguments)]
+    async fn rerun_fresh<P: Provider>(
+        &self,
+        session: Arc<crate::session::Session>,
+        provider: Arc<P>,
+        target: MessageId,
+        pending_approvals: PendingApprovals,
+        allowed_paths: Vec<String>,
+        auto_approve: bool,
+        workspace_root: Option<std::path::PathBuf>,
+        child_registry: Option<crate::sandbox::ChildRegistry>,
+        byte_budget: Option<Arc<crate::byte_budget::ByteBudget>>,
+    ) -> Result<MessageId> {
+        let history = read_since(&session.log_path, 0)
+            .await
+            .map_err(|e| anyhow!("rerun_fresh: read event log: {e}"))?;
+        let history = apply_superseded(history);
+
+        let req = build_fresh_request_for(&history, &target)?;
+
+        let mut dispatcher = crate::tools::ToolDispatcher::new();
+        dispatcher
+            .register(Box::new(crate::tools::FsReadTool))
+            .expect("fs.read must register on a fresh dispatcher");
+        dispatcher
+            .register(Box::new(crate::tools::FsWriteTool))
+            .expect("fs.write must register on a fresh dispatcher");
+        dispatcher
+            .register(Box::new(crate::tools::FsEditTool))
+            .expect("fs.edit must register on a fresh dispatcher");
+        dispatcher
+            .register(Box::new(crate::tools::ShellExecTool))
+            .expect("shell.exec must register on a fresh dispatcher");
+        dispatcher
+            .register(Box::new(crate::tools::AgentSpawnTool))
+            .expect("agent.spawn must register on a fresh dispatcher");
+        let ctx = crate::tools::ToolCtx {
+            allowed_paths,
+            workspace_root,
+            child_registry,
+            byte_budget,
+            agent_ctx: None,
+        };
+
+        let new_id = MessageId::new();
+        run_request_loop(
+            Arc::clone(&session),
+            provider,
+            req,
+            new_id.clone(),
+            None,
+            0,
+            pending_approvals,
+            &dispatcher,
+            &ctx,
+            auto_approve,
+        )
+        .await?;
+
+        session
+            .emit(Event::MessageSuperseded {
+                old_id: target,
+                new_id: new_id.clone(),
+            })
+            .await?;
+
+        Ok(new_id)
+    }
+
+    /// F-144: activate a specific branch variant for replay / UI.
+    ///
+    /// Resolves `variant_index` against the filtered event log and emits
+    /// `Event::BranchSelected { parent, selected }`.
+    ///
+    /// Resolution rules:
+    ///   * `variant_index == 0` — `selected` is `parent` itself (the root's
+    ///     own id).
+    ///   * `variant_index >= 1` — `selected` is the `AssistantMessage` with
+    ///     `branch_parent == Some(parent)` and matching
+    ///     `branch_variant_index`.
+    ///
+    /// An unknown variant index returns `Err` and does **not** emit
+    /// `BranchSelected`. Emitting for a nonexistent variant would corrupt
+    /// the event log — downstream consumers reasonably assume every
+    /// `BranchSelected.selected` points at a real message.
+    pub async fn select_branch(
+        &self,
+        session: Arc<crate::session::Session>,
+        parent: MessageId,
+        variant_index: u32,
+    ) -> Result<()> {
+        let history = read_since(&session.log_path, 0)
+            .await
+            .map_err(|e| anyhow!("select_branch: read event log: {e}"))?;
+        let history = apply_superseded(history);
+
+        let selected = resolve_branch_variant(&history, &parent, variant_index)?;
+        session
+            .emit(Event::BranchSelected { parent, selected })
+            .await?;
+        Ok(())
     }
 }
 
@@ -845,6 +1105,158 @@ fn finalise_request(messages: Vec<ChatMessage>) -> Result<ChatRequest> {
         system: None,
         messages,
     })
+}
+
+/// F-144: given a filtered history and a rerun target, return the branch
+/// root id and the highest `branch_variant_index` already present at that
+/// root. Used by `rerun_branch` to thread the new variant as
+/// `(root, prev_max + 1)`.
+///
+/// Root resolution follows spec §15.1:
+///   * If `target.branch_parent == Some(root)` — target is already a
+///     branch variant; the new sibling shares the same root.
+///   * If `target.branch_parent == None` — target is a root message; the
+///     new sibling's root is `target.id` itself.
+///
+/// `prev_max` starts at 0 (the root's implicit variant). Any sibling with
+/// `branch_parent == Some(root)` bumps it to at least its own
+/// `branch_variant_index`.
+///
+/// Walks the filtered `(seq, Event)` list twice: once to find `target`'s
+/// own AssistantMessage (to read its `branch_parent`), once to scan for
+/// siblings. Both passes are O(n) in history size — single-threaded reruns
+/// are not a hot path.
+fn find_branch_root_and_max(
+    history: &[(u64, Event)],
+    target: &MessageId,
+) -> Result<(MessageId, u32)> {
+    // Pass 1: locate target's own `branch_parent`.
+    let target_branch_parent = history
+        .iter()
+        .find_map(|(_, ev)| match ev {
+            Event::AssistantMessage {
+                id, branch_parent, ..
+            } if id == target => Some(branch_parent.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            anyhow!("rerun_branch: target message {target:?} not found in session log")
+        })?;
+
+    let root = target_branch_parent.unwrap_or_else(|| target.clone());
+
+    // Pass 2: scan siblings. `prev_max` is the highest `branch_variant_index`
+    // seen for any AssistantMessage whose branch_parent coalesces to `root`.
+    // `id == root` covers the root itself (which is the implicit variant 0
+    // but we tolerate any value its own variant field may carry).
+    let mut prev_max: u32 = 0;
+    for (_, ev) in history {
+        if let Event::AssistantMessage {
+            id,
+            branch_parent,
+            branch_variant_index,
+            ..
+        } = ev
+        {
+            let belongs_to_root = match branch_parent {
+                Some(p) => p == &root,
+                None => id == &root,
+            };
+            if belongs_to_root && *branch_variant_index > prev_max {
+                prev_max = *branch_variant_index;
+            }
+        }
+    }
+
+    Ok((root, prev_max))
+}
+
+/// F-144: build the single-message `ChatRequest` for the Fresh re-run
+/// variant.
+///
+/// Behaviourally distinct from `build_request_up_to`: where Replace /
+/// Branch carry *all* prior turns into the request, Fresh discards
+/// everything between the originating user message and `target`. The
+/// returned request contains exactly one message — the last `UserMessage`
+/// before `target`'s assistant turn.
+///
+/// If `target` is not found, or no `UserMessage` precedes it, returns an
+/// informative error.
+fn build_fresh_request_for(history: &[(u64, Event)], target: &MessageId) -> Result<ChatRequest> {
+    let mut last_user: Option<String> = None;
+
+    for (_, ev) in history {
+        match ev {
+            Event::UserMessage { text, .. } => {
+                last_user = Some(text.to_string());
+            }
+            Event::AssistantMessage { id, .. } if id == target => {
+                let text = last_user.ok_or_else(|| {
+                    anyhow!("rerun_fresh: no user message precedes target {target:?}")
+                })?;
+                return Ok(ChatRequest {
+                    system: None,
+                    messages: vec![ChatMessage {
+                        role: ChatRole::User,
+                        content: vec![ChatBlock::Text(text)],
+                    }],
+                });
+            }
+            _ => {}
+        }
+    }
+
+    Err(anyhow!(
+        "rerun_fresh: target message {target:?} not found in session log"
+    ))
+}
+
+/// F-144: resolve `(parent, variant_index)` to the MessageId to report in
+/// `BranchSelected.selected`.
+///
+/// * `variant_index == 0` returns `parent` directly — the root variant is
+///   represented by the original message id itself.
+/// * `variant_index >= 1` scans `history` for an `AssistantMessage` with
+///   `branch_parent == Some(parent)` and `branch_variant_index` equal to
+///   the requested index.
+///
+/// Unknown variants return `Err`. Callers **must** propagate rather than
+/// emit `BranchSelected { parent, selected: parent }` as a fallback —
+/// replay consumers assume every selected id is live.
+fn resolve_branch_variant(
+    history: &[(u64, Event)],
+    parent: &MessageId,
+    variant_index: u32,
+) -> Result<MessageId> {
+    if variant_index == 0 {
+        // Sanity-check that a root with this id actually exists. A random
+        // parent id should not be silently accepted — the UI would gate
+        // display of a nonexistent message.
+        let exists = history
+            .iter()
+            .any(|(_, ev)| matches!(ev, Event::AssistantMessage { id, .. } if id == parent));
+        if !exists {
+            return Err(anyhow!(
+                "select_branch: parent message {parent:?} not found in session log"
+            ));
+        }
+        return Ok(parent.clone());
+    }
+
+    history
+        .iter()
+        .find_map(|(_, ev)| match ev {
+            Event::AssistantMessage {
+                id,
+                branch_parent: Some(bp),
+                branch_variant_index,
+                ..
+            } if bp == parent && *branch_variant_index == variant_index => Some(id.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            anyhow!("select_branch: no variant with index {variant_index} under parent {parent:?}")
+        })
 }
 
 #[cfg(test)]
@@ -978,5 +1390,118 @@ mod tests {
             reqs[0].system.is_none(),
             "no cache → no injection, system stays None"
         );
+    }
+
+    // F-144: branch-of-a-branch re-runs must thread to the same root. Spec
+    // §15.1: `branch_parent_id = M.branch_parent_id ?? M.id`. If the target
+    // is already a branch variant, the new sibling shares target's parent
+    // (not target itself). This is what keeps variants flat — without
+    // coalescing, chained Branch reruns would form a tree of parents and
+    // `prev_max + 1` couldn't resolve sibling order.
+    #[test]
+    fn find_branch_root_coalesces_when_target_is_itself_a_variant() {
+        use chrono::Utc;
+
+        let root = MessageId::new();
+        let variant1 = MessageId::new();
+        let variant2 = MessageId::new();
+
+        fn assistant_with_branch(id: &MessageId, parent: Option<&MessageId>, idx: u32) -> Event {
+            Event::AssistantMessage {
+                id: id.clone(),
+                provider: ProviderId::new(),
+                model: "mock".into(),
+                at: Utc::now(),
+                stream_finalised: true,
+                text: Arc::from(""),
+                branch_parent: parent.cloned(),
+                branch_variant_index: idx,
+            }
+        }
+
+        let history = vec![
+            (1, assistant_with_branch(&root, None, 0)),
+            (2, assistant_with_branch(&variant1, Some(&root), 1)),
+            (3, assistant_with_branch(&variant2, Some(&root), 2)),
+        ];
+
+        // Branch-ing `variant1` must coalesce to `root`, and prev_max must
+        // reflect variant2 (index 2) — not just variant1's own index.
+        let (resolved_root, prev_max) =
+            find_branch_root_and_max(&history, &variant1).expect("resolve");
+        assert_eq!(
+            resolved_root, root,
+            "branch-of-a-branch must resolve to root"
+        );
+        assert_eq!(
+            prev_max, 2,
+            "prev_max must scan all siblings, not just target's own variant_index"
+        );
+
+        // Branch-ing the root directly lands at the same root and the same
+        // prev_max — the family of variants does not grow by targeting the
+        // root.
+        let (root_again, same_max) =
+            find_branch_root_and_max(&history, &root).expect("resolve root");
+        assert_eq!(root_again, root);
+        assert_eq!(same_max, 2);
+    }
+
+    // F-144: resolve_branch_variant must refuse unknown variant indices.
+    // A well-meaning bug that emits `BranchSelected { parent, selected:
+    // parent }` as a fallback on unknown index would corrupt replay —
+    // downstream UIs assume every selected id is a live message.
+    #[test]
+    fn resolve_branch_variant_rejects_unknown_index() {
+        use chrono::Utc;
+
+        let root = MessageId::new();
+        let variant1 = MessageId::new();
+        let history = vec![
+            (
+                1,
+                Event::AssistantMessage {
+                    id: root.clone(),
+                    provider: ProviderId::new(),
+                    model: "mock".into(),
+                    at: Utc::now(),
+                    stream_finalised: true,
+                    text: Arc::from(""),
+                    branch_parent: None,
+                    branch_variant_index: 0,
+                },
+            ),
+            (
+                2,
+                Event::AssistantMessage {
+                    id: variant1.clone(),
+                    provider: ProviderId::new(),
+                    model: "mock".into(),
+                    at: Utc::now(),
+                    stream_finalised: true,
+                    text: Arc::from(""),
+                    branch_parent: Some(root.clone()),
+                    branch_variant_index: 1,
+                },
+            ),
+        ];
+
+        // Known variants resolve.
+        assert_eq!(
+            resolve_branch_variant(&history, &root, 0).expect("root resolves"),
+            root
+        );
+        assert_eq!(
+            resolve_branch_variant(&history, &root, 1).expect("variant 1 resolves"),
+            variant1
+        );
+
+        // Unknown indexes return Err without silently falling back.
+        assert!(resolve_branch_variant(&history, &root, 99).is_err());
+        // Parent id that doesn't exist in the log is also rejected —
+        // even at variant_index 0, where the naïve implementation would
+        // return the parent unchanged.
+        let orphan = MessageId::new();
+        assert!(resolve_branch_variant(&history, &orphan, 0).is_err());
     }
 }

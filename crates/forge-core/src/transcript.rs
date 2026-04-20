@@ -29,11 +29,11 @@ use crate::{ForgeError, Result};
 /// only `ToolCallStarted` would leave orphan completion events with no
 /// matching start. Filtering the full cluster requires tracking
 /// `ToolCallId`s from the started events we hide — a larger change
-/// deferred to F-144 (Branch variant needs the same bookkeeping).
-/// For F-143 (Replace, no-tool-call scenarios are the common case) we
-/// accept that a superseded turn's tool events remain visible in replay;
-/// the UI can interpret them in context of the surviving
-/// `AssistantMessage` for `new_id`.
+/// deferred to a future pass. F-144 (Branch / Fresh) inherits the same
+/// limitation: for `RerunVariant::Fresh` a superseded turn's tool-call
+/// events remain visible in replay alongside the regenerated turn. The
+/// UI interprets them in the context of the surviving `AssistantMessage`
+/// for `new_id`.
 ///
 /// Consumers in other contexts (e.g. rebuilding a provider request from
 /// history) can call this same helper to walk a coherent, non-superseded
@@ -61,7 +61,8 @@ fn is_hidden_by(event: &Event, superseded: &HashSet<MessageId>) -> bool {
         }
         // See doc-comment on `apply_superseded`: filtering `ToolCallStarted`
         // alone would leave orphaned `ToolCallCompleted` events (keyed by
-        // `ToolCallId`, not `MessageId`). Deferred to F-144.
+        // `ToolCallId`, not `MessageId`). Full-cluster filtering is a
+        // future pass; F-144 inherits the limitation.
         // Hide the markers themselves: consumers see a clean transcript.
         Event::MessageSuperseded { .. } => true,
         _ => false,

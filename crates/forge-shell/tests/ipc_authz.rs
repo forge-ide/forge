@@ -211,6 +211,32 @@ fn session_a_window_invoking_rerun_message_for_session_b_is_rejected() {
     );
 }
 
+/// F-144: `select_branch` is session-scoped. A session-A webview must not be
+/// able to switch branch variants inside session-B's transcript — the
+/// resulting `BranchSelected` event would forge UI state in another
+/// session's stream.
+#[test]
+fn session_a_window_invoking_select_branch_for_session_b_is_rejected() {
+    let app = make_app_with_session_bridge();
+    let window = build_window(&app, "session-A");
+
+    let err = invoke(
+        &window,
+        "select_branch",
+        serde_json::json!({
+            "sessionId": "B",
+            "parentId": "deadbeefdeadbeef",
+            "variantIndex": 1,
+        }),
+    )
+    .expect_err("session-A must not select a branch in session B");
+
+    assert!(
+        err.contains(LABEL_MISMATCH),
+        "expected label-mismatch error, got: {err}"
+    );
+}
+
 #[test]
 fn session_a_window_invoking_session_hello_for_session_b_is_rejected() {
     let app = make_app_with_session_bridge();
