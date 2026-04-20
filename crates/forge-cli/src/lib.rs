@@ -1,4 +1,5 @@
 pub mod display;
+pub mod mcp;
 pub mod socket;
 
 use clap::{Parser, Subcommand};
@@ -44,6 +45,11 @@ pub enum Commands {
     Run {
         #[command(subcommand)]
         cmd: RunCommands,
+    },
+    /// Manage MCP (Model Context Protocol) servers.
+    Mcp {
+        #[command(subcommand)]
+        cmd: McpCommands,
     },
 }
 
@@ -104,4 +110,51 @@ pub enum RunCommands {
         #[arg(long, default_value = "-")]
         input: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum McpCommands {
+    /// Import MCP server definitions from another tool's config.
+    ///
+    /// Dry-run by default: prints a unified diff against the workspace's
+    /// existing `.mcp.json`. Pass `--apply` to write.
+    ///
+    /// Auto source mode (`--source=auto`, the default) walks every known
+    /// location; later sources in the list override earlier ones on name
+    /// collision (ordered: vscode → cursor → claude → continue → kiro →
+    /// codex).
+    Import {
+        /// Which source format to read. Omit or set to `auto` to walk all
+        /// known locations.
+        #[arg(long, default_value = "auto", value_parser = parse_import_source)]
+        source: ImportSourceFlag,
+        /// Write the converted config to `.mcp.json` instead of showing a
+        /// diff.
+        #[arg(long)]
+        apply: bool,
+        /// Workspace root. Defaults to the current working directory.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+}
+
+/// CLI-visible form of [`forge_mcp::import::ImportSource`], plus an
+/// explicit `Auto` variant so `--source=auto` is a first-class value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportSourceFlag {
+    Auto,
+    Source(forge_mcp::import::ImportSource),
+}
+
+fn parse_import_source(raw: &str) -> Result<ImportSourceFlag, String> {
+    if raw == "auto" {
+        return Ok(ImportSourceFlag::Auto);
+    }
+    forge_mcp::import::ImportSource::from_slug(raw)
+        .map(ImportSourceFlag::Source)
+        .ok_or_else(|| {
+            format!(
+                "unknown import source {raw:?}; expected one of: auto, vscode, cursor, claude, continue, kiro, codex"
+            )
+        })
 }

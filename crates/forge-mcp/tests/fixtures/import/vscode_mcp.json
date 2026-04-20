@@ -1,0 +1,15 @@
+{
+  "inputs": [
+    { "type": "promptString", "id": "github-token", "description": "GitHub PAT" }
+  ],
+  "servers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@microsoft/mcp-server-playwright"]
+    },
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp"
+    }
+  }
+}

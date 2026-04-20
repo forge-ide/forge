@@ -2,7 +2,10 @@
 /// These import the production `Cli` struct directly so any structural change
 /// to the real command hierarchy will break these tests.
 use clap::Parser;
-use forge_cli::{Cli, Commands, RunCommands, SessionCommands, SessionNewKind};
+use forge_cli::{
+    Cli, Commands, ImportSourceFlag, McpCommands, RunCommands, SessionCommands, SessionNewKind,
+};
+use forge_mcp::import::ImportSource;
 use std::path::PathBuf;
 
 #[test]
@@ -226,4 +229,75 @@ fn parse_run_agent_with_file_input() {
 fn unknown_command_returns_error() {
     let result = Cli::try_parse_from(["forge", "bogus"]);
     assert!(result.is_err(), "bogus command should fail to parse");
+}
+
+#[test]
+fn parse_mcp_import_defaults_to_auto_dry_run() {
+    let cli = Cli::try_parse_from(["forge", "mcp", "import"]).expect("should parse");
+    let Commands::Mcp {
+        cmd:
+            McpCommands::Import {
+                source,
+                apply,
+                workspace,
+            },
+    } = cli.command
+    else {
+        panic!("wrong command shape");
+    };
+    assert_eq!(source, ImportSourceFlag::Auto);
+    assert!(!apply);
+    assert_eq!(workspace, None);
+}
+
+#[test]
+fn parse_mcp_import_with_explicit_source_and_apply() {
+    let cli = Cli::try_parse_from([
+        "forge",
+        "mcp",
+        "import",
+        "--source=cursor",
+        "--apply",
+        "--workspace",
+        "/tmp/project",
+    ])
+    .expect("should parse");
+    let Commands::Mcp {
+        cmd:
+            McpCommands::Import {
+                source,
+                apply,
+                workspace,
+            },
+    } = cli.command
+    else {
+        panic!("wrong command shape");
+    };
+    assert_eq!(source, ImportSourceFlag::Source(ImportSource::Cursor));
+    assert!(apply);
+    assert_eq!(workspace, Some(PathBuf::from("/tmp/project")));
+}
+
+#[test]
+fn parse_mcp_import_rejects_bogus_source() {
+    let result = Cli::try_parse_from(["forge", "mcp", "import", "--source=bogus"]);
+    assert!(result.is_err(), "bogus source should fail to parse");
+}
+
+#[test]
+fn parse_mcp_import_accepts_all_six_source_slugs() {
+    for slug in ["vscode", "cursor", "claude", "continue", "kiro", "codex"] {
+        let cli = Cli::try_parse_from(["forge", "mcp", "import", &format!("--source={slug}")])
+            .unwrap_or_else(|e| panic!("failed to parse source={slug}: {e}"));
+        let Commands::Mcp {
+            cmd: McpCommands::Import { source, .. },
+        } = cli.command
+        else {
+            panic!("wrong command shape for {slug}");
+        };
+        let ImportSourceFlag::Source(got) = source else {
+            panic!("expected Source variant for {slug}");
+        };
+        assert_eq!(got.slug(), slug);
+    }
 }

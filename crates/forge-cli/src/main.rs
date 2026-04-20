@@ -1,6 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
-use forge_cli::{Cli, Commands, RunCommands, SessionCommands, SessionNewKind};
+use forge_cli::{
+    Cli, Commands, ImportSourceFlag, McpCommands, RunCommands, SessionCommands, SessionNewKind,
+};
 use std::path::PathBuf;
 
 #[tokio::main]
@@ -16,7 +18,40 @@ async fn main() -> Result<()> {
         Commands::Run { cmd } => match cmd {
             RunCommands::Agent { name, input } => run_agent(&name, &input).await,
         },
+        Commands::Mcp { cmd } => match cmd {
+            McpCommands::Import {
+                source,
+                apply,
+                workspace,
+            } => mcp_import(source, apply, workspace).await,
+        },
     }
+}
+
+async fn mcp_import(
+    source: ImportSourceFlag,
+    apply: bool,
+    workspace: Option<PathBuf>,
+) -> Result<()> {
+    let workspace_root = workspace.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve user home directory"))?;
+    let source = match source {
+        ImportSourceFlag::Auto => None,
+        ImportSourceFlag::Source(s) => Some(s),
+    };
+    let args = forge_cli::mcp::ImportArgs {
+        workspace_root,
+        home,
+        source,
+        apply,
+    };
+    let mut stdout = std::io::stdout();
+    let code = forge_cli::mcp::run(&args, &mut stdout)?;
+    if code != 0 {
+        std::process::exit(code);
+    }
+    Ok(())
 }
 
 async fn session_new(kind: SessionNewKind) -> Result<()> {
