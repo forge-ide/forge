@@ -311,10 +311,10 @@ pub async fn session_approve_tool<R: Runtime>(
         .map_err(|e| e.to_string())
 }
 
-/// F-143: re-run an assistant message. Phase 1 dispatches only
-/// `RerunVariant::Replace`; `Branch` (F-144) and `Fresh` (F-145) return an
-/// error today rather than silently no-op, so a UI that ships Branch before
-/// the daemon supports it learns fast.
+/// F-143 / F-144: re-run an assistant message. All three `RerunVariant`s
+/// (`Replace`, `Branch`, `Fresh`) are dispatched through the bridge. The
+/// `variant` parameter is typed so serde rejects any non-variant at the
+/// Tauri arg-deserialization layer — no byte cap is useful here.
 #[tauri::command]
 pub async fn rerun_message<R: Runtime>(
     session_id: String,
@@ -324,22 +324,39 @@ pub async fn rerun_message<R: Runtime>(
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
     require_window_label(&webview, &format!("session-{session_id}"))?;
-    // F-068 / L4: bound `msg_id` before the bridge allocates a frame. The
-    // variant is typed (forge_core::RerunVariant) — serde rejects any
-    // non-variant at Tauri arg deserialization, so no byte cap is needed.
+    // F-068 / L4: bound `msg_id` before the bridge allocates a frame.
     require_size("msg_id", &msg_id, MAX_MESSAGE_ID_BYTES)?;
-    match variant {
-        RerunVariant::Replace => state
-            .bridge
-            .rerun_message(&session_id, msg_id, variant)
-            .await
-            .map_err(|e| e.to_string()),
-        // Branch / Fresh return errors here (not silent no-ops) so a UI that
-        // invokes them before F-144/F-145 ship gets a loud signal instead of
-        // a hanging command.
-        RerunVariant::Branch => Err("rerun_message: Branch variant not implemented (F-144)".into()),
-        RerunVariant::Fresh => Err("rerun_message: Fresh variant not implemented (F-145)".into()),
-    }
+    state
+        .bridge
+        .rerun_message(&session_id, msg_id, variant)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// F-144: activate a branch variant for replay / UI display. Resolves
+/// `variant_index` against the session log and (on success) emits
+/// `Event::BranchSelected { parent, selected }`. The emission arrives
+/// through the session event stream; this command returns `Ok(())` once
+/// the frame is written to the daemon.
+///
+/// Authz + size caps mirror `rerun_message` — only the owning session's
+/// webview may drive its branch selection; `parent_id` is bounded by
+/// `MAX_MESSAGE_ID_BYTES`.
+#[tauri::command]
+pub async fn select_branch<R: Runtime>(
+    session_id: String,
+    parent_id: String,
+    variant_index: u32,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+) -> Result<(), String> {
+    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_size("parent_id", &parent_id, MAX_MESSAGE_ID_BYTES)?;
+    state
+        .bridge
+        .select_branch(&session_id, parent_id, variant_index)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -375,6 +392,7 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         session_approve_tool,
         session_reject_tool,
         rerun_message,
+        select_branch,
         get_persistent_approvals,
         save_approval,
         remove_approval,
