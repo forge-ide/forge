@@ -193,9 +193,22 @@ pub fn edit_preview(path: &str, patch: &str) -> ApprovalPreview {
 /// Minimal unified-diff applier. Supports standard `@@ -a,b +c,d @@` hunks
 /// with `' '`, `'-'`, `'+'` line prefixes. Rejects anything else as
 /// [`FsError::MalformedPatch`].
-fn apply_unified_diff(original: &str, patch: &str) -> Result<String, FsError> {
+///
+/// Perf: writes every emitted line directly into a single `String` buffer
+/// pre-sized to the original file length. Context/removed-verified lines are
+/// appended as borrowed slices (no per-line `String` allocation), and `+`
+/// additions only pay for the one terminating `'\n'` byte on top of the slice
+/// copy. Net effect: allocation count is O(1) in the number of lines, dominated
+/// by the single `with_capacity` up-front plus any overflow growth when
+/// additions exceed the original size. See `benches/mutate.rs` for the
+/// ≥5× allocation-reduction guard.
+#[doc(hidden)]
+pub fn apply_unified_diff(original: &str, patch: &str) -> Result<String, FsError> {
     let src_lines: Vec<&str> = split_preserving_newline(original);
-    let mut out: Vec<String> = Vec::with_capacity(src_lines.len());
+    // Pre-size to the original file: most edits are localized, so this is a
+    // tight upper bound for context + removed lines. Additions grow the buffer
+    // via normal `String` doubling; still amortized O(1) per push.
+    let mut out = String::with_capacity(original.len());
     let mut cursor = 0usize; // index into src_lines
     let mut saw_hunk = false;
     let mut lines = patch.lines().peekable();
@@ -215,7 +228,7 @@ fn apply_unified_diff(original: &str, patch: &str) -> Result<String, FsError> {
                 });
             }
             for l in &src_lines[cursor..target] {
-                out.push((*l).to_string());
+                out.push_str(l);
             }
             cursor = target;
 
@@ -236,7 +249,7 @@ fn apply_unified_diff(original: &str, patch: &str) -> Result<String, FsError> {
                             reason: format!("context mismatch at line {}", cursor + 1),
                         });
                     }
-                    out.push((*src).to_string());
+                    out.push_str(src);
                     cursor += 1;
                 } else if let Some(removed) = body.strip_prefix('-') {
                     let src = src_lines
@@ -254,14 +267,13 @@ fn apply_unified_diff(original: &str, patch: &str) -> Result<String, FsError> {
                     // Preserve newline behavior: input lines are stored without
                     // their trailing '\n' by split_preserving_newline; re-add
                     // unless this was a "\ No newline at end of file" marker.
-                    out.push(format!("{added}\n"));
+                    out.push_str(added);
+                    out.push('\n');
                 } else if body.starts_with("\\ ") {
                     // "\ No newline at end of file" — strip trailing newline
-                    // from last emitted line if present.
-                    if let Some(last) = out.last_mut() {
-                        if last.ends_with('\n') {
-                            last.pop();
-                        }
+                    // from the buffer if present.
+                    if out.ends_with('\n') {
+                        out.pop();
                     }
                 } else if body.is_empty() {
                     // Some diff tools emit a bare empty line as a zero-width context line.
@@ -275,7 +287,7 @@ fn apply_unified_diff(original: &str, patch: &str) -> Result<String, FsError> {
                             reason: format!("empty context mismatch at line {}", cursor + 1),
                         });
                     }
-                    out.push((*src).to_string());
+                    out.push_str(src);
                     cursor += 1;
                 } else {
                     return Err(FsError::MalformedPatch {
@@ -302,10 +314,10 @@ fn apply_unified_diff(original: &str, patch: &str) -> Result<String, FsError> {
 
     // Append any source lines remaining after the last hunk.
     for l in &src_lines[cursor..] {
-        out.push((*l).to_string());
+        out.push_str(l);
     }
 
-    Ok(out.concat())
+    Ok(out)
 }
 
 /// Split `s` into lines while preserving the trailing newline on each line so

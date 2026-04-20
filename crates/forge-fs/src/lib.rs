@@ -9,6 +9,13 @@ mod mutate;
 pub use limits::Limits;
 pub use mutate::{edit, edit_preview, write, write_preview, ApprovalPreview, FsError};
 
+/// Internal entry points exposed solely for the `benches/mutate.rs` allocation
+/// guard. Not part of the public API — do not depend on anything in here.
+#[doc(hidden)]
+pub mod __bench_internals {
+    pub use crate::mutate::apply_unified_diff;
+}
+
 /// Result of a successful `fs.read` operation.
 #[derive(Debug)]
 pub struct ReadResult {
