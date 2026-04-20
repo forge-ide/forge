@@ -206,6 +206,22 @@ pub async fn serve_with_session<P: Provider + 'static>(
     // path including `/etc/passwd` and `~/.ssh/id_rsa`.
     let allowed_paths: Arc<Vec<String>> =
         Arc::new(compute_allowed_paths(workspace_path.as_deref()));
+
+    // F-135: load workspace `AGENTS.md` exactly once at session start and
+    // cache the contents for every turn on this session. Missing file is not
+    // an error; unreadable file is logged once and treated as absent so a
+    // transient filesystem problem never fails the session.
+    let agents_md: Option<Arc<str>> = match workspace_path.as_deref() {
+        Some(ws) => match forge_agents::load_agents_md(ws) {
+            Ok(Some(content)) => Some(Arc::from(content)),
+            Ok(None) => None,
+            Err(e) => {
+                eprintln!("AGENTS.md: skipping injection: {e}");
+                None
+            }
+        },
+        None => None,
+    };
     let workspace = Arc::new(
         workspace
             .map(|w| w.display().to_string())
@@ -242,6 +258,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
             allowed_paths,
             child_registry,
             byte_budget,
+            agents_md,
         )
         .await;
     }
@@ -296,6 +313,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
                 let allowed_paths = Arc::clone(&allowed_paths);
                 let child_registry = child_registry.clone();
                 let byte_budget = Arc::clone(&byte_budget);
+                let agents_md = agents_md.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(
                         stream,
@@ -310,6 +328,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
                         allowed_paths,
                         child_registry,
                         byte_budget,
+                        agents_md,
                     )
                     .await
                     {
@@ -359,6 +378,7 @@ async fn handle_connection<P: Provider + 'static>(
     allowed_paths: Arc<Vec<String>>,
     child_registry: ChildRegistry,
     byte_budget: Arc<crate::byte_budget::ByteBudget>,
+    agents_md: Option<Arc<str>>,
 ) -> Result<()> {
     // ── Handshake ──────────────────────────────────────────────────────────────
     let msg = forge_ipc::read_frame(&mut stream).await?;
@@ -462,6 +482,7 @@ async fn handle_connection<P: Provider + 'static>(
                         let allowed_paths = Arc::clone(&allowed_paths);
                         let child_registry = child_registry.clone();
                         let byte_budget = Arc::clone(&byte_budget);
+                        let agents_md = agents_md.clone();
                         tokio::spawn(async move {
                             let result = run_turn(
                                 Arc::clone(&session),
@@ -473,6 +494,7 @@ async fn handle_connection<P: Provider + 'static>(
                                 workspace_path,
                                 Some(child_registry),
                                 Some(byte_budget),
+                                agents_md,
                             ).await;
                             if let Err(e) = &result {
                                 eprintln!("turn error: {e}");
