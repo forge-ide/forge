@@ -12,11 +12,20 @@
 //! `agent_spawn_child_runs_under_child_isolation_not_parent` which exercises
 //! this under the user scope.
 //!
+//! Prompt forwarding (F-137 mandate): the `prompt` arg is threaded onto
+//! `SpawnContext::with_prompt` so the child's registered `AgentInstance.initial_prompt`
+//! carries the parent's seed user message verbatim. Before F-137 the arg was
+//! validated but dropped (`let _prompt = …`); that made F-134 scaffolding-
+//! only. The follow-up that wires an actual step-executor reads the stored
+//! prompt to materialise the child's first user turn.
+//!
 //! The event wire shape matches the existing `forge_core::Event::SubAgentSpawned
 //! { parent, child, from_msg }` variant — the DoD in issue #248 names a
 //! hypothetical `{ parent_id, child_id, agent_name }` shape that does not
 //! exist in the tree. Adjusting the event variant would ripple through the
 //! `event_wire_shape` regression tests and is deliberately out of scope here.
+
+use std::sync::Arc;
 
 use super::{get_required_str, Tool, ToolCtx};
 use forge_agents::{AgentDef, AgentScope, SpawnContext};
@@ -46,12 +55,16 @@ impl Tool for AgentSpawnTool {
             Ok(s) => s.to_owned(),
             Err(e) => return serde_json::json!({ "error": e.to_string() }),
         };
-        // `prompt` is part of the public tool contract so a provider that
-        // wires up `agent.spawn` can pass the child its seed input. F-134
-        // only validates presence; carrying it forward to the runtime lands
-        // alongside the step executor (post-F-140).
-        let _prompt = match get_required_str(args, Self::NAME, "prompt") {
-            Ok(s) => s.to_owned(),
+        // F-137 follow-up to F-134: forward `prompt` through `SpawnContext`
+        // onto the registered child instance so a step-executor can seed the
+        // child's first user turn with the parent's input. Pre-F-137 the arg
+        // was validated but dropped, which turned F-134 into scaffolding-only
+        // plumbing. Wrapped as `Arc<str>` at the boundary — matches the
+        // hot-path contract on `forge_core::Event::UserMessage.text` so the
+        // downstream executor can reuse the same allocation when materialising
+        // the first turn.
+        let prompt: Arc<str> = match get_required_str(args, Self::NAME, "prompt") {
+            Ok(s) => Arc::from(s),
             Err(e) => return serde_json::json!({ "error": e.to_string() }),
         };
         // `context` is the third DoD argument (`AgentContext`). It is
@@ -100,9 +113,12 @@ impl Tool for AgentSpawnTool {
         // Never synthesise isolation from the parent — that would be a
         // privilege-escalation regression. User scope is enforced here so
         // a sub-agent cannot request `Trusted` via this tool even if
-        // someone later allows it in `AgentDef`.
+        // someone later allows it in `AgentDef`. `with_prompt` forwards the
+        // parent-supplied seed to the child's registered instance (F-137
+        // additional mandate).
         let spawn_ctx = SpawnContext {
             scope: AgentScope::User,
+            initial_prompt: Some(prompt),
         };
 
         let instance = match agent_ctx.orchestrator.spawn(child_def, spawn_ctx).await {

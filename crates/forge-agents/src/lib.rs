@@ -17,7 +17,7 @@ use std::{fs, path::Path};
 pub use def::{AgentDef, Isolation};
 pub use error::{Error, Result};
 pub use orchestrator::{
-    AgentEvent, AgentInstance, AgentScope, InstanceState, Orchestrator, SpawnContext,
+    AgentEvent, AgentInstance, AgentScope, InitialPrompt, InstanceState, Orchestrator, SpawnContext,
 };
 
 use def::load_from_dir;

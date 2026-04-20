@@ -408,6 +408,10 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         lsp_start,
         lsp_stop,
         lsp_send,
+        // F-137: background-agent lifecycle.
+        start_background_agent,
+        promote_background_agent,
+        list_background_agents,
     ])
 }
 
@@ -1651,4 +1655,311 @@ pub async fn lsp_send<R: Runtime>(
     let caller_label = webview.label().to_string();
     let transport = state.owned_transport(&server, &caller_label)?;
     transport.send(message).await.map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// F-137: background-agent lifecycle commands.
+//
+// Three Tauri commands let a session webview drive top-level user-initiated
+// agents that run alongside the active chat and surface in the Agent Monitor
+// pane (see `docs/product/ai-ux.md` §10.6). Distinct from F-134's
+// `agent.spawn` (sub-agents spawned by an agent as part of orchestration) —
+// a background agent is started by the user and its lifecycle events flow
+// onto the same `session:event` channel the daemon already uses, so the
+// webview store picks up `BackgroundAgentStarted` / `BackgroundAgentCompleted`
+// alongside every other `forge_core::Event` variant it already handles.
+//
+// State. `BgAgentState` is a Tauri-managed `Mutex<HashMap<session_id,
+// BgAgentSession>>`. Each `BgAgentSession` owns:
+//   - a `BackgroundAgentRegistry` (the session-scoped lifecycle owner),
+//   - a forwarder `JoinHandle` that drains the registry's local broadcast
+//     channel and re-emits each `forge_core::Event` as a `SessionEventPayload`
+//     via `AppHandleSink` — the same path the daemon's `session:event`
+//     subscription uses, so the webview does not see a new event name.
+//
+// Authz. Each command asserts `require_window_label(session-{id})`. The
+// session-label binding is what guarantees a compromised or buggy
+// session-A webview cannot drive session-B's background-agent lifecycle.
+//
+// Agent defs. Resolution happens against the workspace + user-home `.agents/*.md`
+// files via `forge_agents::load_agents`, with the cached workspace root from
+// `SessionConnections::workspace_root` as the authoritative source — a
+// webview can't widen scope by injecting its own `workspace_root` because
+// the commands never read a webview-supplied value.
+// ---------------------------------------------------------------------------
+
+/// Per-session background-agent bookkeeping owned by [`BgAgentState`].
+pub(crate) struct BgAgentSession {
+    pub(crate) registry: Arc<forge_session::BackgroundAgentRegistry>,
+    /// Forwarder task: reads the registry's local broadcast channel and emits
+    /// each event onto the session's `session:event` webview channel. Aborted
+    /// when the `BgAgentSession` is removed from the map (none of the
+    /// commands currently remove, but a future `session_disconnect` will).
+    pub(crate) forwarder: tauri::async_runtime::JoinHandle<()>,
+}
+
+impl Drop for BgAgentSession {
+    fn drop(&mut self) {
+        self.forwarder.abort();
+    }
+}
+
+/// Tauri-managed map of live per-session background-agent registries.
+/// One per Tauri App. The inner map is keyed by `session_id`.
+#[derive(Default)]
+pub struct BgAgentState {
+    inner: Mutex<HashMap<String, Arc<BgAgentSession>>>,
+}
+
+impl BgAgentState {
+    fn get(&self, session_id: &str) -> Option<Arc<BgAgentSession>> {
+        let guard = self.inner.lock().expect("bg-agent state poisoned");
+        guard.get(session_id).cloned()
+    }
+
+    fn insert(&self, session_id: String, entry: Arc<BgAgentSession>) {
+        let mut guard = self.inner.lock().expect("bg-agent state poisoned");
+        guard.insert(session_id, entry);
+    }
+}
+
+/// Attach a fresh [`BgAgentState`] to the app. Idempotent — matches the
+/// `manage_terminals` / `manage_lsp` pattern so `window_manager::run` can
+/// call once and integration tests can opt in via a `make_app`-style
+/// helper (see `tests/ipc_bg_agents.rs`).
+pub fn manage_bg_agents<R: Runtime>(app: &AppHandle<R>) {
+    if app.try_state::<BgAgentState>().is_none() {
+        app.manage(BgAgentState::default());
+    }
+}
+
+/// F-137 test seam: construct a per-session `BgAgentSession` without
+/// invoking any Tauri command. Integration tests use this to pre-populate
+/// the registry for a session so they can drive `start` / `promote` /
+/// `list` directly and observe the forwarder emitting events on the
+/// session's webview channel.
+///
+/// Production code goes through [`resolve_bg_session`] (below) which
+/// performs the same construction on first invoke.
+#[cfg(feature = "webview-test")]
+#[doc(hidden)]
+pub fn install_bg_session_for_test<R: Runtime>(
+    app: &AppHandle<R>,
+    session_id: &str,
+    registry: Arc<forge_session::BackgroundAgentRegistry>,
+) {
+    manage_bg_agents(app);
+    let entry = Arc::new(new_bg_session(
+        app.clone(),
+        session_id.to_string(),
+        registry,
+    ));
+    let state = app.state::<BgAgentState>();
+    state.insert(session_id.to_string(), entry);
+}
+
+/// Build a fresh `BgAgentSession` wrapping `registry` and spawn its
+/// forwarder. Factored out so the production resolution path and the
+/// test-only seam stay in sync on the forwarder shape.
+fn new_bg_session<R: Runtime>(
+    app: AppHandle<R>,
+    session_id: String,
+    registry: Arc<forge_session::BackgroundAgentRegistry>,
+) -> BgAgentSession {
+    let mut events = registry.events();
+    let sink_session_id = session_id.clone();
+    let forwarder = tauri::async_runtime::spawn(async move {
+        // A local monotonic seq so the webview sees well-ordered payloads
+        // for the BackgroundAgent* events — the daemon-side `session:event`
+        // stream emits its own increasing seq, but the two sources are
+        // independent. Starting at 0 is fine: the webview UI uses the
+        // event variant, not the seq, to update the Agent Monitor row.
+        let mut seq: u64 = 0;
+        let sink = AppHandleSink {
+            app,
+            session_id: sink_session_id.clone(),
+        };
+        loop {
+            match events.recv().await {
+                Ok(event) => {
+                    seq += 1;
+                    sink.emit(crate::bridge::SessionEventPayload {
+                        session_id: sink_session_id.clone(),
+                        seq,
+                        event,
+                    });
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    // A slow consumer dropped events. Continue — the next
+                    // `recv` will return the next live event. Missed
+                    // lifecycle events are recoverable: the webview re-fetches
+                    // via `list_background_agents` when the user opens the
+                    // Agent Monitor.
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+    BgAgentSession {
+        registry,
+        forwarder,
+    }
+}
+
+/// Resolve (or lazily construct) the `BgAgentSession` for `session_id`.
+///
+/// On first invoke per session we:
+///   1. look up the cached workspace root (populated by `session_hello`),
+///   2. load agent defs via `forge_agents::load_agents`,
+///   3. build a new `forge_agents::Orchestrator` + `BackgroundAgentRegistry`,
+///   4. spawn the forwarder task and insert the entry into `BgAgentState`.
+///
+/// Subsequent invokes reuse the cached entry. Production callers never pass
+/// a pre-built registry; tests inject one via `install_bg_session_for_test`.
+async fn resolve_bg_session<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &BridgeState,
+    bg_state: &BgAgentState,
+    session_id: &str,
+) -> Result<Arc<BgAgentSession>, String> {
+    if let Some(entry) = bg_state.get(session_id) {
+        return Ok(entry);
+    }
+
+    // Lazy init — workspace root is the authoritative source for agent defs.
+    let workspace_root = cached_workspace_root(state, session_id).await?;
+    let user_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+
+    let defs = forge_agents::load_agents(&workspace_root, &user_home)
+        .map_err(|e| format!("load agent defs: {e}"))?;
+
+    let orchestrator = Arc::new(forge_agents::Orchestrator::new());
+    let registry = Arc::new(forge_session::BackgroundAgentRegistry::new(
+        orchestrator,
+        Arc::new(defs),
+    ));
+    let entry = Arc::new(new_bg_session(
+        app.clone(),
+        session_id.to_string(),
+        registry,
+    ));
+    bg_state.insert(session_id.to_string(), Arc::clone(&entry));
+    Ok(entry)
+}
+
+/// Wire shape returned by `list_background_agents`. Mirrors
+/// `forge_session::BgAgentSummary` but re-derives `TS` here so the generated
+/// binding lands under `web/packages/ipc/src/generated/`. Keeping the
+/// `#[derive(TS)]` at the Tauri boundary matches the pattern used by
+/// `PersistentApprovalEntry`, `TerminalSpawnArgs`, etc.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct BgAgentSummary {
+    pub id: String,
+    pub agent_name: String,
+    pub state: BgAgentStateDto,
+}
+
+/// Three-way lifecycle tag for the background-agent row. Mirrors
+/// `forge_session::BgAgentState` at the wire boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub enum BgAgentStateDto {
+    Running,
+    Completed,
+    Failed,
+}
+
+impl From<forge_session::BgAgentSummary> for BgAgentSummary {
+    fn from(s: forge_session::BgAgentSummary) -> Self {
+        let state = match s.state {
+            forge_session::BgAgentState::Running => BgAgentStateDto::Running,
+            forge_session::BgAgentState::Completed => BgAgentStateDto::Completed,
+            forge_session::BgAgentState::Failed => BgAgentStateDto::Failed,
+        };
+        Self {
+            id: s.id.to_string(),
+            agent_name: s.agent_name,
+            state,
+        }
+    }
+}
+
+/// F-137 size caps. `agent_name` mirrors the `AgentDef.name` glob — short by
+/// convention. `prompt` shares the `MAX_MESSAGE_TEXT_BYTES` ceiling with
+/// `session_send_message` so a user pasting a long seed message for a
+/// background agent hits the same limit they already know from the chat
+/// composer. `instance_id` is a 16-char hex handle.
+pub(crate) const MAX_AGENT_NAME_BYTES: usize = 256;
+pub(crate) const MAX_BG_PROMPT_BYTES: usize = MAX_MESSAGE_TEXT_BYTES;
+pub(crate) const MAX_AGENT_INSTANCE_ID_BYTES: usize = 64;
+
+/// Start a background agent.
+///
+/// Errors:
+/// - unauthorized window label → `forbidden: window label mismatch`
+/// - oversize `agent_name` / `prompt` → size-cap error
+/// - unknown `agent_name` → `start_background_agent: unknown agent '<name>'`
+/// - session not connected → same `cached_workspace_root` error as the
+///   editor-pane commands
+#[tauri::command]
+pub async fn start_background_agent<R: Runtime>(
+    session_id: String,
+    agent_name: String,
+    prompt: String,
+    app: AppHandle<R>,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+    bg_state: State<'_, BgAgentState>,
+) -> Result<String, String> {
+    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_size("agent_name", &agent_name, MAX_AGENT_NAME_BYTES)?;
+    require_size("prompt", &prompt, MAX_BG_PROMPT_BYTES)?;
+
+    let entry = resolve_bg_session(&app, &state, &bg_state, &session_id).await?;
+    let id = entry
+        .registry
+        .start(&agent_name, Arc::from(prompt.as_str()))
+        .await
+        .map_err(|e| format!("start_background_agent: {e}"))?;
+    Ok(id.to_string())
+}
+
+/// Promote a background agent to an active chat pane (observable state
+/// change only: removes the id from the tracked set). The frontend
+/// responds to the returned ack by mounting a new chat pane bound to the
+/// instance id — pane geometry is a webview concern.
+#[tauri::command]
+pub async fn promote_background_agent<R: Runtime>(
+    session_id: String,
+    instance_id: String,
+    app: AppHandle<R>,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+    bg_state: State<'_, BgAgentState>,
+) -> Result<(), String> {
+    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_size("instance_id", &instance_id, MAX_AGENT_INSTANCE_ID_BYTES)?;
+
+    let entry = resolve_bg_session(&app, &state, &bg_state, &session_id).await?;
+    let id = forge_core::AgentInstanceId::from_string(instance_id);
+    entry.registry.promote(&id).await;
+    Ok(())
+}
+
+/// Snapshot of the session's currently-tracked background agents.
+#[tauri::command]
+pub async fn list_background_agents<R: Runtime>(
+    session_id: String,
+    app: AppHandle<R>,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+    bg_state: State<'_, BgAgentState>,
+) -> Result<Vec<BgAgentSummary>, String> {
+    require_window_label(&webview, &format!("session-{session_id}"))?;
+
+    let entry = resolve_bg_session(&app, &state, &bg_state, &session_id).await?;
+    let rows = entry.registry.list().await;
+    Ok(rows.into_iter().map(BgAgentSummary::from).collect())
 }

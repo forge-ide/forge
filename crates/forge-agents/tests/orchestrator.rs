@@ -242,6 +242,7 @@ async fn scope_marker_is_independent_of_parse_time_check() {
             def,
             SpawnContext {
                 scope: AgentScope::User,
+                ..Default::default()
             },
         )
         .await;

@@ -23,6 +23,10 @@ use tokio_stream::wrappers::BroadcastStream;
 use crate::def::{AgentDef, Isolation};
 use crate::error::{Error, Result};
 
+/// Type alias so hot-path field clones stay cheap (refcount bump), matching
+/// the `Arc<str>` contract on `forge_core::Event::UserMessage.text`.
+pub type InitialPrompt = Arc<str>;
+
 /// Runtime lifecycle state of an [`AgentInstance`].
 ///
 /// Distinct from [`AgentEvent`]: states are the *current* condition;
@@ -42,33 +46,61 @@ pub struct AgentInstance {
     pub def: AgentDef,
     pub state: InstanceState,
     pub started_at: DateTime<Utc>,
+    /// F-137 / F-134 follow-up: the seed user message this instance was
+    /// spawned with. Threaded from the spawner (either `agent.spawn`'s
+    /// parent-supplied arg for sub-agents, or `BackgroundAgentRegistry::start`'s
+    /// user-supplied prompt) so the future step executor can materialise it
+    /// as the child's first user turn. `None` only when the spawner had no
+    /// seed to supply (legacy path used by the pre-F-134 scaffolding tests).
+    pub initial_prompt: Option<InitialPrompt>,
 }
 
-/// Origin marker for a spawn. User-scope agents have the [`Isolation::Trusted`]
+/// Origin marker for a spawn. User-scope agents have the `Isolation::Trusted`
 /// escape hatch removed at runtime; built-in skills keep it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentScope {
+    #[default]
     User,
     BuiltIn,
 }
 
-/// Context passed to [`Orchestrator::spawn`]. Currently carries only the
-/// origin scope; future fields (parent id, session binding) land in F-134.
-#[derive(Debug, Clone)]
+/// Context passed to [`Orchestrator::spawn`].
+///
+/// `scope` selects the origin-based policy the orchestrator applies (User-scope
+/// rejects `Isolation::Trusted`). `initial_prompt` is the seed user message
+/// the spawner wants the child's first turn to receive; `Orchestrator::spawn`
+/// copies it onto the registered [`AgentInstance`] so the future step executor
+/// picks it up verbatim when constructing the child's first user turn (F-134
+/// follow-up wired here as the F-137 additional mandate).
+#[derive(Debug, Clone, Default)]
 pub struct SpawnContext {
     pub scope: AgentScope,
+    pub initial_prompt: Option<InitialPrompt>,
 }
 
 impl SpawnContext {
+    /// User-scope spawn with no seed prompt. Matches the pre-F-137 shape and
+    /// keeps existing call sites (sub-agent test fixtures, `rerun_replace`)
+    /// compiling without edits.
     pub fn user() -> Self {
         Self {
             scope: AgentScope::User,
+            initial_prompt: None,
         }
     }
     pub fn built_in() -> Self {
         Self {
             scope: AgentScope::BuiltIn,
+            initial_prompt: None,
         }
+    }
+
+    /// Attach a seed prompt to the context so the spawner can forward the
+    /// parent-tool `prompt` arg (F-134 `agent.spawn`) or the user-supplied
+    /// first message (F-137 background agents) to the child's first turn.
+    pub fn with_prompt(mut self, prompt: InitialPrompt) -> Self {
+        self.initial_prompt = Some(prompt);
+        self
     }
 }
 
@@ -143,6 +175,11 @@ impl Orchestrator {
             def,
             state: InstanceState::Running,
             started_at: now,
+            // F-137 additional mandate: carry the seed prompt onto the
+            // registered instance so a later step-executor (or a test harness
+            // like F-137's integration test) can materialise it as the
+            // child's first user turn.
+            initial_prompt: ctx.initial_prompt.clone(),
         };
 
         self.registry

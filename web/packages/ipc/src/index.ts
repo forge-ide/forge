@@ -1,6 +1,8 @@
 export type { AgentId } from './generated/AgentId';
 export type { AgentInstanceId } from './generated/AgentInstanceId';
 export type { ApprovalConfig } from './generated/ApprovalConfig';
+export type { BgAgentStateDto } from './generated/BgAgentStateDto';
+export type { BgAgentSummary } from './generated/BgAgentSummary';
 export type { ApprovalEntry } from './generated/ApprovalEntry';
 export type { ApprovalLevel } from './generated/ApprovalLevel';
 export type { ApprovalScope } from './generated/ApprovalScope';

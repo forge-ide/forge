@@ -22,11 +22,18 @@ anyhow = "1"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
+forge-agents = { path = "../forge-agents" }
 forge-core = { path = "../forge-core" }
 forge-fs = { path = "../forge-fs" }
 forge-ipc = { path = "../forge-ipc" }
 forge-lsp = { path = "../forge-lsp" }
 forge-providers = { path = "../forge-providers" }
+# F-137: `forge-shell` hosts `BackgroundAgentRegistry` (a `forge-session`
+# library type) per-session so the three `start/promote/list_background_agent`
+# Tauri commands can drive background-agent lifecycle directly rather than
+# inventing a new request/response IPC. The bin-target (`forged`) in
+# `forge-session` is not pulled into the shell binary — only the library.
+forge-session = { path = "../forge-session" }
 forge-term = { path = "../forge-term" }
 # `rc`: `SessionEventPayload.event` embeds `forge_core::Event`, whose hot
 # variants carry `Arc<str>` fields (F-112). `rc` lets serde serialize those
@@ -39,7 +46,8 @@ tokio = { version = "1", features = ["fs", "net", "io-util", "sync", "time", "rt
 ts-rs = "12"
 
 [dev-dependencies]
-forge-session = { path = "../forge-session" }
+# `forge-session` moved to `[dependencies]` as part of F-137 so the shell can
+# own a `BackgroundAgentRegistry` per session.
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "time"] }
 wiremock = "0.6"

@@ -289,3 +289,74 @@ async fn spawn_context_scope_is_always_user_for_this_tool() {
          the privilege model and needs dedicated review"
     );
 }
+
+/// F-137 additional mandate: `agent.spawn`'s `prompt` argument must be
+/// forwarded from the parent's tool call onto the spawned child's
+/// `AgentInstance.initial_prompt`. Before F-137 the arg was validated but
+/// dropped (`let _prompt = …`), which turned F-134 into scaffolding-only
+/// plumbing. This test asserts the end-to-end wiring: dispatch →
+/// `SpawnContext.initial_prompt` → registered instance.
+#[tokio::test]
+async fn agent_spawn_forwards_prompt_onto_child_instance_for_first_turn_materialisation() {
+    let (_dir, session) = fresh_session().await;
+    let orchestrator = Arc::new(AgentOrchestrator::new());
+
+    let parent_inst = orchestrator
+        .spawn(
+            agent_def("parent", Isolation::Process),
+            SpawnContext::user(),
+        )
+        .await
+        .unwrap();
+
+    let agent_ctx = AgentSpawnCtx {
+        agent_defs: Arc::new(vec![agent_def("child", Isolation::Process)]),
+        orchestrator: Arc::clone(&orchestrator),
+        session,
+        parent_instance_id: parent_inst.id.clone(),
+        current_msg_id: MessageId::new(),
+    };
+    let ctx = ToolCtx {
+        allowed_paths: vec![],
+        workspace_root: None,
+        child_registry: None,
+        byte_budget: None,
+        agent_ctx: Some(agent_ctx),
+    };
+
+    let mut dispatcher = ToolDispatcher::new();
+    dispatcher.register(Box::new(AgentSpawnTool)).unwrap();
+
+    // A distinctive prompt so the `contains` assertion below is unambiguous
+    // even if some future seeding step concatenates this with a persona or
+    // other system text.
+    const PROMPT: &str = "review the bg_agents module for race conditions";
+
+    let result = dispatcher
+        .dispatch(
+            "agent.spawn",
+            &json!({ "agent_name": "child", "prompt": PROMPT }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result["ok"].as_bool(), Some(true), "dispatch: {result}");
+    let child_id =
+        AgentInstanceId::from_string(result["child_instance_id"].as_str().unwrap().to_string());
+
+    // The load-bearing assertion: the registered child instance carries the
+    // parent's seed prompt verbatim. A step executor materialising the
+    // child's first user turn reads from exactly this field — the DoD's
+    // "spawned child's first user turn contains the parent's prompt"
+    // phrasing is satisfied as soon as `initial_prompt.as_deref() ==
+    // Some(parent_prompt)` at the boundary where the turn is constructed.
+    let child_inst = orchestrator.get(&child_id).await.expect("child registered");
+    assert_eq!(
+        child_inst.initial_prompt.as_deref(),
+        Some(PROMPT),
+        "agent.spawn must forward its `prompt` argument onto the child's \
+         AgentInstance.initial_prompt — pre-F-137 the arg was dropped \
+         (`let _prompt = …`), which made F-134 scaffolding-only"
+    );
+}
