@@ -1,0 +1,156 @@
+/*
+ * F-136 SubAgentBanner — inline orchestrator-spawn banner rendered in the
+ * parent's ChatPane. Token palette per `docs/ui-specs/sub-agent-banner.md`
+ * §6 and reuses the `PaneHeader.css` ember accent + surface-1/surface-2
+ * token pair. No opacity on state changes (component-principles.md).
+ */
+
+.sub-agent-banner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border-1);
+  /* Spec: 2px left border in `--color-ember-400`. */
+  border-left: 2px solid var(--color-ember-400);
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-primary);
+}
+
+.sub-agent-banner__header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  cursor: pointer;
+  user-select: none;
+  /* Remove button default visuals while keeping keyboard activation. */
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  width: 100%;
+}
+
+.sub-agent-banner__header:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+.sub-agent-banner__glyph {
+  color: var(--color-ember-400);
+  flex: 0 0 auto;
+}
+
+.sub-agent-banner__label {
+  color: var(--color-text-primary);
+  flex: 0 0 auto;
+}
+
+.sub-agent-banner__name {
+  color: var(--color-text-primary);
+}
+
+.sub-agent-banner__timestamp {
+  color: var(--color-text-tertiary);
+  font-size: 10px;
+  margin-left: var(--sp-2);
+  flex: 0 0 auto;
+}
+
+.sub-agent-banner__state-chip {
+  margin-left: auto;
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--color-border-1);
+  background: var(--color-surface-3);
+  color: var(--color-text-secondary);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  flex: 0 0 auto;
+}
+
+/*
+ * State chip semantic palette — spec §6:
+ *   running → warn   done → ok   queued → text-secondary
+ *   error   → err    killed → text-tertiary
+ * No opacity changes; colors are tokenised.
+ */
+.sub-agent-banner__state-chip[data-state='running'] {
+  color: var(--color-warning);
+  border-color: var(--color-warning-border);
+}
+
+.sub-agent-banner__state-chip[data-state='done'] {
+  color: var(--color-ok, #33d17a);
+  border-color: var(--color-ok-border, rgba(51, 209, 122, 0.22));
+}
+
+.sub-agent-banner__state-chip[data-state='error'] {
+  color: var(--color-error);
+  border-color: var(--color-error-border);
+}
+
+.sub-agent-banner__state-chip[data-state='queued'] {
+  color: var(--color-text-secondary);
+}
+
+.sub-agent-banner__state-chip[data-state='killed'] {
+  color: var(--color-text-tertiary);
+}
+
+.sub-agent-banner__chevron {
+  color: var(--color-text-tertiary);
+  flex: 0 0 auto;
+  font-size: 10px;
+}
+
+.sub-agent-banner__summary {
+  color: var(--color-text-tertiary);
+  font-size: 10px;
+  padding-left: var(--sp-4);
+}
+
+.sub-agent-banner__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-left: var(--sp-4);
+  border-top: 1px solid var(--color-border-1);
+  padding-top: var(--sp-2);
+  margin-top: var(--sp-1);
+}
+
+.sub-agent-banner__empty {
+  margin: 0;
+  color: var(--color-text-tertiary);
+  font-size: 10px;
+}
+
+.sub-agent-banner__open-monitor {
+  align-self: flex-start;
+  padding: var(--sp-1) var(--sp-3);
+  background: transparent;
+  border: 1px solid var(--color-border-2);
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.sub-agent-banner__open-monitor:hover {
+  border-color: var(--color-ember-400);
+  color: var(--color-ember-400);
+}
+
+.sub-agent-banner__open-monitor:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
+}

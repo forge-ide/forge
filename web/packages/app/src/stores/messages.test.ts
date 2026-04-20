@@ -345,4 +345,64 @@ describe('messages store', () => {
       expect(getMessagesState(SID).turns[0]!.type).toBe('user');
     });
   });
+
+  // F-136: banner-turn lifecycle inside the store. ChatPane integration
+  // lives in ChatPane.test.tsx; these cases pin the pure reducer semantics.
+  describe('SubAgentSpawned + BackgroundAgentCompleted (F-136)', () => {
+    it('appends a sub_agent_banner turn in running state', () => {
+      pushEvent(SID, {
+        kind: 'SubAgentSpawned',
+        parent_instance_id: 'p-1',
+        child_instance_id: 'c-1',
+        from_msg: 'm-1',
+        agent_name: 'writer',
+      });
+      const state = getMessagesState(SID);
+      expect(state.turns).toHaveLength(1);
+      const turn = state.turns[0]!;
+      if (turn.type !== 'sub_agent_banner') {
+        throw new Error(`expected sub_agent_banner turn, got ${turn.type}`);
+      }
+      expect(turn.child_instance_id).toBe('c-1');
+      expect(turn.parent_instance_id).toBe('p-1');
+      expect(turn.agent_name).toBe('writer');
+      expect(turn.status).toBe('running');
+      expect(typeof turn.started_at).toBe('number');
+    });
+
+    it('does not stack duplicate banners when the same SubAgentSpawned arrives twice', () => {
+      pushEvent(SID, {
+        kind: 'SubAgentSpawned',
+        parent_instance_id: 'p',
+        child_instance_id: 'c-dup',
+        from_msg: 'm',
+      });
+      pushEvent(SID, {
+        kind: 'SubAgentSpawned',
+        parent_instance_id: 'p',
+        child_instance_id: 'c-dup',
+        from_msg: 'm',
+      });
+      const state = getMessagesState(SID);
+      expect(state.turns).toHaveLength(1);
+    });
+
+    it('flips the matching banner to done on BackgroundAgentCompleted', () => {
+      pushEvent(SID, {
+        kind: 'SubAgentSpawned',
+        parent_instance_id: 'p',
+        child_instance_id: 'c-term',
+        from_msg: 'm',
+      });
+      pushEvent(SID, { kind: 'BackgroundAgentCompleted', instance_id: 'c-term' });
+      const turn = getMessagesState(SID).turns[0]!;
+      if (turn.type !== 'sub_agent_banner') throw new Error('expected banner');
+      expect(turn.status).toBe('done');
+    });
+
+    it('BackgroundAgentCompleted for an unknown instance id is a no-op', () => {
+      pushEvent(SID, { kind: 'BackgroundAgentCompleted', instance_id: 'nobody' });
+      expect(getMessagesState(SID).turns).toHaveLength(0);
+    });
+  });
 });

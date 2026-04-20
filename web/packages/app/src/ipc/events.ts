@@ -154,6 +154,50 @@ export function fromRustEvent(rustEvent: unknown): SessionEvent | null {
     return { kind: 'AssistantDelta', message_id: id, delta };
   }
 
+  // F-136: sub-agent spawn — the orchestrator emitted `SubAgentSpawned`
+  // from the session's event log. Carries parent/child `AgentInstanceId`s
+  // and the originating `MessageId`. Optional `agent_name` is accepted if
+  // present so a future shell-side enrichment can surface it without
+  // another round-trip; absent today.
+  if (type === 'sub_agent_spawned') {
+    const parent = ev['parent'];
+    const child = ev['child'];
+    const fromMsg = ev['from_msg'];
+    if (!isString(parent)) {
+      warnDrop('sub_agent_spawned', 'parent missing or not a string');
+      return null;
+    }
+    if (!isString(child)) {
+      warnDrop('sub_agent_spawned', 'child missing or not a string');
+      return null;
+    }
+    if (!isString(fromMsg)) {
+      warnDrop('sub_agent_spawned', 'from_msg missing or not a string');
+      return null;
+    }
+    const agentName = ev['agent_name'];
+    const out: SessionEvent = {
+      kind: 'SubAgentSpawned',
+      parent_instance_id: parent,
+      child_instance_id: child,
+      from_msg: fromMsg,
+    };
+    if (isString(agentName)) out.agent_name = agentName;
+    return out;
+  }
+
+  // F-136: sub-agent terminal — `BackgroundAgentRegistry` (F-137) forwards
+  // this onto the session bus when the child's orchestrator lifecycle hits
+  // `Completed` or `Failed`. Flips the matching banner to `done`.
+  if (type === 'background_agent_completed') {
+    const id = ev['id'];
+    if (!isString(id)) {
+      warnDrop('background_agent_completed', 'id missing or not a string');
+      return null;
+    }
+    return { kind: 'BackgroundAgentCompleted', instance_id: id };
+  }
+
   if (type === 'assistant_message') {
     // The orchestrator emits AssistantMessage twice per turn:
     //   1. at stream-open: stream_finalised: false, text: ""

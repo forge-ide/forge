@@ -25,13 +25,36 @@ export type SessionEvent =
   | { kind: 'ToolCallFailed'; tool_call_id: string; error: string }
   | { kind: 'Error'; message: string }
   | { kind: 'StreamingStarted' }
-  | { kind: 'StreamingStopped' };
+  | { kind: 'StreamingStopped' }
+  // F-136: orchestrator spawned a sub-agent; ChatPane mounts a SubAgentBanner
+  // inline at the spawn position. `agent_name` is optional because the Rust
+  // `SubAgentSpawned` wire event carries only parent/child/from_msg. When the
+  // name is known (F-137 stores it on the orchestrator instance, but it does
+  // not ride the event today), the shell may enrich the payload; otherwise
+  // the banner falls back to `child` id as the label.
+  | {
+      kind: 'SubAgentSpawned';
+      parent_instance_id: string;
+      child_instance_id: string;
+      from_msg: string;
+      agent_name?: string;
+    }
+  // F-136: sub-agent background lifecycle reached a terminal state. Flips any
+  // banner whose child id matches from `running` → `done`. Emitted by
+  // `forge_session::BackgroundAgentRegistry` (F-137).
+  | {
+      kind: 'BackgroundAgentCompleted';
+      instance_id: string;
+    };
 
 // ---------------------------------------------------------------------------
 // Chat turn shapes (derived, used for rendering)
 // ---------------------------------------------------------------------------
 
 export type ToolCallStatus = 'in-progress' | 'awaiting-approval' | 'completed' | 'errored';
+
+/** F-136: sub-agent banner lifecycle state as rendered in the ChatPane. */
+export type SubAgentStatus = 'queued' | 'running' | 'done' | 'error' | 'killed';
 
 export type ChatTurn =
   | { type: 'user'; text: string; message_id: string }
@@ -49,6 +72,23 @@ export type ChatTurn =
       error?: string;
       /** Populated when status is 'awaiting-approval'. */
       preview?: ApprovalPreview;
+    }
+  | {
+      type: 'sub_agent_banner';
+      /** Child `AgentInstanceId` the banner tracks. */
+      child_instance_id: string;
+      /** Emitting parent agent instance id (often the session itself today). */
+      parent_instance_id: string;
+      /** Optional display name — falls back to the child id's short prefix. */
+      agent_name?: string;
+      /** Live state. Starts `running` on spawn; flips to `done` on terminal. */
+      status: SubAgentStatus;
+      /** ms epoch at which the banner was mounted (spawn event seen). */
+      started_at: number;
+      /** Last observed step summary. Populated by future step-routing work. */
+      last_step_summary?: string;
+      /** Count of steps seen so far — reserved for future step-routing work. */
+      step_count?: number;
     }
   | { type: 'error'; message: string };
 
@@ -250,6 +290,59 @@ export function pushEvent(sessionId: SessionId, event: SessionEvent): void {
           state.turns.push({ type: 'error', message: event.message });
           state.awaitingResponse = false;
           state.streamingMessageId = null;
+        }),
+      );
+      break;
+    }
+
+    // F-136: orchestrator spawn — mount a banner turn inline at the current
+    // position. Duplicates (same child_instance_id twice in a row) are
+    // ignored so a replay or event re-delivery doesn't stack multiple
+    // banners for one child.
+    case 'SubAgentSpawned': {
+      setMessagesStore(
+        produce((s) => {
+          const state = s[sessionId]!;
+          const existing = state.turns.find(
+            (t) =>
+              t.type === 'sub_agent_banner' &&
+              t.child_instance_id === event.child_instance_id,
+          );
+          if (existing) return;
+          const banner: Extract<ChatTurn, { type: 'sub_agent_banner' }> = {
+            type: 'sub_agent_banner',
+            child_instance_id: event.child_instance_id,
+            parent_instance_id: event.parent_instance_id,
+            status: 'running',
+            started_at: Date.now(),
+          };
+          if (event.agent_name !== undefined) {
+            banner.agent_name = event.agent_name;
+          }
+          state.turns.push(banner);
+        }),
+      );
+      break;
+    }
+
+    // F-136: child lifecycle terminal — flip matching banner to `done`.
+    // Unknown child_instance_id is a no-op (replay or out-of-order delivery).
+    case 'BackgroundAgentCompleted': {
+      setMessagesStore(
+        produce((s) => {
+          const state = s[sessionId]!;
+          const idx = state.turns.findIndex(
+            (t) =>
+              t.type === 'sub_agent_banner' &&
+              t.child_instance_id === event.instance_id,
+          );
+          if (idx >= 0) {
+            const turn = state.turns[idx] as Extract<
+              ChatTurn,
+              { type: 'sub_agent_banner' }
+            >;
+            turn.status = 'done';
+          }
         }),
       );
       break;
