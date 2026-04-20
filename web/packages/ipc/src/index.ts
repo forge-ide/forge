@@ -28,3 +28,18 @@ export type { ToolCallId } from './generated/ToolCallId';
 export type { TreeKindDto } from './generated/TreeKindDto';
 export type { TreeNodeDto } from './generated/TreeNodeDto';
 export type { WorkspaceId } from './generated/WorkspaceId';
+
+// F-142: context-adapter lives in the IPC package so both the app's send-time
+// wiring and any future shell-side compactor share a single serialization
+// contract for `ContextBlock[]`.
+export {
+  adaptContextBlocks,
+  providerFlavour,
+  toAnthropicXml,
+  toOpenAiFunctionContext,
+} from './context-adapter';
+export type {
+  ContextBlock,
+  ContextBlockType,
+  ProviderFlavour,
+} from './context-adapter';

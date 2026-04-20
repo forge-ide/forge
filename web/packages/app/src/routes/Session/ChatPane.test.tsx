@@ -809,6 +809,90 @@ describe('Composer @-trigger and ContextPicker integration (F-141)', () => {
     expect(queryByTestId('context-picker')).not.toBeInTheDocument();
     expect(queryByTestId('ctx-chip')).not.toBeInTheDocument();
   });
+
+  // F-142 DoD item 4: ChatPane wires the resolver registry + provider adapter
+  // into the send path — a file chip emits a prepended `<context ...>` block
+  // above the user text on the IPC call. Injects a stub registry so the test
+  // doesn't need a running Rust backend.
+  it('F-142 integration: chip at send time prepends an Anthropic-shaped block to text', async () => {
+    const stubRegistry = {
+      file: {
+        list: async () => [
+          { category: 'file' as const, label: 'app.ts', value: '/ws/app.ts' },
+        ],
+        resolve: async () => ({
+          type: 'file' as const,
+          path: '/ws/app.ts',
+          content: 'body-of-app',
+        }),
+      },
+    };
+    const { getByTestId } = render(() => (
+      <ChatPane registry={stubRegistry} providerId={'anthropic'} />
+    ));
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+    // Open the picker, pick the only file candidate, type a message, send.
+    textarea.value = '@app';
+    textarea.selectionStart = 4;
+    textarea.selectionEnd = 4;
+    fireEvent.input(textarea);
+    // `list(query)` runs async; wait a tick for the picker items to populate.
+    await new Promise((r) => setTimeout(r, 0));
+    fireEvent.mouseDown(getByTestId('context-picker-result-0'));
+    fireEvent.input(textarea, { target: { value: 'explain' } });
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    // resolveChips is async — wait a microtask for the prefix path.
+    await new Promise((r) => setTimeout(r, 0));
+    const call = invokeMock.mock.calls.find(
+      (c) => c[0] === 'session_send_message',
+    );
+    expect(call).toBeDefined();
+    const sentText = (call![1] as { text: string }).text;
+    expect(sentText).toContain('<context type="file" path="/ws/app.ts">');
+    expect(sentText).toContain('body-of-app');
+    expect(sentText).toContain('explain');
+    // The user text follows the context block, separated by a blank line.
+    expect(sentText.trim().endsWith('explain')).toBe(true);
+  });
+
+  // F-142 DoD item 2: send flow routes chips through the resolver registry
+  // and prepends a provider-shaped block to the user text. Uses a Composer
+  // directly with a stub `onSend` so the assertion stays scoped to the
+  // composer's chip-forwarding contract.
+  it('F-142: onSend receives the currently-attached chips and clears them', () => {
+    const items = {
+      file: [
+        { category: 'file' as const, label: 'app.ts', value: '/ws/app.ts' },
+      ],
+    };
+    const onSend = vi.fn();
+    const { getByTestId, queryByTestId } = render(() => (
+      <Composer disabled={false} onSend={onSend} items={items} />
+    ));
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+    textarea.value = '@app';
+    textarea.selectionStart = 4;
+    textarea.selectionEnd = 4;
+    fireEvent.input(textarea);
+    fireEvent.mouseDown(getByTestId('context-picker-result-0'));
+    // One chip is now attached.
+    expect(getByTestId('ctx-chip')).toHaveTextContent('app.ts');
+    // Type a message and send with Enter.
+    fireEvent.input(textarea, { target: { value: 'please review' } });
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    expect(onSend).toHaveBeenCalledWith(
+      'please review',
+      expect.arrayContaining([
+        expect.objectContaining({
+          category: 'file',
+          label: 'app.ts',
+          value: '/ws/app.ts',
+        }),
+      ]),
+    );
+    // Chips are consumed on send.
+    expect(queryByTestId('ctx-chip')).not.toBeInTheDocument();
+  });
 });
 
 describe('args_json boundary contract (F-080)', () => {
