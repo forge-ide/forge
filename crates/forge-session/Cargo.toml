@@ -88,3 +88,7 @@ path = "tests/session_error.rs"
 [[test]]
 name = "rerun_replace"
 path = "tests/rerun_replace.rs"
+
+[[test]]
+name = "agent_spawn"
+path = "tests/agent_spawn.rs"

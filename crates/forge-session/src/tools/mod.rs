@@ -2,15 +2,20 @@
 
 use crate::byte_budget::ByteBudget;
 use crate::sandbox::ChildRegistry;
-use forge_core::ApprovalPreview;
+use crate::session::Session;
+use forge_agents::{AgentDef, Orchestrator as AgentOrchestrator};
+use forge_core::ids::AgentInstanceId;
+use forge_core::{ApprovalPreview, MessageId};
 use std::sync::Arc;
 
+pub mod agent_spawn;
 pub mod args;
 pub mod fs_edit;
 pub mod fs_read;
 pub mod fs_write;
 pub mod shell_exec;
 
+pub use agent_spawn::AgentSpawnTool;
 pub use args::{get_optional_str, get_optional_u64, get_required_str};
 pub use fs_edit::FsEditTool;
 pub use fs_read::FsReadTool;
@@ -31,6 +36,36 @@ pub struct ToolCtx {
     /// occupies. `None` means no aggregate enforcement — preserves the
     /// pre-F-077 behaviour for tests and any embedding that opts out.
     pub byte_budget: Option<Arc<ByteBudget>>,
+    /// F-134: per-turn agent runtime plumbing for the `agent.spawn` tool.
+    pub agent_ctx: Option<AgentSpawnCtx>,
+}
+
+/// F-134: context threaded to the `agent.spawn` tool so it can resolve a
+/// child `AgentDef` by name, call `Orchestrator::spawn(child_def, ctx)` with
+/// the child's own isolation, and emit `Event::SubAgentSpawned` against the
+/// session event log.
+///
+/// Every field is required for the tool to succeed; the outer
+/// `ToolCtx.agent_ctx: Option<_>` lets embedders (tests, `rerun_replace`)
+/// omit the plumbing entirely — the tool then returns a typed "not
+/// configured" error rather than panicking.
+#[derive(Clone)]
+pub struct AgentSpawnCtx {
+    /// The agent definitions the tool can resolve `agent_name` against.
+    /// Loaded once per turn via `forge_agents::load_agents`.
+    pub agent_defs: Arc<Vec<AgentDef>>,
+    /// Runtime orchestrator that actually registers the child instance
+    /// and emits lifecycle events. Shared across the turn so F-140's
+    /// monitor can subscribe once and see every spawn.
+    pub orchestrator: Arc<AgentOrchestrator>,
+    /// Session whose event log the tool writes `SubAgentSpawned` into.
+    pub session: Arc<Session>,
+    /// Parent agent instance id — the "parent" field in the emitted event.
+    pub parent_instance_id: AgentInstanceId,
+    /// The `msg_id` of the assistant turn that issued the tool call —
+    /// the `from_msg` field in the emitted event (matches the existing
+    /// `forge_core::Event::SubAgentSpawned` wire shape).
+    pub current_msg_id: MessageId,
 }
 
 /// Tool handler. `invoke` is `async` so filesystem / blocking work can be
@@ -360,6 +395,7 @@ mod tests {
             workspace_root: Some(dir.path().to_path_buf()),
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
             byte_budget: None,
+            agent_ctx: None,
         };
         let result = d.dispatch("shell.exec", &json!({}), &ctx).await.unwrap();
         assert_eq!(
@@ -384,6 +420,7 @@ mod tests {
             workspace_root: Some(dir.path().to_path_buf()),
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
             byte_budget: None,
+            agent_ctx: None,
         };
         let result = d
             .dispatch("shell.exec", &json!({ "command": "" }), &ctx)
@@ -504,6 +541,7 @@ mod tests {
             workspace_root: Some(dir.path().to_path_buf()),
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
             byte_budget: None,
+            agent_ctx: None,
         };
         let result = d
             .dispatch(
@@ -538,6 +576,7 @@ mod tests {
             workspace_root: Some(dir.path().to_path_buf()),
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
             byte_budget: None,
+            agent_ctx: None,
         };
 
         let result = d
@@ -575,6 +614,7 @@ mod tests {
             workspace_root: Some(dir.path().to_path_buf()),
             child_registry: Some(registry.clone()),
             byte_budget: None,
+            agent_ctx: None,
         };
 
         // Background a long sleep, write its pid, detach its stdio from
@@ -688,6 +728,7 @@ mod tests {
             workspace_root: Some(dir.path().to_path_buf()),
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
             byte_budget: None,
+            agent_ctx: None,
         };
         let result = d
             .dispatch(
@@ -728,6 +769,7 @@ mod tests {
             workspace_root: Some(dir.path().to_path_buf()),
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
             byte_budget: None,
+            agent_ctx: None,
         };
         let result = d
             .dispatch(
@@ -764,6 +806,7 @@ mod tests {
             workspace_root: Some(dir.path().to_path_buf()),
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
             byte_budget: None,
+            agent_ctx: None,
         };
         let result = d
             .dispatch(
@@ -807,6 +850,7 @@ mod tests {
             workspace_root: Some(dir.path().to_path_buf()),
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
             byte_budget: None,
+            agent_ctx: None,
         };
 
         let started = std::time::Instant::now();
@@ -844,6 +888,7 @@ mod tests {
             workspace_root: Some(dir.path().to_path_buf()),
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
             byte_budget: None,
+            agent_ctx: None,
         };
         let result = d
             .dispatch(

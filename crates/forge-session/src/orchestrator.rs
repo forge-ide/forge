@@ -17,7 +17,8 @@ use crate::byte_budget::ByteBudget;
 use crate::sandbox::ChildRegistry;
 use crate::session::Session;
 use crate::tools::{
-    FsEditTool, FsReadTool, FsWriteTool, ShellExecTool, ToolCtx, ToolDispatcher, ToolError,
+    AgentSpawnTool, FsEditTool, FsReadTool, FsWriteTool, ShellExecTool, ToolCtx, ToolDispatcher,
+    ToolError,
 };
 
 /// Client decision for a pending tool call approval. Carries the
@@ -104,11 +105,20 @@ pub async fn run_turn<P: Provider>(
     dispatcher
         .register(Box::new(ShellExecTool))
         .expect("shell.exec must register on a fresh dispatcher");
+    // F-134: `agent.spawn` is registered on every `run_turn` dispatcher
+    // so a provider can discover and invoke it. `agent_ctx` below is
+    // `None` by default — the tool returns a typed "agent runtime not
+    // configured" error until the session-level plumbing (F-140
+    // AgentMonitor, parent instance wiring) lands.
+    dispatcher
+        .register(Box::new(AgentSpawnTool))
+        .expect("agent.spawn must register on a fresh dispatcher");
     let ctx = ToolCtx {
         allowed_paths,
         workspace_root,
         child_registry,
         byte_budget,
+        agent_ctx: None,
     };
 
     run_request_loop(
@@ -499,11 +509,20 @@ impl Orchestrator {
         dispatcher
             .register(Box::new(crate::tools::ShellExecTool))
             .expect("shell.exec must register on a fresh dispatcher");
+        // F-134: register `agent.spawn` on the rerun dispatcher too —
+        // rerun regenerates a provider turn that may emit `agent.spawn`
+        // calls. The `agent_ctx` is deliberately `None`: rerun replaces
+        // an assistant message; the existing sub-agents from the
+        // original turn remain registered with the orchestrator.
+        dispatcher
+            .register(Box::new(crate::tools::AgentSpawnTool))
+            .expect("agent.spawn must register on a fresh dispatcher");
         let ctx = crate::tools::ToolCtx {
             allowed_paths,
             workspace_root,
             child_registry,
             byte_budget,
+            agent_ctx: None,
         };
 
         let new_id = MessageId::new();
