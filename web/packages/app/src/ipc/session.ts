@@ -1,6 +1,7 @@
 import { invoke } from '../lib/tauri';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
+  AppSettings,
   ApprovalEntry,
   ApprovalLevel,
   ApprovalScope,
@@ -126,4 +127,42 @@ export async function onSessionEvent(
   return listen<SessionEventPayload>(SESSION_EVENT, (event) => {
     handler(event.payload);
   });
+}
+
+// ---------------------------------------------------------------------------
+// F-151: persistent settings commands
+// ---------------------------------------------------------------------------
+
+/** Tier a `set_setting` write targets. */
+export type SettingsLevel = 'user' | 'workspace';
+
+/**
+ * Load the merged user + workspace settings for the given workspace root.
+ * The shell deep-merges at TOML-tree granularity — a workspace file that
+ * declares only `[notifications]` does NOT overwrite the user's `[windows]`
+ * preferences. Missing files on either tier fall through to defaults.
+ */
+export async function getSettings(workspaceRoot: string): Promise<AppSettings> {
+  return invoke<AppSettings>('get_settings', { workspaceRoot });
+}
+
+/**
+ * Persist a single setting at the requested tier. `key` is a dotted path
+ * (e.g. `"notifications.bg_agents"`); `value` is the JSON-serializable scalar
+ * (or table) to land at that location. The shell validates the value by
+ * round-tripping the updated TOML tree through `AppSettings`, so bad types
+ * are rejected before anything lands on disk.
+ *
+ * Sibling fields already present in the file survive — the backend applies
+ * the update in-place on the raw TOML tree rather than serializing a full
+ * struct, which is the guarantee that lets the merge semantic (workspace
+ * overrides user on declared fields only) hold across repeated writes.
+ */
+export async function setSetting(
+  key: string,
+  value: unknown,
+  level: SettingsLevel,
+  workspaceRoot: string,
+): Promise<void> {
+  await invoke('set_setting', { key, value, level, workspaceRoot });
 }

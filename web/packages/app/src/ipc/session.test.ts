@@ -20,6 +20,8 @@ import {
   getPersistentApprovals,
   saveApproval,
   removeApproval,
+  getSettings,
+  setSetting,
 } from './session';
 
 describe('session ipc wrappers', () => {
@@ -271,5 +273,53 @@ describe('persistent approval ipc wrappers (F-036)', () => {
       level: 'workspace',
       workspaceRoot: '/repo',
     });
+  });
+});
+
+describe('settings ipc wrappers (F-151)', () => {
+  let invokeMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    invokeMock = vi.fn();
+    setInvokeForTesting(invokeMock as never);
+  });
+
+  afterEach(() => {
+    setInvokeForTesting(null);
+  });
+
+  it('getSettings invokes `get_settings` with workspaceRoot and returns the merged shape', async () => {
+    invokeMock.mockResolvedValue({
+      notifications: { bg_agents: 'os' },
+      windows: { session_mode: 'split' },
+    });
+
+    const settings = await getSettings('/ws');
+
+    expect(invokeMock).toHaveBeenCalledWith('get_settings', {
+      workspaceRoot: '/ws',
+    });
+    expect(settings.notifications.bg_agents).toBe('os');
+    expect(settings.windows.session_mode).toBe('split');
+  });
+
+  it('setSetting invokes `set_setting` with key, value, level, workspaceRoot', async () => {
+    invokeMock.mockResolvedValue(undefined);
+
+    await setSetting('notifications.bg_agents', 'os', 'user', '/ws');
+
+    expect(invokeMock).toHaveBeenCalledWith('set_setting', {
+      key: 'notifications.bg_agents',
+      value: 'os',
+      level: 'user',
+      workspaceRoot: '/ws',
+    });
+  });
+
+  it('setSetting surfaces an IPC rejection', async () => {
+    invokeMock.mockRejectedValue('invalid setting value: ...');
+    await expect(
+      setSetting('notifications.bg_agents', 42, 'workspace', '/ws'),
+    ).rejects.toBeDefined();
   });
 });
