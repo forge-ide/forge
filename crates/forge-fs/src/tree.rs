@@ -110,6 +110,152 @@ pub fn list_tree_with_limit(
     Ok(root_node)
 }
 
+/// F-126: `list_tree` variant that honors `.gitignore`, `.ignore`, global
+/// gitignore and parent `.gitignore` files via the `ignore` crate. Hidden
+/// files (`.git/`, dotfiles) are skipped — matching VS Code's files sidebar
+/// defaults. The non-ignored [`list_tree`] is retained for callers that want
+/// raw `read_dir` semantics (e.g. agent `fs.tree` tool calls that may need
+/// to show gitignored files for debugging).
+///
+/// The allowlist and entry-budget / depth-cap contracts are identical to
+/// [`list_tree`]. Symlinks are reported as leaves and never recursed into
+/// (the `ignore` crate has `follow_links(false)` by default, which we rely
+/// on for sandbox safety).
+pub fn list_tree_gitignored(
+    root: &str,
+    allowed_paths: &[String],
+    max_depth: u32,
+) -> Result<TreeNode, FsError> {
+    list_tree_gitignored_with_limit(root, allowed_paths, max_depth, DEFAULT_MAX_ENTRIES)
+}
+
+/// As [`list_tree_gitignored`] but with a caller-chosen entry cap.
+pub fn list_tree_gitignored_with_limit(
+    root: &str,
+    allowed_paths: &[String],
+    max_depth: u32,
+    max_entries: usize,
+) -> Result<TreeNode, FsError> {
+    let canonical = std::fs::canonicalize(root).map_err(|e| FsError::Io {
+        path: PathBuf::from(root),
+        source: e,
+    })?;
+    enforce_allowed(&canonical, allowed_paths)?;
+
+    let name = canonical
+        .file_name()
+        .map(|o| o.to_string_lossy().into_owned())
+        .unwrap_or_else(|| canonical.to_string_lossy().into_owned());
+
+    if !canonical.is_dir() {
+        return Ok(TreeNode {
+            name,
+            kind: classify(&canonical),
+            path: canonical,
+            children: None,
+        });
+    }
+
+    // Bridge `ignore::Walk`'s flat stream into our recursive `TreeNode` shape.
+    // We keep a per-directory bucket keyed by the canonical parent path so
+    // each entry slots into its parent's `children` vec as we see it. `Walk`
+    // yields parents before children when `max_depth` is set, so the first
+    // time a child lands its parent already exists in the map.
+    use std::collections::HashMap;
+
+    let mut builder = ignore::WalkBuilder::new(&canonical);
+    // max_depth on `ignore::WalkBuilder` counts from the root as depth 0
+    // (root itself), which matches `list_tree`'s contract.
+    builder
+        .max_depth(Some(max_depth as usize))
+        .follow_links(false)
+        .hidden(true)
+        .git_global(true)
+        .git_ignore(true)
+        .git_exclude(true)
+        .parents(true)
+        .require_git(false);
+
+    let mut buckets: HashMap<PathBuf, Vec<TreeNode>> = HashMap::new();
+    buckets.insert(canonical.clone(), Vec::new());
+    let mut seen_entries: usize = 0;
+
+    for entry in builder.build() {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let entry_path = entry.path().to_path_buf();
+        if entry_path == canonical {
+            continue;
+        }
+        if seen_entries >= max_entries {
+            break;
+        }
+        seen_entries += 1;
+
+        let file_type = entry.file_type();
+        let kind = match file_type {
+            Some(ft) if ft.is_symlink() => NodeKind::Symlink,
+            Some(ft) if ft.is_dir() => NodeKind::Dir,
+            Some(ft) if ft.is_file() => NodeKind::File,
+            _ => NodeKind::Other,
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let node = TreeNode {
+            name,
+            path: entry_path.clone(),
+            kind,
+            children: if matches!(kind, NodeKind::Dir) {
+                Some(Vec::new())
+            } else {
+                None
+            },
+        };
+        if matches!(kind, NodeKind::Dir) {
+            // `entry(_).or_insert_with(Vec::new)` is intentional over `.insert`:
+            // if the walker ever yields a child before its parent (parallel
+            // mode, future `ignore` changes, or edge cases with parent
+            // `.gitignore` traversal), the earlier children already live in
+            // `buckets[entry_path]`. A blind `.insert` would overwrite and
+            // silently lose them; the entry-API preserves them.
+            buckets.entry(entry_path.clone()).or_default();
+        }
+        let parent = entry_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| canonical.clone());
+        buckets.entry(parent).or_default().push(node);
+    }
+
+    // Second pass: hoist each directory's bucket into its own `children`
+    // vec. Walk depth-first from the root; sort children by lowercase name
+    // for stable output matching `walk_dir`.
+    fn assemble(
+        node: TreeNode,
+        buckets: &mut std::collections::HashMap<PathBuf, Vec<TreeNode>>,
+    ) -> TreeNode {
+        if !matches!(node.kind, NodeKind::Dir) {
+            return node;
+        }
+        let mut children = buckets.remove(&node.path).unwrap_or_default();
+        children.sort_by_key(|c| c.name.to_lowercase());
+        let assembled = children.into_iter().map(|c| assemble(c, buckets)).collect();
+        TreeNode {
+            children: Some(assembled),
+            ..node
+        }
+    }
+
+    let root_node = TreeNode {
+        name,
+        path: canonical.clone(),
+        kind: NodeKind::Dir,
+        children: Some(Vec::new()),
+    };
+    Ok(assemble(root_node, &mut buckets))
+}
+
 /// Walk a single directory, recursing into subdirectories while
 /// `remaining_depth > 0`. Budget is decremented per emitted node. Symlinks
 /// appear as leaves and are never recursed into.
@@ -274,5 +420,89 @@ mod tests {
         let err = list_tree(missing.to_str().unwrap(), &allow(tmp.path()), 4)
             .expect_err("missing path is an Io error");
         assert!(matches!(err, FsError::Io { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // F-126: gitignore-aware walker
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn gitignored_walker_excludes_ignored_paths() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join(".gitignore"),
+            "node_modules/\nbuild/\n*.log\n",
+        )
+        .unwrap();
+        fs::write(tmp.path().join("app.ts"), "").unwrap();
+        fs::write(tmp.path().join("keep.md"), "").unwrap();
+        fs::write(tmp.path().join("debug.log"), "").unwrap();
+        fs::create_dir(tmp.path().join("node_modules")).unwrap();
+        fs::write(tmp.path().join("node_modules/junk.js"), "").unwrap();
+        fs::create_dir(tmp.path().join("build")).unwrap();
+        fs::write(tmp.path().join("build/out.o"), "").unwrap();
+
+        let tree = list_tree_gitignored(tmp.path().to_str().unwrap(), &allow(tmp.path()), 4)
+            .expect("gitignored walk ok");
+        let children = tree.children.expect("root has children");
+        let names: Vec<_> = children.iter().map(|n| n.name.as_str()).collect();
+        // .gitignore itself is hidden (starts with dot) so it's excluded by
+        // the `hidden(true)` default, matching VS Code's default. `debug.log`
+        // and `node_modules` and `build` must all be excluded.
+        assert!(
+            names.contains(&"app.ts"),
+            "app.ts must be present: {names:?}"
+        );
+        assert!(
+            names.contains(&"keep.md"),
+            "keep.md must be present: {names:?}"
+        );
+        assert!(
+            !names.contains(&"debug.log"),
+            "*.log must be excluded: {names:?}"
+        );
+        assert!(
+            !names.contains(&"node_modules"),
+            "node_modules/ must be excluded: {names:?}"
+        );
+        assert!(
+            !names.contains(&"build"),
+            "build/ must be excluded: {names:?}"
+        );
+    }
+
+    #[test]
+    fn gitignored_walker_denies_paths_outside_allowlist() {
+        let tmp = TempDir::new().unwrap();
+        let other = TempDir::new().unwrap();
+        let err = list_tree_gitignored(other.path().to_str().unwrap(), &allow(tmp.path()), 4)
+            .expect_err("must deny out-of-allowlist root");
+        assert!(matches!(err, FsError::PathDenied { .. }));
+    }
+
+    #[test]
+    fn gitignored_walker_lists_nested_dirs() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join(".gitignore"), "ignored.txt\n").unwrap();
+        fs::create_dir(tmp.path().join("src")).unwrap();
+        fs::write(tmp.path().join("src/main.rs"), "").unwrap();
+        fs::write(tmp.path().join("ignored.txt"), "").unwrap();
+
+        let tree = list_tree_gitignored(tmp.path().to_str().unwrap(), &allow(tmp.path()), 4)
+            .expect("walk ok");
+        let children = tree.children.expect("has children");
+        let src = children
+            .iter()
+            .find(|n| n.name == "src")
+            .expect("src dir present");
+        assert_eq!(src.kind, NodeKind::Dir);
+        let src_children = src.children.as_ref().unwrap();
+        assert_eq!(src_children.len(), 1);
+        assert_eq!(src_children[0].name, "main.rs");
+        let names: Vec<_> = children.iter().map(|n| n.name.as_str()).collect();
+        assert!(
+            !names.contains(&"ignored.txt"),
+            "ignored.txt must be excluded: {names:?}"
+        );
     }
 }

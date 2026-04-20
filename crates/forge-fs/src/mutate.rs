@@ -165,6 +165,116 @@ pub fn write_bytes(
     Ok(())
 }
 
+/// F-126: atomically rename `from` to `to`, validating both paths against
+/// `allowed_paths`. Supports files and directories. Symlink rejection applies
+/// to both paths (via `canonicalize_no_symlink`) and the allowlist glob match
+/// is performed on both resolved canonical paths so a rename cannot relocate
+/// an entry outside the sandbox (or move an outside entry in).
+///
+/// `from` must exist; `to` must not exist, and its parent must be a directory
+/// — mirroring the same conservative policy as [`write()`]. Crossing
+/// filesystems is rejected with the platform's `std::fs::rename` error (we
+/// do not fall back to copy+delete — that would break atomicity and the
+/// approval audit trail).
+pub fn rename(
+    from: &str,
+    to: &str,
+    allowed_paths: &[String],
+    _limits: &Limits,
+) -> Result<(), FsError> {
+    let from_input = Path::new(from);
+    let to_input = Path::new(to);
+
+    // `from` must exist and canonicalize strictly — a rename of a
+    // not-yet-existing file is a bug at the caller, not a valid operation.
+    let canonical_from = canonicalize_no_symlink(from_input)?;
+    if !canonical_from.exists() {
+        return Err(FsError::TargetMissing {
+            path: canonical_from,
+        });
+    }
+    enforce_allowed(&canonical_from, allowed_paths)?;
+
+    // `to` uses the lenient canonicalizer (parent must exist, leaf may not).
+    let canonical_to = canonicalize_no_symlink(to_input)?;
+    enforce_allowed(&canonical_to, allowed_paths)?;
+
+    let parent = canonical_to
+        .parent()
+        .ok_or_else(|| FsError::ParentMissing {
+            path: canonical_to.clone(),
+        })?;
+    if !parent.is_dir() {
+        return Err(FsError::ParentMissing {
+            path: canonical_to.clone(),
+        });
+    }
+
+    // Refuse to clobber an existing destination. The UI-level rename action
+    // collects a fresh name up-front; if the user picks a colliding one the
+    // right behavior is to surface the error, not silently overwrite.
+    if canonical_to.exists() {
+        return Err(FsError::Io {
+            path: canonical_to.clone(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "rename destination already exists",
+            ),
+        });
+    }
+
+    std::fs::rename(&canonical_from, &canonical_to).map_err(|e| FsError::Io {
+        path: canonical_from,
+        source: e,
+    })
+}
+
+/// F-126: delete the entry at `path`. Files are removed via
+/// `std::fs::remove_file`; directories are removed recursively via
+/// `std::fs::remove_dir_all`. The FilesSidebar's context menu hits both, so
+/// branching on [`std::fs::FileType`] keeps the call site a single Tauri
+/// command.
+///
+/// Policy mirrors [`write()`]: `canonicalize_no_symlink` rejects any
+/// symlinked component along the path, and `enforce_allowed` glob-matches
+/// the canonical result against the caller's allowlist. `..` traversal is
+/// rejected by the canonicalization itself.
+///
+/// A compromised webview cannot delete outside its workspace, and a
+/// directory-delete cannot "escape" via a symlink inside the tree because
+/// `remove_dir_all` walks link targets by default — **BUT** we pre-reject
+/// symlinked path components so the walk begins inside the sandbox.
+pub fn delete(path: &str, allowed_paths: &[String], _limits: &Limits) -> Result<(), FsError> {
+    let input = Path::new(path);
+    let canonical = canonicalize_no_symlink(input)?;
+    enforce_allowed(&canonical, allowed_paths)?;
+
+    if !canonical.exists() {
+        return Err(FsError::TargetMissing { path: canonical });
+    }
+
+    let metadata = std::fs::symlink_metadata(&canonical).map_err(|e| FsError::Io {
+        path: canonical.clone(),
+        source: e,
+    })?;
+    if metadata.file_type().is_symlink() {
+        // Belt-and-braces: the canonicalize_no_symlink walk should have
+        // caught this, but leaf symlinks created via a race between check
+        // and delete are possible on slow filesystems. Refuse loudly.
+        return Err(FsError::SymlinkDenied { path: canonical });
+    }
+
+    let result = if metadata.is_dir() {
+        std::fs::remove_dir_all(&canonical)
+    } else {
+        std::fs::remove_file(&canonical)
+    };
+    result.map_err(|e| FsError::Io {
+        path: canonical,
+        source: e,
+    })
+}
+
 /// Apply a unified-diff `patch` to the file at `path` after validating the
 /// path. Rejects source files larger than `limits.max_read_bytes` before
 /// reading them into RAM, and delegates post-patch size enforcement to
@@ -438,5 +548,132 @@ mod tests {
     fn apply_unified_diff_rejects_non_patch_input() {
         let err = apply_unified_diff("a\n", "garbage\n").unwrap_err();
         assert!(matches!(err, FsError::MalformedPatch { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // F-126: rename / delete tests
+    // -----------------------------------------------------------------------
+
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn allow(root: &std::path::Path) -> Vec<String> {
+        let base = fs::canonicalize(root).unwrap();
+        vec![format!("{}/**", base.display()), base.display().to_string()]
+    }
+
+    #[test]
+    fn rename_moves_file_within_allowlist() {
+        let tmp = TempDir::new().unwrap();
+        let from = tmp.path().join("a.txt");
+        let to = tmp.path().join("b.txt");
+        fs::write(&from, "hi").unwrap();
+
+        rename(
+            from.to_str().unwrap(),
+            to.to_str().unwrap(),
+            &allow(tmp.path()),
+            &Limits::default(),
+        )
+        .expect("rename must succeed");
+        assert!(!from.exists());
+        assert_eq!(fs::read_to_string(&to).unwrap(), "hi");
+    }
+
+    #[test]
+    fn rename_rejects_destination_outside_allowlist() {
+        let workspace = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let from = workspace.path().join("a.txt");
+        fs::write(&from, "hi").unwrap();
+        let to = outside.path().join("exfil.txt");
+
+        let err = rename(
+            from.to_str().unwrap(),
+            to.to_str().unwrap(),
+            &allow(workspace.path()),
+            &Limits::default(),
+        )
+        .expect_err("rename outside allowlist must fail");
+        assert!(matches!(err, FsError::PathDenied { .. }));
+        assert!(from.exists(), "from must not have been moved");
+    }
+
+    #[test]
+    fn rename_refuses_to_clobber_existing() {
+        let tmp = TempDir::new().unwrap();
+        let from = tmp.path().join("a.txt");
+        let to = tmp.path().join("b.txt");
+        fs::write(&from, "one").unwrap();
+        fs::write(&to, "two").unwrap();
+
+        let err = rename(
+            from.to_str().unwrap(),
+            to.to_str().unwrap(),
+            &allow(tmp.path()),
+            &Limits::default(),
+        )
+        .expect_err("rename over existing must fail");
+        assert!(matches!(err, FsError::Io { .. }));
+        assert_eq!(fs::read_to_string(&to).unwrap(), "two");
+    }
+
+    #[test]
+    fn delete_removes_file_within_allowlist() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("a.txt");
+        fs::write(&target, "hi").unwrap();
+        delete(
+            target.to_str().unwrap(),
+            &allow(tmp.path()),
+            &Limits::default(),
+        )
+        .expect("delete must succeed");
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn delete_removes_directory_recursively() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("sub");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("inner.txt"), "x").unwrap();
+        delete(
+            dir.to_str().unwrap(),
+            &allow(tmp.path()),
+            &Limits::default(),
+        )
+        .expect("recursive delete must succeed");
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn delete_rejects_path_outside_allowlist() {
+        let workspace = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let victim = outside.path().join("keep.txt");
+        fs::write(&victim, "important").unwrap();
+
+        let err = delete(
+            victim.to_str().unwrap(),
+            &allow(workspace.path()),
+            &Limits::default(),
+        )
+        .expect_err("delete outside allowlist must fail");
+        assert!(matches!(err, FsError::PathDenied { .. }));
+        assert!(victim.exists(), "victim must not be deleted");
+    }
+
+    #[test]
+    fn delete_missing_target_returns_target_missing() {
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("ghost.txt");
+        let err = delete(
+            missing.to_str().unwrap(),
+            &allow(tmp.path()),
+            &Limits::default(),
+        )
+        .expect_err("missing target must error");
+        assert!(matches!(err, FsError::TargetMissing { .. }));
     }
 }

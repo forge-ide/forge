@@ -213,4 +213,74 @@ describe('layoutStore', () => {
     // Other layouts untouched.
     expect(Object.keys(writes[0]?.named ?? {})).toEqual(['default']);
   });
+
+  // F-126: openFile + activeEditorFile cover the FilesSidebar -> EditorPane
+  // routing. The reducer writes `pane_state[EDITOR_LEAF_ID].active_file`
+  // on the active layout; the getter reads the same slot.
+  it('openFile sets active_file on the active layout and exposes it via activeEditorFile', async () => {
+    const { scheduler, tick } = makeFakeScheduler();
+    const store = createLayoutStore(WORKSPACE, { read, write, scheduler });
+    await store.load();
+    expect(store.activeEditorFile()).toBeNull();
+
+    store.openFile('/ws/src/main.ts');
+    expect(store.activeEditorFile()).toBe('/ws/src/main.ts');
+
+    tick(DEFAULT_DEBOUNCE_MS);
+    await store.flush();
+    expect(writes[0]?.named.default?.pane_state.editor?.active_file).toBe(
+      '/ws/src/main.ts',
+    );
+  });
+
+  it('openFile updates the existing editor slot when called with a new path', async () => {
+    const { scheduler, tick } = makeFakeScheduler();
+    const store = createLayoutStore(WORKSPACE, { read, write, scheduler });
+    await store.load();
+
+    store.openFile('/ws/first.ts');
+    store.openFile('/ws/second.ts');
+    expect(store.activeEditorFile()).toBe('/ws/second.ts');
+
+    tick(DEFAULT_DEBOUNCE_MS);
+    await store.flush();
+    // Only one write because both mutations land inside the debounce window.
+    expect(writes).toHaveLength(1);
+    expect(writes[0]?.named.default?.pane_state.editor?.active_file).toBe(
+      '/ws/second.ts',
+    );
+  });
+
+  it('openFile(null) clears the active editor file', async () => {
+    const { scheduler, tick } = makeFakeScheduler();
+    const store = createLayoutStore(WORKSPACE, { read, write, scheduler });
+    await store.load();
+
+    store.openFile('/ws/a.ts');
+    store.openFile(null);
+    expect(store.activeEditorFile()).toBeNull();
+
+    tick(DEFAULT_DEBOUNCE_MS);
+    await store.flush();
+    expect(
+      writes[writes.length - 1]?.named.default?.pane_state.editor?.active_file,
+    ).toBeNull();
+  });
+
+  it('openFile is idempotent on identical path (no extra write scheduled)', async () => {
+    const { scheduler, tick } = makeFakeScheduler();
+    const store = createLayoutStore(WORKSPACE, { read, write, scheduler });
+    await store.load();
+
+    store.openFile('/ws/x.ts');
+    tick(DEFAULT_DEBOUNCE_MS);
+    await store.flush();
+    expect(writes).toHaveLength(1);
+
+    // Second call with the same path: no state change, no scheduled write.
+    store.openFile('/ws/x.ts');
+    tick(DEFAULT_DEBOUNCE_MS);
+    await store.flush();
+    expect(writes).toHaveLength(1);
+  });
 });

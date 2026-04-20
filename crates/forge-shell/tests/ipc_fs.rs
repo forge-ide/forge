@@ -465,3 +465,226 @@ async fn tree_rejects_mismatched_session_label() {
         "cross-session invoke must be rejected, got: {err}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tree_excludes_gitignored_entries() {
+    let workspace = TempDir::new().unwrap();
+    let canonical_ws = fs::canonicalize(workspace.path()).unwrap();
+    fs::write(canonical_ws.join(".gitignore"), "node_modules/\n*.log\n").unwrap();
+    fs::write(canonical_ws.join("app.ts"), "").unwrap();
+    fs::write(canonical_ws.join("err.log"), "leak").unwrap();
+    fs::create_dir(canonical_ws.join("node_modules")).unwrap();
+    fs::write(canonical_ws.join("node_modules/pkg.js"), "").unwrap();
+
+    let (app, _conn) = make_app_with_workspace(workspace.path(), TEST_SESSION).await;
+    let window = make_session_window(&app, TEST_SESSION);
+
+    let result = invoke_ok(
+        &window,
+        "tree",
+        serde_json::json!({
+            "sessionId": TEST_SESSION,
+            "root": canonical_ws,
+            "depth": 4,
+        }),
+    );
+    let children = result["children"].as_array().expect("children array");
+    let names: Vec<&str> = children
+        .iter()
+        .map(|n| n["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"app.ts"), "app.ts must remain: {names:?}");
+    assert!(
+        !names.contains(&"err.log"),
+        "*.log must be excluded from sidebar tree: {names:?}"
+    );
+    assert!(
+        !names.contains(&"node_modules"),
+        "node_modules/ must be excluded: {names:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// rename_path (F-126)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rename_path_moves_file_within_workspace() {
+    let workspace = TempDir::new().unwrap();
+    let canonical_ws = fs::canonicalize(workspace.path()).unwrap();
+    let from = canonical_ws.join("old.txt");
+    let to = canonical_ws.join("new.txt");
+    fs::write(&from, "contents").unwrap();
+
+    let (app, _conn) = make_app_with_workspace(workspace.path(), TEST_SESSION).await;
+    let window = make_session_window(&app, TEST_SESSION);
+
+    invoke_ok(
+        &window,
+        "rename_path",
+        serde_json::json!({
+            "sessionId": TEST_SESSION,
+            "from": from,
+            "to": to,
+        }),
+    );
+    assert!(!from.exists());
+    assert_eq!(fs::read_to_string(&to).unwrap(), "contents");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rename_path_rejects_destination_outside_workspace() {
+    let workspace = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let canonical_ws = fs::canonicalize(workspace.path()).unwrap();
+    let canonical_outside = fs::canonicalize(outside.path()).unwrap();
+    let from = canonical_ws.join("inside.txt");
+    let to = canonical_outside.join("escape.txt");
+    fs::write(&from, "x").unwrap();
+
+    let (app, _conn) = make_app_with_workspace(workspace.path(), TEST_SESSION).await;
+    let window = make_session_window(&app, TEST_SESSION);
+
+    let err = invoke_err(
+        &window,
+        "rename_path",
+        serde_json::json!({
+            "sessionId": TEST_SESSION,
+            "from": from,
+            "to": to,
+        }),
+    );
+    assert!(
+        err.contains("not allowed") || err.contains("PathDenied"),
+        "must reject out-of-workspace destination: {err}"
+    );
+    assert!(from.exists(), "source must remain when rename denied");
+    assert!(!to.exists(), "destination must not be created on denial");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rename_path_rejects_dashboard_window() {
+    let workspace = TempDir::new().unwrap();
+    let canonical_ws = fs::canonicalize(workspace.path()).unwrap();
+    let from = canonical_ws.join("a.txt");
+    let to = canonical_ws.join("b.txt");
+    fs::write(&from, "x").unwrap();
+
+    let (app, _conn) = make_app_with_workspace(workspace.path(), TEST_SESSION).await;
+    let window = make_dashboard_window(&app);
+
+    let err = invoke_err(
+        &window,
+        "rename_path",
+        serde_json::json!({
+            "sessionId": TEST_SESSION,
+            "from": from,
+            "to": to,
+        }),
+    );
+    assert!(
+        err.contains(LABEL_MISMATCH),
+        "dashboard must not invoke rename_path: {err}"
+    );
+    assert!(from.exists(), "source must remain");
+}
+
+// ---------------------------------------------------------------------------
+// delete_path (F-126)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_path_removes_file_inside_workspace() {
+    let workspace = TempDir::new().unwrap();
+    let canonical_ws = fs::canonicalize(workspace.path()).unwrap();
+    let target = canonical_ws.join("doomed.txt");
+    fs::write(&target, "x").unwrap();
+
+    let (app, _conn) = make_app_with_workspace(workspace.path(), TEST_SESSION).await;
+    let window = make_session_window(&app, TEST_SESSION);
+
+    invoke_ok(
+        &window,
+        "delete_path",
+        serde_json::json!({
+            "sessionId": TEST_SESSION,
+            "path": target,
+        }),
+    );
+    assert!(!target.exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_path_rejects_paths_outside_workspace() {
+    let workspace = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let canonical_outside = fs::canonicalize(outside.path()).unwrap();
+    let victim = canonical_outside.join("keep.txt");
+    fs::write(&victim, "important").unwrap();
+
+    let (app, _conn) = make_app_with_workspace(workspace.path(), TEST_SESSION).await;
+    let window = make_session_window(&app, TEST_SESSION);
+
+    let err = invoke_err(
+        &window,
+        "delete_path",
+        serde_json::json!({
+            "sessionId": TEST_SESSION,
+            "path": victim,
+        }),
+    );
+    assert!(
+        err.contains("not allowed") || err.contains("PathDenied"),
+        "must reject out-of-workspace path: {err}"
+    );
+    assert!(victim.exists(), "victim must remain when delete denied");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_path_rejects_dashboard_window() {
+    let workspace = TempDir::new().unwrap();
+    let canonical_ws = fs::canonicalize(workspace.path()).unwrap();
+    let target = canonical_ws.join("forbidden.txt");
+    fs::write(&target, "x").unwrap();
+
+    let (app, _conn) = make_app_with_workspace(workspace.path(), TEST_SESSION).await;
+    let window = make_dashboard_window(&app);
+
+    let err = invoke_err(
+        &window,
+        "delete_path",
+        serde_json::json!({
+            "sessionId": TEST_SESSION,
+            "path": target,
+        }),
+    );
+    assert!(
+        err.contains(LABEL_MISMATCH),
+        "dashboard must not invoke delete_path: {err}"
+    );
+    assert!(target.exists(), "target must remain");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_path_returns_not_connected_when_cache_is_empty() {
+    let tmp = TempDir::new().unwrap();
+    let file = tmp.path().join("hi.txt");
+    fs::write(&file, "hi").unwrap();
+
+    let app = make_app_empty_cache();
+    let window = make_session_window(&app, TEST_SESSION);
+
+    let err = invoke_err(
+        &window,
+        "delete_path",
+        serde_json::json!({
+            "sessionId": TEST_SESSION,
+            "path": file,
+        }),
+    );
+    assert!(
+        err.contains("not connected") && err.contains("session_hello"),
+        "expected 'not connected' error, got: {err}"
+    );
+    assert!(file.exists(), "file must remain on not-connected");
+}
