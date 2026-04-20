@@ -1,10 +1,15 @@
-//! MCP (Model Context Protocol) configuration parser.
+//! MCP (Model Context Protocol) client crate.
 //!
-//! This crate owns the universal `.mcp.json` schema — the `mcpServers` object
-//! keyed by name with `command` / `args` / `env` for stdio transports and
-//! `url` / `headers` for HTTP transports. Transports themselves (F-128, F-129)
-//! and the lifecycle manager (F-130) live in follow-up crates; this one just
-//! produces typed [`McpServerSpec`] values from config files.
+//! Owns the universal `.mcp.json` schema — the `mcpServers` object keyed by
+//! name with `command` / `args` / `env` for stdio transports and `url` /
+//! `headers` for HTTP transports — plus the transports themselves.
+//!
+//! - [`McpServerSpec`] / [`ServerKind`]: typed on-disk declarations (F-127).
+//! - [`config`]: workspace- and user-scope loaders (F-127).
+//! - [`transport`]: stdio (F-128) and, later, http (F-129) connections.
+//! - Lifecycle manager (F-130) builds on top.
+
+pub mod transport;
 
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
