@@ -141,19 +141,19 @@ pub mod config {
         read_config_file(&workspace_root.join(".mcp.json"))
     }
 
-    /// Load the user-scope `~/.config/forge/mcp.json`, resolving the base
-    /// directory via the same policy [`dirs::config_dir`] uses (XDG on Linux,
-    /// `Application Support` on macOS, `%APPDATA%` on Windows).
+    /// Load the user-scope `~/.mcp.json` per the architecture doc's universal
+    /// home-directory convention (matches Claude Desktop and the MCP universal
+    /// proposal). Missing file yields an empty map.
     pub fn load_user() -> Result<BTreeMap<String, McpServerSpec>> {
-        let base =
-            dirs::config_dir().ok_or_else(|| anyhow!("could not resolve user config directory"))?;
-        read_config_file(&base.join("forge").join("mcp.json"))
+        let home =
+            dirs::home_dir().ok_or_else(|| anyhow!("could not resolve user home directory"))?;
+        read_config_file(&home.join(".mcp.json"))
     }
 
-    /// Test seam: same as [`load_user`] but with an explicit config-base
-    /// directory (so tests can point at a tempdir).
-    pub fn load_user_from(config_dir: &Path) -> Result<BTreeMap<String, McpServerSpec>> {
-        read_config_file(&config_dir.join("forge").join("mcp.json"))
+    /// Test seam: same as [`load_user`] but with an explicit home directory
+    /// (so tests can point at a tempdir).
+    pub fn load_user_from(home_dir: &Path) -> Result<BTreeMap<String, McpServerSpec>> {
+        read_config_file(&home_dir.join(".mcp.json"))
     }
 
     /// Merge user- and workspace-scope servers, with workspace entries
@@ -329,7 +329,7 @@ mod tests {
         let user_cfg = TempDir::new().unwrap();
 
         write(
-            &user_cfg.path().join("forge").join("mcp.json"),
+            &user_cfg.path().join(".mcp.json"),
             r#"{
                 "mcpServers": {
                     "shared": { "command": "user-binary" },
