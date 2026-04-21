@@ -10,7 +10,19 @@
 //!   for the full scope story; the rlimit [`SandboxConfig::rlimit_nproc_backstop`]
 //!   remains as a uid-wide defense-in-depth backstop.
 //!
-//! Linux-only. macOS and Windows support is deferred beyond Phase 1.
+//! # Platform surface
+//!
+//! The **enforcement** primitives — `SandboxedCommand`, `SandboxedChild`,
+//! the cgroup v2 writes and `setrlimit` calls — live in the `imp`
+//! submodule and are `#[cfg(target_os = "linux")]`. macOS and Windows
+//! support for real sandboxing is deferred beyond Phase 1.
+//!
+//! The **bookkeeping** types — [`SandboxConfig`], [`ChildRegistry`],
+//! [`BASE_ENV_WHITELIST`] — compile on every platform so non-Linux
+//! callers (tools, server, orchestrator) can still plumb configuration
+//! through without platform branching. On non-Linux
+//! [`ChildRegistry::kill_all`] is a no-op that simply clears the
+//! registry; real process-group kill is a Linux-only concept.
 
 use std::sync::{Arc, Mutex};
 
