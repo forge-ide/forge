@@ -1,0 +1,122 @@
+/* F-138 status bar.
+ *
+ * Lives at the bottom of the Session window per docs/ui-specs/shell.md §2.
+ * Thin strip, neutral chrome; the `BgAgentsBadge` is the only interactive
+ * element today — room reserved for workspace/provider/cost pills in
+ * follow-ups.
+ */
+
+.status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--fg-space-2, 8px);
+  padding: 2px 8px;
+  min-height: 22px;
+  font-size: 12px;
+  background: var(--fg-surface-1, #1e1e1e);
+  border-top: 1px solid var(--fg-border-subtle, rgba(255, 255, 255, 0.06));
+  color: var(--fg-fg-muted, #cfcfcf);
+  position: relative;
+  flex-shrink: 0;
+}
+
+.status-bar__bg-badge {
+  all: unset;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  height: 18px;
+  border-radius: 10px;
+  background: var(--fg-accent-bg, rgba(255, 140, 0, 0.18));
+  color: var(--fg-accent-fg, #ff9a33);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.status-bar__bg-badge:hover {
+  background: var(--fg-accent-bg-strong, rgba(255, 140, 0, 0.32));
+}
+
+.status-bar__bg-badge:focus-visible {
+  outline: 2px solid var(--fg-focus, #4a9eff);
+  outline-offset: 2px;
+}
+
+.status-bar__bg-badge-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.status-bar__bg-badge-label {
+  text-transform: lowercase;
+  opacity: 0.9;
+}
+
+.status-bar__bg-popover {
+  position: absolute;
+  right: 8px;
+  bottom: calc(100% + 4px);
+  min-width: 280px;
+  padding: 4px;
+  background: var(--fg-surface-2, #262626);
+  border: 1px solid var(--fg-border, rgba(255, 255, 255, 0.12));
+  border-radius: 6px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+  z-index: 40;
+}
+
+.status-bar__bg-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.status-bar__bg-row:hover {
+  background: var(--fg-surface-3, rgba(255, 255, 255, 0.04));
+}
+
+.status-bar__bg-row-name {
+  flex: 1;
+  color: var(--fg-fg, #eaeaea);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-bar__bg-row-id {
+  font-family: var(--fg-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  color: var(--fg-fg-muted, #9a9a9a);
+}
+
+.status-bar__bg-row-action {
+  all: unset;
+  padding: 2px 8px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  background: var(--fg-button-bg, rgba(255, 255, 255, 0.06));
+  color: var(--fg-fg, #eaeaea);
+  transition: background 120ms ease;
+}
+
+.status-bar__bg-row-action:hover {
+  background: var(--fg-button-bg-strong, rgba(255, 255, 255, 0.12));
+}
+
+.status-bar__bg-row-action:focus-visible {
+  outline: 2px solid var(--fg-focus, #4a9eff);
+  outline-offset: 2px;
+}
+
+.status-bar__bg-row-action--stop {
+  color: var(--fg-danger-fg, #ff6b6b);
+}

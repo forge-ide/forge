@@ -412,6 +412,8 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         start_background_agent,
         promote_background_agent,
         list_background_agents,
+        // F-138: stop command completes the start/promote/list/stop quartet.
+        stop_background_agent,
         rename_path,
         delete_path,
         // F-151: persistent settings store.
@@ -2169,6 +2171,58 @@ pub async fn set_setting<R: Runtime>(
                 .map_err(|e| e.to_string())
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// F-138: stop_background_agent — terminal transition on an instance.
+//
+// Mirrors `promote_background_agent` for authz + size-gate, but drives
+// `Orchestrator::stop(id)` instead of the tracking-set flip. The registry's
+// forwarder (set up in `new_bg_session` / `BackgroundAgentRegistry::start`)
+// already observes the orchestrator's terminal event and re-emits it as
+// `Event::BackgroundAgentCompleted` on the per-session broadcast. The
+// session-scoped webview forwarder picks that up and emits
+// `session:event` with the `background_agent_completed` shape — the same
+// path F-137 pinned — so callers see Badge count flip and the configured
+// `notifications.bg_agents` mode fire without a second emit here.
+//
+// Appended at EOF per the concurrent-worktree convention used by F-137 /
+// F-144 / F-151.
+// ---------------------------------------------------------------------------
+
+/// Stop a running background agent.
+///
+/// Errors:
+/// - unauthorized window label → `forbidden: window label mismatch`
+/// - oversize `instance_id` → size-cap error
+/// - unknown instance id → `stop_background_agent: unknown instance`
+///
+/// Idempotence: calling `stop` twice against the same id returns
+/// `unknown instance` on the second call once the forwarder has dropped the
+/// row. A concurrent caller racing the forwarder may observe either the
+/// `unknown instance` error or the terminal state on `list`, both of which
+/// are acceptable terminal observations.
+#[tauri::command]
+pub async fn stop_background_agent<R: Runtime>(
+    session_id: String,
+    instance_id: String,
+    app: AppHandle<R>,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+    bg_state: State<'_, BgAgentState>,
+) -> Result<(), String> {
+    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_size("instance_id", &instance_id, MAX_AGENT_INSTANCE_ID_BYTES)?;
+
+    let entry = resolve_bg_session(&app, &state, &bg_state, &session_id).await?;
+    let id = forge_core::AgentInstanceId::from_string(instance_id);
+    entry
+        .registry
+        .orchestrator()
+        .stop(&id)
+        .await
+        .map_err(|e| format!("stop_background_agent: {e}"))?;
+    Ok(())
 }
 
 /// Convert a `serde_json::Value` into a `toml::Value`. Returns `None` for
