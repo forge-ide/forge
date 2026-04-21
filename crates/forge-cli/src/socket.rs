@@ -13,36 +13,25 @@ pub fn session_id_is_valid(s: &str) -> bool {
     s.len() == 16 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// Error message shared by all path resolvers when `XDG_RUNTIME_DIR` is
-/// unset. Keeping a single message means any caller that surfaces this error
-/// (CLI, shell, daemon startup) advertises the same fix to the operator.
-fn xdg_runtime_dir_missing() -> anyhow::Error {
-    anyhow::anyhow!(
-        "XDG_RUNTIME_DIR is unset: forge refuses to fall back to a \
-         shared /tmp directory because the socket there would be \
-         world-connectable. Set XDG_RUNTIME_DIR to a per-user 0o700 \
-         directory (systemd sets it to /run/user/<uid> automatically). \
-         (F-044 / H8)"
-    )
-}
-
-/// Read `XDG_RUNTIME_DIR` or error. We deliberately do not consult `$UID`
-/// (an unreliable shell-only variable that F-044 removed) nor fall back to
-/// `/tmp/forge-<uid>` — that fallback was the defect H8 closed.
+/// Resolve the per-user runtime directory, delegating to the shared helper
+/// so the CLI, daemon, and Tauri shell agree on the same policy.
+///
+/// We deliberately do not consult `$UID` (an unreliable shell-only variable
+/// that F-044 removed) nor fall back to `/tmp/forge-<uid>` — that fallback
+/// was the defect H8 closed. On macOS (F-339) the shared helper resolves
+/// `$HOME/Library/Application Support/Forge/run` at `0o700`, preserving the
+/// per-user invariant via a platform-native path rather than relaxing it.
 fn xdg_runtime_dir() -> anyhow::Result<PathBuf> {
-    std::env::var("XDG_RUNTIME_DIR")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .ok_or_else(xdg_runtime_dir_missing)
+    forge_core::runtime_dir::runtime_dir()
 }
 
 /// Resolve the Unix socket path for a session, using the same logic as `forged`.
 ///
-/// Returns an error when `XDG_RUNTIME_DIR` is unset. `forged` refuses to
-/// start without it (see `forge_session::socket_path::resolve_socket_path`),
-/// so any CLI resolution without the env var would be pointing at a socket
-/// that can't exist.
+/// Returns an error when no per-user runtime directory can be established
+/// (Linux without `XDG_RUNTIME_DIR`, or macOS with an unreadable `$HOME`).
+/// `forged` refuses to start in the same situations (see
+/// `forge_session::socket_path::resolve_socket_path`), so any CLI resolution
+/// here is pointing at the same socket the daemon would bind.
 pub fn socket_path(session_id: &str) -> anyhow::Result<PathBuf> {
     // Defense-in-depth for F-057 (T12a): the CLI's clap `value_parser`
     // already rejects malformed ids, but any future caller that constructs
@@ -421,11 +410,15 @@ mod tests {
         }
     }
 
-    /// F-044: cover both the success (XDG_RUNTIME_DIR set) and failure
-    /// (unset) branches of every path resolver in a single `#[test]` so
-    /// env-mutation can't race parallel readers in this binary.
+    /// F-044 + F-339: cover the happy path (XDG_RUNTIME_DIR set -> resolves
+    /// under that dir) on every platform, plus the Linux-only failure path
+    /// (XDG unset -> error, no `/tmp` fallback). The macOS F-339 fallback
+    /// has DI-based unit tests in `forge_core::runtime_dir`; we do not
+    /// mutate `$HOME` here to avoid dragging fragile env state into this
+    /// test binary. A single `#[test]` serializes all env mutation so
+    /// parallel tests in this binary can't race it.
     #[test]
-    fn path_resolvers_require_xdg_runtime_dir() {
+    fn path_resolvers_use_xdg_runtime_dir_when_set() {
         let prev_xdg = std::env::var("XDG_RUNTIME_DIR").ok();
         let prev_uid = std::env::var("UID").ok();
 
@@ -451,23 +444,30 @@ mod tests {
         let dir = sessions_socket_dir().expect("should resolve");
         assert_eq!(dir.to_string_lossy(), "/run/user/4242/forge/sessions");
 
-        // --- Failure path: XDG_RUNTIME_DIR unset, no /tmp fallback ---
-        unsafe {
-            std::env::remove_var("XDG_RUNTIME_DIR");
-            std::env::remove_var("UID");
+        // --- Linux failure path: XDG_RUNTIME_DIR unset, no /tmp fallback ---
+        // On macOS the F-339 fallback kicks in and resolves a per-user
+        // 0o700 directory under `$HOME/Library/...`, so the CLI must NOT
+        // error in that case. The shared `forge_core::runtime_dir` module
+        // covers the macOS branch with dedicated DI-based tests.
+        #[cfg(target_os = "linux")]
+        {
+            unsafe {
+                std::env::remove_var("XDG_RUNTIME_DIR");
+                std::env::remove_var("UID");
+            }
+            let err = socket_path("deadbeefcafebabe").expect_err("no xdg -> err");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("XDG_RUNTIME_DIR"),
+                "error must name XDG_RUNTIME_DIR, got: {msg}"
+            );
+            assert!(
+                !msg.contains("/tmp/forge-"),
+                "error must not advertise /tmp fallback, got: {msg}"
+            );
+            assert!(sessions_socket_dir().is_err());
+            assert!(pid_path("abc123def4560000").is_err());
         }
-        let err = socket_path("deadbeefcafebabe").expect_err("no xdg -> err");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("XDG_RUNTIME_DIR"),
-            "error must name XDG_RUNTIME_DIR, got: {msg}"
-        );
-        assert!(
-            !msg.contains("/tmp/forge-"),
-            "error must not advertise /tmp fallback, got: {msg}"
-        );
-        assert!(sessions_socket_dir().is_err());
-        assert!(pid_path("abc123def4560000").is_err());
 
         // Restore
         unsafe {

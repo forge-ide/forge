@@ -1,6 +1,6 @@
 # forge-session
 
-The session daemon — `forged` — and its supporting library. A long-running per-session process that owns the append-only event log, hosts the agent orchestrator and tool dispatcher, accepts client connections over a Unix domain socket under `$XDG_RUNTIME_DIR/forge/sessions/<id>.sock`, and on shutdown either archives or purges the session directory based on the `SessionPersistence` mode. The library half (`forge_session`) exposes the building blocks used by integration tests and the `forge` CLI; the binary half (`forged`) wires them together.
+The session daemon — `forged` — and its supporting library. A long-running per-session process that owns the append-only event log, hosts the agent orchestrator and tool dispatcher, accepts client connections over a Unix domain socket under the per-user runtime directory (`$XDG_RUNTIME_DIR/forge/sessions/<id>.sock` on Linux; `$HOME/Library/Application Support/Forge/run/forge/sessions/<id>.sock` on macOS when `XDG_RUNTIME_DIR` is unset — see `forge_core::runtime_dir`), and on shutdown either archives or purges the session directory based on the `SessionPersistence` mode. The library half (`forge_session`) exposes the building blocks used by integration tests and the `forge` CLI; the binary half (`forged`) wires them together.
 
 ## Role in the workspace
 
@@ -15,7 +15,7 @@ The session daemon — `forged` — and its supporting library. A long-running p
 - `orchestrator` — drives provider chat turns and dispatches tool calls.
 - `tools/` — built-in tool implementations (fs, shell, etc.) wired through `forge-fs` for write paths.
 - `archive::archive_or_purge` — end-of-life handling: rename into `.forge/sessions/archived/<id>/` or remove the session directory.
-- `socket_path` — resolves the session UDS path with the `XDG_RUNTIME_DIR` / `FORGE_SOCKET_PATH` policy.
+- `socket_path` — resolves the session UDS path via `forge_core::runtime_dir` (`XDG_RUNTIME_DIR` on Linux, or the macOS per-user `~/Library/Application Support/Forge/run` fallback at mode `0o700`) or the `FORGE_SOCKET_PATH` override.
 - `pid_file` — daemon liveness file with stale-pid detection. Cross-platform: the start-time token uses `/proc/self/stat` on Linux, `libproc`'s `BSDInfo` on macOS, and `GetProcessTimes` on Windows (see `starttime`).
 - `starttime` — platform-gated `read_self_starttime()` that produces the opaque `u64` token the pid-file embeds so `forge session kill` can detect pid reuse before signalling.
 - `sandbox` — `pre_exec` hooks that cap NPROC/NOFILE/FSIZE for spawned children.

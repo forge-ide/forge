@@ -162,26 +162,18 @@ impl SessionConnections {
 /// rules as `forge-session::socket_path::resolve_socket_path`. Exposed so
 /// the Tauri command layer and tests agree on the convention.
 ///
-/// Returns `Err` when `XDG_RUNTIME_DIR` is unset. F-044 (H8) closed the
-/// pre-existing `/tmp/forge-<uid>` fallback; `forged` itself refuses to
-/// start without `XDG_RUNTIME_DIR`, so a shell that silently resolved to
-/// `/tmp/...` would only ever hit `ENOENT`. Surfacing the missing env var
-/// here gives the operator a clearer error than "no such file".
+/// Returns `Err` when no per-user runtime directory can be established:
+///   - Linux without `XDG_RUNTIME_DIR`: errors (F-044 / H8 — no `/tmp`
+///     fallback, socket there would be world-connectable).
+///   - macOS without `XDG_RUNTIME_DIR`: falls back to
+///     `$HOME/Library/Application Support/Forge/run` at `0o700` (F-339).
+///     The per-user `0o700` invariant is preserved, just via a natively-
+///     appropriate path rather than relaxed into a shared directory.
+///
+/// Delegates the runtime-dir policy to [`forge_core::runtime_dir::runtime_dir`]
+/// so every callsite (daemon, CLI, shell) agrees on the same rules.
 pub fn default_socket_path(session_id: &str) -> Result<PathBuf> {
-    let base = std::env::var("XDG_RUNTIME_DIR")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .ok_or_else(|| {
-            anyhow!(
-                "XDG_RUNTIME_DIR is unset: forge-shell refuses to fall \
-                 back to /tmp because the socket there would be \
-                 world-connectable. Set XDG_RUNTIME_DIR to a per-user \
-                 0o700 directory (systemd sets /run/user/<uid> \
-                 automatically). (F-044 / H8)"
-            )
-        })?;
-    Ok(base
+    Ok(forge_core::runtime_dir::runtime_dir()?
         .join("forge/sessions")
         .join(format!("{session_id}.sock")))
 }
