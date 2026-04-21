@@ -25,6 +25,7 @@ import {
   onCleanup,
   onMount,
 } from 'solid-js';
+import { useNavigate } from '@solidjs/router';
 import type { BgAgentSummary, SessionId } from '@forge/ipc';
 import {
   isPermissionGranted as pluginIsPermissionGranted,
@@ -86,6 +87,15 @@ const defaultSubscribe: BgAgentsSubscribe = (handler) =>
 // Component
 // ---------------------------------------------------------------------------
 
+/**
+ * Router navigate seam. Matches `@solidjs/router`'s `useNavigate()` return
+ * shape closely enough for tests to pass a `vi.fn()` without importing the
+ * router's `Navigator` type. F-153 uses this so double-click / right-click
+ * handlers can navigate to `/agents/<sessionId>?instance=<id>` without the
+ * test harness needing to mount a full `<MemoryRouter>`.
+ */
+export type StatusBarNavigate = (to: string) => void;
+
 export interface StatusBarProps {
   sessionId: SessionId;
   /** Initial snapshot provider. Defaults to the real Tauri command. */
@@ -98,6 +108,12 @@ export interface StatusBarProps {
   subscribe?: BgAgentsSubscribe;
   /** Notification delivery adapter. */
   notificationAdapter?: NotificationAdapter;
+  /**
+   * Router navigate function. Defaults to `useNavigate()`; tests inject a
+   * spy so the badge / popover-row double-click + right-click nav can be
+   * asserted without a router harness.
+   */
+  navigate?: StatusBarNavigate;
 }
 
 interface BgEventStarted {
@@ -142,6 +158,31 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
     props.subscribe ?? defaultSubscribe;
   const notifier = (): NotificationAdapter =>
     props.notificationAdapter ?? defaultNotificationAdapter;
+
+  // F-153: default navigate comes from the router context when no test
+  // spy is threaded through. Solid's `useNavigate()` is owner-scoped: it
+  // MUST be resolved during component setup because event handlers fire
+  // outside the component's owner and context lookups at that point
+  // return undefined. Existing StatusBar tests mount without a
+  // `<MemoryRouter>` and never exercise the nav path, so we tolerate the
+  // missing router by swallowing the invariant during setup.
+  let routerNavigate: ((to: string) => void) | null = null;
+  try {
+    routerNavigate = useNavigate();
+  } catch {
+    // No Router in the render tree (notification / unit tests outside the
+    // app shell). The navigate fallback becomes a no-op; a production
+    // mount always has the app-shell Router so this branch is unreachable
+    // end-to-end.
+    routerNavigate = null;
+  }
+  const navigate = (to: string): void => {
+    if (props.navigate) {
+      props.navigate(to);
+      return;
+    }
+    if (routerNavigate) routerNavigate(to);
+  };
 
   // Running set keyed by instance id. The same id from multiple sources (the
   // initial list + the subscribe stream) is idempotently deduped.
@@ -247,6 +288,29 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
     setPopoverOpen((v) => !v);
   };
 
+  // F-153: badge double-click opens the Agent Monitor for this session with
+  // no `instance` param — the monitor auto-selects the first row. Useful as
+  // a zero-context entry point when the user wants to see "whatever's
+  // running" rather than inspect a specific agent.
+  const onBadgeDoubleClick = (e: MouseEvent): void => {
+    e.preventDefault();
+    navigate(`/agents/${props.sessionId}`);
+  };
+
+  // F-153: popover-row double-click / right-click is the primary "open this
+  // exact instance" path. Both gestures push `?instance=<id>` so the monitor
+  // pre-selects the row; right-click also suppresses the native context
+  // menu so the Tauri webview doesn't surface its default menu over the
+  // popover.
+  const onRowDoubleClick = (instanceId: string) => (e: MouseEvent): void => {
+    e.preventDefault();
+    navigate(`/agents/${props.sessionId}?instance=${instanceId}`);
+  };
+  const onRowContextMenu = (instanceId: string) => (e: MouseEvent): void => {
+    e.preventDefault();
+    navigate(`/agents/${props.sessionId}?instance=${instanceId}`);
+  };
+
   const onPromote = async (id: string): Promise<void> => {
     try {
       await promoteBg()(props.sessionId, id);
@@ -277,6 +341,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
           aria-haspopup="menu"
           aria-expanded={popoverOpen()}
           onClick={togglePopover}
+          onDblClick={onBadgeDoubleClick}
         >
           <span class="status-bar__bg-badge-count">{badgeCount()}</span>
           <span class="status-bar__bg-badge-label">{' bg'}</span>
@@ -290,7 +355,13 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
         >
           <For each={running().filter((r) => r.state === 'Running')}>
             {(row) => (
-              <div class="status-bar__bg-row" role="menuitem">
+              <div
+                class="status-bar__bg-row"
+                role="menuitem"
+                data-testid={`bg-agents-row-${row.id}`}
+                onDblClick={onRowDoubleClick(row.id)}
+                onContextMenu={onRowContextMenu(row.id)}
+              >
                 <span
                   class="status-bar__bg-row-name"
                   data-testid={`bg-agents-name-${row.id}`}

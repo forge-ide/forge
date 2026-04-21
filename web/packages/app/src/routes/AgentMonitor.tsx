@@ -23,7 +23,7 @@ import {
   type Component,
   type JSX,
 } from 'solid-js';
-import { useParams } from '@solidjs/router';
+import { useParams, useSearchParams } from '@solidjs/router';
 import { invoke } from '../lib/tauri';
 import type { BgAgentSummary } from '@forge/ipc';
 import { onSessionEvent, type SessionEventPayload } from '../ipc/session';
@@ -675,6 +675,10 @@ function inspectorStub(row: AgentRow): AgentInspectorData {
 export const AgentMonitor: Component = () => {
   const params = useParams<{ id?: string }>();
   const sessionId = () => params.id ?? null;
+  // F-153: honor `?instance=<id>` from the status-bar badge's nav so the
+  // monitor pre-selects the clicked row instead of the default first row.
+  // Param absence falls through to the auto-select-first effect below.
+  const [searchParams] = useSearchParams<{ instance?: string }>();
 
   const [filter, setFilter] = createSignal<AgentFilter>('all');
   const [selectedId, setSelectedId] = createSignal<string | null>(null);
@@ -721,12 +725,22 @@ export const AgentMonitor: Component = () => {
   }
 
   // Auto-select the session root so the trace column isn't empty on mount.
+  // F-153: when `?instance=<id>` is present, prefer selecting that row.
+  // Falls back to the first row when the requested instance isn't in the
+  // current list (stale id, navigation from a different session, etc.).
   createEffect(
     on(rows, (list) => {
-      if (!selectedId() && list.length > 0) {
-        const first = list[0];
-        if (first) setSelectedId(first.id);
+      if (selectedId() || list.length === 0) return;
+      const wanted = searchParams.instance;
+      if (wanted) {
+        const match = list.find((r) => r.id === wanted);
+        if (match) {
+          setSelectedId(match.id);
+          return;
+        }
       }
+      const first = list[0];
+      if (first) setSelectedId(first.id);
     }),
   );
 

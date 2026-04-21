@@ -22,6 +22,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@solidjs/testing-library';
+import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import type { BgAgentSummary, SessionId } from '@forge/ipc';
 import { StatusBar } from './StatusBar';
 import type {
@@ -417,5 +418,174 @@ describe('StatusBar — cleanup', () => {
     expect(bus.unlistenCalls).toBe(0);
     unmount();
     expect(bus.unlistenCalls).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-153: AgentMonitor entry points from the status-bar badge.
+//
+// The DoD requires double-click OR right-click on the BgAgentsBadge to
+// navigate to the agent-monitor route with the clicked instance pre-selected.
+// "Clicked instance" only makes sense for a specific row, so the interpretation
+// shipped here is:
+//   - Double-click / right-click a POPOVER ROW → navigate with that row's id
+//     as `?instance=<id>`. This is the primary "clicked instance" path.
+//   - Double-click the BADGE → navigate without a pre-selection (the monitor
+//     auto-selects the first row when no `instance` param is present). Gives
+//     users a zero-click-open-to-last-running entry when they don't care which
+//     instance they land on.
+//
+// Nav is exercised through an injected `navigate` prop so tests don't need to
+// mount a full router harness. Matches the existing injectable-dep pattern in
+// StatusBar.tsx (list/promote/stop/subscribe/notifier are all props).
+// ---------------------------------------------------------------------------
+
+describe('StatusBar — AgentMonitor entry points (F-153)', () => {
+  it('double-clicking the badge navigates to /agents/<sessionId> with no instance param', async () => {
+    const bus = fakeBus();
+    const list = vi.fn().mockResolvedValue([running('a1', 'writer')]);
+    const navigate = vi.fn();
+    const { findByTestId } = render(() => (
+      <StatusBar
+        sessionId={SID}
+        listBackgroundAgents={list}
+        subscribe={bus.subscribe}
+        navigate={navigate}
+      />
+    ));
+    const badge = await findByTestId('bg-agents-badge');
+    fireEvent.dblClick(badge);
+    await waitFor(() => {
+      expect(navigate).toHaveBeenCalledWith(`/agents/${SID}`);
+    });
+  });
+
+  it('double-clicking a popover row navigates with ?instance=<id>', async () => {
+    const bus = fakeBus();
+    const list = vi
+      .fn()
+      .mockResolvedValue([running('abcd1234', 'writer'), running('ef567890', 'reviewer')]);
+    const navigate = vi.fn();
+    const { findByTestId } = render(() => (
+      <StatusBar
+        sessionId={SID}
+        listBackgroundAgents={list}
+        subscribe={bus.subscribe}
+        navigate={navigate}
+      />
+    ));
+    fireEvent.click(await findByTestId('bg-agents-badge'));
+    const row = await findByTestId('bg-agents-row-ef567890');
+    fireEvent.dblClick(row);
+    await waitFor(() => {
+      expect(navigate).toHaveBeenCalledWith(
+        `/agents/${SID}?instance=ef567890`,
+      );
+    });
+  });
+
+  it('right-clicking a popover row navigates with ?instance=<id> and suppresses the native menu', async () => {
+    const bus = fakeBus();
+    const list = vi.fn().mockResolvedValue([running('abcd1234', 'writer')]);
+    const navigate = vi.fn();
+    const { findByTestId } = render(() => (
+      <StatusBar
+        sessionId={SID}
+        listBackgroundAgents={list}
+        subscribe={bus.subscribe}
+        navigate={navigate}
+      />
+    ));
+    fireEvent.click(await findByTestId('bg-agents-badge'));
+    const row = await findByTestId('bg-agents-row-abcd1234');
+    const evt = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+    const prevented = !row.dispatchEvent(evt);
+    expect(prevented).toBe(true);
+    await waitFor(() => {
+      expect(navigate).toHaveBeenCalledWith(
+        `/agents/${SID}?instance=abcd1234`,
+      );
+    });
+  });
+
+  it('single-click on a popover row does NOT navigate (reserved for Promote/Stop focus)', async () => {
+    const bus = fakeBus();
+    const list = vi.fn().mockResolvedValue([running('abcd1234', 'writer')]);
+    const navigate = vi.fn();
+    const { findByTestId } = render(() => (
+      <StatusBar
+        sessionId={SID}
+        listBackgroundAgents={list}
+        subscribe={bus.subscribe}
+        navigate={navigate}
+      />
+    ));
+    fireEvent.click(await findByTestId('bg-agents-badge'));
+    const row = await findByTestId('bg-agents-row-abcd1234');
+    fireEvent.click(row);
+    // Give any pending microtasks a chance to run.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  // Production-path pin: when no `navigate` prop is threaded the component
+  // falls back to `useNavigate()` from `@solidjs/router`. Mount under a real
+  // `<MemoryRouter>` to prove the fallback actually dispatches a route change
+  // (owner-scoping of the `useNavigate` call inside an event handler is not
+  // otherwise covered by the injectable-seam tests above — they all pass a
+  // spy prop and never exercise the router-context path).
+  it('default (no injected navigate prop) dispatches through the router', async () => {
+    const bus = fakeBus();
+    const list = vi.fn().mockResolvedValue([running('prod-row', 'writer')]);
+    const history = createMemoryHistory();
+    history.set({ value: '/' });
+    const { findByTestId } = render(() => (
+      <MemoryRouter history={history}>
+        <Route
+          path="/"
+          component={() => (
+            <StatusBar
+              sessionId={SID}
+              listBackgroundAgents={list}
+              subscribe={bus.subscribe}
+            />
+          )}
+        />
+      </MemoryRouter>
+    ));
+    const badge = await findByTestId('bg-agents-badge');
+    fireEvent.dblClick(badge);
+    await waitFor(() => {
+      expect(history.get()).toBe(`/agents/${SID}`);
+    });
+  });
+
+  it('default (no injected navigate prop) dispatches a row right-click with ?instance through the router', async () => {
+    const bus = fakeBus();
+    const list = vi.fn().mockResolvedValue([running('prod-row-2', 'reviewer')]);
+    const history = createMemoryHistory();
+    history.set({ value: '/' });
+    const { findByTestId } = render(() => (
+      <MemoryRouter history={history}>
+        <Route
+          path="/"
+          component={() => (
+            <StatusBar
+              sessionId={SID}
+              listBackgroundAgents={list}
+              subscribe={bus.subscribe}
+            />
+          )}
+        />
+      </MemoryRouter>
+    ));
+    fireEvent.click(await findByTestId('bg-agents-badge'));
+    const row = await findByTestId('bg-agents-row-prod-row-2');
+    const evt = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+    row.dispatchEvent(evt);
+    await waitFor(() => {
+      expect(history.get()).toBe(`/agents/${SID}?instance=prod-row-2`);
+    });
   });
 });
