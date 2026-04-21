@@ -10,7 +10,9 @@
 
 **Trigger.** Typing `@` in any chat composer.
 
-**Size.** 360–480px wide, up to 360px tall (scrolls), popped *above* the composer (never below — the composer must remain visible).
+**Size.** 360–480px wide, up to 360px tall (scrolls).
+
+**Placement.** Viewport-aware and computed by the pure `computePopupPlacement` helper in `web/packages/app/src/components/ContextPicker.tsx`. The popup prefers anchoring *below* the caret/composer when there is room — specifically, when `viewportHeight − anchorBottom − gap ≥ popupHeight` (gap defaults to 4px, popup height is capped at 360px). When that space is not available, placement flips to *above* the anchor so the popup is never clipped by the viewport bottom. In the standard chat layout the composer is pinned to the bottom of its pane, so the flip-above branch is the one that renders in practice; the below branch is what keeps the popup from being clipped when the composer is embedded in pickers or other non-bottom-pinned hosts. Either way the composer itself remains visible.
 
 **Structure.**
 ```
