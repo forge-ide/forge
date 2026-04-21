@@ -171,8 +171,14 @@ jobs:
       - name: Rust checks (fmt, cargo check, clippy, rustdoc)
         run: just check-rust
 
+      # Temporary override for the F-158 fallout sweep: `--no-fail-fast`
+      # so a single macOS CI run surfaces every cross-platform regression
+      # at once (instead of stopping at the first failing test binary,
+      # which forced a per-binary PR cascade during F-158). Matches the
+      # flags the Linux `just test-rust` recipe would use otherwise;
+      # remove and restore `just test-rust` once macOS is stably green.
       - name: Rust tests
-        run: just test-rust
+        run: cargo test --all --no-fail-fast
 
       # F-154: McpManager + stdio transport + real subprocess composition
       # test. Same serial-single-binary constraint applies on macOS:
@@ -181,7 +187,7 @@ jobs:
         run: just test-rust-serial
 
       - name: Rust tests — forge-term ghostty-vt feature
-        run: cargo test -p forge-term --features ghostty-vt --all-targets
+        run: cargo test -p forge-term --features ghostty-vt --all-targets --no-fail-fast
 
       - name: Rust clippy — forge-term ghostty-vt feature
         run: cargo clippy -p forge-term --features ghostty-vt --all-targets -- -D warnings
@@ -194,8 +200,12 @@ jobs:
       # Tauri webview integration tests on macOS use the native
       # WebKit.framework that `wry` bundles — no system-dep install
       # needed (unlike Linux, which needs libwebkit2gtk).
+      #
+      # Temporary F-158 override: inlined with `--no-fail-fast` for the
+      # same reason as the earlier `Rust tests` step — restore
+      # `just test-rust-webview` once macOS is stably green.
       - name: Rust webview integration tests
-        run: just test-rust-webview
+        run: cargo test -p forge-shell --features webview-test --no-fail-fast
 
       # Web lane runs here too so any macOS-specific node/pnpm
       # regression (native binding resolution, path casing) surfaces on
