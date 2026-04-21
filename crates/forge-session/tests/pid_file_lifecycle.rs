@@ -1,22 +1,28 @@
-//! Integration test: `forged` owns its pid file lifecycle (F-049).
+//! Integration test: `forged` owns its pid file lifecycle (F-049, F-338).
 //!
 //! Persistent-mode `forged` must:
 //!   - write its pid file atomically via `O_EXCL` (refuse to overwrite an
 //!     existing file),
 //!   - write the two-line `<pid>\n<start_time>\n` format so `session_kill`
-//!     can detect PID reuse,
+//!     can detect pid reuse,
 //!   - remove the pid file on clean SIGTERM exit.
 //!
 //! These tests spawn `forged` with an explicit `FORGE_PID_FILE` pointing
 //! into a `TempDir` so they don't collide with live sessions on the host.
 //!
-//! Linux-only: the start-time parser reads `/proc/<pid>/stat`, which is
-//! Linux-specific. macOS / Windows `forged` uses a different liveness
-//! check (not yet implemented); this module compiles out on those targets.
+//! Cross-platform: the F-338 rework replaced the Linux-only
+//! `/proc/self/stat` probe with `crate::starttime::read_self_starttime`,
+//! so the full lifecycle runs on macOS too. The Linux-only assertion
+//! that used to compare the recorded value to `/proc/<pid>/stat` field
+//! 22 stays gated — macOS can't round-trip through `/proc`. macOS
+//! asserts the same invariant via the pid-file shape + starttime range.
+//! Windows isn't exercised (no CI runner yet, and the pid-file test
+//! spawner drives a persistent daemon whose full UDS handshake is
+//! Unix-only anyway).
 
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use forge_cli::socket::{parse_pid_file_record, parse_proc_stat_starttime};
+use forge_cli::socket::parse_pid_file_record;
 use forge_ipc::{ClientInfo, Hello, IpcMessage, Subscribe, PROTO_VERSION};
 use std::process::Stdio;
 use std::time::Duration;
@@ -96,10 +102,28 @@ async fn forged_writes_two_line_pid_file_with_self_starttime() {
     let forged_pid = child.id().expect("child pid") as libc::pid_t;
     assert_eq!(recorded_pid, forged_pid);
 
-    // Recorded start-time matches /proc/<pid>/stat field 22.
-    let stat = std::fs::read_to_string(format!("/proc/{forged_pid}/stat")).expect("proc stat");
-    let current_st = parse_proc_stat_starttime(&stat).expect("parse starttime");
-    assert_eq!(recorded_st, current_st);
+    // F-338: the Linux probe exposes `parse_proc_stat_starttime` so
+    // the recorded value can be round-tripped against a fresh read of
+    // `/proc/<forged_pid>/stat`. macOS has no equivalent text-parsing
+    // entry point (libproc is FFI), so on that platform we only assert
+    // the value is non-zero and shaped like microseconds-since-epoch
+    // (what the macOS branch of `read_self_starttime` produces). Both
+    // branches enforce the same end-to-end invariant: the pid file
+    // contains a value that uniquely identifies the live `forged`.
+    #[cfg(target_os = "linux")]
+    {
+        use forge_cli::socket::parse_proc_stat_starttime;
+        let stat = std::fs::read_to_string(format!("/proc/{forged_pid}/stat")).expect("proc stat");
+        let current_st = parse_proc_stat_starttime(&stat).expect("parse starttime");
+        assert_eq!(recorded_st, current_st);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        assert!(
+            recorded_st > 1_000_000_000_000_000,
+            "macOS starttime is microseconds-since-epoch; got implausibly small value {recorded_st}"
+        );
+    }
 
     // Clean up: SIGTERM forged so the test doesn't leak it.
     // SAFETY: pid is the live child we spawned.

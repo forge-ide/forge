@@ -111,19 +111,24 @@ pub fn pid_file_contents(pid: Option<u32>) -> anyhow::Result<String> {
 
 /// Format a session pid-file record as `"<pid>\n<start_time>\n"`.
 ///
-/// Two-line format pairs the pid with the daemon's start-time (from
-/// `/proc/<pid>/stat` field 22) so `session_kill` can detect kernel PID
-/// reuse before signaling: if the recorded start-time differs from the
-/// current `/proc/<pid>/stat` reading, the pid has been recycled and we
-/// refuse to signal.
+/// Two-line format pairs the pid with the daemon's platform-dependent
+/// start-time (see `forge_session::starttime::read_self_starttime`) so
+/// `session_kill` can detect kernel PID reuse before signaling: if the
+/// recorded start-time differs from the value the live process reports
+/// now, the pid has been recycled and we refuse to signal. The `u64`'s
+/// physical meaning is platform-specific (Linux: clock ticks since
+/// boot; macOS: microseconds since epoch; Windows: 100ns FILETIME
+/// creation time) and is only ever compared against a freshly-probed
+/// value on the same host.
 pub fn format_pid_file_record(pid: libc::pid_t, start_time: u64) -> String {
     format!("{pid}\n{start_time}\n")
 }
 
 /// Parse a two-line pid-file record written by `format_pid_file_record`.
 ///
-/// Returns `(pid, start_time)`. Refuses single-line files (legacy one-line
-/// format) so `session_kill` cannot silently skip the identity check.
+/// Returns `(pid, platform_start_time)`. Refuses single-line files
+/// (legacy one-line format) so `session_kill` cannot silently skip the
+/// identity check.
 pub fn parse_pid_file_record(raw: &str) -> anyhow::Result<(libc::pid_t, u64)> {
     let mut lines = raw.lines();
     let pid_line = lines
