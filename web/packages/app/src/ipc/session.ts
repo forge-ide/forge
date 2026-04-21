@@ -5,6 +5,7 @@ import type {
   ApprovalEntry,
   ApprovalLevel,
   ApprovalScope,
+  BgAgentSummary,
   PersistentApprovalEntry,
   SessionId,
   ToolCallId,
@@ -127,6 +128,35 @@ export async function onSessionEvent(
   return listen<SessionEventPayload>(SESSION_EVENT, (event) => {
     handler(event.payload);
   });
+}
+
+// ---------------------------------------------------------------------------
+// F-137 / F-138: background-agent lifecycle commands.
+//
+// The Status-bar `BgAgentsBadge` (F-138) calls `listBackgroundAgents` on mount
+// (post-reconnect recovery) and subscribes to `session:event` for live
+// lifecycle updates. Popover Promote/Stop buttons route through
+// `promoteBackgroundAgent` / `stopBackgroundAgent`.
+// ---------------------------------------------------------------------------
+
+export async function listBackgroundAgents(
+  sessionId: SessionId,
+): Promise<BgAgentSummary[]> {
+  return invoke<BgAgentSummary[]>('list_background_agents', { sessionId });
+}
+
+export async function promoteBackgroundAgent(
+  sessionId: SessionId,
+  instanceId: string,
+): Promise<void> {
+  await invoke('promote_background_agent', { sessionId, instanceId });
+}
+
+export async function stopBackgroundAgent(
+  sessionId: SessionId,
+  instanceId: string,
+): Promise<void> {
+  await invoke('stop_background_agent', { sessionId, instanceId });
 }
 
 // ---------------------------------------------------------------------------

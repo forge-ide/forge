@@ -17,8 +17,8 @@ anyhow = "1"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 # F-132: `load_mcp_manager` resolves the user-scope `~/.mcp.json` via
-# `dirs::home_dir`. Kept pinned to the same 5.x line `forge-shell` uses.
-dirs = "5"
+# `dirs::home_dir`. Pinned to the 6.x line used elsewhere in the workspace.
+dirs = "6.0.0"
 forge-agents = { path = "../forge-agents" }
 forge-core = { path = "../forge-core" }
 forge-fs = { path = "../forge-fs" }
@@ -102,6 +102,10 @@ path = "tests/rerun_replace.rs"
 [[test]]
 name = "agent_spawn"
 path = "tests/agent_spawn.rs"
+
+[[test]]
+name = "agent_spawn_live"
+path = "tests/agent_spawn_live.rs"
 
 [[test]]
 name = "step_events"

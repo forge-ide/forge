@@ -76,6 +76,42 @@ pub struct AgentSpawnCtx {
     pub current_msg_id: MessageId,
 }
 
+/// F-140: session-scoped agent runtime handles that live longer than a
+/// single turn.
+///
+/// `run_turn` / `rerun_message` take this as an `Option<AgentRuntime>` and
+/// synthesize a per-turn [`AgentSpawnCtx`] by combining the runtime with
+/// the turn's `Session` + `current_msg_id`. The split keeps the long-lived
+/// handles (orchestrator, loaded defs, parent instance id) under the
+/// caller's control while the per-turn fields stay local to each turn.
+///
+/// Producers (F-140 `serve_with_session`):
+///   1. build an `Arc<forge_agents::Orchestrator>` once per session,
+///   2. `Orchestrator::spawn` a "session root" `AgentInstance` whose id
+///      becomes `parent_instance_id` — every top-level `agent.spawn`
+///      attributes back to this root, and every `StepStarted.instance_id`
+///      the turn loop emits carries the same id so the Agent Monitor can
+///      group a session's trace against a stable parent.
+///   3. load agent defs via `forge_agents::load_agents`,
+///   4. pass the resulting `AgentRuntime` to `run_turn` / `rerun_message`.
+///
+/// Consumers that don't need spawning (tests, no-op embedders) pass
+/// `None`; the tool still registers on the dispatcher and returns the
+/// existing "agent runtime not configured" error shape when invoked.
+#[derive(Clone)]
+pub struct AgentRuntime {
+    /// Shared orchestrator that registers child instances and emits
+    /// lifecycle events. Kept alive across all turns in a session so the
+    /// Agent Monitor sees a coherent registry.
+    pub orchestrator: Arc<AgentOrchestrator>,
+    /// Merged workspace + user agent defs, loaded once at session start.
+    pub agent_defs: Arc<Vec<AgentDef>>,
+    /// The session's root `AgentInstance` id. Every turn's
+    /// `StepStarted.instance_id` and every spawned sub-agent's `parent`
+    /// attributes to this id.
+    pub parent_instance_id: AgentInstanceId,
+}
+
 /// Tool handler. `invoke` is `async` so filesystem / blocking work can be
 /// wrapped in `tokio::task::spawn_blocking` at the async/sync boundary
 /// (F-106) without blocking a tokio worker thread while a large file

@@ -17,8 +17,8 @@ use crate::byte_budget::ByteBudget;
 use crate::sandbox::ChildRegistry;
 use crate::session::Session;
 use crate::tools::{
-    AgentSpawnTool, FsEditTool, FsReadTool, FsWriteTool, McpTool, ShellExecTool, ToolCtx,
-    ToolDispatcher, ToolError,
+    AgentRuntime, AgentSpawnCtx, AgentSpawnTool, FsEditTool, FsReadTool, FsWriteTool, McpTool,
+    ShellExecTool, ToolCtx, ToolDispatcher, ToolError,
 };
 use forge_mcp::McpManager;
 
@@ -90,6 +90,7 @@ pub async fn run_turn<P: Provider>(
     child_registry: Option<ChildRegistry>,
     byte_budget: Option<Arc<ByteBudget>>,
     agents_md: Option<Arc<str>>,
+    agent_runtime: Option<AgentRuntime>,
     mcp: Option<Arc<McpManager>>,
 ) -> Result<()> {
     let msg_id = MessageId::new();
@@ -139,10 +140,12 @@ pub async fn run_turn<P: Provider>(
         .register(Box::new(ShellExecTool))
         .expect("shell.exec must register on a fresh dispatcher");
     // F-134: `agent.spawn` is registered on every `run_turn` dispatcher
-    // so a provider can discover and invoke it. `agent_ctx` below is
-    // `None` by default — the tool returns a typed "agent runtime not
-    // configured" error until the session-level plumbing (F-140
-    // AgentMonitor, parent instance wiring) lands.
+    // so a provider can discover and invoke it. Under F-140 the caller
+    // threads an `AgentRuntime` — when present we synthesize the per-turn
+    // `AgentSpawnCtx` here so a provider-emitted `agent.spawn` actually
+    // spawns a child against the session's shared orchestrator. Callers
+    // that pass `None` (legacy tests, embedders without a runtime) keep
+    // the previous "agent runtime not configured" behaviour.
     dispatcher
         .register(Box::new(AgentSpawnTool))
         .expect("agent.spawn must register on a fresh dispatcher");
@@ -174,12 +177,22 @@ pub async fn run_turn<P: Provider>(
         }
     }
 
+    let agent_ctx = agent_runtime.as_ref().map(|rt| AgentSpawnCtx {
+        agent_defs: Arc::clone(&rt.agent_defs),
+        orchestrator: Arc::clone(&rt.orchestrator),
+        session: Arc::clone(&session),
+        parent_instance_id: rt.parent_instance_id.clone(),
+        current_msg_id: msg_id.clone(),
+    });
+    let instance_id = agent_runtime
+        .as_ref()
+        .map(|rt| rt.parent_instance_id.clone());
     let ctx = ToolCtx {
         allowed_paths,
         workspace_root,
         child_registry,
         byte_budget,
-        agent_ctx: None,
+        agent_ctx,
         mcp,
     };
 
@@ -194,6 +207,7 @@ pub async fn run_turn<P: Provider>(
         &dispatcher,
         &ctx,
         auto_approve,
+        instance_id,
     )
     .await
 }
@@ -225,6 +239,12 @@ pub(crate) async fn run_request_loop<P: Provider>(
     dispatcher: &ToolDispatcher,
     ctx: &ToolCtx,
     auto_approve: bool,
+    // F-140: populated with the session's root `AgentInstanceId` when the
+    // caller has a wired `AgentRuntime`. Threaded onto every `StepStarted`
+    // so the Agent Monitor can group a session's trace under a stable
+    // parent id. `None` preserves the pre-F-140 behaviour for embedders
+    // that don't have an agent runtime wired up.
+    instance_id: Option<forge_core::ids::AgentInstanceId>,
 ) -> Result<()> {
     // Fixed provider/model identifiers for the mock provider.
     let provider_id = ProviderId::new();
@@ -237,15 +257,16 @@ pub(crate) async fn run_request_loop<P: Provider>(
         // replay readers) rely on StepStarted preceding any per-turn
         // event with the same step_id.
         //
-        // `instance_id: None` today — the session turn loop runs outside
-        // of a registered `AgentInstance`. F-140 wires the `AgentMonitor`
-        // into `run_turn` and will populate the field.
+        // F-140: `instance_id` carries the session's root `AgentInstanceId`
+        // when a caller wired an `AgentRuntime`; callers without one (legacy
+        // tests, embedders with no agent wiring) still emit `None`. The
+        // Agent Monitor groups a session's trace under the stable id here.
         let model_step_id = StepId::new();
         let model_step_started = Instant::now();
         session
             .emit(Event::StepStarted {
                 step_id: model_step_id.clone(),
-                instance_id: None,
+                instance_id: instance_id.clone(),
                 kind: StepKind::Model,
                 started_at: Utc::now(),
             })
@@ -305,7 +326,10 @@ pub(crate) async fn run_request_loop<P: Provider>(
                     session
                         .emit(Event::StepStarted {
                             step_id: tool_step_id.clone(),
-                            instance_id: None,
+                            // F-140: same instance id as the enclosing Model
+                            // step, so a tool step nests cleanly inside its
+                            // parent step in the Agent Monitor timeline.
+                            instance_id: instance_id.clone(),
                             kind: StepKind::Tool,
                             started_at: Utc::now(),
                         })
@@ -708,6 +732,7 @@ impl Orchestrator {
         workspace_root: Option<std::path::PathBuf>,
         child_registry: Option<crate::sandbox::ChildRegistry>,
         byte_budget: Option<Arc<crate::byte_budget::ByteBudget>>,
+        agent_runtime: Option<AgentRuntime>,
     ) -> Result<MessageId> {
         match variant {
             RerunVariant::Replace => {
@@ -721,6 +746,7 @@ impl Orchestrator {
                     workspace_root,
                     child_registry,
                     byte_budget,
+                    agent_runtime,
                 )
                 .await
             }
@@ -735,6 +761,7 @@ impl Orchestrator {
                     workspace_root,
                     child_registry,
                     byte_budget,
+                    agent_runtime,
                 )
                 .await
             }
@@ -749,6 +776,7 @@ impl Orchestrator {
                     workspace_root,
                     child_registry,
                     byte_budget,
+                    agent_runtime,
                 )
                 .await
             }
@@ -767,6 +795,7 @@ impl Orchestrator {
         workspace_root: Option<std::path::PathBuf>,
         child_registry: Option<crate::sandbox::ChildRegistry>,
         byte_budget: Option<Arc<crate::byte_budget::ByteBudget>>,
+        agent_runtime: Option<AgentRuntime>,
     ) -> Result<MessageId> {
         // Read the log up to the current tip; filter prior supersede markers
         // so a second rerun doesn't rebuild context from already-hidden
@@ -794,20 +823,32 @@ impl Orchestrator {
         dispatcher
             .register(Box::new(crate::tools::ShellExecTool))
             .expect("shell.exec must register on a fresh dispatcher");
-        // F-134: register `agent.spawn` on the rerun dispatcher too —
-        // rerun regenerates a provider turn that may emit `agent.spawn`
-        // calls. The `agent_ctx` is deliberately `None`: rerun replaces
-        // an assistant message; the existing sub-agents from the
-        // original turn remain registered with the orchestrator.
+        // F-134: register `agent.spawn` on the rerun dispatcher too. F-140
+        // additional mandate — when the caller supplies an `AgentRuntime`,
+        // thread it so a regenerated turn that emits `agent.spawn`
+        // actually spawns the child against the session's shared
+        // orchestrator. `None` preserves the pre-F-140 "not configured"
+        // shape for embedders with no runtime wired up.
         dispatcher
             .register(Box::new(crate::tools::AgentSpawnTool))
             .expect("agent.spawn must register on a fresh dispatcher");
+        let new_id = MessageId::new();
+        let agent_ctx = agent_runtime.as_ref().map(|rt| AgentSpawnCtx {
+            agent_defs: Arc::clone(&rt.agent_defs),
+            orchestrator: Arc::clone(&rt.orchestrator),
+            session: Arc::clone(&session),
+            parent_instance_id: rt.parent_instance_id.clone(),
+            current_msg_id: new_id.clone(),
+        });
+        let instance_id = agent_runtime
+            .as_ref()
+            .map(|rt| rt.parent_instance_id.clone());
         let ctx = crate::tools::ToolCtx {
             allowed_paths,
             workspace_root,
             child_registry,
             byte_budget,
-            agent_ctx: None,
+            agent_ctx,
             // F-132: rerun paths do not re-enter the MCP path. Rerun
             // regenerates a prior assistant turn against already-recorded
             // context — the running session's MCP manager already
@@ -817,7 +858,6 @@ impl Orchestrator {
             mcp: None,
         };
 
-        let new_id = MessageId::new();
         run_request_loop(
             Arc::clone(&session),
             provider,
@@ -831,6 +871,7 @@ impl Orchestrator {
             &dispatcher,
             &ctx,
             auto_approve,
+            instance_id,
         )
         .await?;
 
@@ -880,6 +921,7 @@ impl Orchestrator {
         workspace_root: Option<std::path::PathBuf>,
         child_registry: Option<crate::sandbox::ChildRegistry>,
         byte_budget: Option<Arc<crate::byte_budget::ByteBudget>>,
+        agent_runtime: Option<AgentRuntime>,
     ) -> Result<MessageId> {
         let history = read_since(&session.log_path, 0)
             .await
@@ -912,12 +954,23 @@ impl Orchestrator {
         dispatcher
             .register(Box::new(crate::tools::AgentSpawnTool))
             .expect("agent.spawn must register on a fresh dispatcher");
+        let new_id = MessageId::new();
+        let agent_ctx = agent_runtime.as_ref().map(|rt| AgentSpawnCtx {
+            agent_defs: Arc::clone(&rt.agent_defs),
+            orchestrator: Arc::clone(&rt.orchestrator),
+            session: Arc::clone(&session),
+            parent_instance_id: rt.parent_instance_id.clone(),
+            current_msg_id: new_id.clone(),
+        });
+        let instance_id = agent_runtime
+            .as_ref()
+            .map(|rt| rt.parent_instance_id.clone());
         let ctx = crate::tools::ToolCtx {
             allowed_paths,
             workspace_root,
             child_registry,
             byte_budget,
-            agent_ctx: None,
+            agent_ctx,
             // F-132: rerun paths do not re-enter the MCP path. Rerun
             // regenerates a prior assistant turn against already-recorded
             // context — the running session's MCP manager already
@@ -927,7 +980,6 @@ impl Orchestrator {
             mcp: None,
         };
 
-        let new_id = MessageId::new();
         run_request_loop(
             Arc::clone(&session),
             provider,
@@ -939,6 +991,7 @@ impl Orchestrator {
             &dispatcher,
             &ctx,
             auto_approve,
+            instance_id,
         )
         .await?;
 
@@ -981,6 +1034,7 @@ impl Orchestrator {
         workspace_root: Option<std::path::PathBuf>,
         child_registry: Option<crate::sandbox::ChildRegistry>,
         byte_budget: Option<Arc<crate::byte_budget::ByteBudget>>,
+        agent_runtime: Option<AgentRuntime>,
     ) -> Result<MessageId> {
         let history = read_since(&session.log_path, 0)
             .await
@@ -1005,12 +1059,23 @@ impl Orchestrator {
         dispatcher
             .register(Box::new(crate::tools::AgentSpawnTool))
             .expect("agent.spawn must register on a fresh dispatcher");
+        let new_id = MessageId::new();
+        let agent_ctx = agent_runtime.as_ref().map(|rt| AgentSpawnCtx {
+            agent_defs: Arc::clone(&rt.agent_defs),
+            orchestrator: Arc::clone(&rt.orchestrator),
+            session: Arc::clone(&session),
+            parent_instance_id: rt.parent_instance_id.clone(),
+            current_msg_id: new_id.clone(),
+        });
+        let instance_id = agent_runtime
+            .as_ref()
+            .map(|rt| rt.parent_instance_id.clone());
         let ctx = crate::tools::ToolCtx {
             allowed_paths,
             workspace_root,
             child_registry,
             byte_budget,
-            agent_ctx: None,
+            agent_ctx,
             // F-132: rerun paths do not re-enter the MCP path. Rerun
             // regenerates a prior assistant turn against already-recorded
             // context — the running session's MCP manager already
@@ -1020,7 +1085,6 @@ impl Orchestrator {
             mcp: None,
         };
 
-        let new_id = MessageId::new();
         run_request_loop(
             Arc::clone(&session),
             provider,
@@ -1032,6 +1096,7 @@ impl Orchestrator {
             &dispatcher,
             &ctx,
             auto_approve,
+            instance_id,
         )
         .await?;
 
@@ -1419,6 +1484,7 @@ mod tests {
             None,
             agents_md.clone(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1440,6 +1506,7 @@ mod tests {
             None,
             None,
             agents_md,
+            None,
             None,
         )
         .await
@@ -1496,6 +1563,7 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new())),
             vec![],
             true,
+            None,
             None,
             None,
             None,

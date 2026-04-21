@@ -30,6 +30,7 @@ import {
 } from '../../layout/layoutStore';
 import { ActivityBar, type ActivityId } from '../../shell/ActivityBar';
 import { FilesSidebar } from '../../shell/FilesSidebar';
+import { StatusBar } from '../../shell/StatusBar';
 import './SessionWindow.css';
 
 /**
@@ -285,6 +286,10 @@ export const SessionWindow: Component = () => {
           </div>
         </section>
       </div>
+      {/* F-138: status bar lives at the bottom of the session chrome.
+          Subscribes to `session:event` for background-agent lifecycle
+          events and surfaces the running count + Promote/Stop popover. */}
+      <StatusBar sessionId={sessionId()} />
     </main>
   );
 };
