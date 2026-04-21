@@ -27,9 +27,17 @@ use std::time::Duration;
 /// Upper bound for `shell.exec` `timeout_ms`. A provider-supplied value larger
 /// than this is silently clamped. Prevents a runaway tool call from holding
 /// the future open indefinitely (F-066 / CWE-400).
+///
+/// Gated to Linux because the entire `shell.exec` implementation is Linux-only
+/// (drives the `SandboxedCommand` L1 sandbox). On non-Linux the constant
+/// would be dead code — gate it so macOS/Windows compile cleanly.
+#[cfg(target_os = "linux")]
 pub(crate) const MAX_TIMEOUT_MS: u64 = 10 * 60 * 1000;
 
 /// Default `timeout_ms` when the caller does not supply one.
+///
+/// Linux-gated for the same reason as [`MAX_TIMEOUT_MS`].
+#[cfg(target_os = "linux")]
 pub(crate) const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 pub struct ShellExecTool;

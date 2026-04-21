@@ -91,9 +91,11 @@ pub fn read_file(
     })
 }
 
-/// Shared helper: return the canonical form of `path` only if every component is
-/// symlink-free. Used by both write and edit to enforce symlink rejection even
-/// when the enclosing directory is allowed.
+/// Shared helper: return the canonical form of `path`, rejecting any
+/// user-visible symlink traversed *within* the path hierarchy. Used by
+/// write, edit, rename, and delete to keep symlink rejection honest without
+/// tripping over system-level redirects (e.g. macOS `/var` → `/private/var`)
+/// that live above the workspace root.
 ///
 /// **Lenient by design.** When `std::fs::canonicalize` fails (typically because
 /// the leaf does not yet exist), this helper falls back to canonicalizing the
@@ -101,20 +103,23 @@ pub fn read_file(
 /// new files — see the canonicalization-policy doc on [`mutate::write`] for
 /// the full rationale and how this differs from [`read_file`]'s strict
 /// canonicalization.
+///
+/// # Symlink policy
+///
+/// System-level symlinks that sit above the workspace (like macOS `/var` →
+/// `/private/var`, which every temp-path resolves through) are transparent:
+/// they add components at the front of the canonical form but don't rename
+/// components at the same depth the user referenced. User-created symlinks
+/// inside a workspace rename components at the same depth — we detect this
+/// by aligning `path` and `canonical` component-by-component **from the
+/// right** and flagging any mismatch before we hit `path`'s `RootDir`.
+///
+/// The real escape-prevention is `enforce_allowed` comparing the canonical
+/// path to the canonical allowlist; this extra check is defense-in-depth
+/// against benign-looking intra-workspace symlinks.
 pub(crate) fn canonicalize_no_symlink(path: &Path) -> std::result::Result<PathBuf, FsError> {
-    let mut cursor = PathBuf::new();
-    for comp in path.components() {
-        cursor.push(comp);
-        if let Ok(md) = std::fs::symlink_metadata(&cursor) {
-            if md.file_type().is_symlink() {
-                return Err(FsError::SymlinkDenied {
-                    path: path.to_path_buf(),
-                });
-            }
-        }
-    }
-    match std::fs::canonicalize(path) {
-        Ok(p) => Ok(p),
+    let canonical = match std::fs::canonicalize(path) {
+        Ok(p) => p,
         Err(_) => {
             let parent = path.parent().ok_or_else(|| FsError::ParentMissing {
                 path: path.to_path_buf(),
@@ -126,9 +131,30 @@ pub(crate) fn canonicalize_no_symlink(path: &Path) -> std::result::Result<PathBu
             let name = path.file_name().ok_or_else(|| FsError::ParentMissing {
                 path: path.to_path_buf(),
             })?;
-            Ok(canonical_parent.join(name))
+            canonical_parent.join(name)
+        }
+    };
+
+    let input: Vec<_> = path.components().collect();
+    let canonical_comps: Vec<_> = canonical.components().collect();
+    if canonical_comps.len() >= input.len() {
+        let offset = canonical_comps.len() - input.len();
+        for (i, comp) in input.iter().enumerate().rev() {
+            if matches!(
+                comp,
+                std::path::Component::RootDir | std::path::Component::Prefix(_)
+            ) {
+                break;
+            }
+            if canonical_comps[i + offset] != *comp {
+                return Err(FsError::SymlinkDenied {
+                    path: path.to_path_buf(),
+                });
+            }
         }
     }
+
+    Ok(canonical)
 }
 
 pub(crate) fn enforce_allowed(

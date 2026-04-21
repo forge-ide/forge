@@ -9,6 +9,12 @@
 //!
 //! These tests spawn `forged` with an explicit `FORGE_PID_FILE` pointing
 //! into a `TempDir` so they don't collide with live sessions on the host.
+//!
+//! Linux-only: the start-time parser reads `/proc/<pid>/stat`, which is
+//! Linux-specific. macOS / Windows `forged` uses a different liveness
+//! check (not yet implemented); this module compiles out on those targets.
+
+#![cfg(target_os = "linux")]
 
 use forge_cli::socket::{parse_pid_file_record, parse_proc_stat_starttime};
 use forge_ipc::{ClientInfo, Hello, IpcMessage, Subscribe, PROTO_VERSION};

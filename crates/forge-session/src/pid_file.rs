@@ -101,7 +101,7 @@ fn parse_proc_stat_starttime(line: &str) -> Result<u64> {
         .map_err(|_| anyhow::anyhow!("invalid starttime field: {st:?}"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use tempfile::TempDir;
