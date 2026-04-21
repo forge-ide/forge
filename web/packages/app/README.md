@@ -36,6 +36,25 @@ The copied tree is gitignored (`web/packages/app/public/monaco-host/`) — the s
 
 The three session-scoped filesystem commands backing this pane — `read_file`, `write_file`, `tree` — look up the workspace root from a server-side cache (`SessionConnections.workspace_root`) populated at `session_hello` time. The webview never supplies a `workspace_root` parameter, so a compromised or buggy webview cannot widen its filesystem sandbox. See `crates/forge-shell/src/ipc.rs` F-122 block for the authority.
 
+## Command palette (F-157)
+
+The app mounts a keyboard-invoked command palette at shell level. Any module inside `packages/app` can expose an action by calling the registry API:
+
+```ts
+import { registerCommand } from './commands';
+
+const dispose = registerCommand({
+  id: 'unique-id',              // stable; re-registering replaces the entry
+  title: 'Human-readable title',
+  run: () => { /* invoked on select */ },
+});
+// dispose() removes the command later (useful in HMR / tests).
+```
+
+The palette itself is a single `<CommandPalette />` rendered by `App.tsx`'s shell wrapper. It opens on `Cmd/Ctrl+K` (primary, matches `docs/architecture/window-hierarchy.md` §3.3) and on `Cmd/Ctrl+Shift+P` (alternate). Escape, backdrop click, or re-pressing the shortcut closes it. Fuzzy filtering, arrow-key navigation, and Enter-to-run are provided by the component.
+
+Built-in commands live in `src/commands/registerBuiltins.ts`. Today that file registers only `open-agent-monitor` (the entry F-153 deferred until the palette existed). Add new built-ins there when the target is app-global; register route-scoped commands from their own routes so the registration follows the component lifecycle.
+
 ## Further reading
 
 - [Frontend architecture](../../../docs/frontend/architecture.md)
