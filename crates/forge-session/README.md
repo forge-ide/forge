@@ -16,11 +16,17 @@ The session daemon — `forged` — and its supporting library. A long-running p
 - `tools/` — built-in tool implementations (fs, shell, etc.) wired through `forge-fs` for write paths.
 - `archive::archive_or_purge` — end-of-life handling: rename into `.forge/sessions/archived/<id>/` or remove the session directory.
 - `socket_path` — resolves the session UDS path via `forge_core::runtime_dir` (`XDG_RUNTIME_DIR` on Linux, or the macOS per-user `~/Library/Application Support/Forge/run` fallback at mode `0o700`) or the `FORGE_SOCKET_PATH` override.
-- `pid_file` — daemon liveness file with stale-pid detection.
+- `pid_file` — daemon liveness file with stale-pid detection. Cross-platform: the start-time token uses `/proc/self/stat` on Linux, `libproc`'s `BSDInfo` on macOS, and `GetProcessTimes` on Windows (see `starttime`).
+- `starttime` — platform-gated `read_self_starttime()` that produces the opaque `u64` token the pid-file embeds so `forge session kill` can detect pid reuse before signalling.
 - `sandbox` — `pre_exec` hooks that cap NPROC/NOFILE/FSIZE for spawned children.
 - `byte_budget` — per-session aggregate byte budget used to bound output growth.
 - `provider_spec` — parses the `provider:model` selector strings the CLI accepts.
 - `error::SessionError` — the session-local error type.
+
+## Platform notes
+
+- **macOS `forged`** runs the full persistent-mode lifecycle (F-338), including the pid-file write-and-remove cycle. The `session_kill` path, however, is still Linux-only: race-free signal delivery requires `pidfd_open` / `pidfd_send_signal`, which has no direct macOS equivalent (`kqueue EVFILT_PROC` is the planned follow-up). On macOS, terminate a persistent daemon manually via Activity Monitor, `kill`, or equivalent. `forge session kill` returns a typed error rather than falling back to `libc::kill`, which would reintroduce the pid-reuse race that F-049 closed.
+- **Windows** is not a supported host for `forged` today; the UDS handshake and signal plumbing are Unix-only. Windows-specific starttime code exists so the `forge-session` library compiles on Windows for future cross-compilation work.
 
 ## Further reading
 
