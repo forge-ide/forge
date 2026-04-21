@@ -28,6 +28,15 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # F-146: libghostty-vt-sys vendor-fetches the Ghostty C sources and
+      # compiles them via zig at build time. The forge-term `ghostty-vt`
+      # feature is off by default, but we build+test it here so the VT
+      # state authority stays covered in CI.
+      - name: Install zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -57,6 +66,16 @@ jobs:
 
       - name: Rust tests
         run: just test-rust
+
+      # F-146: forge-term's `ghostty-vt` feature exercises libghostty-vt as
+      # the authoritative VT state machine. It's a separate step because it
+      # pulls in the zig/C build chain and isn't part of default workspace
+      # test coverage.
+      - name: Rust tests — forge-term ghostty-vt feature
+        run: cargo test -p forge-term --features ghostty-vt --all-targets
+
+      - name: Rust clippy — forge-term ghostty-vt feature
+        run: cargo clippy -p forge-term --features ghostty-vt --all-targets -- -D warnings
 
       # Tauri webview integration tests (F-020 / F-051 / F-068 / F-069 /
       # F-036 / F-125). Gated on the `webview-test` feature so the pure-Rust
