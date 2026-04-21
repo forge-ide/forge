@@ -51,10 +51,32 @@ pub struct Stdio {
     /// frames must be atomic relative to `\n`.
     stdin: Arc<Mutex<ChildStdin>>,
     rx: mpsc::Receiver<StdioEvent>,
-    /// Dropping this aborts the reader/reaper — the child is killed on
-    /// drop by tokio because [`Command::kill_on_drop`] is set.
+    /// Reader task that owns the child process and drives
+    /// `child.wait().await` to completion. The handle is held purely
+    /// to tie the task's lifetime to this struct. We deliberately do
+    /// NOT `.abort()` it in [`Drop`]: the reader is the *only* task
+    /// that `wait()`s on the child, and aborting mid-wait leaves the
+    /// child un-reaped — later `Command::spawn()` calls in the same
+    /// tokio runtime then observe zombie handles and stall. Relying
+    /// on `Command::kill_on_drop(true)` (set in [`Stdio::connect`])
+    /// plus the reader's own end-of-stream `wait()` is both
+    /// necessary and sufficient for clean teardown.
     _reader: JoinHandle<()>,
-    _stderr: JoinHandle<()>,
+    /// Stderr drain task. Explicitly aborted in [`Drop`]: unlike the
+    /// reader it holds no child handle, only a log-forwarding loop
+    /// over the (now-closed-on-drop) stderr pipe. Aborting it
+    /// guarantees the tokio runtime's blocking thread pool releases
+    /// the read as soon as the handle is gone.
+    stderr: JoinHandle<()>,
+}
+
+impl Drop for Stdio {
+    fn drop(&mut self) {
+        // See field docs: reader is left alone so it finishes
+        // `child.wait()`; stderr is aborted so the runtime reclaims
+        // its blocking slot promptly.
+        self.stderr.abort();
+    }
 }
 
 impl std::fmt::Debug for Stdio {
@@ -201,7 +223,7 @@ impl Stdio {
             stdin: Arc::new(Mutex::new(stdin)),
             rx,
             _reader: reader_task,
-            _stderr: stderr_task,
+            stderr: stderr_task,
         })
     }
 

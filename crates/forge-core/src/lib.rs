@@ -4,6 +4,7 @@ mod event;
 mod event_log;
 pub mod ids;
 pub mod meta;
+mod tool;
 mod transcript;
 pub mod types;
 pub mod workspace;
@@ -17,6 +18,7 @@ pub use ids::{
     AgentId, AgentInstanceId, MessageId, ProviderId, SessionId, StepId, TerminalId, ToolCallId,
     WorkspaceId,
 };
+pub use tool::Tool;
 pub use transcript::{apply_superseded, Transcript};
 pub use types::{
     ApprovalLevel, ApprovalScope, CompactTrigger, RerunVariant, RosterScope, SessionPersistence,

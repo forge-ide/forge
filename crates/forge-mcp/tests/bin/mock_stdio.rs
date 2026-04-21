@@ -56,10 +56,34 @@ fn main() {
                 "id": id,
                 "result": {
                     "tools": [
-                        { "name": "ping", "description": "returns pong" }
+                        {
+                            "name": "ping",
+                            "description": "returns pong",
+                            "inputSchema": { "type": "object" },
+                            "annotations": { "readOnlyHint": true }
+                        }
                     ]
                 }
             }),
+            "tools/call" => {
+                // Echo the arguments back so the F-130 manager integration
+                // test can assert `tool_name` + `args` round-tripped.
+                let tool_name = req
+                    .get("params")
+                    .and_then(|p| p.get("name"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let args = req
+                    .get("params")
+                    .and_then(|p| p.get("arguments"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "tool": tool_name, "args": args }
+                })
+            }
             "shutdown" => {
                 // Reply, flush, then drop off the read loop so the parent
                 // observes a clean Exit event.

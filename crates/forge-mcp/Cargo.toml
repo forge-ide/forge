@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 anyhow = "1"
 dirs = "6.0.0"
+forge-core = { path = "../forge-core" }
 # `futures::StreamExt` drives the SSE `bytes_stream()` in the HTTP transport
 # reader task.
 futures = "0.3"
@@ -17,6 +18,10 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "rt", "rt-multi-thread", "time"] }
+# F-130 state_stream adapts `tokio::sync::broadcast` into a futures `Stream`
+# so the IPC layer can consume `McpStateEvent`s without caring about the
+# broadcast channel shape.
+tokio-stream = { version = "0.1", features = ["sync"] }
 # Codex source format (F-131) stores MCP servers in `~/.codex/config.toml`.
 toml = "0.8"
 tracing = "0.1"
