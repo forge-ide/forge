@@ -133,19 +133,30 @@ impl BackgroundAgentRegistry {
         // registry's own events bus. Subscribers then see lifecycle
         // events and resource samples on a single channel — the shell's
         // existing `session:event` forwarder needs no extra plumbing.
+        //
+        // Production `with_monitor` is called from Tauri's setup hook, which
+        // runs inside the Tauri-managed tokio runtime, so `Handle::current`
+        // is always available. The `try_current` guard makes the function
+        // safe to call from sync test harnesses (webview-test suite
+        // constructs `BridgeState` outside any runtime); when no runtime is
+        // available the monitor-forwarding task is simply skipped — tests
+        // that assert bg_agents lifecycle don't depend on resource samples
+        // flowing through this channel.
         let mut monitor_rx = monitor.events();
         let events_tx = events.clone();
-        tokio::spawn(async move {
-            loop {
-                match monitor_rx.recv().await {
-                    Ok(ev) => {
-                        let _ = events_tx.send(ev);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                loop {
+                    match monitor_rx.recv().await {
+                        Ok(ev) => {
+                            let _ = events_tx.send(ev);
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
                 }
-            }
-        });
+            });
+        }
 
         Self {
             orchestrator,
