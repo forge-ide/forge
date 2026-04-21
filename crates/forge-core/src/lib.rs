@@ -3,6 +3,7 @@ mod error;
 mod event;
 mod event_log;
 pub mod ids;
+pub mod mcp_state;
 pub mod meta;
 pub mod settings;
 mod tool;
@@ -19,6 +20,7 @@ pub use ids::{
     AgentId, AgentInstanceId, MessageId, ProviderId, SessionId, StepId, TerminalId, ToolCallId,
     WorkspaceId,
 };
+pub use mcp_state::{McpStateEvent, ServerState};
 pub use settings::{
     AppSettings, NotificationMode, NotificationsSettings, SessionMode, WindowsSettings,
 };

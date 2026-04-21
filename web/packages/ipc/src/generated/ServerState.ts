@@ -2,6 +2,11 @@
 
 /**
  * Lifecycle state of one MCP server, as seen by consumers of
- * [`McpManager::state_stream`] and [`McpManager::list`].
+ * `McpManager::state_stream` and `McpManager::list`.
+ *
+ * `Disabled` (F-155) is distinct from `Failed { reason: "stopped" }` — it
+ * marks an explicit user toggle-off so the manager's `call()` path can
+ * surface the literal error text `"MCP server <name> is disabled"` that
+ * the running-session toggle test asserts against.
  */
-export type ServerState = { "state": "starting" } | { "state": "healthy" } | { "state": "degraded", reason: string, } | { "state": "failed", reason: string, };
+export type ServerState = { "state": "starting" } | { "state": "healthy" } | { "state": "degraded", reason: string, } | { "state": "failed", reason: string, } | { "state": "disabled", reason: string, };

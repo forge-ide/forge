@@ -85,11 +85,23 @@ jobs:
       - name: Rust clippy — forge-term ghostty-vt feature
         run: cargo clippy -p forge-term --features ghostty-vt --all-targets -- -D warnings
 
+      # F-155: build the forge-mcp fixture binary so the `ipc_mcp.rs`
+      # running-session test can exercise a real MCP subprocess under the
+      # webview-test run. `forge-mcp-mock-stdio` is declared `test = false,
+      # doc = false` in forge-mcp's manifest — cargo will not build it as
+      # a side effect of `cargo test -p forge-shell`. Without this step
+      # the test silently skips (it returns early when the path is
+      # absent) and the DoD's running-session correctness assertion
+      # never runs in CI.
+      - name: Build forge-mcp-mock-stdio for running-session test
+        run: cargo build -p forge-mcp --bin forge-mcp-mock-stdio
+
       # Tauri webview integration tests (F-020 / F-051 / F-068 / F-069 /
-      # F-036 / F-125). Gated on the `webview-test` feature so the pure-Rust
-      # suite above can run on hosts without WebKitGTK; CI runners have the
-      # Tauri system deps installed earlier in this job, so enabling the
-      # feature here lights up these integration tests as a separate step.
+      # F-036 / F-125 / F-155). Gated on the `webview-test` feature so the
+      # pure-Rust suite above can run on hosts without WebKitGTK; CI runners
+      # have the Tauri system deps installed earlier in this job, so
+      # enabling the feature here lights up these integration tests as a
+      # separate step.
       - name: Rust webview integration tests
         run: just test-rust-webview
 

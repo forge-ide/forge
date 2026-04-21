@@ -22,20 +22,19 @@ anyhow = "1"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
-# F-132: state-stream forwarder in `ipc.rs` polls the `BoxStream` returned
-# by `McpManager::state_stream`; `futures::StreamExt::next` is the
-# canonical driver for it.
+# `futures::StreamExt::next` drives the session event forwarder and the
+# per-connection MCP reply-router in `bridge.rs`.
 futures = "0.3"
 forge-agents = { path = "../forge-agents" }
 forge-core = { path = "../forge-core" }
 forge-fs = { path = "../forge-fs" }
 forge-ipc = { path = "../forge-ipc" }
 forge-lsp = { path = "../forge-lsp" }
-# F-132: shell owns an `McpManager` for the user-facing Tauri commands
-# (`list_mcp_servers`, `toggle_mcp_server`, `import_mcp_config`) and the
-# state-event forwarder that re-emits `McpStateEvent`s to the webview as
-# `mcp:state` IPC events. The daemon keeps its own `McpManager` for
-# session tool dispatch — the two read the same on-disk `.mcp.json`.
+# F-155: the shell's Tauri MCP commands dispatch over the session UDS
+# bridge to the daemon's authoritative `McpManager`. forge-mcp is still
+# a dependency (the integration tests in `tests/ipc_mcp.rs` build a
+# manager in-process to pin the "server disabled" error-text contract),
+# but the shell no longer runs a live manager of its own.
 forge-mcp = { path = "../forge-mcp" }
 forge-providers = { path = "../forge-providers" }
 # F-137: `forge-shell` hosts `BackgroundAgentRegistry` (a `forge-session`

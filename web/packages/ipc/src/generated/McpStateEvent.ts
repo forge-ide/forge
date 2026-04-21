@@ -16,9 +16,7 @@ state: ServerState,
 /**
  * Wall-clock timestamp. Included so the UI can order events
  * coming from multiple servers even when the stream lags. ts-rs:
- * serialized as an RFC-3339 string on the wire (serde picks the
- * default `SystemTime` representation — an object with `secs_since_epoch`).
- * We emit `unknown` so the frontend treats the field opaquely and
- * reads it as a monotonic ordering key.
+ * emitted as `unknown` so the frontend treats the field opaquely
+ * and reads it as a monotonic ordering key.
  */
 ts: unknown, };

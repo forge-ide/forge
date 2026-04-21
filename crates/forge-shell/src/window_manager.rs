@@ -123,8 +123,8 @@ pub fn run() -> Result<()> {
             // to be managed up-front so the `State<'_, BgAgentState>` extractor
             // on each command doesn't panic.
             crate::ipc::manage_bg_agents(&app.handle().clone());
-            // F-132: MCP manager container + state-stream forwarder.
-            crate::ipc::manage_mcp(&app.handle().clone());
+            // F-155: MCP commands now dispatch over the session UDS
+            // bridge; no shell-side manager state to initialise.
             let manager = WindowManager::new(app.handle().clone());
             manager.open_dashboard()?;
             Ok(())
