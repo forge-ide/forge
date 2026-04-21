@@ -19,7 +19,7 @@
 //! fields; `serde_json::from_value` is the only stable constructor.
 
 use chrono::{DateTime, Utc};
-use forge_core::{ApprovalPreview, Event, MessageId, ToolCallId};
+use forge_core::{AgentInstanceId, ApprovalPreview, Event, MessageId, ToolCallId};
 use serde_json::{json, Value};
 
 fn fixed_time() -> DateTime<Utc> {
@@ -286,6 +286,59 @@ fn tool_call_completed_wire_shape() {
             "result": { "ok": true, "bytes": 42 },
             "duration_ms": 12,
             "at": "2026-04-18T10:00:00Z",
+        }),
+    );
+}
+
+fn instance_id(s: &str) -> AgentInstanceId {
+    serde_json::from_value(Value::String(s.to_string())).unwrap()
+}
+
+#[test]
+fn resource_sample_wire_shape_all_fields_present() {
+    // F-152: AgentMonitor pills fold on this event. Pinning the wire shape
+    // here keeps the TS side (`applyEventToState` in
+    // `web/packages/app/src/routes/AgentMonitor.tsx`) honest across refactors.
+    assert_wire_eq(
+        Event::ResourceSample {
+            instance_id: instance_id("inst-1"),
+            cpu_pct: Some(12.5),
+            rss_bytes: Some(64 * 1024 * 1024),
+            fd_count: Some(18),
+            sampled_at: fixed_time(),
+        },
+        json!({
+            "type": "resource_sample",
+            "instance_id": "inst-1",
+            "cpu_pct": 12.5,
+            "rss_bytes": 64 * 1024 * 1024,
+            "fd_count": 18,
+            "sampled_at": "2026-04-18T10:00:00Z",
+        }),
+    );
+}
+
+#[test]
+fn resource_sample_wire_shape_missing_fields_are_null() {
+    // A best-effort platform probe can leave any subset of fields unpopulated
+    // (notably `fd_count` on macOS via libproc). The wire shape must preserve
+    // `null` for those — the UI renders `null` as the `—` placeholder and must
+    // not see a field disappear from the JSON object between emissions.
+    assert_wire_eq(
+        Event::ResourceSample {
+            instance_id: instance_id("inst-partial"),
+            cpu_pct: Some(5.0),
+            rss_bytes: None,
+            fd_count: None,
+            sampled_at: fixed_time(),
+        },
+        json!({
+            "type": "resource_sample",
+            "instance_id": "inst-partial",
+            "cpu_pct": 5.0,
+            "rss_bytes": null,
+            "fd_count": null,
+            "sampled_at": "2026-04-18T10:00:00Z",
         }),
     );
 }
