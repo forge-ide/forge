@@ -73,6 +73,18 @@ pub enum Event {
         parent: MessageId,
         selected: MessageId,
     },
+    /// F-145: marks a branch variant as logically deleted. The event log is
+    /// append-only (§15.1) — the underlying `AssistantMessage` is not removed.
+    /// Replay consumers hide any assistant events whose `(branch_parent, index)`
+    /// (or `(id, 0)` for roots) matches a `BranchDeleted` marker. Used by the
+    /// branch metadata popover's Delete action.
+    ///
+    /// Deleting `variant_index == 0` is rejected server-side — the root is the
+    /// original message and removing it would orphan every sibling.
+    BranchDeleted {
+        parent: MessageId,
+        variant_index: u32,
+    },
     /// F-143: emitted after a successful re-run (Replace variant) to mark
     /// `old_id`'s assistant message as logically superseded by `new_id`.
     ///

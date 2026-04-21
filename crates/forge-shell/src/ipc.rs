@@ -393,6 +393,7 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         session_reject_tool,
         rerun_message,
         select_branch,
+        delete_branch,
         get_persistent_approvals,
         save_approval,
         remove_approval,
@@ -2199,4 +2200,37 @@ fn json_to_toml(v: serde_json::Value) -> Option<toml::Value> {
             Some(toml::Value::Table(out))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// F-145: branch-variant deletion.
+//
+// Mirrors F-144's `select_branch` shape: session-scoped authz, size-capped
+// `parent_id`, delegation to `bridge::delete_branch`. The daemon resolves the
+// target and either emits `Event::BranchDeleted { parent, variant_index }`
+// or — for a root-with-siblings delete — rejects the request and logs. The
+// Tauri command returns `Ok(())` once the IPC frame is written; the outcome
+// arrives through the event stream.
+//
+// Appended at the bottom of the file per the concurrent-worktree convention
+// (F-137 / F-144 / F-126 / F-151 have all extended this file in parallel;
+// keeping new additions at EOF minimizes rebase conflicts). Also registered
+// in `build_invoke_handler` at the top of this file.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn delete_branch<R: Runtime>(
+    session_id: String,
+    parent_id: String,
+    variant_index: u32,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+) -> Result<(), String> {
+    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_size("parent_id", &parent_id, MAX_MESSAGE_ID_BYTES)?;
+    state
+        .bridge
+        .delete_branch(&session_id, parent_id, variant_index)
+        .await
+        .map_err(|e| e.to_string())
 }

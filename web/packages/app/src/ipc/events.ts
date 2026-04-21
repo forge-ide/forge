@@ -216,7 +216,65 @@ export function fromRustEvent(rustEvent: unknown): SessionEvent | null {
       warnDrop('assistant_message', 'text missing or not a string');
       return null;
     }
-    return { kind: 'AssistantMessage', message_id: id, text };
+    // F-145: forward branch coordinates + provider/model/at when present.
+    // Older fixtures may omit these; the store treats missing values as
+    // "root variant, no metadata" — no branch rendering chrome appears.
+    const branchParentRaw = ev['branch_parent'];
+    const branchParent: string | null =
+      branchParentRaw === null || branchParentRaw === undefined
+        ? null
+        : isString(branchParentRaw)
+          ? branchParentRaw
+          : null;
+    const variantIndexRaw = ev['branch_variant_index'];
+    const branchVariantIndex =
+      typeof variantIndexRaw === 'number' && Number.isFinite(variantIndexRaw)
+        ? variantIndexRaw
+        : 0;
+    const provider = ev['provider'];
+    const model = ev['model'];
+    const at = ev['at'];
+    const out: SessionEvent = {
+      kind: 'AssistantMessage',
+      message_id: id,
+      text,
+      branch_parent: branchParent,
+      branch_variant_index: branchVariantIndex,
+    };
+    if (isString(provider)) out.provider = provider;
+    if (isString(model)) out.model = model;
+    if (isString(at)) out.at = at;
+    return out;
+  }
+
+  // F-144: branch selection — flips the active variant of a group.
+  if (type === 'branch_selected') {
+    const parent = ev['parent'];
+    const selected = ev['selected'];
+    if (!isString(parent)) {
+      warnDrop('branch_selected', 'parent missing or not a string');
+      return null;
+    }
+    if (!isString(selected)) {
+      warnDrop('branch_selected', 'selected missing or not a string');
+      return null;
+    }
+    return { kind: 'BranchSelected', parent, selected };
+  }
+
+  // F-145: branch deletion — tombstones a variant.
+  if (type === 'branch_deleted') {
+    const parent = ev['parent'];
+    const variantIndex = ev['variant_index'];
+    if (!isString(parent)) {
+      warnDrop('branch_deleted', 'parent missing or not a string');
+      return null;
+    }
+    if (typeof variantIndex !== 'number' || !Number.isFinite(variantIndex)) {
+      warnDrop('branch_deleted', 'variant_index missing or not a finite number');
+      return null;
+    }
+    return { kind: 'BranchDeleted', parent, variant_index: variantIndex };
   }
 
   return null;

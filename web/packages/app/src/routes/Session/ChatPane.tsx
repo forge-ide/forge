@@ -12,8 +12,18 @@ import {
   getMessagesState,
   pushEvent,
   setAwaitingResponse,
+  activeVariantPosition,
+  liveVariantCount,
+  neighbourVariantId,
   type ChatTurn,
+  type BranchGroup,
 } from '../../stores/messages';
+import { BranchSelectorStrip } from '../../components/BranchSelectorStrip';
+import { BranchGutter } from '../../components/BranchGutter';
+import {
+  BranchMetadataPopover,
+  type VariantRow,
+} from '../../components/BranchMetadataPopover';
 import type { ApprovalLevel, ApprovalScope, SessionId } from '@forge/ipc';
 import {
   getApprovalWhitelist,
@@ -324,6 +334,187 @@ const AssistantBubble: Component<{ turn: Extract<ChatTurn, { type: 'assistant' }
     </p>
   </article>
 );
+
+// ---------------------------------------------------------------------------
+// F-145 — branch-aware assistant turn wrapper
+//
+// Renders the AssistantBubble plus, when the owning branch group has more
+// than one live variant, the 2px gutter line, the selector strip, and the
+// on-demand metadata popover. Dispatches `select_branch` / `delete_branch`
+// through `invoke`; Export serializes the active branch path and writes it
+// to the clipboard.
+// ---------------------------------------------------------------------------
+
+const BranchedAssistantTurn: Component<{
+  turn: Extract<ChatTurn, { type: 'assistant' }>;
+  group: BranchGroup;
+  turns: ChatTurn[];
+  /**
+   * F-145: the transcript filtered to the currently-active branch variant
+   * per branch group. The Export action serialises this (not the full
+   * `turns`) so a user sharing the "selected branch path" does not leak
+   * inactive variants from other branch points into the exported JSON.
+   */
+  visibleTurns: ChatTurn[];
+  sessionId: SessionId;
+}> = (props) => {
+  const [popoverOpen, setPopoverOpen] = createSignal(false);
+
+  const position = createMemo(() => activeVariantPosition(props.group));
+  const liveCount = createMemo(() => liveVariantCount(props.group));
+  const rootId = createMemo(() => props.turn.branch_parent ?? props.turn.message_id);
+
+  const cyclePrev = (): void => {
+    const next = neighbourVariantId(props.group, 'prev');
+    if (next !== null) dispatchSelect(next);
+  };
+  const cycleNext = (): void => {
+    const next = neighbourVariantId(props.group, 'next');
+    if (next !== null) dispatchSelect(next);
+  };
+
+  const dispatchSelect = (messageId: string): void => {
+    // Spec §15.3: switching variants dispatches `select_branch` with the
+    // variant's index. Find that index from the group.
+    const idx = props.group.variantIds.indexOf(messageId);
+    if (idx < 0) return;
+    invoke('select_branch', {
+      sessionId: props.sessionId,
+      parentId: rootId(),
+      variantIndex: idx,
+    }).catch((err) => reportInvokeError(props.sessionId, 'select_branch', err));
+  };
+
+  const dispatchDelete = (variantIndex: number): void => {
+    invoke('delete_branch', {
+      sessionId: props.sessionId,
+      parentId: rootId(),
+      variantIndex,
+    }).catch((err) => reportInvokeError(props.sessionId, 'delete_branch', err));
+    setPopoverOpen(false);
+  };
+
+  /**
+   * F-145: "Export copies the selected branch path to clipboard as JSON."
+   *
+   * Interpretation (spec §15.5 is silent on shape): the active variant's
+   * sub-path — the user/assistant turns in the transcript ordered as they
+   * would render, filtered to the active variant per branch group — is
+   * serialized as a JSON array of `{ role, text, ... }` entries. Using
+   * `visibleTurns` (not the full `turns`) ensures inactive variants from
+   * OTHER branch points don't leak into the export; only the conversation
+   * the user currently sees is copied. The shape is the minimum a
+   * downstream tool needs to reconstruct the selected branch's conversation;
+   * tool-call trees and deep provider metadata are out of scope for v1.
+   */
+  const handleExportAll = async (): Promise<void> => {
+    const payload = props.visibleTurns
+      .map((t) => {
+        if (t.type === 'user') {
+          return { role: 'user', text: t.text, message_id: t.message_id };
+        }
+        if (t.type === 'assistant') {
+          const row: Record<string, unknown> = {
+            role: 'assistant',
+            text: t.text,
+            message_id: t.message_id,
+            branch_parent: t.branch_parent,
+            branch_variant_index: t.branch_variant_index,
+          };
+          if (t.provider !== undefined) row.provider = t.provider;
+          if (t.model !== undefined) row.model = t.model;
+          if (t.at !== undefined) row.at = t.at;
+          return row;
+        }
+        return null;
+      })
+      .filter((r): r is Record<string, unknown> => r !== null);
+    const json = JSON.stringify(payload, null, 2);
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard) {
+        await navigator.clipboard.writeText(json);
+      }
+    } catch (err) {
+      reportInvokeError(props.sessionId, 'clipboard.writeText', err);
+    }
+    setPopoverOpen(false);
+  };
+
+  /**
+   * Build the variant rows consumed by the popover. Preview text comes
+   * from the matching turn in `props.turns` when available; a missing turn
+   * (e.g. the variant has not yet streamed in after a BranchSelected
+   * arrived first) falls back to an empty preview so the popover still
+   * lists the placeholder row.
+   */
+  const variantRows = createMemo<VariantRow[]>(() => {
+    const rows: VariantRow[] = [];
+    const ids = props.group.variantIds;
+    for (let idx = 0; idx < ids.length; idx++) {
+      const id = ids[idx];
+      if (id === null || id === undefined) continue;
+      const matchId: string = id;
+      const turn = props.turns.find(
+        (t): t is Extract<ChatTurn, { type: 'assistant' }> =>
+          t.type === 'assistant' && t.message_id === matchId,
+      );
+      rows.push({
+        index: idx,
+        message_id: matchId,
+        preview: turn?.text ?? '',
+        ...(turn?.provider !== undefined ? { provider: turn.provider } : {}),
+        ...(turn?.model !== undefined ? { model: turn.model } : {}),
+        ...(turn?.at !== undefined ? { at: turn.at } : {}),
+      });
+    }
+    return rows;
+  });
+
+  return (
+    <div
+      class="turn-branch"
+      data-testid={`branch-turn-${props.turn.message_id}`}
+      data-branch-root={rootId()}
+    >
+      <BranchGutter depth={0} />
+      <Show when={position()}>
+        {(pos) => (
+          <BranchSelectorStrip
+            position={pos().position}
+            total={pos().total}
+            onPrev={cyclePrev}
+            onNext={cycleNext}
+            onToggleInfo={() => setPopoverOpen((v) => !v)}
+            infoOpen={popoverOpen()}
+          />
+        )}
+      </Show>
+      <Show when={popoverOpen()}>
+        <div class="turn-branch__popover-anchor">
+          <BranchMetadataPopover
+            variants={variantRows()}
+            activeVariantId={props.group.activeVariantId}
+            onSelect={(id) => {
+              dispatchSelect(id);
+              setPopoverOpen(false);
+            }}
+            onDelete={dispatchDelete}
+            onExportAll={() => {
+              void handleExportAll();
+            }}
+            onDismiss={() => setPopoverOpen(false)}
+          />
+        </div>
+      </Show>
+      <AssistantBubble turn={props.turn} />
+      <Show when={liveCount() > 1 && !popoverOpen()}>
+        {/* Keep a stable placeholder so layout tests can measure the
+            post-strip gap even when the popover is closed. Empty by design. */}
+        <span class="turn-branch__gap" aria-hidden="true" />
+      </Show>
+    </div>
+  );
+};
 
 const ErrorTurn: Component<{ turn: Extract<ChatTurn, { type: 'error' }> }> = (props) => (
   <div class="turn turn--error" role="alert">
@@ -696,7 +887,7 @@ export const ChatPane: Component<ChatPaneProps> = (props) => {
   const sessionId = () => activeSessionId();
   const state = createMemo(() => {
     const id = sessionId();
-    if (!id) return { turns: [], awaitingResponse: false, streamingMessageId: null };
+    if (!id) return { turns: [], awaitingResponse: false, streamingMessageId: null, branchGroups: {} };
     return getMessagesState(id);
   });
 
@@ -726,6 +917,23 @@ export const ChatPane: Component<ChatPaneProps> = (props) => {
     const file = await defaultReadFile(id, path);
     return file.content;
   };
+
+  // F-145: filter assistant turns to render only the active variant of each
+  // branch group. Non-assistant turns pass through unchanged. When a root
+  // message has siblings, we hide every assistant turn whose id doesn't
+  // match the group's `activeVariantId` — the selector strip + popover
+  // surface the hidden siblings as separately-selectable items.
+  const visibleTurns = createMemo<ChatTurn[]>(() => {
+    const { turns, branchGroups } = state();
+    return turns.filter((turn) => {
+      if (turn.type !== 'assistant') return true;
+      const rootId = turn.branch_parent ?? turn.message_id;
+      const group = branchGroups[rootId];
+      if (!group) return true;
+      if (group.deletedIndices.includes(turn.branch_variant_index)) return false;
+      return turn.message_id === group.activeVariantId;
+    });
+  });
 
   let listRef: HTMLDivElement | undefined;
   // Track whether the user has scrolled up (released auto-pin)
@@ -811,13 +1019,34 @@ export const ChatPane: Component<ChatPaneProps> = (props) => {
         ref={listRef}
         onScroll={handleListScroll}
       >
-        <For each={state().turns}>
+        <For each={visibleTurns()}>
           {(turn) => {
             switch (turn.type) {
               case 'user':
                 return <UserBubble turn={turn} />;
-              case 'assistant':
+              case 'assistant': {
+                // F-145: when the turn belongs to a multi-variant branch
+                // group, mount the branch chrome around it. Otherwise fall
+                // back to the plain bubble (spec §15.2 — single-variant
+                // messages render without extra chrome).
+                const rootId = turn.branch_parent ?? turn.message_id;
+                const group = state().branchGroups[rootId];
+                if (group && liveVariantCount(group) > 1) {
+                  const id = sessionId();
+                  if (id !== null) {
+                    return (
+                      <BranchedAssistantTurn
+                        turn={turn}
+                        group={group}
+                        turns={state().turns}
+                        visibleTurns={visibleTurns()}
+                        sessionId={id}
+                      />
+                    );
+                  }
+                }
                 return <AssistantBubble turn={turn} />;
+              }
               case 'tool_placeholder':
                 return <ToolCallCard turn={turn} />;
               case 'error':

@@ -237,6 +237,32 @@ fn session_a_window_invoking_select_branch_for_session_b_is_rejected() {
     );
 }
 
+/// F-145: `delete_branch` is session-scoped. A session-A webview must not be
+/// able to tombstone a branch variant inside session-B's transcript — the
+/// resulting `BranchDeleted` event would logically remove another session's
+/// content from replay.
+#[test]
+fn session_a_window_invoking_delete_branch_for_session_b_is_rejected() {
+    let app = make_app_with_session_bridge();
+    let window = build_window(&app, "session-A");
+
+    let err = invoke(
+        &window,
+        "delete_branch",
+        serde_json::json!({
+            "sessionId": "B",
+            "parentId": "deadbeefdeadbeef",
+            "variantIndex": 1,
+        }),
+    )
+    .expect_err("session-A must not delete a branch in session B");
+
+    assert!(
+        err.contains(LABEL_MISMATCH),
+        "expected label-mismatch error, got: {err}"
+    );
+}
+
 #[test]
 fn session_a_window_invoking_session_hello_for_session_b_is_rejected() {
     let app = make_app_with_session_bridge();

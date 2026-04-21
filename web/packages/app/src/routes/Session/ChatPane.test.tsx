@@ -1232,3 +1232,174 @@ describe('ChatPane — sub-agent banner inline mount (F-136)', () => {
     expect(banners).toHaveLength(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// F-145 — branch-aware ChatPane rendering
+// ---------------------------------------------------------------------------
+
+describe('ChatPane — branch variants (F-145)', () => {
+  const seedBranchedTurn = (): void => {
+    // Initial user then branch root assistant.
+    pushEvent(SID, { kind: 'UserMessage', text: 'ask', message_id: 'u1' });
+    pushEvent(SID, {
+      kind: 'AssistantMessage',
+      text: 'root answer',
+      message_id: 'root-1',
+      branch_parent: null,
+      branch_variant_index: 0,
+      provider: 'mock',
+      model: 'sonnet-4.5',
+      at: '2026-04-20T14:22:11Z',
+    });
+    // Sibling variant.
+    pushEvent(SID, {
+      kind: 'AssistantMessage',
+      text: 'variant one',
+      message_id: 'var-1',
+      branch_parent: 'root-1',
+      branch_variant_index: 1,
+      provider: 'mock',
+      model: 'sonnet-4.5',
+      at: '2026-04-20T14:24:35Z',
+    });
+  };
+
+  it('renders no branch chrome for a single-variant assistant turn', () => {
+    pushEvent(SID, {
+      kind: 'AssistantMessage',
+      text: 'lone',
+      message_id: 'root-1',
+      branch_parent: null,
+      branch_variant_index: 0,
+    });
+    const { queryByTestId, getByText } = render(() => <ChatPane />);
+    expect(getByText('lone')).toBeInTheDocument();
+    expect(queryByTestId('branch-selector-strip')).toBeNull();
+    expect(queryByTestId('branch-gutter')).toBeNull();
+  });
+
+  it('mounts the strip + gutter around a branched assistant turn', () => {
+    seedBranchedTurn();
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('branch-selector-strip')).toBeInTheDocument();
+    expect(getByTestId('branch-gutter')).toBeInTheDocument();
+    // Active is var-1 after the sibling arrives (spec §15.1 — new variant
+    // becomes active). Strip position reflects this.
+    expect(getByTestId('branch-strip-label').textContent).toBe('variant 2 of 2');
+  });
+
+  it('filters non-active variants from the transcript', () => {
+    seedBranchedTurn();
+    const { queryByText, getByText } = render(() => <ChatPane />);
+    expect(getByText('variant one')).toBeInTheDocument();
+    // Root variant is hidden because it is not the active one.
+    expect(queryByText('root answer')).toBeNull();
+  });
+
+  it('next-arrow dispatches select_branch with the sibling variant index', () => {
+    seedBranchedTurn();
+    const { getByTestId } = render(() => <ChatPane />);
+    invokeMock.mockClear();
+    fireEvent.click(getByTestId('branch-strip-next'));
+    // neighbourVariantId(next) wraps from var-1 back to root-1 (index 0).
+    expect(invokeMock).toHaveBeenCalledWith('select_branch', {
+      sessionId: SID,
+      parentId: 'root-1',
+      variantIndex: 0,
+    });
+  });
+
+  it('info button opens the metadata popover', () => {
+    seedBranchedTurn();
+    const { getByTestId, queryByTestId } = render(() => <ChatPane />);
+    expect(queryByTestId('branch-metadata-popover')).toBeNull();
+    fireEvent.click(getByTestId('branch-strip-info'));
+    expect(getByTestId('branch-metadata-popover')).toBeInTheDocument();
+  });
+
+  it('popover Delete dispatches delete_branch with the variant index', () => {
+    seedBranchedTurn();
+    const { getByTestId } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('branch-strip-info'));
+    invokeMock.mockClear();
+    fireEvent.click(getByTestId('branch-popover-delete-1'));
+    expect(invokeMock).toHaveBeenCalledWith('delete_branch', {
+      sessionId: SID,
+      parentId: 'root-1',
+      variantIndex: 1,
+    });
+  });
+
+  it('Export button writes the active branch path (only the selected variant) to the clipboard as JSON', async () => {
+    seedBranchedTurn();
+    // jsdom doesn't have a clipboard; stub it. Cleaned up after the test so
+    // later clipboard-dependent tests don't inherit the stub.
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    try {
+      const { getByTestId } = render(() => <ChatPane />);
+      fireEvent.click(getByTestId('branch-strip-info'));
+      fireEvent.click(getByTestId('branch-popover-export'));
+      // writeText fires asynchronously; yield microtasks.
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(writeText).toHaveBeenCalledTimes(1);
+      const jsonArg = writeText.mock.calls[0]![0] as string;
+      const parsed = JSON.parse(jsonArg) as Array<Record<string, unknown>>;
+      // Must contain the user turn plus the ACTIVE assistant variant only.
+      const roles = parsed.map((r) => r.role);
+      expect(roles).toContain('user');
+      expect(roles).toContain('assistant');
+      const assistantTexts = parsed
+        .filter((r) => r.role === 'assistant')
+        .map((r) => r.text as string);
+      // Active is `var-1` after sibling registration — its text must appear.
+      expect(assistantTexts).toContain('variant one');
+      // Inactive `root-1` variant must NOT leak into the export.
+      expect(assistantTexts).not.toContain('root answer');
+    } finally {
+      // Remove the stub so it doesn't leak into unrelated tests below.
+      // `delete navigator.clipboard` is the mirror of defineProperty.
+      Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  });
+
+  it('renders a gutter per branched group when two branch groups stack', () => {
+    seedBranchedTurn();
+    pushEvent(SID, { kind: 'UserMessage', text: 'follow-up', message_id: 'u2' });
+    pushEvent(SID, {
+      kind: 'AssistantMessage',
+      text: 'follow root',
+      message_id: 'root-2',
+      branch_parent: null,
+      branch_variant_index: 0,
+    });
+    pushEvent(SID, {
+      kind: 'AssistantMessage',
+      text: 'follow var',
+      message_id: 'root-2-var-1',
+      branch_parent: 'root-2',
+      branch_variant_index: 1,
+    });
+    const { getAllByTestId } = render(() => <ChatPane />);
+    const gutters = getAllByTestId('branch-gutter');
+    expect(gutters).toHaveLength(2);
+  });
+
+  it('BranchSelected event flips which variant is rendered', () => {
+    seedBranchedTurn();
+    const { getByText, queryByText } = render(() => <ChatPane />);
+    expect(getByText('variant one')).toBeInTheDocument();
+    // Flip back to root.
+    pushEvent(SID, {
+      kind: 'BranchSelected',
+      parent: 'root-1',
+      selected: 'root-1',
+    });
+    expect(getByText('root answer')).toBeInTheDocument();
+    expect(queryByText('variant one')).toBeNull();
+  });
+});
