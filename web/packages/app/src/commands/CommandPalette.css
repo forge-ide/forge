@@ -1,0 +1,93 @@
+/* F-157: CommandPalette overlay.
+ * Backdrop covers the viewport; the palette itself sits near the top, sized
+ * to a readable width. Styling pulls from @forge/design tokens — no raw
+ * hex or spacing values. */
+
+.command-palette__backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  z-index: 1000;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 96px;
+}
+
+.command-palette {
+  width: min(560px, 90vw);
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border-2);
+  border-radius: var(--r-lg);
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  font-family: var(--font-body);
+  color: var(--color-text-primary);
+}
+
+.command-palette__input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--sp-3) var(--sp-4);
+  border: none;
+  border-bottom: 1px solid var(--color-border-1);
+  background: var(--color-surface-1);
+  color: var(--color-text-primary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  outline: none;
+}
+
+.command-palette__input::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.command-palette__input:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
+}
+
+.command-palette__list {
+  margin: 0;
+  padding: var(--sp-1) 0;
+  list-style: none;
+  overflow-y: auto;
+  flex: 1 1 auto;
+}
+
+.command-palette__item {
+  padding: var(--sp-2) var(--sp-4);
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--color-text-primary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+}
+
+.command-palette__item--active {
+  background: var(--color-surface-3);
+}
+
+.command-palette__item:hover {
+  background: var(--color-surface-3);
+}
+
+.command-palette__item:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
+}
+
+.command-palette__item-title {
+  flex: 1 1 auto;
+}
+
+.command-palette__empty {
+  padding: var(--sp-3) var(--sp-4);
+  color: var(--color-text-tertiary);
+  font-style: italic;
+  font-size: 13px;
+}
