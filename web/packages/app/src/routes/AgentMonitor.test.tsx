@@ -1,8 +1,19 @@
 import { describe, expect, it, vi } from 'vitest';
-import { cleanup, render, fireEvent } from '@solidjs/testing-library';
+import { cleanup, render, fireEvent, waitFor } from '@solidjs/testing-library';
+
+const { listenMock } = vi.hoisted(() => ({
+  listenMock: vi.fn(),
+}));
+
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: listenMock,
+}));
+
+import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import {
   AgentInspector,
   AgentList,
+  AgentMonitor,
   AgentTrace,
   applyEventToState,
   filterAgents,
@@ -14,6 +25,7 @@ import {
   type AgentStep,
   type LiveAgentState,
 } from './AgentMonitor';
+import { setInvokeForTesting } from '../lib/tauri';
 import { afterEach } from 'vitest';
 
 afterEach(() => cleanup());
@@ -484,5 +496,87 @@ describe('stopAgentInstance wiring', () => {
     const result = await stopAgentInstance({ invoke }, 'sess-a', 'kill-me');
     expect(invoke).toHaveBeenCalledTimes(1);
     expect(result).toBe('failed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-153: route-level pre-selection.
+//
+// The status-bar badge double-clicks / right-clicks navigate to
+// `/agents/<sessionId>?instance=<id>`. The monitor must honor the `instance`
+// query param as the initial `selectedId` so the trace + inspector columns
+// surface the exact row the user clicked rather than the default first row.
+// ---------------------------------------------------------------------------
+describe('AgentMonitor — instance query-param pre-selection (F-153)', () => {
+  function renderAt(path: string) {
+    // `onSessionEvent` calls `listen('session:event', ...)`; under vitest the
+    // mock just records the call and returns a no-op unlisten so the component
+    // mounts cleanly without a Tauri runtime.
+    listenMock.mockResolvedValue(() => {});
+    const history = createMemoryHistory();
+    history.set({ value: path });
+    return render(() => (
+      <MemoryRouter history={history}>
+        <Route path="/agents/:id" component={AgentMonitor} />
+      </MemoryRouter>
+    ));
+  }
+
+  afterEach(() => {
+    setInvokeForTesting(null);
+    listenMock.mockReset();
+  });
+
+  it('seeds selectedId from ?instance=<id> when the row is present in the bg list', async () => {
+    // `list_background_agents` returns two running rows; the instance param
+    // singles out the second one. Without the pre-select, the first row
+    // would auto-select on mount.
+    setInvokeForTesting(
+      (async (cmd: string) => {
+        if (cmd === 'list_background_agents') {
+          return [
+            { id: 'aaaa1111', agent_name: 'writer', state: 'Running' },
+            { id: 'bbbb2222', agent_name: 'reviewer', state: 'Running' },
+          ];
+        }
+        return undefined;
+      }) as never,
+    );
+    const { container } = renderAt('/agents/sess-a?instance=bbbb2222');
+
+    // The trace column header renders the selected agent's name + id — both
+    // halves must point at bbbb2222, not aaaa1111. Query by class rather
+    // than by text because the row's name element in the list column also
+    // renders "reviewer" and `findByText` would see both.
+    await waitFor(() => {
+      const idEl = container.querySelector(
+        '.agent-monitor__trace-id',
+      ) as HTMLElement | null;
+      expect(idEl?.textContent).toBe('bbbb2222');
+    });
+    const traceHead = container.querySelector(
+      '.agent-monitor__trace-name',
+    ) as HTMLElement | null;
+    expect(traceHead?.textContent).toBe('reviewer');
+  });
+
+  it('falls back to the first row when ?instance=<id> does not match any loaded row', async () => {
+    setInvokeForTesting(
+      (async (cmd: string) => {
+        if (cmd === 'list_background_agents') {
+          return [
+            { id: 'aaaa1111', agent_name: 'writer', state: 'Running' },
+          ];
+        }
+        return undefined;
+      }) as never,
+    );
+    const { container } = renderAt('/agents/sess-a?instance=does-not-exist');
+    await waitFor(() => {
+      const traceHead = container.querySelector(
+        '.agent-monitor__trace-name',
+      ) as HTMLElement | null;
+      expect(traceHead?.textContent).toBe('writer');
+    });
   });
 });
