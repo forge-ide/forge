@@ -24,9 +24,12 @@ import {
 import { resetSessionEventStore } from '../../stores/session';
 import { resetMessagesStore } from '../../stores/messages';
 import { setInvokeForTesting } from '../../lib/tauri';
-import type { Layouts, PaneState } from '@forge/ipc';
-import { createStore, produce } from 'solid-js/store';
-import { defaultLayouts, type LayoutStore } from '../../layout/layoutStore';
+import type { LayoutTree, Layouts } from '@forge/ipc';
+import {
+  createLayoutStore,
+  defaultLayouts,
+  type LayoutStore,
+} from '../../layout/layoutStore';
 
 const helloAck = {
   session_id: 'abc123',
@@ -46,59 +49,37 @@ function renderAt(path: string) {
   ));
 }
 
-// F-126: test-only fake layout store that skips the `read_layouts` /
-// `write_layouts` IPC roundtrip. Mirrors the production `LayoutStore`
-// interface closely enough that SessionWindow can drive the Open ->
-// EditorPane flow through it deterministically.
-function makeFakeLayoutStore(): LayoutStore & { __openFileCalls: string[] } {
-  // Use `createStore` so mutations notify Solid reactivity — SessionWindow's
-  // `<Show when={activeEditorFile()}>` only retracks when the underlying
-  // signal is reactive. A plain object would mutate silently and the
-  // EditorPane would never mount.
-  const [state, setState] = createStore<Layouts>(defaultLayouts());
+// F-150: test-only wrapper around the real `createLayoutStore` that skips
+// the `read_layouts` / `write_layouts` IPC roundtrip and exposes an
+// `__openFileCalls` spy. Uses the production implementation so tree-based
+// openFile / closeLeaf / setLayoutTree semantics are tested end-to-end —
+// the previous fake reproduced only the singleton pane_state shape that
+// F-150 removed.
+function makeFakeLayoutStore(
+  seed?: Layouts,
+): LayoutStore & { __openFileCalls: string[] } {
   const calls: string[] = [];
-  return {
-    get layouts() {
-      return state;
+  const initial = seed ?? defaultLayouts();
+  // Synchronous stubs so `load()` completes in-line with `onMount`, keeping
+  // `activeTree()` stable from the first paint. The scheduler is stubbed to
+  // a no-op so no setTimeout handles leak between tests.
+  const store = createLayoutStore('/ws', {
+    read: async () => initial,
+    write: async () => {},
+    scheduler: {
+      setTimeout: () => 0,
+      clearTimeout: () => {},
     },
-    async load() {
-      /* already seeded */
-    },
-    setLayouts() {
-      /* no-op */
-    },
-    setLayout() {
-      /* no-op */
-    },
-    setPaneState(layoutName, leafId, paneState) {
-      setState('named', layoutName, 'pane_state', leafId, paneState);
-    },
-    setActive(name) {
-      setState('active', name);
-    },
-    openFile(path) {
-      calls.push(path ?? '<null>');
-      setState(
-        produce((s) => {
-          const layout = s.named[s.active];
-          if (!layout) return;
-          const current = layout.pane_state.editor ?? ({} as PaneState);
-          layout.pane_state.editor = { ...current, active_file: path };
-        }),
-      );
-    },
-    activeEditorFile() {
-      const layout = state.named[state.active];
-      return layout?.pane_state.editor?.active_file ?? null;
-    },
-    cancelPendingWrite() {
-      /* no-op */
-    },
-    async flush() {
-      /* no-op */
-    },
-    __openFileCalls: calls,
+  });
+  // Seed synchronously so test setup can call `store.openFile(...)` before
+  // mount without awaiting `load()`.
+  store.setLayouts(initial);
+  const origOpen = store.openFile.bind(store);
+  store.openFile = (path: string) => {
+    calls.push(path);
+    origOpen(path);
   };
+  return Object.assign(store, { __openFileCalls: calls });
 }
 
 function renderWithStore(path: string, store: LayoutStore) {
@@ -201,13 +182,16 @@ describe('SessionWindow', () => {
     );
   });
 
-  it('renders exactly one pane slot (no splitter or dock zones)', async () => {
+  it('renders a single-leaf grid when no split is in the active layout (F-150)', async () => {
     const { container, findByTestId } = renderAt('/session/abc123');
     await findByTestId('pane-header-subject');
+    // Default layout is a single chat leaf — GridContainer renders one
+    // `.session-window__pane` and no SplitPane divider. After F-150 the
+    // grid is always present, so assert on the leaf count rather than the
+    // previous "exactly one pane slot" singleton shape.
     const panes = container.querySelectorAll('.session-window__pane');
     expect(panes.length).toBe(1);
-    expect(container.querySelector('.session-window__splitter')).toBeNull();
-    expect(container.querySelector('.session-window__dock-zone')).toBeNull();
+    expect(container.querySelector('[data-testid="split-pane"]')).toBeNull();
   });
 
   it('pane header shows subject, ollama provider label, cost placeholder, close action', async () => {
@@ -377,17 +361,14 @@ describe('SessionWindow', () => {
   });
 
   // -----------------------------------------------------------------------
-  // F-126 mandatory fix: Open action -> layoutStore -> EditorPane end-to-end.
-  // This test is the whole reason PR #291 was closed: the previous Open
-  // handler was a placeholder. Here we assert the full flow:
-  //   1. User opens the Files sidebar.
-  //   2. User double-clicks a file row (or context-menu Open).
-  //   3. SessionWindow.onFileOpen invokes layoutStore.openFile(path).
-  //   4. SessionWindow reactively mounts an EditorPane for that path in the
-  //      main pane body (replacing the ChatPane fallback).
+  // F-150: Files-sidebar Open -> layoutStore -> GridContainer -> EditorPane.
+  // Unlike F-126's singleton-slot flow, opening a file splits the grid so
+  // the existing chat pane remains visible side-by-side with a new editor
+  // leaf. Closing the editor leaf reclaims the grid space and leaves the
+  // chat pane as the sole leaf.
   // -----------------------------------------------------------------------
 
-  it('routes a files-sidebar Open click through the layout store and mounts an EditorPane', async () => {
+  it('splits the grid and mounts an EditorPane when the Files sidebar opens a file', async () => {
     // Arrange the `tree` IPC mock to return a workspace with one file so
     // the sidebar has something to double-click.
     const treeNode = {
@@ -422,7 +403,7 @@ describe('SessionWindow', () => {
       store,
     );
 
-    // Initial state: ChatPane is mounted, no EditorPane.
+    // Initial state: ChatPane is mounted as the sole grid leaf; no editor.
     await findByTestId('chat-pane');
     expect(queryByTestId('editor-pane')).toBeNull();
 
@@ -432,8 +413,8 @@ describe('SessionWindow', () => {
     await findByTestId('files-sidebar');
 
     // Double-click the README row. Sidebar emits onOpen(path);
-    // SessionWindow calls store.openFile(path); reactive Show swaps the
-    // pane body from ChatPane to EditorPane.
+    // SessionWindow calls store.openFile(path); the tree splits so both
+    // the chat leaf and a freshly-minted editor leaf render in parallel.
     const row = await findByText('README.md');
     row.dispatchEvent(
       new MouseEvent('dblclick', { bubbles: true, cancelable: true }),
@@ -442,13 +423,67 @@ describe('SessionWindow', () => {
     const editor = await findByTestId('editor-pane');
     expect(editor).toBeInTheDocument();
     expect(store.__openFileCalls).toContain('/ws/README.md');
-    // ChatPane gone, EditorPane breadcrumb displays the path leaf.
-    expect(queryByTestId('chat-pane')).toBeNull();
+    // F-150: chat pane stays — the split mounts editor beside it.
+    expect(queryByTestId('chat-pane')).not.toBeNull();
     const breadcrumb = await findByTestId('editor-pane-breadcrumb');
     expect(breadcrumb.textContent).toContain('README.md');
+    // Tree is now a v-split with one editor leaf (F-150 DoD: split-when-none).
+    const rootTree = store.layouts.named[store.layouts.active]?.tree;
+    expect(rootTree?.kind).toBe('split');
   });
 
-  it('closing the EditorPane clears the active file and falls back to ChatPane', async () => {
+  it('reuses the existing editor leaf when opening a second file', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'session_hello') return helloAck;
+      if (cmd === 'read_layouts') return defaultLayouts();
+      if (cmd === 'write_layouts') return undefined;
+      if (cmd === 'tree') {
+        return {
+          name: 'ws',
+          path: '/ws',
+          kind: 'Dir',
+          children: [
+            { name: 'a.ts', path: '/ws/a.ts', kind: 'File', children: null },
+            { name: 'b.ts', path: '/ws/b.ts', kind: 'File', children: null },
+          ],
+        };
+      }
+      if (cmd === 'read_file') {
+        return { content: '', bytes: 0, sha256: '' };
+      }
+      return undefined;
+    });
+
+    const store = makeFakeLayoutStore();
+    // First open creates the editor leaf. Count the editor leaves after
+    // the second open to confirm only one exists.
+    store.openFile('/ws/a.ts');
+    const treeAfterFirst = store.layouts.named[store.layouts.active]?.tree;
+    expect(treeAfterFirst?.kind).toBe('split');
+
+    const { findByTestId } = renderWithStore('/session/abc123', store);
+    await findByTestId('editor-pane');
+
+    // Second open should reuse the same leaf, not add another split.
+    store.openFile('/ws/b.ts');
+    const treeAfterSecond = store.layouts.named[store.layouts.active]?.tree;
+    expect(treeAfterSecond?.kind).toBe('split');
+    if (treeAfterSecond?.kind === 'split') {
+      // Still exactly one editor leaf under the root split.
+      const ids = new Set<string>();
+      const walk = (n: LayoutTree): void => {
+        if (n.kind === 'leaf') ids.add(n.id);
+        else {
+          walk(n.a);
+          walk(n.b);
+        }
+      };
+      walk(treeAfterSecond);
+      expect(ids.size).toBe(2); // chat + editor
+    }
+  });
+
+  it('closing the EditorPane reclaims the grid space and leaves the chat pane', async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === 'session_hello') return helloAck;
       if (cmd === 'read_layouts') return defaultLayouts();
@@ -472,13 +507,176 @@ describe('SessionWindow', () => {
     );
 
     await findByTestId('editor-pane');
-    expect(queryByTestId('chat-pane')).toBeNull();
+    // Both panes render in parallel before the close.
+    await findByTestId('chat-pane');
 
     const close = await findByRole('button', { name: /close editor pane/i });
     close.click();
 
+    // Editor leaf removed; chat leaf promoted to the whole grid.
+    await waitFor(() => expect(queryByTestId('editor-pane')).toBeNull());
     await findByTestId('chat-pane');
-    expect(queryByTestId('editor-pane')).toBeNull();
-    expect(store.activeEditorFile()).toBeNull();
+    const tree = store.layouts.named[store.layouts.active]?.tree;
+    expect(tree?.kind).toBe('leaf');
+  });
+
+  // -----------------------------------------------------------------------
+  // F-150: drag-to-dock regression — dragging an editor pane header must
+  // reposition the leaf in the grid the same way it does for any other
+  // pane type. We drive a real pointer sequence against the editor's
+  // breadcrumb header and assert the tree mutates via layoutStore.
+  // Geometry and hit-testing are stubbed the same way
+  // `useDragToDock.test.ts` stubs them, so the whole pointerdown → pointer-
+  // move → pointerup path participates.
+  // -----------------------------------------------------------------------
+
+  it('drag-to-dock moves an editor leaf like any other grid pane', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'session_hello') return helloAck;
+      if (cmd === 'read_layouts') return defaultLayouts();
+      if (cmd === 'write_layouts') return undefined;
+      if (cmd === 'tree') {
+        return { name: 'ws', path: '/ws', kind: 'Dir', children: [] };
+      }
+      if (cmd === 'read_file') {
+        return { content: '', bytes: 0, sha256: '' };
+      }
+      return undefined;
+    });
+
+    const store = makeFakeLayoutStore();
+    // Seed the tree with chat + editor side-by-side.
+    store.openFile('/ws/seed.ts');
+    const beforeTree = store.layouts.named[store.layouts.active]?.tree;
+    if (beforeTree?.kind !== 'split') throw new Error('expected split');
+    const editorLeaf = beforeTree.b.kind === 'leaf' ? beforeTree.b : null;
+    const chatLeaf = beforeTree.a.kind === 'leaf' ? beforeTree.a : null;
+    if (editorLeaf === null || chatLeaf === null) {
+      throw new Error('expected two sibling leaves');
+    }
+    const editorId = editorLeaf.id;
+    const chatId = chatLeaf.id;
+
+    const { findByTestId } = renderWithStore('/session/abc123', store);
+    await findByTestId('editor-pane');
+
+    // Editor leaf is exposed as a drop target (data-leaf-id marker).
+    const editorMarker = document.querySelector(
+      `[data-leaf-id="${editorId}"]`,
+    ) as HTMLElement | null;
+    expect(editorMarker).not.toBeNull();
+
+    // Stub leaf geometry so `useDragToDock`'s `elementFromPoint` +
+    // `getBoundingClientRect` resolve to the two leaves. Chat on the left
+    // half, editor on the right half — matches the seeded v-split.
+    const geometry: Record<
+      string,
+      { left: number; top: number; right: number; bottom: number; width: number; height: number }
+    > = {
+      [chatId]: { left: 0, top: 0, right: 500, bottom: 600, width: 500, height: 600 },
+      [editorId]: {
+        left: 500,
+        top: 0,
+        right: 1000,
+        bottom: 600,
+        width: 500,
+        height: 600,
+      },
+    };
+    const originalEfp = document.elementFromPoint;
+    const originalRect = Element.prototype.getBoundingClientRect;
+    Element.prototype.getBoundingClientRect = function stubbed(
+      this: Element,
+    ): DOMRect {
+      if (this instanceof HTMLElement) {
+        const id = this.getAttribute('data-leaf-id');
+        if (id !== null && geometry[id] !== undefined) {
+          const g = geometry[id];
+          return {
+            ...g,
+            x: g.left,
+            y: g.top,
+            toJSON() {
+              return g;
+            },
+          } as DOMRect;
+        }
+      }
+      return originalRect.call(this);
+    };
+    document.elementFromPoint = function stubbed(
+      x: number,
+      y: number,
+    ): Element | null {
+      for (const [id, g] of Object.entries(geometry)) {
+        if (x >= g.left && x <= g.right && y >= g.top && y <= g.bottom) {
+          const el = document.querySelector(`[data-leaf-id="${id}"]`);
+          if (el !== null) return el;
+        }
+      }
+      return null;
+    };
+
+    try {
+      // EditorPane's own header is where onHeaderPointerDown is wired —
+      // that's the drag source for the editor leaf. Fire pointerdown on
+      // it, then move + up over the chat leaf's left edge to dock the
+      // editor on the far left.
+      const editorHeader = document.querySelector(
+        '.editor-pane__header',
+      ) as HTMLElement | null;
+      expect(editorHeader).not.toBeNull();
+      const pd = new MouseEvent('pointerdown', {
+        bubbles: true,
+        cancelable: true,
+        clientX: 520,
+        clientY: 10,
+        button: 0,
+      });
+      Object.defineProperty(pd, 'pointerId', { value: 1 });
+      editorHeader!.dispatchEvent(pd);
+
+      const firePointer = (
+        kind: 'pointermove' | 'pointerup',
+        x: number,
+        y: number,
+      ) => {
+        const ev = new MouseEvent(kind, {
+          bubbles: true,
+          cancelable: true,
+          clientX: x,
+          clientY: y,
+        });
+        Object.defineProperty(ev, 'pointerId', { value: 1 });
+        window.dispatchEvent(ev);
+      };
+      // Dock onto the chat leaf's left edge.
+      firePointer('pointermove', 10, 300);
+      firePointer('pointerup', 10, 300);
+
+      // Tree should have mutated — editor on the left now, chat on the
+      // right — proving the editor leaf is a drag source the same as any
+      // other pane. The exact shape matches `applyDockDrop` semantics.
+      const after = store.layouts.named[store.layouts.active]?.tree;
+      if (after?.kind !== 'split') throw new Error('expected split after drop');
+      // Either (editor, chat) by id or an equivalent structural mutation.
+      const ids: string[] = [];
+      const walk = (n: LayoutTree) => {
+        if (n.kind === 'leaf') ids.push(n.id);
+        else {
+          walk(n.a);
+          walk(n.b);
+        }
+      };
+      walk(after);
+      expect(ids).toContain(editorId);
+      expect(ids).toContain(chatId);
+      // The editor leaf must now sit on the left half of the split.
+      const leftmost = after.a.kind === 'leaf' ? after.a.id : null;
+      expect(leftmost).toBe(editorId);
+    } finally {
+      Element.prototype.getBoundingClientRect = originalRect;
+      document.elementFromPoint = originalEfp;
+    }
   });
 });

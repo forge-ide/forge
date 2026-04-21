@@ -1,37 +1,30 @@
 import { type Component, type JSX, Match, Show, Switch } from 'solid-js';
+import type { LayoutTree } from '@forge/ipc';
 import { SplitPane } from './SplitPane';
 import { DropZoneOverlay } from './DropZoneOverlay';
 import type { DragState } from './useDragToDock';
 
 /**
- * A terminal node in the layout tree. `render` produces the pane body for
- * the leaf — F-117 stays agnostic about pane type (chat, terminal, editor,
- * files, agent monitor); the caller supplies the renderer.
+ * F-150: GridContainer now consumes the serialized `LayoutTree` shape from
+ * the IPC package directly. A leaf carries `pane_type`, which drives the
+ * caller-supplied `renderLeaf` dispatcher. Previously each leaf embedded a
+ * `render` closure, but closures can't be persisted and made the tree
+ * non-serializable, forcing an adapter layer that had to be rebuilt for
+ * every tree mutation. Moving to the persisted shape lets drag-to-dock,
+ * layoutStore, and GridContainer share one data structure end-to-end.
  */
-export interface LeafNode {
-  kind: 'leaf';
-  id: string;
-  render: () => JSX.Element;
-}
-
-/**
- * An internal node that splits its area between `a` and `b`. `ratio` is the
- * fraction of the container occupied by `a` (0..1).
- */
-export interface SplitNode {
-  kind: 'split';
-  id: string;
-  direction: 'h' | 'v';
-  ratio: number;
-  a: LayoutNode;
-  b: LayoutNode;
-}
-
-export type LayoutNode = LeafNode | SplitNode;
+export type LayoutLeaf = LayoutTree & { kind: 'leaf' };
 
 export interface GridContainerProps {
   /** The root of the layout tree. Arbitrarily deep H/V combinations. */
-  tree: LayoutNode;
+  tree: LayoutTree;
+  /**
+   * Produce the pane body for a leaf. GridContainer stays pane-agnostic —
+   * the dispatch on `pane_type` lives in the caller's renderer so chat /
+   * terminal / editor / files / agent-monitor panes all mount through a
+   * single code path. Re-invoked whenever the tree identity changes.
+   */
+  renderLeaf: (leaf: LayoutLeaf) => JSX.Element;
   /**
    * Emitted when a split node's ratio changes (drag or double-click
    * reset). `id` is the split node's id; the parent owns persistence
@@ -49,8 +42,8 @@ export interface GridContainerProps {
 
 /**
  * Recursive N-ary layout renderer over `SplitPane`. Each split node maps to
- * one `SplitPane`; each leaf renders via its callback. GridContainer is a
- * pure function of its props — the tree walks parent-side, which keeps
+ * one `SplitPane`; each leaf renders via `renderLeaf(leaf)`. GridContainer
+ * is a pure function of its props — the tree walks parent-side, which keeps
  * persistence (F-120) and drag-to-dock (F-118) trivial to layer on later.
  *
  * F-118 layered the optional `dragState` prop here so the drop-zone overlay
@@ -62,6 +55,7 @@ export const GridContainer: Component<GridContainerProps> = (props) => {
   return (
     <GridNode
       node={props.tree}
+      renderLeaf={props.renderLeaf}
       onRatioChange={props.onRatioChange}
       dragState={() => props.dragState ?? null}
     />
@@ -69,13 +63,14 @@ export const GridContainer: Component<GridContainerProps> = (props) => {
 };
 
 const GridNode: Component<{
-  node: LayoutNode;
+  node: LayoutTree;
+  renderLeaf: (leaf: LayoutLeaf) => JSX.Element;
   onRatioChange: (id: string, next: number) => void;
   dragState: () => DragState | null;
 }> = (props) => {
   return (
     <Switch>
-      <Match when={props.node.kind === 'leaf' && (props.node as LeafNode)}>
+      <Match when={props.node.kind === 'leaf' && (props.node as LayoutLeaf)}>
         {(leaf) => {
           const activeZone = () => {
             const s = props.dragState();
@@ -89,7 +84,7 @@ const GridNode: Component<{
               data-leaf-id={leaf().id}
               style={{ width: '100%', height: '100%', position: 'relative' }}
             >
-              {leaf().render()}
+              {props.renderLeaf(leaf())}
               <Show when={showOverlay()}>
                 <DropZoneOverlay activeZone={activeZone()} />
               </Show>
@@ -97,7 +92,12 @@ const GridNode: Component<{
           );
         }}
       </Match>
-      <Match when={props.node.kind === 'split' && (props.node as SplitNode)}>
+      <Match
+        when={
+          props.node.kind === 'split' &&
+          (props.node as LayoutTree & { kind: 'split' })
+        }
+      >
         {(split) => (
           <SplitPane
             direction={split().direction}
@@ -106,11 +106,13 @@ const GridNode: Component<{
           >
             <GridNode
               node={split().a}
+              renderLeaf={props.renderLeaf}
               onRatioChange={props.onRatioChange}
               dragState={props.dragState}
             />
             <GridNode
               node={split().b}
+              renderLeaf={props.renderLeaf}
               onRatioChange={props.onRatioChange}
               dragState={props.dragState}
             />

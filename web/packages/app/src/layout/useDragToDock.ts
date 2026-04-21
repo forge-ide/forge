@@ -1,6 +1,11 @@
 import { createSignal, onCleanup } from 'solid-js';
-import type { LayoutNode } from './GridContainer';
+import type { LayoutTree } from '@forge/ipc';
 import { applyDockDrop, type DropZone, zoneForPoint } from './dockDrop';
+
+// F-150: the hook now operates on the persisted `LayoutTree` shape so the
+// drop-emitted tree can flow straight into `layoutStore.setLayoutTree`
+// without a closure-stripping pass.
+type LayoutNode = LayoutTree;
 
 /**
  * Active-drag state exposed to consumers so they can render the drag visuals

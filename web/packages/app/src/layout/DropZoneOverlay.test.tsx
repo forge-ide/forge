@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render } from '@solidjs/testing-library';
-import type { LayoutNode } from './GridContainer';
-import { GridContainer } from './GridContainer';
+import type { LayoutTree } from '@forge/ipc';
+import { GridContainer, type LayoutLeaf } from './GridContainer';
 import { DropZoneOverlay } from './DropZoneOverlay';
 
 afterEach(() => {
   cleanup();
 });
+
+function renderByPaneType(leaf: LayoutLeaf) {
+  return <div data-testid={leaf.id}>{leaf.id}</div>;
+}
 
 describe('DropZoneOverlay — standalone', () => {
   it('renders all five zones, none active when `activeZone` is null', () => {
@@ -27,18 +31,23 @@ describe('DropZoneOverlay — standalone', () => {
 });
 
 describe('GridContainer — drag overlay threading', () => {
-  const tree: LayoutNode = {
+  const tree: LayoutTree = {
     kind: 'split',
     id: 'root',
     direction: 'v',
     ratio: 0.5,
-    a: { kind: 'leaf', id: 'a', render: () => <div data-testid="a">a</div> },
-    b: { kind: 'leaf', id: 'b', render: () => <div data-testid="b">b</div> },
+    a: { kind: 'leaf', id: 'a', pane_type: 'chat' },
+    b: { kind: 'leaf', id: 'b', pane_type: 'chat' },
   };
 
   it('renders no overlay when dragState is null', () => {
     const { queryByTestId } = render(() => (
-      <GridContainer tree={tree} onRatioChange={() => {}} dragState={null} />
+      <GridContainer
+        tree={tree}
+        renderLeaf={renderByPaneType}
+        onRatioChange={() => {}}
+        dragState={null}
+      />
     ));
     expect(queryByTestId('drop-zone-overlay')).toBeNull();
   });
@@ -47,6 +56,7 @@ describe('GridContainer — drag overlay threading', () => {
     render(() => (
       <GridContainer
         tree={tree}
+        renderLeaf={renderByPaneType}
         onRatioChange={() => {}}
         dragState={{ sourceId: 'a', targetId: 'b', zone: 'right' }}
       />

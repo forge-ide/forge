@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Layouts } from '@forge/ipc';
+import type { LayoutTree, Layouts } from '@forge/ipc';
 import {
   createLayoutStore,
   DEFAULT_DEBOUNCE_MS,
@@ -214,73 +214,187 @@ describe('layoutStore', () => {
     expect(Object.keys(writes[0]?.named ?? {})).toEqual(['default']);
   });
 
-  // F-126: openFile + activeEditorFile cover the FilesSidebar -> EditorPane
-  // routing. The reducer writes `pane_state[EDITOR_LEAF_ID].active_file`
-  // on the active layout; the getter reads the same slot.
-  it('openFile sets active_file on the active layout and exposes it via activeEditorFile', async () => {
+  // F-150: openFile now writes into a real editor leaf in the GridContainer
+  // tree. The reducer walks the tree DFS and either updates an existing
+  // editor leaf's `pane_state[<id>].active_file`, or splits the root right
+  // with a freshly-minted editor leaf when no editor is present.
+  it('openFile splits the root right with a fresh editor leaf when no editor exists', async () => {
     const { scheduler, tick } = makeFakeScheduler();
     const store = createLayoutStore(WORKSPACE, { read, write, scheduler });
     await store.load();
-    expect(store.activeEditorFile()).toBeNull();
 
     store.openFile('/ws/src/main.ts');
-    expect(store.activeEditorFile()).toBe('/ws/src/main.ts');
+
+    const tree = store.layouts.named.default?.tree;
+    // Root is now a v-split (chat left, editor right).
+    expect(tree?.kind).toBe('split');
+    if (tree?.kind !== 'split') throw new Error('expected split');
+    expect(tree.direction).toBe('v');
+    expect(tree.ratio).toBeCloseTo(0.5);
+    expect(tree.a.kind).toBe('leaf');
+    if (tree.a.kind !== 'leaf') throw new Error('expected leaf');
+    expect(tree.a.pane_type).toBe('chat');
+    expect(tree.b.kind).toBe('leaf');
+    if (tree.b.kind !== 'leaf') throw new Error('expected leaf');
+    expect(tree.b.pane_type).toBe('editor');
+
+    // The editor leaf's active_file is wired via pane_state keyed on the
+    // leaf's own id.
+    const editorId = tree.b.id;
+    expect(
+      store.layouts.named.default?.pane_state[editorId]?.active_file,
+    ).toBe('/ws/src/main.ts');
 
     tick(DEFAULT_DEBOUNCE_MS);
     await store.flush();
-    expect(writes[0]?.named.default?.pane_state.editor?.active_file).toBe(
+    expect(writes[0]?.named.default?.pane_state[editorId]?.active_file).toBe(
       '/ws/src/main.ts',
     );
   });
 
-  it('openFile updates the existing editor slot when called with a new path', async () => {
+  it('openFile reuses the first editor leaf in DFS order when one exists', async () => {
+    // Pre-load a layout that already has an editor leaf mid-tree.
+    const seed: LayoutTree = {
+      kind: 'split',
+      id: 'root',
+      direction: 'v',
+      ratio: 0.5,
+      a: { kind: 'leaf', id: 'chat-1', pane_type: 'chat' },
+      b: { kind: 'leaf', id: 'editor-1', pane_type: 'editor' },
+    };
+    read.mockResolvedValueOnce({
+      active: 'default',
+      named: {
+        default: {
+          tree: seed,
+          pane_state: { 'editor-1': { active_file: '/ws/old.ts' } },
+        },
+      },
+    });
     const { scheduler, tick } = makeFakeScheduler();
     const store = createLayoutStore(WORKSPACE, { read, write, scheduler });
     await store.load();
 
-    store.openFile('/ws/first.ts');
-    store.openFile('/ws/second.ts');
-    expect(store.activeEditorFile()).toBe('/ws/second.ts');
+    store.openFile('/ws/new.ts');
 
-    tick(DEFAULT_DEBOUNCE_MS);
-    await store.flush();
-    // Only one write because both mutations land inside the debounce window.
-    expect(writes).toHaveLength(1);
-    expect(writes[0]?.named.default?.pane_state.editor?.active_file).toBe(
-      '/ws/second.ts',
-    );
-  });
-
-  it('openFile(null) clears the active editor file', async () => {
-    const { scheduler, tick } = makeFakeScheduler();
-    const store = createLayoutStore(WORKSPACE, { read, write, scheduler });
-    await store.load();
-
-    store.openFile('/ws/a.ts');
-    store.openFile(null);
-    expect(store.activeEditorFile()).toBeNull();
+    // Tree structure is unchanged (same leaf count, same ids).
+    const tree = store.layouts.named.default?.tree;
+    expect(tree).toEqual(seed);
+    // active_file on the existing leaf swapped to the new path.
+    expect(
+      store.layouts.named.default?.pane_state['editor-1']?.active_file,
+    ).toBe('/ws/new.ts');
 
     tick(DEFAULT_DEBOUNCE_MS);
     await store.flush();
     expect(
-      writes[writes.length - 1]?.named.default?.pane_state.editor?.active_file,
-    ).toBeNull();
+      writes[0]?.named.default?.pane_state['editor-1']?.active_file,
+    ).toBe('/ws/new.ts');
   });
 
-  it('openFile is idempotent on identical path (no extra write scheduled)', async () => {
+  it('openFile assigns a fresh id for each new editor leaf so multiple editors can coexist', async () => {
+    // Start from the singleton chat layout; openFile once to create editor-1.
+    // Then closeLeaf(editor-1) to restore the singleton, then openFile again —
+    // the new editor must not collide with the first id even after removal.
+    const { scheduler } = makeFakeScheduler();
+    const store = createLayoutStore(WORKSPACE, { read, write, scheduler });
+    await store.load();
+
+    store.openFile('/ws/a.ts');
+    const firstTree = store.layouts.named.default?.tree;
+    if (firstTree?.kind !== 'split') throw new Error('expected split');
+    if (firstTree.b.kind !== 'leaf') throw new Error('expected leaf');
+    const firstEditorId = firstTree.b.id;
+
+    store.closeLeaf(firstEditorId);
+    store.openFile('/ws/b.ts');
+    const secondTree = store.layouts.named.default?.tree;
+    if (secondTree?.kind !== 'split') throw new Error('expected split');
+    if (secondTree.b.kind !== 'leaf') throw new Error('expected leaf');
+    const secondEditorId = secondTree.b.id;
+
+    expect(secondEditorId).not.toBe(firstEditorId);
+  });
+
+  it('closeLeaf removes a leaf, promotes its sibling, and reclaims pane_state', async () => {
+    const seed: LayoutTree = {
+      kind: 'split',
+      id: 'root',
+      direction: 'v',
+      ratio: 0.5,
+      a: { kind: 'leaf', id: 'chat-1', pane_type: 'chat' },
+      b: { kind: 'leaf', id: 'editor-1', pane_type: 'editor' },
+    };
+    read.mockResolvedValueOnce({
+      active: 'default',
+      named: {
+        default: {
+          tree: seed,
+          pane_state: {
+            'editor-1': { active_file: '/ws/gone.ts' },
+            'chat-1': {},
+          },
+        },
+      },
+    });
     const { scheduler, tick } = makeFakeScheduler();
     const store = createLayoutStore(WORKSPACE, { read, write, scheduler });
     await store.load();
 
-    store.openFile('/ws/x.ts');
-    tick(DEFAULT_DEBOUNCE_MS);
-    await store.flush();
-    expect(writes).toHaveLength(1);
+    store.closeLeaf('editor-1');
 
-    // Second call with the same path: no state change, no scheduled write.
-    store.openFile('/ws/x.ts');
+    const tree = store.layouts.named.default?.tree;
+    // Sibling promoted — root becomes the chat leaf.
+    expect(tree?.kind).toBe('leaf');
+    if (tree?.kind !== 'leaf') throw new Error('expected leaf');
+    expect(tree.id).toBe('chat-1');
+    expect(tree.pane_type).toBe('chat');
+
+    // pane_state for the removed leaf is gone; the surviving leaf's state
+    // is preserved.
+    const paneState = store.layouts.named.default?.pane_state ?? {};
+    expect('editor-1' in paneState).toBe(false);
+    expect('chat-1' in paneState).toBe(true);
+
     tick(DEFAULT_DEBOUNCE_MS);
     await store.flush();
-    expect(writes).toHaveLength(1);
+    expect('editor-1' in (writes[0]?.named.default?.pane_state ?? {})).toBe(
+      false,
+    );
+  });
+
+  it('closeLeaf on the sole remaining leaf resets to the default chat layout', async () => {
+    const { scheduler } = makeFakeScheduler();
+    const store = createLayoutStore(WORKSPACE, { read, write, scheduler });
+    await store.load();
+
+    // Default seed is a single `root`/`chat` leaf.
+    store.closeLeaf('root');
+
+    const tree = store.layouts.named.default?.tree;
+    expect(tree?.kind).toBe('leaf');
+    if (tree?.kind !== 'leaf') throw new Error('expected leaf');
+    expect(tree.pane_type).toBe('chat');
+  });
+
+  it('setLayoutTree replaces the active layout\'s tree and schedules a write', async () => {
+    const { scheduler, tick } = makeFakeScheduler();
+    const store = createLayoutStore(WORKSPACE, { read, write, scheduler });
+    await store.load();
+
+    const next: LayoutTree = {
+      kind: 'split',
+      id: 'root',
+      direction: 'h',
+      ratio: 0.3,
+      a: { kind: 'leaf', id: 'chat-1', pane_type: 'chat' },
+      b: { kind: 'leaf', id: 'terminal-1', pane_type: 'terminal' },
+    };
+    store.setLayoutTree('default', next);
+    expect(store.layouts.named.default?.tree).toEqual(next);
+
+    tick(DEFAULT_DEBOUNCE_MS);
+    await store.flush();
+    expect(writes[0]?.named.default?.tree).toEqual(next);
   });
 });

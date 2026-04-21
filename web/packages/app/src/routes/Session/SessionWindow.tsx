@@ -1,7 +1,14 @@
-import { type Component, Show, createSignal, onCleanup, onMount } from 'solid-js';
+import {
+  type Component,
+  type JSX,
+  Show,
+  createSignal,
+  onCleanup,
+  onMount,
+} from 'solid-js';
 import { useParams } from '@solidjs/router';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import type { ProviderId, SessionId } from '@forge/ipc';
+import type { LayoutTree, ProviderId, SessionId } from '@forge/ipc';
 import {
   getPersistentApprovals,
   getSettings,
@@ -28,6 +35,8 @@ import {
   createLayoutStore,
   type LayoutStore,
 } from '../../layout/layoutStore';
+import { GridContainer, type LayoutLeaf } from '../../layout/GridContainer';
+import { useDragToDock } from '../../layout/useDragToDock';
 import { ActivityBar, type ActivityId } from '../../shell/ActivityBar';
 import { FilesSidebar } from '../../shell/FilesSidebar';
 import { StatusBar } from '../../shell/StatusBar';
@@ -54,9 +63,11 @@ export function __setInjectedLayoutStoreForTesting(
 
 /**
  * Session window shell — default single-pane layout from
- * docs/ui-specs/layout-panes.md §3.4. Splitters and drag-to-dock are
- * deferred to Phase 2. Subscribes to the session event stream on mount
- * (via the F-020 IPC wrappers) and cleanly detaches on unmount.
+ * docs/ui-specs/layout-panes.md §3.4. F-150 replaces the F-126 "singleton
+ * editor slot" with a real GridContainer: the active layout's tree drives
+ * rendering end-to-end, so multiple editors can coexist, drag-to-dock works
+ * on editor leaves the same as any other pane, and F-119 compactness runs
+ * per-leaf rather than on a single window-scope pane.
  */
 export const SessionWindow: Component = () => {
   const params = useParams<{ id: string }>();
@@ -158,7 +169,7 @@ export const SessionWindow: Component = () => {
     setActiveWorkspaceRoot(null);
   });
 
-  const handleClose = () => {
+  const handleCloseWindow = () => {
     try {
       void getCurrentWindow().close();
     } catch (err) {
@@ -173,15 +184,6 @@ export const SessionWindow: Component = () => {
   const providerId = (): ProviderId => 'ollama' as ProviderId;
   const providerLabel = () => 'ollama \u00b7 pending';
   const costLabel = () => 'in 0 \u00b7 out 0 \u00b7 $0.00';
-
-  // F-119: observe the pane section's width so the header collapses its
-  // chrome below the 320/240 thresholds. The ref is populated synchronously
-  // by Solid when the element mounts, which is the resolution order the
-  // hook expects. In the jsdom test environment ResizeObserver is absent
-  // and the hook degrades to `full` — the existing SessionWindow tests
-  // still pass without a fixture.
-  const [paneEl, setPaneEl] = createSignal<HTMLElement | null>(null);
-  const { compactness } = usePaneWidth(paneEl);
 
   // F-126: activity-bar + files-sidebar chrome. `activeActivity` is `null`
   // when the sidebar is hidden (default) and an activity id when visible.
@@ -218,10 +220,9 @@ export const SessionWindow: Component = () => {
     window.removeEventListener('keydown', onShortcut);
   });
 
-  // F-126 mandatory-fix: route FilesSidebar Open -> layoutStore -> EditorPane.
-  // When `activeEditorFile()` resolves to a non-null path, SessionWindow
-  // mounts an EditorPane pinned to that path in place of the chat pane.
-  // Closing the editor clears the active file and drops back to chat.
+  // F-150: files-sidebar Open routes through layoutStore.openFile(path),
+  // which either updates an existing editor leaf's active_file or splits
+  // the tree to mount a fresh editor leaf.
   const onFileOpen = (path: string): void => {
     const s = store();
     if (s === null) {
@@ -233,14 +234,80 @@ export const SessionWindow: Component = () => {
     s.openFile(path);
   };
 
-  const onEditorClose = (): void => {
+  // F-150: the active layout's tree is what GridContainer renders. When the
+  // store hasn't loaded yet (no-workspace edge case on mount), we fall back
+  // to a synthetic single-chat tree so the first paint isn't empty.
+  const FALLBACK_TREE: LayoutTree = {
+    kind: 'leaf',
+    id: 'root',
+    pane_type: 'chat',
+  };
+  const activeTree = (): LayoutTree => {
     const s = store();
-    if (s) s.openFile(null);
+    if (s === null) return FALLBACK_TREE;
+    const name = s.layouts.active;
+    return s.layouts.named[name]?.tree ?? FALLBACK_TREE;
+  };
+  const paneStateFor = (leafId: string) => {
+    const s = store();
+    if (s === null) return undefined;
+    const name = s.layouts.active;
+    return s.layouts.named[name]?.pane_state[leafId];
   };
 
-  const activeEditorFile = (): string | null => {
+  // Drag-to-dock hook. `getTree` reads the active tree through the store;
+  // `onTreeChange` writes the new tree back via `setLayoutTree` so the
+  // mutation is persisted alongside the next debounced write.
+  const dockApi = useDragToDock({
+    getTree: () => activeTree(),
+    onTreeChange: (next) => {
+      const s = store();
+      if (s === null) return;
+      s.setLayoutTree(s.layouts.active, next);
+    },
+  });
+
+  const onRatioChange = (id: string, ratio: number): void => {
     const s = store();
-    return s ? s.activeEditorFile() : null;
+    if (s === null) return;
+    const current = s.layouts.named[s.layouts.active]?.tree;
+    if (!current) return;
+    const next = updateSplitRatio(current, id, ratio);
+    if (next !== current) s.setLayoutTree(s.layouts.active, next);
+  };
+
+  const onCloseLeaf = (leafId: string): void => {
+    // If the leaf being closed is the last chat leaf in the active tree,
+    // treat CLOSE SESSION as a window-close (preserving the pre-F-150
+    // behavior for the default single-pane session). In any other shape
+    // we remove the leaf from the grid so the surviving panes reclaim
+    // its space.
+    const tree = activeTree();
+    if (tree.kind === 'leaf' && tree.id === leafId && tree.pane_type === 'chat') {
+      handleCloseWindow();
+      return;
+    }
+    const s = store();
+    if (s === null) return;
+    s.closeLeaf(leafId);
+  };
+
+  const renderLeaf = (leaf: LayoutLeaf): JSX.Element => {
+    // Each leaf owns its own compactness observation so a narrow split still
+    // collapses chrome independently of the window width (§3.7).
+    return (
+      <LeafHost
+        leaf={leaf}
+        sessionId={sessionId()}
+        subject={subject()}
+        providerId={providerId()}
+        providerLabel={providerLabel()}
+        costLabel={costLabel()}
+        activeFile={paneStateFor(leaf.id)?.active_file ?? null}
+        onCloseLeaf={() => onCloseLeaf(leaf.id)}
+        onPointerDownHeader={dockApi.startDrag(leaf.id)}
+      />
+    );
   };
 
   return (
@@ -258,32 +325,15 @@ export const SessionWindow: Component = () => {
           />
         </Show>
         <section
-          class="session-window__pane"
-          aria-label="Session pane"
-          ref={setPaneEl}
+          class="session-window__grid"
+          aria-label="Session pane grid"
         >
-          <PaneHeader
-            subject={subject()}
-            providerId={providerId()}
-            providerLabel={providerLabel()}
-            costLabel={costLabel()}
-            compactness={compactness()}
-            onClose={handleClose}
+          <GridContainer
+            tree={activeTree()}
+            renderLeaf={renderLeaf}
+            onRatioChange={onRatioChange}
+            dragState={dockApi.drag()}
           />
-          <div class="session-window__pane-body">
-            <Show
-              when={activeEditorFile()}
-              fallback={<ChatPane />}
-            >
-              {(path) => (
-                <EditorPane
-                  sessionId={sessionId()}
-                  path={path()}
-                  onClose={onEditorClose}
-                />
-              )}
-            </Show>
-          </div>
         </section>
       </div>
       {/* F-138: status bar lives at the bottom of the session chrome.
@@ -293,3 +343,138 @@ export const SessionWindow: Component = () => {
     </main>
   );
 };
+
+/**
+ * Per-leaf renderer. Owns the pane's own `usePaneWidth` observation so the
+ * F-119 compactness thresholds are computed against the leaf's own extent,
+ * not the enclosing window. Dispatches on `pane_type` — chat, editor, and
+ * the remaining variants are stubbed out for now (F-125 / F-140 ship them).
+ */
+interface LeafHostProps {
+  leaf: LayoutLeaf;
+  sessionId: SessionId;
+  subject: string;
+  providerId: ProviderId;
+  providerLabel: string;
+  costLabel: string;
+  activeFile: string | null;
+  onCloseLeaf: () => void;
+  onPointerDownHeader: (e: PointerEvent) => void;
+}
+const LeafHost: Component<LeafHostProps> = (props) => {
+  const [leafEl, setLeafEl] = createSignal<HTMLElement | null>(null);
+  const { compactness } = usePaneWidth(leafEl);
+
+  // Close semantics: chat leaves inherit the prior CLOSE SESSION behavior
+  // (tear down the window). Editor/terminal/etc. leaves call
+  // `layoutStore.closeLeaf(id)` so the grid reclaims the freed space.
+  const closeLabel = (): string =>
+    props.leaf.pane_type === 'chat' ? 'CLOSE SESSION' : 'CLOSE PANE';
+  const closeAriaLabel = (): string =>
+    props.leaf.pane_type === 'chat' ? 'Close session window' : 'Close pane';
+
+  // The editor pane owns its own header (breadcrumb + CLOSE TAB), so we
+  // suppress the outer PaneHeader for editor leaves to avoid a double-header
+  // row. Everything else uses the standard PaneHeader.
+  const showOuterHeader = (): boolean => props.leaf.pane_type !== 'editor';
+
+  return (
+    <div
+      class="session-window__pane"
+      ref={setLeafEl}
+      data-pane-type={props.leaf.pane_type}
+    >
+      <Show when={showOuterHeader()}>
+        <div
+          class="session-window__pane-header"
+          onPointerDown={props.onPointerDownHeader}
+        >
+          <Show
+            when={props.leaf.pane_type === 'chat'}
+            fallback={
+              <PaneHeader
+                subject={props.subject}
+                typeLabel={paneTypeToHeaderLabel(props.leaf.pane_type)}
+                compactness={compactness()}
+                closeLabel={closeLabel()}
+                closeAriaLabel={closeAriaLabel()}
+                onClose={props.onCloseLeaf}
+              />
+            }
+          >
+            <PaneHeader
+              subject={props.subject}
+              providerId={props.providerId}
+              providerLabel={props.providerLabel}
+              costLabel={props.costLabel}
+              typeLabel="CHAT"
+              compactness={compactness()}
+              closeLabel={closeLabel()}
+              closeAriaLabel={closeAriaLabel()}
+              onClose={props.onCloseLeaf}
+            />
+          </Show>
+        </div>
+      </Show>
+      <div class="session-window__pane-body">
+        <Show when={props.leaf.pane_type === 'chat'}>
+          <ChatPane />
+        </Show>
+        <Show when={props.leaf.pane_type === 'editor' && props.activeFile !== null}>
+          <EditorPane
+            sessionId={props.sessionId}
+            path={props.activeFile as string}
+            onClose={props.onCloseLeaf}
+            onHeaderPointerDown={props.onPointerDownHeader}
+          />
+        </Show>
+        <Show when={props.leaf.pane_type === 'editor' && props.activeFile === null}>
+          <div class="session-window__pane-empty" data-testid="editor-pane-empty">
+            No file open.
+          </div>
+        </Show>
+        <Show when={props.leaf.pane_type === 'terminal'}>
+          <div class="session-window__pane-empty" data-testid="terminal-pane-stub">
+            Terminal pane (F-125).
+          </div>
+        </Show>
+        <Show when={props.leaf.pane_type === 'files'}>
+          <div class="session-window__pane-empty" data-testid="files-pane-stub">
+            Files pane.
+          </div>
+        </Show>
+        <Show when={props.leaf.pane_type === 'agentmonitor'}>
+          <div class="session-window__pane-empty" data-testid="agent-monitor-stub">
+            Agent monitor (F-140).
+          </div>
+        </Show>
+      </div>
+    </div>
+  );
+};
+
+function paneTypeToHeaderLabel(
+  paneType: LayoutLeaf['pane_type'],
+): 'CHAT' | 'TERMINAL' | 'EDITOR' {
+  if (paneType === 'terminal') return 'TERMINAL';
+  if (paneType === 'editor') return 'EDITOR';
+  return 'CHAT';
+}
+
+/**
+ * Immutable ratio update: walk `tree`, return a new tree with the matching
+ * split's `ratio` replaced. Returns the original reference if `id` isn't a
+ * split node in the tree so an unknown id is a safe no-op.
+ */
+function updateSplitRatio(
+  tree: LayoutTree,
+  id: string,
+  ratio: number,
+): LayoutTree {
+  if (tree.kind === 'leaf') return tree;
+  if (tree.id === id) return { ...tree, ratio };
+  const nextA = updateSplitRatio(tree.a, id, ratio);
+  const nextB = updateSplitRatio(tree.b, id, ratio);
+  if (nextA === tree.a && nextB === tree.b) return tree;
+  return { ...tree, a: nextA, b: nextB };
+}

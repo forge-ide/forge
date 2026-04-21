@@ -1,4 +1,12 @@
-import type { LayoutNode, LeafNode, SplitNode } from './GridContainer';
+import type { LayoutTree } from '@forge/ipc';
+
+// F-150: `dockDrop` operates on the persisted `LayoutTree` shape. Renderer
+// closures live on the caller (GridContainer's `renderLeaf` prop) and don't
+// leak into tree mutation. Local type aliases keep the rest of the module
+// readable — a "leaf" and a "split" are just `LayoutTree` narrowed by kind.
+type LeafNode = LayoutTree & { kind: 'leaf' };
+type SplitNode = LayoutTree & { kind: 'split' };
+type LayoutNode = LayoutTree;
 
 /**
  * Which edge (or center) of a target pane is being hovered. Matches the five
