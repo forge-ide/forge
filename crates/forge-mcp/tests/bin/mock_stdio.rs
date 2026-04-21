@@ -5,6 +5,11 @@
 //!
 //! - `initialize` -> `{ "capabilities": {} }`
 //! - `tools/list` -> `{ "tools": [ { "name": "ping", ... } ] }`
+//! - `tools/call` -> echoes `{ "tool": <name>, "args": <arguments> }`,
+//!   except when `name == "crash"` where the mock exits with status 1
+//!   without replying to force a transport-close event (used by the
+//!   F-154 manager subprocess test)
+//! - `shutdown`   -> replies `{}` then exits 0
 //!
 //! Anything else produces a JSON-RPC error with code `-32601`. `ping`
 //! method is exposed purely so the test can assert a non-trivial shape.
@@ -78,6 +83,14 @@ fn main() {
                     .and_then(|p| p.get("arguments"))
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
+                // F-154: when invoked with tool name "crash", exit 1 without
+                // replying so the manager observes an abrupt transport
+                // close. This keeps the manager's public API crash-free
+                // (callers route through `tools/call` only).
+                if tool_name.as_str() == Some("crash") {
+                    let _ = out.flush();
+                    std::process::exit(1);
+                }
                 serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": id,

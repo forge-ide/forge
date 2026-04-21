@@ -67,6 +67,14 @@ jobs:
       - name: Rust tests
         run: just test-rust
 
+      # F-154: McpManager + stdio transport + real subprocess composition
+      # test. Ignored under the default parallel suite because tokio's
+      # process-wide SIGCHLD reaper races across parallel test binaries
+      # that spawn children; CI runs it here in a dedicated
+      # single-binary, single-thread pass where the race can't surface.
+      - name: Rust tests -- McpManager subprocess (serial)
+        run: just test-rust-serial
+
       # F-146: forge-term's `ghostty-vt` feature exercises libghostty-vt as
       # the authoritative VT state machine. It's a separate step because it
       # pulls in the zig/C build chain and isn't part of default workspace

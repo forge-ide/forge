@@ -67,6 +67,14 @@ check: check-rust check-web
 test-rust:
     cargo test --all
 
+# Serial `#[ignore]`-gated Rust tests that can't share a process-wide
+# resource with parallel test binaries. Currently: the F-154 McpManager
+# subprocess integration test, which conflicts with tokio's single
+# process-wide SIGCHLD reaper when other test binaries are also spawning
+# and reaping children in parallel. Run single-threaded, single-binary.
+test-rust-serial:
+    cargo test -p forge-mcp -- --ignored --test-threads=1
+
 # Tauri webview integration tests. Gated on the `webview-test` feature
 # because `tauri::test::mock_builder` pulls in the full Tauri runtime; keeping
 # it off `test-rust`'s default build lets hosts without WebKitGTK headers
@@ -81,7 +89,7 @@ test-web:
     cd web && pnpm -r test
 
 # Both lanes.
-test: test-rust test-rust-webview test-web
+test: test-rust test-rust-serial test-rust-webview test-web
 
 # Verify generated TS bindings are in sync with Rust types. ts-rs emits the
 # TS files as a side effect of `cargo build` (see forge-core/src/ids.rs `ts`
