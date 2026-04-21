@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createRoot, createSignal } from 'solid-js';
-import type { LayoutNode } from './GridContainer';
+import type { LayoutTree as LayoutNode } from '@forge/ipc';
 import { applyDockDrop, zoneForPoint } from './dockDrop';
 import { useDragToDock } from './useDragToDock';
 
@@ -14,14 +14,14 @@ describe('applyDockDrop — edge zones', () => {
     id: 'root',
     direction: 'v',
     ratio: 0.5,
-    a: { kind: 'leaf', id: 'chat', render: () => null },
+    a: { kind: 'leaf', id: 'chat', pane_type: 'chat' },
     b: {
       kind: 'split',
       id: 'right',
       direction: 'h',
       ratio: 0.5,
-      a: { kind: 'leaf', id: 'editor', render: () => null },
-      b: { kind: 'leaf', id: 'terminal', render: () => null },
+      a: { kind: 'leaf', id: 'editor', pane_type: 'chat' },
+      b: { kind: 'leaf', id: 'terminal', pane_type: 'chat' },
     },
   });
 
@@ -75,14 +75,14 @@ describe('applyDockDrop — center zone', () => {
       id: 'root',
       direction: 'v',
       ratio: 0.5,
-      a: { kind: 'leaf', id: 'a', render: () => null },
+      a: { kind: 'leaf', id: 'a', pane_type: 'chat' },
       b: {
         kind: 'split',
         id: 'inner',
         direction: 'h',
         ratio: 0.5,
-        a: { kind: 'leaf', id: 'b', render: () => null },
-        b: { kind: 'leaf', id: 'c', render: () => null },
+        a: { kind: 'leaf', id: 'b', pane_type: 'chat' },
+        b: { kind: 'leaf', id: 'c', pane_type: 'chat' },
       },
     };
     const next = applyDockDrop(tree, 'a', 'c', 'center');
@@ -99,8 +99,8 @@ describe('applyDockDrop — malformed drops are no-ops', () => {
     id: 'root',
     direction: 'v',
     ratio: 0.5,
-    a: { kind: 'leaf', id: 'a', render: () => null },
-    b: { kind: 'leaf', id: 'b', render: () => null },
+    a: { kind: 'leaf', id: 'a', pane_type: 'chat' },
+    b: { kind: 'leaf', id: 'b', pane_type: 'chat' },
   };
 
   it('returns tree unchanged when sourceId === targetId', () => {
@@ -116,7 +116,7 @@ describe('applyDockDrop — malformed drops are no-ops', () => {
   });
 
   it('refuses to remove the sole leaf of a root-leaf tree', () => {
-    const lonely: LayoutNode = { kind: 'leaf', id: 'only', render: () => null };
+    const lonely: LayoutNode = { kind: 'leaf', id: 'only', pane_type: 'chat' };
     expect(applyDockDrop(lonely, 'only', 'only', 'center')).toBe(lonely);
   });
 });
@@ -261,8 +261,8 @@ describe('useDragToDock — integration', () => {
     id: 'root',
     direction: 'v',
     ratio: 0.5,
-    a: { kind: 'leaf', id: 'a', render: () => null },
-    b: { kind: 'leaf', id: 'b', render: () => null },
+    a: { kind: 'leaf', id: 'a', pane_type: 'chat' },
+    b: { kind: 'leaf', id: 'b', pane_type: 'chat' },
   };
   const geometry: LeafGeometry = {
     a: { left: 0, top: 0, right: 500, bottom: 600, width: 500, height: 600 },

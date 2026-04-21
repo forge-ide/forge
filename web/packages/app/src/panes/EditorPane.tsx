@@ -75,6 +75,12 @@ export interface EditorPaneProps {
    *  iframe. Tests capture these; prod resolves to
    *  `iframe.contentWindow.postMessage`. */
   postToIframe?: (msg: unknown) => void;
+  /** F-150: pointer-down handler wired onto the breadcrumb header so the
+   *  pane participates in the F-118 drag-to-dock gesture. Callers thread
+   *  `dockApi.startDrag(leafId)` through here; the header is the only
+   *  non-content surface on the pane and is the same drag-initiation
+   *  affordance every other grid leaf uses. */
+  onHeaderPointerDown?: (e: PointerEvent) => void;
 }
 
 /** Monaco-style URI. Keeps the round-trip through `readFile` → iframe →
@@ -238,7 +244,11 @@ export const EditorPane: Component<EditorPaneProps> = (props) => {
       data-testid="editor-pane"
       onKeyDown={handleKeyDown}
     >
-      <header class="editor-pane__header" role="banner">
+      <header
+        class="editor-pane__header"
+        role="banner"
+        onPointerDown={props.onHeaderPointerDown}
+      >
         <span class="editor-pane__type-label">EDITOR</span>
         <span
           class="editor-pane__breadcrumb"

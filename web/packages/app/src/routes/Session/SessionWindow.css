@@ -14,17 +14,46 @@
   min-height: 0;
 }
 
+/* F-150: the top-level grid host. Occupies the remaining chrome column
+   and delegates pane rendering to GridContainer. The grid's leaves each
+   render with their own `.session-window__pane` chrome. */
+.session-window__grid {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  position: relative;
+}
+
 .session-window__pane {
   display: flex;
   flex-direction: column;
-  flex: 1 1 auto;
-  min-width: 320px;
+  width: 100%;
+  height: 100%;
   background: var(--color-surface-1);
   border: 1px solid var(--color-border-1);
+  min-width: 0;
+  min-height: 0;
+}
+
+.session-window__pane-header {
+  flex: 0 0 auto;
+  cursor: grab;
 }
 
 .session-window__pane-body {
   display: flex;
   flex: 1 1 auto;
   min-height: 0;
+}
+
+.session-window__pane-empty {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-muted);
+  font-family: var(--font-body);
+  font-size: 12px;
+  opacity: 0.7;
 }
