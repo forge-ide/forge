@@ -10,7 +10,13 @@
 //! - Lifecycle manager (F-130) builds on top.
 
 pub mod import;
+pub mod manager;
 pub mod transport;
+
+pub use manager::{
+    LifecycleTuning, McpManager, McpServerInfo, McpStateEvent, ServerState, HEALTH_CHECK_INTERVAL,
+    MAX_RESTARTS_PER_WINDOW, REQUEST_TIMEOUT, RESTART_BACKOFF_LADDER, RESTART_WINDOW,
+};
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};

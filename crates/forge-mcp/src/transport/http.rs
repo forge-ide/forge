@@ -75,9 +75,17 @@ pub struct Http {
     headers: HeaderMap,
     tx: mpsc::Sender<HttpEvent>,
     rx: mpsc::Receiver<HttpEvent>,
-    /// Dropping this aborts the reader. The handle owns the join handle
-    /// strictly for cancellation — we never await its result.
-    _reader: JoinHandle<()>,
+    /// SSE reader task. Explicitly aborted in [`Drop`] so the reconnect
+    /// loop cannot keep running against a dead server after the handle
+    /// has been dropped — it would otherwise sit in the `sleep(delay)`
+    /// branch of the backoff loop indefinitely.
+    reader: JoinHandle<()>,
+}
+
+impl Drop for Http {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
 }
 
 impl std::fmt::Debug for Http {
@@ -127,7 +135,7 @@ impl Http {
             headers,
             tx,
             rx,
-            _reader: reader,
+            reader,
         })
     }
 

@@ -5,6 +5,7 @@ mod event_log;
 pub mod ids;
 pub mod meta;
 pub mod settings;
+mod tool;
 mod transcript;
 pub mod types;
 pub mod workspace;
@@ -21,6 +22,7 @@ pub use ids::{
 pub use settings::{
     AppSettings, NotificationMode, NotificationsSettings, SessionMode, WindowsSettings,
 };
+pub use tool::Tool;
 pub use transcript::{apply_superseded, Transcript};
 pub use types::{
     ApprovalLevel, ApprovalScope, CompactTrigger, RerunVariant, RosterScope, SessionPersistence,
