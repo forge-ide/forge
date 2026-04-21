@@ -21,7 +21,7 @@
 //! event payload.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use forge_core::approvals::{
@@ -420,6 +420,10 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         // F-151: persistent settings store.
         get_settings,
         set_setting,
+        // F-132: MCP commands — list / toggle / import (+ state-stream forwarder).
+        list_mcp_servers,
+        toggle_mcp_server,
+        import_mcp_config,
     ])
 }
 
@@ -2287,4 +2291,424 @@ pub async fn delete_branch<R: Runtime>(
         .delete_branch(&session_id, parent_id, variant_index)
         .await
         .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// F-132: MCP Tauri commands + state-event forwarding.
+//
+// Three Tauri commands expose the user-facing MCP surface:
+//
+// - `list_mcp_servers(workspace_root) -> Vec<McpServerInfo>` — loads both the
+//   user and workspace `.mcp.json` files (merged, workspace wins on name
+//   collision), returns the manager's current snapshot including per-server
+//   state (`Starting | Healthy | Degraded | Failed`) and the cached tool
+//   list. Used by the MCP panel's health badges.
+// - `toggle_mcp_server(name, workspace_root) -> bool` — inverts the shell's
+//   manager state for `name`: a started server is stopped (and the updated
+//   state is broadcast on the state stream, which reaches the UI via the
+//   `mcp:state` forwarder below); a stopped server is re-started. Returns
+//   the new "running" flag so the UI can reflect the change without
+//   round-tripping `list`. Toggle is a **display / shell-side** concern —
+//   the daemon's own `McpManager` instance is unaffected; running-session
+//   tool dispatch stays bound to whatever was healthy at session start.
+//   This is a known limitation for F-132 and documented in the command's
+//   rustdoc.
+// - `import_mcp_config(source, workspace_root, target) -> ImportReport` —
+//   delegates to `forge_mcp::import` to convert a third-party tool's config
+//   into Forge's universal `.mcp.json` schema. `target` is `user` or
+//   `workspace`; the command rewrites the chosen file atomically and
+//   asks the shell's `McpManager` to refresh (stop-then-start each server)
+//   so the UI picks up the new set.
+//
+// Authz uses `require_window_label_in(&webview, &["dashboard"], true)` —
+// MCP config is a user+workspace artifact (not session-bound), so any
+// session window and the dashboard may invoke. Same pattern as F-036's
+// approval commands and F-151's settings commands.
+//
+// State-event forwarding: `manage_mcp` subscribes to `state_stream()` on
+// the shared `McpManager` and re-emits each `McpStateEvent` as a Tauri
+// event named `mcp:state`. The event targets any window (broadcast) so
+// every panel instance (dashboard MCP view + session MCP badges) sees
+// the same events. Unlike `session:event` there is no per-session owner
+// to bind against — MCP state is global.
+//
+// Appended at EOF per the Wave 2B convention (every parallel PR has
+// extended this file from the bottom to minimize rebase conflicts).
+// ---------------------------------------------------------------------------
+
+use forge_mcp::{McpManager, McpServerInfo};
+
+/// Max accepted byte length for `workspace_root` on MCP commands. Matches the
+/// existing `MAX_WORKSPACE_ROOT_BYTES` (PATH_MAX envelope). Defined as an
+/// alias so the cap can diverge later without touching call sites.
+pub(crate) const MAX_MCP_WORKSPACE_ROOT_BYTES: usize = MAX_WORKSPACE_ROOT_BYTES;
+
+/// Max accepted byte length for an MCP server `name` argument. Server names
+/// live as JSON-object keys in `.mcp.json`; a sane ceiling well above any
+/// realistic Cursor / Claude / VS Code config.
+pub(crate) const MAX_MCP_SERVER_NAME_BYTES: usize = 256;
+
+/// Max accepted byte length for a source slug or import target string on
+/// `import_mcp_config`. Slugs are short (`vscode`, `cursor`, `claude`, ...)
+/// and targets are bounded enums, but we cap defensively.
+pub(crate) const MAX_MCP_SLUG_BYTES: usize = 64;
+
+/// Tauri-managed shell-side MCP manager + its lazy configuration.
+///
+/// The manager itself is lazy: we build it on the first `list_mcp_servers`
+/// call using the caller's `workspace_root`, then reuse it. This matches
+/// the F-036 / F-151 pattern where the config dir is only resolved at
+/// first use. Storing it in a `tokio::sync::Mutex` rather than parking it
+/// in `BridgeState` keeps MCP state cleanly separated — `BridgeState`
+/// owns the session IPC; MCP is a parallel concern.
+pub struct McpState {
+    /// The active manager. `None` until first `list_mcp_servers` call
+    /// seeds it. Re-built by `import_mcp_config` so a newly-imported
+    /// server list takes effect without re-launching the shell.
+    inner: tokio::sync::Mutex<Option<Arc<McpManager>>>,
+    /// The workspace the manager was built against. Needed so a
+    /// subsequent `toggle` call knows which workspace its config came
+    /// from; also used by the state-stream forwarder task.
+    workspace: tokio::sync::Mutex<Option<PathBuf>>,
+}
+
+impl Default for McpState {
+    fn default() -> Self {
+        Self {
+            inner: tokio::sync::Mutex::new(None),
+            workspace: tokio::sync::Mutex::new(None),
+        }
+    }
+}
+
+impl McpState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Attach the `McpState` to an app builder. Idempotent — parallels
+/// `manage_terminals` so tests can wire both and production
+/// `window_manager` can call once.
+pub fn manage_mcp<R: Runtime>(app: &AppHandle<R>) {
+    if app.try_state::<McpState>().is_none() {
+        app.manage(McpState::new());
+    }
+}
+
+/// Resolve the user-scope home directory. Tests can pre-seed `$HOME` via
+/// `tempfile`; production picks it up from `dirs::home_dir`.
+fn resolve_mcp_user_dir() -> Option<PathBuf> {
+    dirs::home_dir()
+}
+
+/// Build an `McpManager` by merging the user + workspace `.mcp.json`.
+/// Used by both `ensure_manager` (first-call seed) and
+/// `import_mcp_config` (rebuild-after-write). Returns an empty manager
+/// rather than an error when both files are absent — the UI should show
+/// "no servers configured" in that case, not a hard error.
+async fn build_manager(workspace_root: &Path) -> Result<Arc<McpManager>, String> {
+    let home = resolve_mcp_user_dir();
+    let merged = match home.as_deref() {
+        Some(home_dir) => forge_mcp::config::load_merged(workspace_root, home_dir)
+            .map_err(|e| format!("load_merged: {e:#}"))?,
+        None => forge_mcp::config::load_workspace(workspace_root)
+            .map_err(|e| format!("load_workspace: {e:#}"))?,
+    };
+    let mgr = Arc::new(McpManager::new(merged));
+    // Start every configured server. Non-fatal errors are logged inline —
+    // a failed start parks the server in `Failed` state and the UI shows
+    // the reason via `list_mcp_servers`.
+    let names: Vec<String> = mgr.list().await.into_iter().map(|s| s.name).collect();
+    for name in names {
+        if let Err(e) = mgr.start(&name).await {
+            eprintln!("mcp: start({name}) failed: {e:#}");
+        }
+    }
+    Ok(mgr)
+}
+
+/// Lazily create (or retrieve) the `McpManager` for this workspace. Also
+/// installs a background task on first creation that pumps
+/// `state_stream()` into Tauri `mcp:state` events — so the UI sees
+/// `Starting → Healthy → Degraded → Failed` transitions in real time
+/// without polling `list_mcp_servers`.
+async fn ensure_manager<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &McpState,
+    workspace_root: &Path,
+) -> Result<Arc<McpManager>, String> {
+    let mut inner = state.inner.lock().await;
+    if let Some(mgr) = inner.as_ref() {
+        return Ok(mgr.clone());
+    }
+    let mgr = build_manager(workspace_root).await?;
+    *inner = Some(mgr.clone());
+    *state.workspace.lock().await = Some(workspace_root.to_path_buf());
+
+    // Forward state events to the webview. Subscribe BEFORE any further
+    // state transitions so we don't drop the initial `Healthy` publication
+    // for a fast-starting server. The task holds a weak ref to the app
+    // via `AppHandle::clone` (a cheap `Arc` bump) — on app shutdown the
+    // emit fails silently and the task exits.
+    let app_clone = app.clone();
+    let mut stream = mgr.state_stream();
+    tokio::spawn(async move {
+        use futures::StreamExt;
+        while let Some(ev) = stream.next().await {
+            // `emit` (broadcast) — MCP state is global, not bound to a
+            // single session window. Every open panel receives the event
+            // and filters by server name client-side.
+            if let Err(e) = app_clone.emit("mcp:state", &ev) {
+                eprintln!("mcp:state emit failed: {e}");
+            }
+        }
+    });
+
+    Ok(mgr)
+}
+
+/// List every configured MCP server with its current state and cached
+/// tool list.
+///
+/// The first call on this shell instance seeds the shared `McpManager`
+/// from `<workspace>/.mcp.json` + `~/.mcp.json`; subsequent calls reuse
+/// the same manager so server connections survive across list refreshes.
+/// `import_mcp_config` rebuilds the manager in place — callers should
+/// invalidate any cached list after a successful import.
+#[tauri::command]
+pub async fn list_mcp_servers<R: Runtime>(
+    workspace_root: String,
+    app: AppHandle<R>,
+    webview: Webview<R>,
+    state: State<'_, McpState>,
+) -> Result<Vec<McpServerInfo>, String> {
+    require_window_label_in(&webview, &["dashboard"], true)?;
+    require_size(
+        "workspace_root",
+        &workspace_root,
+        MAX_MCP_WORKSPACE_ROOT_BYTES,
+    )?;
+
+    let workspace = PathBuf::from(&workspace_root);
+    let mgr = ensure_manager(&app, &state, &workspace).await?;
+    Ok(mgr.list().await)
+}
+
+/// Toggle a configured MCP server on or off.
+///
+/// Semantics: if the server is currently `Starting | Healthy | Degraded`
+/// it is stopped (→ `Failed { reason: "stopped" }`); if it is
+/// `Failed` it is re-started (→ `Starting → Healthy`). The returned
+/// `bool` is the new "running" flag (`true` when a start was issued).
+///
+/// **Scope (F-132):** the toggle only affects the **shell's** manager.
+/// Running sessions inside the `forged` daemon keep their own manager
+/// bound at session start — the toggle does not reach them. A session
+/// must be restarted for a toggle to take effect on its tool dispatcher.
+/// This is documented in the PR and will be revisited when the shell
+/// and daemon share an `McpManager` (out of scope for F-132).
+#[tauri::command]
+pub async fn toggle_mcp_server<R: Runtime>(
+    name: String,
+    workspace_root: String,
+    app: AppHandle<R>,
+    webview: Webview<R>,
+    state: State<'_, McpState>,
+) -> Result<bool, String> {
+    require_window_label_in(&webview, &["dashboard"], true)?;
+    require_size(
+        "workspace_root",
+        &workspace_root,
+        MAX_MCP_WORKSPACE_ROOT_BYTES,
+    )?;
+    require_size("name", &name, MAX_MCP_SERVER_NAME_BYTES)?;
+
+    let workspace = PathBuf::from(&workspace_root);
+    let mgr = ensure_manager(&app, &state, &workspace).await?;
+
+    // Inspect current state, then branch. We re-list rather than keeping
+    // a cached entry because the state may have changed since the last
+    // `list_mcp_servers` call.
+    let servers = mgr.list().await;
+    let entry = servers
+        .into_iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| format!("unknown MCP server {name:?}"))?;
+
+    let currently_running = matches!(
+        entry.state,
+        forge_mcp::ServerState::Starting
+            | forge_mcp::ServerState::Healthy
+            | forge_mcp::ServerState::Degraded { .. }
+    );
+    if currently_running {
+        mgr.stop(&name).await.map_err(|e| e.to_string())?;
+        Ok(false)
+    } else {
+        mgr.start(&name).await.map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+}
+
+/// Target file tier for `import_mcp_config`. Mirrors `ApprovalLevel`'s
+/// user/workspace split — "session" has no meaning for an on-disk config.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpImportTarget {
+    User,
+    Workspace,
+}
+
+/// Summary returned by `import_mcp_config`. Includes enough information
+/// for the UI to show a post-import diff-style confirmation ("imported N
+/// servers from Cursor").
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct McpImportReport {
+    /// Source slug (e.g. `"cursor"`, `"claude"`).
+    pub source: String,
+    /// Absolute path the config was read from, as a display string.
+    pub source_path: String,
+    /// Absolute path the merged config was written to.
+    pub destination_path: String,
+    /// Names of servers imported on top of whatever was already in the
+    /// destination. Empty when the source file declared no servers.
+    pub imported: Vec<String>,
+}
+
+/// Import an MCP server list from a third-party tool's config into
+/// Forge's universal `.mcp.json` schema.
+///
+/// `source` is one of the slugs defined by `forge_mcp::import::ImportSource`
+/// (`vscode | cursor | claude | continue | kiro | codex`). The command
+/// resolves the source's default path (per `ImportSource::default_path`),
+/// converts the file body into `McpServerSpec`s, merges the result on top
+/// of whatever is already in the destination's `.mcp.json`, and writes
+/// the combined document. On success the shell-side `McpManager` is
+/// rebuilt so the UI sees the new servers without a refresh.
+#[tauri::command]
+pub async fn import_mcp_config<R: Runtime>(
+    source: String,
+    workspace_root: String,
+    target: McpImportTarget,
+    app: AppHandle<R>,
+    webview: Webview<R>,
+    state: State<'_, McpState>,
+) -> Result<McpImportReport, String> {
+    require_window_label_in(&webview, &["dashboard"], true)?;
+    require_size(
+        "workspace_root",
+        &workspace_root,
+        MAX_MCP_WORKSPACE_ROOT_BYTES,
+    )?;
+    require_size("source", &source, MAX_MCP_SLUG_BYTES)?;
+
+    let import_source = forge_mcp::import::ImportSource::from_slug(&source)
+        .ok_or_else(|| format!("unknown import source {source:?}"))?;
+
+    let home = resolve_mcp_user_dir()
+        .ok_or_else(|| "could not resolve user home directory".to_string())?;
+    let workspace = PathBuf::from(&workspace_root);
+
+    let source_path = import_source
+        .default_path(&workspace, &home)
+        .ok_or_else(|| format!("no default path known for source {source:?}"))?;
+    let source_body = tokio::fs::read_to_string(&source_path)
+        .await
+        .map_err(|e| format!("reading {}: {e}", source_path.display()))?;
+    let converted = import_source
+        .convert(&source_body)
+        .map_err(|e| format!("converting {}: {e:#}", source_path.display()))?;
+
+    let destination_path = match target {
+        McpImportTarget::User => home.join(".mcp.json"),
+        McpImportTarget::Workspace => workspace.join(".mcp.json"),
+    };
+
+    // Merge on top of whatever's already in the destination. Rewriting
+    // the file blindly would blow away user-curated servers not present
+    // in the source — not acceptable for an `import` (the op is meant
+    // to be additive).
+    let mut existing = match tokio::fs::read_to_string(&destination_path).await {
+        Ok(body) => parse_existing_mcp_file(&body)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::collections::BTreeMap::new(),
+        Err(e) => return Err(format!("reading {}: {e}", destination_path.display())),
+    };
+
+    let mut imported: Vec<String> = Vec::with_capacity(converted.len());
+    for (name, spec) in converted {
+        imported.push(name.clone());
+        existing.insert(name, spec);
+    }
+
+    let rendered = forge_mcp::render_universal(&existing)
+        .map_err(|e| format!("rendering merged .mcp.json: {e:#}"))?;
+    if let Some(parent) = destination_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    tokio::fs::write(&destination_path, rendered)
+        .await
+        .map_err(|e| format!("writing {}: {e}", destination_path.display()))?;
+
+    // Rebuild the shell-side manager so `list_mcp_servers` reflects the
+    // new set immediately. Drop the old entry under the lock, then let
+    // the next `list` / `toggle` rebuild via `ensure_manager`.
+    {
+        let mut inner = state.inner.lock().await;
+        *inner = None;
+    }
+    // Eagerly re-seed so the state-stream forwarder gets a fresh
+    // subscription — otherwise the old task is still live against the
+    // dropped manager's broadcast and the UI sees no transitions for
+    // newly-imported servers.
+    let _ = ensure_manager(&app, &state, &workspace).await?;
+
+    Ok(McpImportReport {
+        source: source.clone(),
+        source_path: source_path.display().to_string(),
+        destination_path: destination_path.display().to_string(),
+        imported,
+    })
+}
+
+/// Parse an existing `.mcp.json` into the same `BTreeMap<String, McpServerSpec>`
+/// shape `render_universal` consumes. Kept as a thin wrapper so the
+/// import path can tolerate an empty file without treating it as a
+/// parse error.
+fn parse_existing_mcp_file(
+    body: &str,
+) -> Result<std::collections::BTreeMap<String, forge_mcp::McpServerSpec>, String> {
+    if body.trim().is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    // `forge_mcp::config::load_*` read from disk; we already have the
+    // body, so drive the underlying serde parse directly via the same
+    // top-level shape. Wrapping this as a helper keeps the Tauri command
+    // body readable.
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Doc {
+        #[serde(rename = "mcpServers", default)]
+        servers: std::collections::BTreeMap<String, serde_json::Value>,
+    }
+    let doc: Doc = serde_json::from_str(body).map_err(|e| format!("parsing .mcp.json: {e}"))?;
+    let mut out = std::collections::BTreeMap::new();
+    for (name, raw) in doc.servers {
+        // Round-trip through `forge_mcp::import`'s JsonServer via a
+        // synthetic `{ "mcpServers": { name: raw } }` document. This
+        // avoids exposing the crate-private `RawServer` type; the
+        // import path's `JsonServer` is the public shape that accepts
+        // the universal layout.
+        let wrapped = serde_json::json!({ "mcpServers": { &name: raw } });
+        let mut parsed = forge_mcp::import::ImportSource::Cursor
+            .convert(&wrapped.to_string())
+            .map_err(|e| format!("invalid server entry {name:?} in destination: {e:#}"))?;
+        if let Some(spec) = parsed.remove(&name) {
+            out.insert(name, spec);
+        }
+    }
+    Ok(out)
 }

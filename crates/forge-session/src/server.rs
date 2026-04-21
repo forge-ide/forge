@@ -139,6 +139,75 @@ pub fn event_log_path(session_id: &str, workspace: Option<&Path>) -> PathBuf {
     }
 }
 
+/// F-132: construct an `McpManager` from the workspace and user `.mcp.json`
+/// files, start every configured server, and return the `Arc<_>` for
+/// `run_turn` to register tools against.
+///
+/// Failures at any stage (missing config, malformed JSON, server refuses
+/// `initialize`) are non-fatal: the session keeps running without the
+/// failed servers. Logging surfaces each failure reason so an operator
+/// can diagnose without killing the daemon. `None` is returned only when
+/// the config produced zero servers — either because both files were
+/// absent or every entry failed to parse — so the caller can skip MCP
+/// registration entirely without creating a manager-shaped no-op.
+///
+/// The user-scope home directory is resolved via `dirs::home_dir`; a
+/// missing `$HOME` (extremely unusual — CI without `HOME` set) skips the
+/// user-scope file and loads workspace only. That's the fail-open path:
+/// we'd rather run with fewer servers than fail the whole session.
+async fn load_mcp_manager(workspace_path: Option<&Path>) -> Option<Arc<forge_mcp::McpManager>> {
+    let user_dir = dirs::home_dir();
+    let merged = match workspace_path {
+        Some(ws) => match (user_dir.as_deref(), forge_mcp::config::load_workspace(ws)) {
+            (Some(home), ws_result) => match (forge_mcp::config::load_user_from(home), ws_result) {
+                (Ok(mut merged), Ok(ws_specs)) => {
+                    for (name, spec) in ws_specs {
+                        merged.insert(name, spec);
+                    }
+                    merged
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    eprintln!("mcp: failed to load .mcp.json: {e:#}; continuing without MCP");
+                    return None;
+                }
+            },
+            (None, Ok(ws_specs)) => ws_specs,
+            (None, Err(e)) => {
+                eprintln!("mcp: failed to load workspace .mcp.json: {e:#}");
+                return None;
+            }
+        },
+        None => match user_dir.as_deref() {
+            Some(home) => match forge_mcp::config::load_user_from(home) {
+                Ok(specs) => specs,
+                Err(e) => {
+                    eprintln!("mcp: failed to load user .mcp.json: {e:#}");
+                    return None;
+                }
+            },
+            None => return None,
+        },
+    };
+
+    if merged.is_empty() {
+        return None;
+    }
+
+    let mgr = Arc::new(forge_mcp::McpManager::new(merged));
+    // Start every configured server. `start()` itself never fails for a
+    // valid config; the driver task surfaces spawn/handshake errors via
+    // the state stream and retries per the restart policy. Not awaiting
+    // the handshake here keeps session startup snappy — the first turn
+    // observes whichever servers became `Healthy` in time.
+    let names: Vec<String> = mgr.list().await.into_iter().map(|s| s.name).collect();
+    for name in names {
+        if let Err(e) = mgr.start(&name).await {
+            eprintln!("mcp: start({name}) failed: {e:#}");
+        }
+    }
+    Some(mgr)
+}
+
 /// Start a session server using the default `MockProvider`.
 pub async fn serve(path: &Path, auto_approve: bool, ephemeral: bool) -> Result<()> {
     let log_path = event_log_path(&SessionId::new().to_string(), None);
@@ -283,6 +352,21 @@ pub async fn serve_with_session<P: Provider + 'static>(
         None => None,
     };
 
+    // F-132: build the MCP manager from `.mcp.json` (workspace + user) and
+    // start every configured server. Failures at this layer are non-fatal
+    // — a missing or malformed config, or a server that refuses to
+    // initialize, leaves the session without MCP tools but still
+    // functional. Each server's health is tracked per-server inside the
+    // manager; `list()` reflects the state so `list_mcp_servers`
+    // (shell-side) can show the failure reason.
+    //
+    // This `McpManager` instance is the daemon-local one. A second
+    // instance lives inside `forge-shell`'s Tauri app for the UI-facing
+    // commands — the two read the same on-disk `.mcp.json`. Toggling a
+    // server from the shell does not affect the daemon's already-running
+    // session (toggle is a UI / next-session concern).
+    let mcp = load_mcp_manager(workspace_path.as_deref()).await;
+
     // F-140: session-scoped agent runtime so live turns can actually spawn
     // sub-agents via `agent.spawn`.
     //
@@ -335,6 +419,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
             byte_budget,
             agents_md,
             agent_runtime,
+            mcp,
         )
         .await;
     }
@@ -390,6 +475,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
                 let child_registry = child_registry.clone();
                 let byte_budget = Arc::clone(&byte_budget);
                 let agents_md = agents_md.clone();
+                let mcp = mcp.clone();
                 let agent_runtime = Arc::clone(&agent_runtime);
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(
@@ -407,6 +493,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
                         byte_budget,
                         agents_md,
                         agent_runtime,
+                        mcp,
                     )
                     .await
                     {
@@ -458,6 +545,7 @@ async fn handle_connection<P: Provider + 'static>(
     byte_budget: Arc<crate::byte_budget::ByteBudget>,
     agents_md: Option<Arc<str>>,
     agent_runtime: Arc<Option<AgentRuntime>>,
+    mcp: Option<Arc<forge_mcp::McpManager>>,
 ) -> Result<()> {
     // ── Handshake ──────────────────────────────────────────────────────────────
     let msg = forge_ipc::read_frame(&mut stream).await?;
@@ -562,6 +650,7 @@ async fn handle_connection<P: Provider + 'static>(
                         let child_registry = child_registry.clone();
                         let byte_budget = Arc::clone(&byte_budget);
                         let agents_md = agents_md.clone();
+                        let mcp = mcp.clone();
                         let agent_runtime = (*agent_runtime).clone();
                         tokio::spawn(async move {
                             let result = run_turn(
@@ -576,6 +665,7 @@ async fn handle_connection<P: Provider + 'static>(
                                 Some(byte_budget),
                                 agents_md,
                                 agent_runtime,
+                                mcp,
                             ).await;
                             if let Err(e) = &result {
                                 eprintln!("turn error: {e}");

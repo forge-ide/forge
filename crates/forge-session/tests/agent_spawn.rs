@@ -76,6 +76,7 @@ async fn parent_process_spawning_container_child_does_not_escalate_or_demote_pri
         child_registry: None,
         byte_budget: None,
         agent_ctx: Some(agent_ctx),
+        mcp: None,
     };
 
     let mut dispatcher = ToolDispatcher::new();
@@ -148,6 +149,7 @@ async fn unknown_agent_name_fails_with_typed_error_not_panic() {
         child_registry: None,
         byte_budget: None,
         agent_ctx: Some(agent_ctx),
+        mcp: None,
     };
 
     let mut dispatcher = ToolDispatcher::new();
@@ -191,6 +193,7 @@ async fn user_scope_cannot_spawn_trusted_child_even_if_def_is_forged() {
         child_registry: None,
         byte_budget: None,
         agent_ctx: Some(agent_ctx),
+        mcp: None,
     };
 
     let mut dispatcher = ToolDispatcher::new();
@@ -322,6 +325,7 @@ async fn agent_spawn_forwards_prompt_onto_child_instance_for_first_turn_material
         child_registry: None,
         byte_budget: None,
         agent_ctx: Some(agent_ctx),
+        mcp: None,
     };
 
     let mut dispatcher = ToolDispatcher::new();

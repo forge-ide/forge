@@ -1437,6 +1437,7 @@ dependencies = [
  "tokio-stream",
  "toml 0.8.23",
  "tracing",
+ "ts-rs",
  "wiremock",
 ]
 
@@ -1478,6 +1479,7 @@ dependencies = [
  "forge-core",
  "forge-fs",
  "forge-ipc",
+ "forge-mcp",
  "forge-providers",
  "futures",
  "libc",
@@ -1504,9 +1506,11 @@ dependencies = [
  "forge-fs",
  "forge-ipc",
  "forge-lsp",
+ "forge-mcp",
  "forge-providers",
  "forge-session",
  "forge-term",
+ "futures",
  "png",
  "serde",
  "serde_json",

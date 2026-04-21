@@ -15,6 +15,7 @@
 //! session doesn't have to know anything about MCP.
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 /// A callable tool the model can invoke.
 ///
@@ -22,7 +23,8 @@ use serde::{Deserialize, Serialize};
 /// tools and every connected MCP server — and hand the list to a
 /// provider. The session also uses `read_only` to decide whether the
 /// provider should be allowed to batch tool calls in parallel.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
 pub struct Tool {
     /// Unique name. For MCP tools we namespace with the server name
     /// (`"<server>.<tool>"`) so two servers exposing the same tool name
@@ -31,7 +33,10 @@ pub struct Tool {
     /// One-line description shown to the model. Providers may truncate.
     pub description: String,
     /// JSON-Schema for the tool's argument object. Providers forward
-    /// this verbatim on their tool-declaration surface.
+    /// this verbatim on their tool-declaration surface. ts-rs: the
+    /// backing `serde_json::Value` has no single TypeScript shape —
+    /// emit as `unknown` so the frontend treats it opaquely.
+    #[ts(type = "unknown")]
     pub input_schema: serde_json::Value,
     /// `true` if calling the tool never mutates external state.
     ///

@@ -98,6 +98,7 @@ async fn agent_spawn_from_live_turn_registers_child_and_emits_sub_agent_spawned(
         None,   // byte_budget
         None,   // agents_md
         Some(runtime),
+        None, // mcp — F-132 (no MCP servers in this test)
     )
     .await
     .expect("run_turn should complete");

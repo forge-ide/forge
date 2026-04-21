@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::BroadcastStream;
+use ts_rs::TS;
 
 use crate::transport::{Http, HttpEvent, Stdio, StdioEvent};
 use crate::{McpServerSpec, ServerKind};
@@ -65,7 +66,8 @@ const STATE_CHANNEL_CAPACITY: usize = 64;
 
 /// Lifecycle state of one MCP server, as seen by consumers of
 /// [`McpManager::state_stream`] and [`McpManager::list`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ServerState {
     /// Spawn/connect in progress (transport connect → `initialize`
@@ -83,21 +85,28 @@ pub enum ServerState {
 }
 
 /// A record emitted on the state stream when a server transitions.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
 pub struct McpStateEvent {
     /// Server name, matches the key in the loaded spec map.
     pub server: String,
     /// New state the server transitioned to.
     pub state: ServerState,
     /// Wall-clock timestamp. Included so the UI can order events
-    /// coming from multiple servers even when the stream lags.
+    /// coming from multiple servers even when the stream lags. ts-rs:
+    /// serialized as an RFC-3339 string on the wire (serde picks the
+    /// default `SystemTime` representation — an object with `secs_since_epoch`).
+    /// We emit `unknown` so the frontend treats the field opaquely and
+    /// reads it as a monotonic ordering key.
+    #[ts(type = "unknown")]
     pub ts: SystemTime,
 }
 
 /// Opaque summary returned by [`McpManager::list`]. Keep it minimal;
 /// downstream IPC consumers can grow it over time without disturbing
 /// the manager internals.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
 pub struct McpServerInfo {
     pub name: String,
     pub state: ServerState,

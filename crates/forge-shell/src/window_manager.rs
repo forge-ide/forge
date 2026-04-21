@@ -108,6 +108,10 @@ pub fn run() -> Result<()> {
             // the default `toast` mode.
             crate::ipc::get_settings,
             crate::ipc::set_setting,
+            // F-132: MCP commands — list / toggle / import.
+            crate::ipc::list_mcp_servers,
+            crate::ipc::toggle_mcp_server,
+            crate::ipc::import_mcp_config,
         ])
         .setup(|app| {
             crate::ipc::manage_bridge(&app.handle().clone());
@@ -119,6 +123,8 @@ pub fn run() -> Result<()> {
             // to be managed up-front so the `State<'_, BgAgentState>` extractor
             // on each command doesn't panic.
             crate::ipc::manage_bg_agents(&app.handle().clone());
+            // F-132: MCP manager container + state-stream forwarder.
+            crate::ipc::manage_mcp(&app.handle().clone());
             let manager = WindowManager::new(app.handle().clone());
             manager.open_dashboard()?;
             Ok(())
