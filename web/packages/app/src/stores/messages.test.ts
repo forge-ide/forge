@@ -4,6 +4,9 @@ import {
   setAwaitingResponse,
   getMessagesState,
   resetMessagesStore,
+  liveVariantCount,
+  activeVariantPosition,
+  neighbourVariantId,
 } from './messages';
 import type { SessionId } from '@forge/ipc';
 
@@ -335,6 +338,155 @@ describe('messages store', () => {
     });
   });
 
+  // -----------------------------------------------------------------------
+  // F-145 — branch-group tracking
+  // -----------------------------------------------------------------------
+  describe('branch groups (F-145)', () => {
+    it('registers a root variant on the first AssistantMessage', () => {
+      pushEvent(SID, {
+        kind: 'AssistantMessage',
+        text: 'root answer',
+        message_id: 'root-1',
+        branch_parent: null,
+        branch_variant_index: 0,
+      });
+      const state = getMessagesState(SID);
+      expect(state.branchGroups['root-1']).toBeDefined();
+      expect(state.branchGroups['root-1']!.variantIds).toEqual(['root-1']);
+      expect(state.branchGroups['root-1']!.activeVariantId).toBe('root-1');
+    });
+
+    it('attaches a sibling variant under its branch_parent and flips active', () => {
+      pushEvent(SID, {
+        kind: 'AssistantMessage',
+        text: 'root answer',
+        message_id: 'root-1',
+        branch_parent: null,
+        branch_variant_index: 0,
+      });
+      pushEvent(SID, {
+        kind: 'AssistantMessage',
+        text: 'variant 1',
+        message_id: 'var-1',
+        branch_parent: 'root-1',
+        branch_variant_index: 1,
+      });
+      const group = getMessagesState(SID).branchGroups['root-1']!;
+      expect(group.variantIds).toEqual(['root-1', 'var-1']);
+      expect(group.activeVariantId).toBe('var-1');
+      expect(liveVariantCount(group)).toBe(2);
+    });
+
+    it('BranchSelected flips the active variant', () => {
+      pushEvent(SID, {
+        kind: 'AssistantMessage',
+        text: 'root',
+        message_id: 'root-1',
+        branch_parent: null,
+        branch_variant_index: 0,
+      });
+      pushEvent(SID, {
+        kind: 'AssistantMessage',
+        text: 'v1',
+        message_id: 'var-1',
+        branch_parent: 'root-1',
+        branch_variant_index: 1,
+      });
+      pushEvent(SID, {
+        kind: 'BranchSelected',
+        parent: 'root-1',
+        selected: 'root-1',
+      });
+      expect(getMessagesState(SID).branchGroups['root-1']!.activeVariantId).toBe('root-1');
+    });
+
+    it('BranchDeleted tombstones a variant and falls back the active id', () => {
+      pushEvent(SID, {
+        kind: 'AssistantMessage',
+        text: 'root',
+        message_id: 'root-1',
+        branch_parent: null,
+        branch_variant_index: 0,
+      });
+      pushEvent(SID, {
+        kind: 'AssistantMessage',
+        text: 'v1',
+        message_id: 'var-1',
+        branch_parent: 'root-1',
+        branch_variant_index: 1,
+      });
+      // active is var-1 at this point. Delete var-1 — active must fall back.
+      pushEvent(SID, {
+        kind: 'BranchDeleted',
+        parent: 'root-1',
+        variant_index: 1,
+      });
+      const group = getMessagesState(SID).branchGroups['root-1']!;
+      expect(group.variantIds[1]).toBeNull();
+      expect(group.deletedIndices).toContain(1);
+      expect(group.activeVariantId).toBe('root-1');
+      expect(liveVariantCount(group)).toBe(1);
+    });
+
+    it('activeVariantPosition reports 1-indexed position and live count', () => {
+      pushEvent(SID, {
+        kind: 'AssistantMessage',
+        text: 'r',
+        message_id: 'root-1',
+        branch_parent: null,
+        branch_variant_index: 0,
+      });
+      pushEvent(SID, {
+        kind: 'AssistantMessage',
+        text: 'a',
+        message_id: 'var-1',
+        branch_parent: 'root-1',
+        branch_variant_index: 1,
+      });
+      pushEvent(SID, {
+        kind: 'AssistantMessage',
+        text: 'b',
+        message_id: 'var-2',
+        branch_parent: 'root-1',
+        branch_variant_index: 2,
+      });
+      const group = getMessagesState(SID).branchGroups['root-1']!;
+      // active is var-2 (last sibling registered).
+      expect(activeVariantPosition(group)).toEqual({ position: 3, total: 3 });
+    });
+
+    it('neighbourVariantId cycles prev / next and wraps', () => {
+      pushEvent(SID, {
+        kind: 'AssistantMessage',
+        text: 'r',
+        message_id: 'root-1',
+        branch_parent: null,
+        branch_variant_index: 0,
+      });
+      pushEvent(SID, {
+        kind: 'AssistantMessage',
+        text: 'a',
+        message_id: 'var-1',
+        branch_parent: 'root-1',
+        branch_variant_index: 1,
+      });
+      const group = getMessagesState(SID).branchGroups['root-1']!;
+      // active is var-1. next wraps to root-1; prev wraps to root-1.
+      expect(neighbourVariantId(group, 'next')).toBe('root-1');
+      expect(neighbourVariantId(group, 'prev')).toBe('root-1');
+    });
+
+    it('AssistantMessage without branch fields defaults to root variant', () => {
+      pushEvent(SID, {
+        kind: 'AssistantMessage',
+        text: 'legacy',
+        message_id: 'legacy-1',
+      });
+      const group = getMessagesState(SID).branchGroups['legacy-1']!;
+      expect(group.variantIds).toEqual(['legacy-1']);
+    });
+  });
+
   describe('multi-session isolation', () => {
     it('keeps turns isolated per session', () => {
       const SID2 = 'session-other' as SessionId;
@@ -343,6 +495,66 @@ describe('messages store', () => {
       expect(getMessagesState(SID).turns).toHaveLength(1);
       expect(getMessagesState(SID2).turns).toHaveLength(1);
       expect(getMessagesState(SID).turns[0]!.type).toBe('user');
+    });
+  });
+
+  // F-136: banner-turn lifecycle inside the store. ChatPane integration
+  // lives in ChatPane.test.tsx; these cases pin the pure reducer semantics.
+  describe('SubAgentSpawned + BackgroundAgentCompleted (F-136)', () => {
+    it('appends a sub_agent_banner turn in running state', () => {
+      pushEvent(SID, {
+        kind: 'SubAgentSpawned',
+        parent_instance_id: 'p-1',
+        child_instance_id: 'c-1',
+        from_msg: 'm-1',
+        agent_name: 'writer',
+      });
+      const state = getMessagesState(SID);
+      expect(state.turns).toHaveLength(1);
+      const turn = state.turns[0]!;
+      if (turn.type !== 'sub_agent_banner') {
+        throw new Error(`expected sub_agent_banner turn, got ${turn.type}`);
+      }
+      expect(turn.child_instance_id).toBe('c-1');
+      expect(turn.parent_instance_id).toBe('p-1');
+      expect(turn.agent_name).toBe('writer');
+      expect(turn.status).toBe('running');
+      expect(typeof turn.started_at).toBe('number');
+    });
+
+    it('does not stack duplicate banners when the same SubAgentSpawned arrives twice', () => {
+      pushEvent(SID, {
+        kind: 'SubAgentSpawned',
+        parent_instance_id: 'p',
+        child_instance_id: 'c-dup',
+        from_msg: 'm',
+      });
+      pushEvent(SID, {
+        kind: 'SubAgentSpawned',
+        parent_instance_id: 'p',
+        child_instance_id: 'c-dup',
+        from_msg: 'm',
+      });
+      const state = getMessagesState(SID);
+      expect(state.turns).toHaveLength(1);
+    });
+
+    it('flips the matching banner to done on BackgroundAgentCompleted', () => {
+      pushEvent(SID, {
+        kind: 'SubAgentSpawned',
+        parent_instance_id: 'p',
+        child_instance_id: 'c-term',
+        from_msg: 'm',
+      });
+      pushEvent(SID, { kind: 'BackgroundAgentCompleted', instance_id: 'c-term' });
+      const turn = getMessagesState(SID).turns[0]!;
+      if (turn.type !== 'sub_agent_banner') throw new Error('expected banner');
+      expect(turn.status).toBe('done');
+    });
+
+    it('BackgroundAgentCompleted for an unknown instance id is a no-op', () => {
+      pushEvent(SID, { kind: 'BackgroundAgentCompleted', instance_id: 'nobody' });
+      expect(getMessagesState(SID).turns).toHaveLength(0);
     });
   });
 });

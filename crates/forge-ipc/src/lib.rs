@@ -25,6 +25,8 @@ pub enum IpcMessage {
     RerunMessage(RerunMessage),
     /// F-144: client → session request to activate a specific branch variant.
     SelectBranch(SelectBranch),
+    /// F-145: client → session request to tombstone a branch variant.
+    DeleteBranch(DeleteBranch),
 }
 
 /// Client → session: re-run the assistant message with `msg_id` using the
@@ -48,6 +50,20 @@ pub struct RerunMessage {
 /// selected }` where `selected` is the resolved MessageId.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SelectBranch {
+    pub parent_id: String,
+    pub variant_index: u32,
+}
+
+/// Client → session: tombstone a specific branch variant (F-145).
+///
+/// `parent_id` is the branch-point message id; `variant_index` identifies the
+/// sibling to delete (0 = the root variant, N >= 1 = the Nth branch sibling).
+/// The daemon resolves the target against the event log and emits
+/// `Event::BranchDeleted { parent, variant_index }`. Deleting `variant_index
+/// == 0` is **not** rejected here — the orchestrator may decide policy
+/// (e.g. refuse when it would orphan every sibling).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeleteBranch {
     pub parent_id: String,
     pub variant_index: u32,
 }

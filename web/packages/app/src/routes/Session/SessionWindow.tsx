@@ -4,6 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { ProviderId, SessionId } from '@forge/ipc';
 import {
   getPersistentApprovals,
+  getSettings,
   onSessionEvent,
   sessionHello,
   sessionSubscribe,
@@ -18,6 +19,7 @@ import {
 import { pushEvent } from '../../stores/messages';
 import { fromRustEvent } from '../../ipc/events';
 import { seedPersistentApprovals } from '../../stores/approvals';
+import { seedSettings } from '../../stores/settings';
 import { PaneHeader } from './PaneHeader';
 import { ChatPane } from './ChatPane';
 import { EditorPane } from '../../panes/EditorPane';
@@ -105,6 +107,15 @@ export const SessionWindow: Component = () => {
           seedPersistentApprovals(id, persisted);
         } catch (seedErr) {
           console.error('get_persistent_approvals failed', seedErr);
+        }
+        // F-151: seed the persistent settings store. Same failure discipline
+        // as approvals above — a failed load leaves the defaults in place
+        // rather than blocking session startup.
+        try {
+          const persistedSettings = await getSettings(ack.workspace);
+          seedSettings(persistedSettings);
+        } catch (seedErr) {
+          console.error('get_settings failed', seedErr);
         }
       } catch (err) {
         console.error('session_hello/subscribe failed', err);

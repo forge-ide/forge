@@ -47,10 +47,13 @@ describe('fromRustEvent — non-rendering variants return null', () => {
       persistence: 'Persist',
     },
     { type: 'session_ended', at: '2026-04-18T10:00:00Z', reason: 'UserExit', archived: true },
-    { type: 'branch_selected', parent: 'a', selected: 'b' },
-    { type: 'sub_agent_spawned', parent: 'p', child: 'c', from_msg: 'm' },
+    // F-136: sub_agent_spawned + background_agent_completed are now mapped
+    // into renderable SessionEvents (banner mount + terminal flip); they're
+    // asserted in their own positive describes below.
+    // F-145: branch_selected / branch_deleted are also mapped (positive
+    // tests live in the `assistant_message` describe), so neither appears
+    // in this null-passthrough list.
     { type: 'background_agent_started', id: 'ba-1', agent: 'a', at: '2026-04-18T10:00:00Z' },
-    { type: 'background_agent_completed', id: 'ba-1', at: '2026-04-18T10:00:00Z' },
     {
       type: 'usage_tick',
       provider: 'p',
@@ -247,11 +250,91 @@ describe('fromRustEvent — assistant_message', () => {
       branch_variant_index: 0,
     };
 
+    // F-145: adapter now forwards branch_parent / branch_variant_index and,
+    // when present, provider / model / at onto the store event so branch
+    // grouping and the metadata popover can read them.
     expect(fromRustEvent(rust)).toEqual({
       kind: 'AssistantMessage',
       message_id: 'mid-2',
       text: 'hi there',
+      branch_parent: null,
+      branch_variant_index: 0,
+      provider: 'mock',
+      model: 'mock-1',
+      at: '2026-04-18T10:00:01Z',
     });
+  });
+
+  it('maps a branched sibling: branch_parent + branch_variant_index forwarded', () => {
+    // F-145: when Rust emits an AssistantMessage whose branch_parent points
+    // at a root, the adapter preserves that linkage so the store can build
+    // a branch group around it.
+    const rust = {
+      type: 'assistant_message',
+      id: 'variant-2',
+      provider: 'mock',
+      model: 'mock-1',
+      at: '2026-04-20T14:26:02Z',
+      stream_finalised: true,
+      text: 'variant text',
+      branch_parent: 'root-1',
+      branch_variant_index: 2,
+    };
+    expect(fromRustEvent(rust)).toEqual({
+      kind: 'AssistantMessage',
+      message_id: 'variant-2',
+      text: 'variant text',
+      branch_parent: 'root-1',
+      branch_variant_index: 2,
+      provider: 'mock',
+      model: 'mock-1',
+      at: '2026-04-20T14:26:02Z',
+    });
+  });
+
+  // F-145: branch-tree mutations round-trip through the adapter.
+  it('maps branch_selected to BranchSelected', () => {
+    expect(
+      fromRustEvent({
+        type: 'branch_selected',
+        parent: 'root-1',
+        selected: 'variant-2',
+      }),
+    ).toEqual({
+      kind: 'BranchSelected',
+      parent: 'root-1',
+      selected: 'variant-2',
+    });
+  });
+
+  it('maps branch_deleted to BranchDeleted', () => {
+    expect(
+      fromRustEvent({
+        type: 'branch_deleted',
+        parent: 'root-1',
+        variant_index: 2,
+      }),
+    ).toEqual({
+      kind: 'BranchDeleted',
+      parent: 'root-1',
+      variant_index: 2,
+    });
+  });
+
+  it('drops branch_selected with non-string parent', () => {
+    expect(
+      fromRustEvent({ type: 'branch_selected', parent: 42, selected: 'b' }),
+    ).toBeNull();
+  });
+
+  it('drops branch_deleted with non-number variant_index', () => {
+    expect(
+      fromRustEvent({
+        type: 'branch_deleted',
+        parent: 'root-1',
+        variant_index: 'two',
+      }),
+    ).toBeNull();
   });
 
   it('returns null for the stream-open sentinel (stream_finalised: false)', () => {
@@ -375,6 +458,84 @@ describe('fromRustEvent — narrowing drops malformed required fields', () => {
         stream_finalised: true,
         text: null,
       }),
+    ).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-136: sub_agent_spawned + background_agent_completed — ChatPane banner
+// wire-up. The Rust shape matches `forge_core::Event::SubAgentSpawned` /
+// `BackgroundAgentCompleted`; event_wire_shape.rs pins it serverside.
+// ---------------------------------------------------------------------------
+
+describe('fromRustEvent — sub_agent_spawned (F-136)', () => {
+  it('maps to SubAgentSpawned with parent/child/from_msg carried through', () => {
+    const rust = {
+      type: 'sub_agent_spawned',
+      parent: 'parent-inst-1',
+      child: 'child-inst-1',
+      from_msg: 'msg-7',
+    };
+    expect(fromRustEvent(rust)).toEqual({
+      kind: 'SubAgentSpawned',
+      parent_instance_id: 'parent-inst-1',
+      child_instance_id: 'child-inst-1',
+      from_msg: 'msg-7',
+    });
+  });
+
+  it('forwards an optional agent_name when the shell enriches the payload', () => {
+    const rust = {
+      type: 'sub_agent_spawned',
+      parent: 'p',
+      child: 'c',
+      from_msg: 'm',
+      agent_name: 'test-writer',
+    };
+    expect(fromRustEvent(rust)).toEqual({
+      kind: 'SubAgentSpawned',
+      parent_instance_id: 'p',
+      child_instance_id: 'c',
+      from_msg: 'm',
+      agent_name: 'test-writer',
+    });
+  });
+
+  it('drops payloads with a non-string parent', () => {
+    expect(
+      fromRustEvent({ type: 'sub_agent_spawned', parent: 7, child: 'c', from_msg: 'm' }),
+    ).toBeNull();
+  });
+
+  it('drops payloads with a non-string child', () => {
+    expect(
+      fromRustEvent({ type: 'sub_agent_spawned', parent: 'p', child: null, from_msg: 'm' }),
+    ).toBeNull();
+  });
+
+  it('drops payloads with a non-string from_msg', () => {
+    expect(
+      fromRustEvent({ type: 'sub_agent_spawned', parent: 'p', child: 'c' }),
+    ).toBeNull();
+  });
+});
+
+describe('fromRustEvent — background_agent_completed (F-136)', () => {
+  it('maps to BackgroundAgentCompleted keyed by instance id', () => {
+    const rust = {
+      type: 'background_agent_completed',
+      id: 'child-inst-1',
+      at: '2026-04-20T10:00:00Z',
+    };
+    expect(fromRustEvent(rust)).toEqual({
+      kind: 'BackgroundAgentCompleted',
+      instance_id: 'child-inst-1',
+    });
+  });
+
+  it('drops payloads missing the id', () => {
+    expect(
+      fromRustEvent({ type: 'background_agent_completed', at: '2026-04-20T10:00:00Z' }),
     ).toBeNull();
   });
 });

@@ -393,6 +393,7 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         session_reject_tool,
         rerun_message,
         select_branch,
+        delete_branch,
         get_persistent_approvals,
         save_approval,
         remove_approval,
@@ -414,6 +415,9 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         list_background_agents,
         rename_path,
         delete_path,
+        // F-151: persistent settings store.
+        get_settings,
+        set_setting,
     ])
 }
 
@@ -2035,4 +2039,198 @@ pub async fn delete_path<R: Runtime>(
     let allowed = workspace_allowlist(&workspace);
     let limits = forge_fs::Limits::default();
     forge_fs::delete(&path, &allowed, &limits).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// F-151: user + workspace settings store
+//
+// Two Tauri commands expose the persistent settings to the frontend:
+//
+// - `get_settings(workspace_root) -> AppSettings` — loads both the user and
+//   workspace files, deep-merges workspace onto user at TOML-tree granularity
+//   (so a workspace file that declares only `[notifications]` does not
+//   overwrite the user's `[windows]` preference), and returns the merged
+//   shape.
+// - `set_setting(key, value, level, workspace_root)` — writes a single
+//   `(dotted_key, value)` into the requested tier's file, preserving every
+//   other field that already lives there. Implemented as load → mutate the
+//   raw toml tree → validate by deserializing into `AppSettings` → atomically
+//   rewrite the file. A blind struct-serialize + rewrite would promote
+//   defaults into the file for every absent field, defeating the merge
+//   semantic.
+//
+// Authz mirrors F-036's approval commands: the dashboard window and any
+// `session-*` window may invoke. Settings are a user-level artifact, not
+// per-session, so there is no session-label check inside the command.
+//
+// Appended at EOF (Wave 2B-a convention, same as the F-144 fs commands
+// above) — several parallel PRs are also touching this file, so new
+// additions stay at the bottom to minimize rebase conflicts.
+// ---------------------------------------------------------------------------
+
+use forge_core::settings::{
+    apply_setting_update, load_merged_in, save_user_settings_raw_in, save_workspace_settings_raw,
+    workspace_settings_path, AppSettings,
+};
+
+/// Maximum accepted size for the `key` argument to `set_setting`. Dotted
+/// keys are short (section + field name); 256 bytes leaves substantial
+/// headroom without letting a compromised webview drive unbounded allocations.
+pub(crate) const MAX_SETTING_KEY_BYTES: usize = 256;
+
+/// Maximum accepted size for the `value` argument to `set_setting` when
+/// serialized back to JSON. Settings values are scalars today; even the
+/// longest foreseeable string (a path) is bounded by MAX_WORKSPACE_ROOT_BYTES.
+/// 16 KiB is generous enough for any reasonable future array field while
+/// still blocking large-payload abuse.
+pub(crate) const MAX_SETTING_VALUE_BYTES: usize = 16 * 1024;
+
+/// `level` argument for `set_setting`. Kept a typed enum (instead of a
+/// raw string) so serde rejects typos at the IPC boundary and the reader
+/// cannot construct an ambiguous tier.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsLevel {
+    User,
+    Workspace,
+}
+
+#[tauri::command]
+pub async fn get_settings<R: Runtime>(
+    workspace_root: String,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+) -> Result<AppSettings, String> {
+    // Same authz model as F-036's approval commands: dashboard + any
+    // session-* window may read.
+    require_window_label_in(&webview, &["dashboard"], true)?;
+    require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
+
+    let user_dir = resolve_user_config_dir(&state);
+    load_merged_in(user_dir.as_deref(), std::path::Path::new(&workspace_root))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_setting<R: Runtime>(
+    key: String,
+    value: serde_json::Value,
+    level: SettingsLevel,
+    workspace_root: String,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+) -> Result<(), String> {
+    require_window_label_in(&webview, &["dashboard"], true)?;
+    require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
+    require_size("key", &key, MAX_SETTING_KEY_BYTES)?;
+
+    // Enforce the value cap off the serialized form — the wire shape is JSON
+    // and the eventual on-disk shape is TOML, so this is a conservative
+    // upper bound on both.
+    let value_str = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+    require_size("value", &value_str, MAX_SETTING_VALUE_BYTES)?;
+
+    // JSON -> TOML: serde_json::Value's scalar shapes deserialize cleanly into
+    // toml::Value for the types we accept (string, bool, number). Tagged
+    // objects land as tables; null is rejected below because toml has no
+    // null type and settings never store null.
+    let toml_value: toml::Value =
+        json_to_toml(value).ok_or_else(|| "value cannot be represented as TOML".to_string())?;
+
+    match level {
+        SettingsLevel::Workspace => {
+            let root = std::path::Path::new(&workspace_root);
+            let path = workspace_settings_path(root);
+            let existing = tokio::fs::read_to_string(&path)
+                .await
+                .unwrap_or_else(|_| String::new());
+            let updated =
+                apply_setting_update(&existing, &key, toml_value).map_err(|e| e.to_string())?;
+            // Write the `apply_setting_update` output verbatim — going back
+            // through `AppSettings` + the struct-typed save would promote
+            // every `#[serde(default)]` field into the file, erasing the
+            // "absent means pick up the other tier / pick up the default"
+            // invariant the merge layer relies on.
+            save_workspace_settings_raw(root, &updated)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        SettingsLevel::User => {
+            let dir = resolve_user_config_dir(&state)
+                .ok_or_else(|| "could not resolve user config directory".to_string())?;
+            let path = forge_core::settings::user_settings_path_in(&dir);
+            let existing = tokio::fs::read_to_string(&path)
+                .await
+                .unwrap_or_else(|_| String::new());
+            let updated =
+                apply_setting_update(&existing, &key, toml_value).map_err(|e| e.to_string())?;
+            save_user_settings_raw_in(&dir, &updated)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    }
+}
+
+/// Convert a `serde_json::Value` into a `toml::Value`. Returns `None` for
+/// JSON shapes TOML cannot represent (null; numbers that aren't finite).
+/// Arrays and objects convert recursively; other scalars map 1:1.
+fn json_to_toml(v: serde_json::Value) -> Option<toml::Value> {
+    match v {
+        serde_json::Value::Null => None,
+        serde_json::Value::Bool(b) => Some(toml::Value::Boolean(b)),
+        serde_json::Value::String(s) => Some(toml::Value::String(s)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Some(toml::Value::Integer(i))
+            } else {
+                n.as_f64().filter(|f| f.is_finite()).map(toml::Value::Float)
+            }
+        }
+        serde_json::Value::Array(items) => items
+            .into_iter()
+            .map(json_to_toml)
+            .collect::<Option<Vec<_>>>()
+            .map(toml::Value::Array),
+        serde_json::Value::Object(map) => {
+            let mut out = toml::value::Table::new();
+            for (k, v) in map {
+                out.insert(k, json_to_toml(v)?);
+            }
+            Some(toml::Value::Table(out))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F-145: branch-variant deletion.
+//
+// Mirrors F-144's `select_branch` shape: session-scoped authz, size-capped
+// `parent_id`, delegation to `bridge::delete_branch`. The daemon resolves the
+// target and either emits `Event::BranchDeleted { parent, variant_index }`
+// or — for a root-with-siblings delete — rejects the request and logs. The
+// Tauri command returns `Ok(())` once the IPC frame is written; the outcome
+// arrives through the event stream.
+//
+// Appended at the bottom of the file per the concurrent-worktree convention
+// (F-137 / F-144 / F-126 / F-151 have all extended this file in parallel;
+// keeping new additions at EOF minimizes rebase conflicts). Also registered
+// in `build_invoke_handler` at the top of this file.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn delete_branch<R: Runtime>(
+    session_id: String,
+    parent_id: String,
+    variant_index: u32,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+) -> Result<(), String> {
+    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_size("parent_id", &parent_id, MAX_MESSAGE_ID_BYTES)?;
+    state
+        .bridge
+        .delete_branch(&session_id, parent_id, variant_index)
+        .await
+        .map_err(|e| e.to_string())
 }

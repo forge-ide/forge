@@ -1018,6 +1018,64 @@ impl Orchestrator {
             .await?;
         Ok(())
     }
+
+    /// F-145: tombstone a branch variant. Resolves `(parent, variant_index)`
+    /// against the filtered event log (reusing `resolve_branch_variant` so
+    /// unknown variants surface the same diagnostic), then emits
+    /// `Event::BranchDeleted { parent, variant_index }`.
+    ///
+    /// Refuses to delete `variant_index == 0` when sibling variants remain:
+    /// the root is the original message and removing it would orphan the
+    /// siblings whose `branch_parent` points at it. Deleting the root when
+    /// it is the *only* variant would leave the turn empty on screen; the
+    /// UI gates against that path too (the strip only renders when there
+    /// are two or more variants), but the orchestrator enforces the
+    /// invariant server-side so a compromised webview cannot bypass it.
+    pub async fn delete_branch(
+        &self,
+        session: Arc<crate::session::Session>,
+        parent: MessageId,
+        variant_index: u32,
+    ) -> Result<()> {
+        let history = read_since(&session.log_path, 0)
+            .await
+            .map_err(|e| anyhow!("delete_branch: read event log: {e}"))?;
+        let history = apply_superseded(history);
+
+        // Resolve the target — shares its error message with select_branch so
+        // clients see a consistent "variant not found" diagnostic regardless
+        // of which action triggered the lookup.
+        let _ = resolve_branch_variant(&history, &parent, variant_index)
+            .map_err(|e| anyhow!("delete_branch: {e}"))?;
+
+        // Refuse root deletion when siblings exist. Count live siblings
+        // (branch_parent == Some(parent)) — if any remain, deleting the root
+        // would leave them parent-less on replay.
+        if variant_index == 0 {
+            let sibling_count = history
+                .iter()
+                .filter(|(_, ev)| {
+                    matches!(
+                        ev,
+                        Event::AssistantMessage { branch_parent: Some(bp), .. } if bp == &parent
+                    )
+                })
+                .count();
+            if sibling_count > 0 {
+                return Err(anyhow!(
+                    "delete_branch: refusing to delete root variant while {sibling_count} sibling(s) remain"
+                ));
+            }
+        }
+
+        session
+            .emit(Event::BranchDeleted {
+                parent,
+                variant_index,
+            })
+            .await?;
+        Ok(())
+    }
 }
 
 /// Walk `history` (a superseded-filtered `(seq, Event)` replay) and

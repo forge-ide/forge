@@ -15,12 +15,20 @@ use crate::{ForgeError, Result};
 /// tells a replay consumer that `old_id`'s assistant-side events
 /// (`AssistantMessage`, `AssistantDelta`) are logically hidden.
 ///
+/// F-145 extends this with [`Event::BranchDeleted`] markers. A branch
+/// deletion tombstones every `AssistantMessage` whose
+/// `(branch_parent, branch_variant_index)` pair matches the marker; the
+/// corresponding `AssistantDelta`s are also hidden via the id set collected
+/// during the pre-pass.
+///
 /// The filter walks the stream once:
 ///   1. Pre-pass: collect the set of `old_id`s from every `MessageSuperseded`
-///      marker.
+///      marker and resolve each `BranchDeleted { parent, variant_index }`
+///      to the target `MessageId`. Both sets feed the same hide predicate.
 ///   2. Emit-pass: drop any `AssistantMessage`/`AssistantDelta` whose `id` is
-///      in that set, plus the `MessageSuperseded` markers themselves (their
-///      purpose is already encoded in the filtered output).
+///      in the combined set, plus the `MessageSuperseded` / `BranchDeleted`
+///      markers themselves (their purpose is already encoded in the filtered
+///      output).
 ///
 /// **Tool-call events are intentionally left in place.** `ToolCallStarted`
 /// references the owning message via `msg: MessageId`, but the subsequent
@@ -29,42 +37,73 @@ use crate::{ForgeError, Result};
 /// only `ToolCallStarted` would leave orphan completion events with no
 /// matching start. Filtering the full cluster requires tracking
 /// `ToolCallId`s from the started events we hide — a larger change
-/// deferred to a future pass. F-144 (Branch / Fresh) inherits the same
-/// limitation: for `RerunVariant::Fresh` a superseded turn's tool-call
-/// events remain visible in replay alongside the regenerated turn. The
-/// UI interprets them in the context of the surviving `AssistantMessage`
-/// for `new_id`.
+/// deferred to a future pass. F-144 (Branch / Fresh) and F-145 (branch
+/// deletion) inherit the same limitation.
 ///
 /// Consumers in other contexts (e.g. rebuilding a provider request from
 /// history) can call this same helper to walk a coherent, non-superseded
 /// transcript.
 pub fn apply_superseded(events: Vec<(u64, Event)>) -> Vec<(u64, Event)> {
-    let mut superseded: HashSet<MessageId> = HashSet::new();
+    let mut hidden_ids: HashSet<MessageId> = HashSet::new();
     for (_, ev) in &events {
-        if let Event::MessageSuperseded { old_id, .. } = ev {
-            superseded.insert(old_id.clone());
+        match ev {
+            Event::MessageSuperseded { old_id, .. } => {
+                hidden_ids.insert(old_id.clone());
+            }
+            Event::BranchDeleted {
+                parent,
+                variant_index,
+            } => {
+                // Resolve parent+index to the underlying MessageId. variant 0
+                // is the root (`id == parent`); N >= 1 is the sibling whose
+                // (branch_parent, index) matches.
+                for (_, cand) in &events {
+                    if let Event::AssistantMessage {
+                        id,
+                        branch_parent,
+                        branch_variant_index: idx,
+                        ..
+                    } = cand
+                    {
+                        let is_target = if *variant_index == 0 {
+                            branch_parent.is_none() && id == parent
+                        } else {
+                            branch_parent.as_ref() == Some(parent) && idx == variant_index
+                        };
+                        if is_target {
+                            hidden_ids.insert(id.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
-    if superseded.is_empty() {
+    if hidden_ids.is_empty() {
+        // Still need to hide bare BranchDeleted markers that did not resolve
+        // (client-side drift). Unresolved markers do nothing observable, so
+        // passthrough of an empty-set log is a hot-path fast-return today —
+        // keep that contract and let unresolved markers sit in the replay.
         return events;
     }
     events
         .into_iter()
-        .filter(|(_, ev)| !is_hidden_by(ev, &superseded))
+        .filter(|(_, ev)| !is_hidden_by(ev, &hidden_ids))
         .collect()
 }
 
-fn is_hidden_by(event: &Event, superseded: &HashSet<MessageId>) -> bool {
+fn is_hidden_by(event: &Event, hidden_ids: &HashSet<MessageId>) -> bool {
     match event {
         Event::AssistantMessage { id, .. } | Event::AssistantDelta { id, .. } => {
-            superseded.contains(id)
+            hidden_ids.contains(id)
         }
         // See doc-comment on `apply_superseded`: filtering `ToolCallStarted`
         // alone would leave orphaned `ToolCallCompleted` events (keyed by
         // `ToolCallId`, not `MessageId`). Full-cluster filtering is a
-        // future pass; F-144 inherits the limitation.
+        // future pass; F-144 / F-145 inherit the limitation.
         // Hide the markers themselves: consumers see a clean transcript.
-        Event::MessageSuperseded { .. } => true,
+        Event::MessageSuperseded { .. } | Event::BranchDeleted { .. } => true,
         _ => false,
     }
 }
@@ -208,6 +247,78 @@ mod superseded_tests {
                 _ => panic!("unexpected event kind"),
             }
         }
+    }
+
+    fn assistant_branch(id: &MessageId, parent: &MessageId, idx: u32, text: &str) -> Event {
+        Event::AssistantMessage {
+            id: id.clone(),
+            provider: ProviderId::new(),
+            model: "mock".into(),
+            at: Utc::now(),
+            stream_finalised: true,
+            text: Arc::from(text),
+            branch_parent: Some(parent.clone()),
+            branch_variant_index: idx,
+        }
+    }
+
+    #[test]
+    fn removes_branch_deleted_sibling() {
+        // F-145: BranchDeleted { parent, variant_index } hides the
+        // sibling with that (parent, index) pair, without touching other
+        // variants under the same parent.
+        let root = MessageId::new();
+        let sib1 = MessageId::new();
+        let sib2 = MessageId::new();
+        let input = vec![
+            (1, assistant(&root, "root answer", true)),
+            (2, assistant_branch(&sib1, &root, 1, "variant 1")),
+            (3, assistant_branch(&sib2, &root, 2, "variant 2")),
+            (
+                4,
+                Event::BranchDeleted {
+                    parent: root.clone(),
+                    variant_index: 1,
+                },
+            ),
+        ];
+        let out = apply_superseded(input);
+        // Expect: root + variant 2 only; the BranchDeleted marker is hidden.
+        assert_eq!(out.len(), 2, "got: {:?}", out);
+        let ids: Vec<MessageId> = out
+            .iter()
+            .filter_map(|(_, ev)| match ev {
+                Event::AssistantMessage { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(ids.contains(&root));
+        assert!(ids.contains(&sib2));
+        assert!(!ids.contains(&sib1), "deleted variant must not survive");
+    }
+
+    #[test]
+    fn removes_branch_deleted_root_variant() {
+        // F-145: variant_index 0 resolves to the parent message itself.
+        // Deleting the root hides the original assistant message while
+        // sibling variants remain.
+        let root = MessageId::new();
+        let sib1 = MessageId::new();
+        let input = vec![
+            (1, assistant(&root, "root", true)),
+            (2, assistant_branch(&sib1, &root, 1, "variant 1")),
+            (
+                3,
+                Event::BranchDeleted {
+                    parent: root.clone(),
+                    variant_index: 0,
+                },
+            ),
+        ];
+        let out = apply_superseded(input);
+        // Only the sibling survives.
+        assert_eq!(out.len(), 1);
+        assert!(matches!(&out[0].1, Event::AssistantMessage { id, .. } if *id == sib1));
     }
 
     #[test]

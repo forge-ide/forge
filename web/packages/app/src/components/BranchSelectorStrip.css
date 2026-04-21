@@ -1,0 +1,67 @@
+/*
+ * F-145 — variant selector strip styling.
+ *
+ * Matches `docs/ui-specs/branching.md` §15.3: 20px strip on `surface-2`
+ * (iron-800) with left/right arrows, centred `variant N of M` label, and
+ * an info button right-aligned. Arrow/info buttons are ghost-styled — the
+ * hover state uses iron-750 per the iron-scale rule (deepest-to-elevated).
+ */
+
+.branch-strip {
+  display: flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  background: var(--color-surface-2, #13161d);
+  color: var(--color-text-secondary, #6a7e98);
+  border-radius: 2px;
+  font-size: 11px;
+  line-height: 1;
+  gap: 4px;
+  /* Focus outline uses the brand ember on keyboard focus only; matches the
+   * standard focus ring defined in globals. */
+}
+
+.branch-strip:focus-visible {
+  outline: 1px solid var(--color-ember-400, #ff4a12);
+  outline-offset: 1px;
+}
+
+.branch-strip__arrow,
+.branch-strip__info {
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 2px 4px;
+  font-size: 10px;
+  line-height: 1;
+  border-radius: 2px;
+}
+
+.branch-strip__arrow:hover,
+.branch-strip__info:hover {
+  background: var(--color-surface-3, #181c26);
+  color: var(--color-text-primary, #eae6de);
+}
+
+.branch-strip__arrow:focus-visible,
+.branch-strip__info:focus-visible {
+  outline: 1px solid var(--color-ember-400, #ff4a12);
+  outline-offset: 1px;
+}
+
+.branch-strip__label {
+  font-variant-numeric: tabular-nums;
+  min-width: 5em;
+  text-align: center;
+}
+
+.branch-strip__spacer {
+  flex: 1 1 auto;
+}
+
+.branch-strip__info[aria-expanded='true'] {
+  background: var(--color-surface-3, #181c26);
+  color: var(--color-text-primary, #eae6de);
+}

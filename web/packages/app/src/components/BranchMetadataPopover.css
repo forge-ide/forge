@@ -1,0 +1,169 @@
+/*
+ * F-145 — branch metadata popover styling.
+ *
+ * Panel background uses `--color-surface-2` (iron-800); border uses
+ * `--color-border-default` (iron-700). Active row highlight uses
+ * `--color-surface-3` (iron-750) per the Iron-scale hover rule. The
+ * delete button follows the semantic error color (ember-400). The
+ * popover positions itself via inline style from the parent (portalled
+ * or absolutely anchored below the selector strip).
+ */
+
+.branch-popover {
+  min-width: 320px;
+  max-width: 480px;
+  background: var(--color-surface-2, #13161d);
+  color: var(--color-text-primary, #eae6de);
+  border: 1px solid var(--color-border-default, #1c2230);
+  border-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  font-size: 12px;
+  line-height: 1.4;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.branch-popover:focus-visible {
+  outline: 1px solid var(--color-ember-400, #ff4a12);
+  outline-offset: 1px;
+}
+
+.branch-popover__header {
+  padding: 8px 12px;
+  background: var(--color-surface-2, #13161d);
+  color: var(--color-text-secondary, #6a7e98);
+  border-bottom: 1px solid var(--color-border-default, #1c2230);
+  font-weight: 500;
+}
+
+.branch-popover__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.branch-popover__row {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--color-border-default, #1c2230);
+}
+
+.branch-popover__row:last-child {
+  border-bottom: none;
+}
+
+.branch-popover__row--active {
+  background: var(--color-surface-3, #181c26);
+}
+
+.branch-popover__row-body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 12px;
+  background: transparent;
+  border: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.branch-popover__row-body:hover {
+  background: var(--color-surface-3, #181c26);
+}
+
+.branch-popover__row-body:focus-visible {
+  outline: 1px solid var(--color-ember-400, #ff4a12);
+  outline-offset: -1px;
+}
+
+.branch-popover__row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text-primary, #eae6de);
+}
+
+.branch-popover__bullet {
+  color: var(--color-ember-300, #ff7a30);
+}
+
+.branch-popover__variant-label {
+  font-weight: 500;
+}
+
+.branch-popover__model,
+.branch-popover__time {
+  color: var(--color-text-secondary, #6a7e98);
+}
+
+.branch-popover__active-tag {
+  color: var(--color-ember-300, #ff7a30);
+  font-style: italic;
+}
+
+.branch-popover__preview {
+  color: var(--color-text-secondary, #6a7e98);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.branch-popover__delete {
+  background: transparent;
+  border: none;
+  color: var(--color-ember-400, #ff4a12);
+  padding: 0 12px;
+  font: inherit;
+  cursor: pointer;
+  border-left: 1px solid var(--color-border-default, #1c2230);
+}
+
+.branch-popover__delete:hover:not(:disabled) {
+  background: var(--color-surface-3, #181c26);
+}
+
+.branch-popover__delete:disabled {
+  color: var(--color-iron-500, #3a4558);
+  cursor: not-allowed;
+}
+
+.branch-popover__delete:focus-visible {
+  outline: 1px solid var(--color-ember-400, #ff4a12);
+  outline-offset: -1px;
+}
+
+.branch-popover__footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 12px;
+  background: var(--color-surface-2, #13161d);
+  border-top: 1px solid var(--color-border-default, #1c2230);
+}
+
+.branch-popover__export {
+  background: transparent;
+  border: 1px solid var(--color-border-default, #1c2230);
+  color: var(--color-text-primary, #eae6de);
+  padding: 4px 12px;
+  font: inherit;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.branch-popover__export:hover {
+  background: var(--color-surface-3, #181c26);
+}
+
+.branch-popover__export:focus-visible {
+  outline: 1px solid var(--color-ember-400, #ff4a12);
+  outline-offset: -1px;
+}

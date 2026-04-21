@@ -239,6 +239,39 @@ fn tool_call_rejected_without_reason_wire_shape() {
 }
 
 #[test]
+fn branch_selected_wire_shape() {
+    // F-144 event consumed by the UI via `fromRustEvent` (F-145).
+    assert_wire_eq(
+        Event::BranchSelected {
+            parent: msg_id("root-1"),
+            selected: msg_id("variant-2"),
+        },
+        json!({
+            "type": "branch_selected",
+            "parent": "root-1",
+            "selected": "variant-2",
+        }),
+    );
+}
+
+#[test]
+fn branch_deleted_wire_shape() {
+    // F-145 tombstone marker consumed by the UI via `fromRustEvent` and by
+    // `apply_superseded` on replay.
+    assert_wire_eq(
+        Event::BranchDeleted {
+            parent: msg_id("root-1"),
+            variant_index: 2,
+        },
+        json!({
+            "type": "branch_deleted",
+            "parent": "root-1",
+            "variant_index": 2,
+        }),
+    );
+}
+
+#[test]
 fn tool_call_completed_wire_shape() {
     assert_wire_eq(
         Event::ToolCallCompleted {

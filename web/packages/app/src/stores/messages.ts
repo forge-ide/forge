@@ -13,7 +13,21 @@ export interface ApprovalPreview {
 
 export type SessionEvent =
   | { kind: 'UserMessage'; text: string; message_id: string }
-  | { kind: 'AssistantMessage'; text: string; message_id: string }
+  // F-145: `branch_parent` + `branch_variant_index` + provider/model/timestamp
+  // are optional so the bulk of the adapter (UserMessage-only scenarios, older
+  // fixtures) need not spell them out. The Rust wire shape always includes
+  // `branch_parent` / `branch_variant_index` for AssistantMessage; omission
+  // on the TS side maps to "root variant" (parent=null, index=0).
+  | {
+      kind: 'AssistantMessage';
+      text: string;
+      message_id: string;
+      branch_parent?: string | null;
+      branch_variant_index?: number;
+      provider?: string;
+      model?: string;
+      at?: string;
+    }
   | { kind: 'AssistantDelta'; delta: string; message_id: string }
   | { kind: 'ToolCallStarted'; tool_call_id: string; tool_name: string; args_json: string; batch_id?: string }
   // tool_name/args_json are optional — the Rust wire event carries only id+preview,
@@ -23,9 +37,33 @@ export type SessionEvent =
   | { kind: 'ToolCallApprovalRequested'; tool_call_id: string; tool_name?: string; args_json?: string; preview: ApprovalPreview }
   | { kind: 'ToolCallCompleted'; tool_call_id: string; result_summary: string }
   | { kind: 'ToolCallFailed'; tool_call_id: string; error: string }
+  // F-144 / F-145: branch-tree mutations. `BranchSelected` flips the active
+  // variant for a given branch point; `BranchDeleted` tombstones a variant.
+  | { kind: 'BranchSelected'; parent: string; selected: string }
+  | { kind: 'BranchDeleted'; parent: string; variant_index: number }
   | { kind: 'Error'; message: string }
   | { kind: 'StreamingStarted' }
-  | { kind: 'StreamingStopped' };
+  | { kind: 'StreamingStopped' }
+  // F-136: orchestrator spawned a sub-agent; ChatPane mounts a SubAgentBanner
+  // inline at the spawn position. `agent_name` is optional because the Rust
+  // `SubAgentSpawned` wire event carries only parent/child/from_msg. When the
+  // name is known (F-137 stores it on the orchestrator instance, but it does
+  // not ride the event today), the shell may enrich the payload; otherwise
+  // the banner falls back to `child` id as the label.
+  | {
+      kind: 'SubAgentSpawned';
+      parent_instance_id: string;
+      child_instance_id: string;
+      from_msg: string;
+      agent_name?: string;
+    }
+  // F-136: sub-agent background lifecycle reached a terminal state. Flips any
+  // banner whose child id matches from `running` → `done`. Emitted by
+  // `forge_session::BackgroundAgentRegistry` (F-137).
+  | {
+      kind: 'BackgroundAgentCompleted';
+      instance_id: string;
+    };
 
 // ---------------------------------------------------------------------------
 // Chat turn shapes (derived, used for rendering)
@@ -33,9 +71,28 @@ export type SessionEvent =
 
 export type ToolCallStatus = 'in-progress' | 'awaiting-approval' | 'completed' | 'errored';
 
+/** F-136: sub-agent banner lifecycle state as rendered in the ChatPane. */
+export type SubAgentStatus = 'queued' | 'running' | 'done' | 'error' | 'killed';
+
 export type ChatTurn =
   | { type: 'user'; text: string; message_id: string }
-  | { type: 'assistant'; text: string; message_id: string; isStreaming: boolean }
+  | {
+      type: 'assistant';
+      text: string;
+      message_id: string;
+      isStreaming: boolean;
+      /**
+       * F-145: branch tree coordinates. `branch_parent` points at the branch
+       * root (the original message's id); `null` for non-branched turns.
+       * `branch_variant_index` is 0 for the root and N>=1 for siblings.
+       * Provider/model/at support the metadata popover (spec §15.5).
+       */
+      branch_parent: string | null;
+      branch_variant_index: number;
+      provider?: string;
+      model?: string;
+      at?: string;
+    }
   | {
       type: 'tool_placeholder';
       tool_call_id: string;
@@ -50,7 +107,53 @@ export type ChatTurn =
       /** Populated when status is 'awaiting-approval'. */
       preview?: ApprovalPreview;
     }
+  | {
+      type: 'sub_agent_banner';
+      /** Child `AgentInstanceId` the banner tracks. */
+      child_instance_id: string;
+      /** Emitting parent agent instance id (often the session itself today). */
+      parent_instance_id: string;
+      /** Optional display name — falls back to the child id's short prefix. */
+      agent_name?: string;
+      /** Live state. Starts `running` on spawn; flips to `done` on terminal. */
+      status: SubAgentStatus;
+      /** ms epoch at which the banner was mounted (spawn event seen). */
+      started_at: number;
+      /** Last observed step summary. Populated by future step-routing work. */
+      last_step_summary?: string;
+      /** Count of steps seen so far — reserved for future step-routing work. */
+      step_count?: number;
+    }
   | { type: 'error'; message: string };
+
+// ---------------------------------------------------------------------------
+// F-145 — branch groups
+//
+// Every AssistantMessage has an implicit "branch root" id: `branch_parent`
+// if set, else its own `message_id`. Assistant turns that share a root form
+// a branch group; the group tracks all variant ids, the currently-active id
+// (flipped by `BranchSelected`), and the variants that have been tombstoned
+// via `BranchDeleted`.
+//
+// The ChatPane renders only the active variant of a multi-variant group (the
+// root alone is rendered identically to today's chrome-less assistant turn).
+// The strip / gutter / popover components read straight off this shape.
+// ---------------------------------------------------------------------------
+
+export interface BranchGroup {
+  /**
+   * Ordered list of variant `message_id`s under this branch root — positions
+   * match variant indices (element 0 is the root variant; element N is
+   * `branch_variant_index == N`). `null` at a position means the variant
+   * has been deleted. Storing a sparse array keeps the index→id mapping
+   * stable across deletes — the strip's `N of M` label counts live variants
+   * but the popover keeps numbering aligned with the log.
+   */
+  variantIds: Array<string | null>;
+  activeVariantId: string;
+  /** Tombstoned variant indices (mirrors `variantIds[i] === null`). */
+  deletedIndices: number[];
+}
 
 // ---------------------------------------------------------------------------
 // Per-session messages state
@@ -60,6 +163,8 @@ export interface MessagesState {
   turns: ChatTurn[];
   awaitingResponse: boolean;
   streamingMessageId: string | null;
+  /** F-145: branch-root id → group tracking. Empty when no assistant turn has branched. */
+  branchGroups: Record<string, BranchGroup>;
 }
 
 // ---------------------------------------------------------------------------
@@ -74,6 +179,7 @@ function ensureSession(sessionId: SessionId): void {
       turns: [],
       awaitingResponse: false,
       streamingMessageId: null,
+      branchGroups: {},
     });
   }
 }
@@ -86,6 +192,100 @@ export function getMessagesState(sessionId: SessionId): MessagesState {
 export function setAwaitingResponse(sessionId: SessionId, value: boolean): void {
   ensureSession(sessionId);
   setMessagesStore(sessionId, 'awaitingResponse', value);
+}
+
+// ---------------------------------------------------------------------------
+// F-145 — branch-group helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Insert or update an entry in a branch group's `variantIds` at the given
+ * index. Grows the array with `null` slots if the variant arrives out-of-
+ * order (e.g. replay skipped variant 1 and landed variant 2 first). If the
+ * root variant (index 0) has not yet been seen, the group is still created
+ * so siblings can attach — the root id defaults to the `rootId` argument,
+ * which is the branch-parent (which is always the root's own id).
+ */
+function registerVariant(
+  state: MessagesState,
+  rootId: string,
+  variantIndex: number,
+  messageId: string,
+): void {
+  let group = state.branchGroups[rootId];
+  if (!group) {
+    group = {
+      variantIds: [rootId],
+      activeVariantId: rootId,
+      deletedIndices: [],
+    };
+    state.branchGroups[rootId] = group;
+  }
+  // Grow the sparse array if needed.
+  while (group.variantIds.length <= variantIndex) {
+    group.variantIds.push(null);
+  }
+  group.variantIds[variantIndex] = messageId;
+  // If this is a newly-observed sibling (N>=1), it becomes the active
+  // variant. The server's `rerun_branch` does **not** auto-emit a
+  // `BranchSelected` for the new sibling (see orchestrator.rs doc-comment
+  // on `select_branch`: "BranchSelected emitted separately"), so the UI
+  // papers over that gap by flipping active on first-observation. Spec
+  // §15.1 is silent on the client-vs-server-first activation order; this
+  // keeps the UX identical to Claude.ai (new variant lands as active). A
+  // later `BranchSelected` event then overrides the choice explicitly.
+  // The root (index 0) is "active by default" — registering its own
+  // message must not clobber a prior selection.
+  if (variantIndex >= 1) {
+    group.activeVariantId = messageId;
+  } else if (group.activeVariantId === rootId) {
+    // First time we see the root — keep activeVariantId pointing at it.
+    group.activeVariantId = messageId;
+  }
+}
+
+/**
+ * Count live (non-deleted) variants in a branch group. Used by the strip
+ * to render `N of M` and the popover's `M variants of this response` header.
+ */
+export function liveVariantCount(group: BranchGroup): number {
+  return group.variantIds.filter((v) => v !== null).length;
+}
+
+/**
+ * Return the active variant's position among live variants (1-indexed) and
+ * the total live count. Returns `null` when the group is empty or the
+ * active id is not in it. The strip renders `${position} of ${total}`.
+ */
+export function activeVariantPosition(
+  group: BranchGroup,
+): { position: number; total: number } | null {
+  const live = group.variantIds
+    .map((id, i) => ({ id, i }))
+    .filter((e): e is { id: string; i: number } => e.id !== null);
+  if (live.length === 0) return null;
+  const pos = live.findIndex((e) => e.id === group.activeVariantId);
+  if (pos < 0) return null;
+  return { position: pos + 1, total: live.length };
+}
+
+/**
+ * Cycle the active variant in `direction` (`prev` or `next`) and return the
+ * id that should become active. Wraps at boundaries. Skips tombstoned
+ * variants. Returns `null` when no live variant exists or the current
+ * active id is not in the group.
+ */
+export function neighbourVariantId(
+  group: BranchGroup,
+  direction: 'prev' | 'next',
+): string | null {
+  const live = group.variantIds.filter((v): v is string => v !== null);
+  if (live.length === 0) return null;
+  const currentIdx = live.indexOf(group.activeVariantId);
+  if (currentIdx < 0) return null;
+  const step = direction === 'next' ? 1 : -1;
+  const nextIdx = (currentIdx + step + live.length) % live.length;
+  return live[nextIdx]!;
 }
 
 export function pushEvent(sessionId: SessionId, event: SessionEvent): void {
@@ -109,22 +309,44 @@ export function pushEvent(sessionId: SessionId, event: SessionEvent): void {
       setMessagesStore(
         produce((s) => {
           const state = s[sessionId]!;
+          // F-145: branch-root resolution — `branch_parent` (when set) is
+          // the root id; otherwise this turn is itself a root and the group
+          // keys on its own message_id. Missing on pre-F-145 wire events,
+          // in which case we treat the turn as a lone root (variant_index 0).
+          const branchParent = event.branch_parent ?? null;
+          const variantIndex = event.branch_variant_index ?? 0;
+          const rootId = branchParent ?? event.message_id;
+
           // If there's a streaming turn for this message_id, update it in place.
           const idx = state.turns.findIndex(
             (t) => t.type === 'assistant' && t.message_id === event.message_id,
           );
           if (idx >= 0) {
-            const turn = state.turns[idx] as { type: 'assistant'; text: string; message_id: string; isStreaming: boolean };
+            const turn = state.turns[idx] as Extract<ChatTurn, { type: 'assistant' }>;
             turn.text = event.text;
             turn.isStreaming = false;
+            turn.branch_parent = branchParent;
+            turn.branch_variant_index = variantIndex;
+            if (event.provider !== undefined) turn.provider = event.provider;
+            if (event.model !== undefined) turn.model = event.model;
+            if (event.at !== undefined) turn.at = event.at;
           } else {
-            state.turns.push({
+            const next: Extract<ChatTurn, { type: 'assistant' }> = {
               type: 'assistant',
               text: event.text,
               message_id: event.message_id,
               isStreaming: false,
-            });
+              branch_parent: branchParent,
+              branch_variant_index: variantIndex,
+            };
+            if (event.provider !== undefined) next.provider = event.provider;
+            if (event.model !== undefined) next.model = event.model;
+            if (event.at !== undefined) next.at = event.at;
+            state.turns.push(next);
           }
+
+          registerVariant(state, rootId, variantIndex, event.message_id);
+
           state.streamingMessageId = null;
           state.awaitingResponse = false;
         }),
@@ -141,7 +363,7 @@ export function pushEvent(sessionId: SessionId, event: SessionEvent): void {
             (t) => t.type === 'assistant' && t.message_id === event.message_id,
           );
           if (idx >= 0) {
-            const turn = state.turns[idx] as { type: 'assistant'; text: string; message_id: string; isStreaming: boolean };
+            const turn = state.turns[idx] as Extract<ChatTurn, { type: 'assistant' }>;
             turn.text += event.delta;
           } else {
             state.turns.push({
@@ -149,8 +371,60 @@ export function pushEvent(sessionId: SessionId, event: SessionEvent): void {
               text: event.delta,
               message_id: event.message_id,
               isStreaming: true,
+              branch_parent: null,
+              branch_variant_index: 0,
             });
             state.streamingMessageId = event.message_id;
+          }
+        }),
+      );
+      break;
+    }
+
+    case 'BranchSelected': {
+      setMessagesStore(
+        produce((s) => {
+          const state = s[sessionId]!;
+          const group = state.branchGroups[event.parent];
+          if (group) {
+            group.activeVariantId = event.selected;
+          } else {
+            // A BranchSelected arriving before its AssistantMessages is a
+            // replay-order drift; initialise a minimal group so the strip
+            // has something to bind to when the messages land.
+            state.branchGroups[event.parent] = {
+              variantIds: [event.parent],
+              activeVariantId: event.selected,
+              deletedIndices: [],
+            };
+          }
+        }),
+      );
+      break;
+    }
+
+    case 'BranchDeleted': {
+      setMessagesStore(
+        produce((s) => {
+          const state = s[sessionId]!;
+          const group = state.branchGroups[event.parent];
+          if (!group) return;
+          const idx = event.variant_index;
+          const deletedId =
+            idx < group.variantIds.length ? group.variantIds[idx] : null;
+          if (idx < group.variantIds.length) group.variantIds[idx] = null;
+          if (!group.deletedIndices.includes(idx)) {
+            group.deletedIndices.push(idx);
+          }
+          // If the active variant was the one deleted, fall back to the
+          // lowest-indexed live variant. Preference: the root (0), else the
+          // first live sibling. The orchestrator refuses a root-delete with
+          // live siblings, so one of these will always exist.
+          if (deletedId !== null && group.activeVariantId === deletedId) {
+            const fallback = group.variantIds.find((v): v is string => v !== null);
+            if (fallback) {
+              group.activeVariantId = fallback;
+            }
           }
         }),
       );
@@ -250,6 +524,59 @@ export function pushEvent(sessionId: SessionId, event: SessionEvent): void {
           state.turns.push({ type: 'error', message: event.message });
           state.awaitingResponse = false;
           state.streamingMessageId = null;
+        }),
+      );
+      break;
+    }
+
+    // F-136: orchestrator spawn — mount a banner turn inline at the current
+    // position. Duplicates (same child_instance_id twice in a row) are
+    // ignored so a replay or event re-delivery doesn't stack multiple
+    // banners for one child.
+    case 'SubAgentSpawned': {
+      setMessagesStore(
+        produce((s) => {
+          const state = s[sessionId]!;
+          const existing = state.turns.find(
+            (t) =>
+              t.type === 'sub_agent_banner' &&
+              t.child_instance_id === event.child_instance_id,
+          );
+          if (existing) return;
+          const banner: Extract<ChatTurn, { type: 'sub_agent_banner' }> = {
+            type: 'sub_agent_banner',
+            child_instance_id: event.child_instance_id,
+            parent_instance_id: event.parent_instance_id,
+            status: 'running',
+            started_at: Date.now(),
+          };
+          if (event.agent_name !== undefined) {
+            banner.agent_name = event.agent_name;
+          }
+          state.turns.push(banner);
+        }),
+      );
+      break;
+    }
+
+    // F-136: child lifecycle terminal — flip matching banner to `done`.
+    // Unknown child_instance_id is a no-op (replay or out-of-order delivery).
+    case 'BackgroundAgentCompleted': {
+      setMessagesStore(
+        produce((s) => {
+          const state = s[sessionId]!;
+          const idx = state.turns.findIndex(
+            (t) =>
+              t.type === 'sub_agent_banner' &&
+              t.child_instance_id === event.instance_id,
+          );
+          if (idx >= 0) {
+            const turn = state.turns[idx] as Extract<
+              ChatTurn,
+              { type: 'sub_agent_banner' }
+            >;
+            turn.status = 'done';
+          }
         }),
       );
       break;

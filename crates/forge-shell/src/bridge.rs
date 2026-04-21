@@ -26,8 +26,8 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use forge_core::{ApprovalScope, RerunVariant};
 use forge_ipc::{
-    read_frame, write_frame, ClientInfo, Hello, HelloAck, IpcMessage, RerunMessage, SelectBranch,
-    SendUserMessage, Subscribe, ToolCallApproved, ToolCallRejected, PROTO_VERSION,
+    read_frame, write_frame, ClientInfo, DeleteBranch, Hello, HelloAck, IpcMessage, RerunMessage,
+    SelectBranch, SendUserMessage, Subscribe, ToolCallApproved, ToolCallRejected, PROTO_VERSION,
 };
 use serde::Serialize;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -402,6 +402,28 @@ impl SessionBridge {
         let writer = self.writer_for(session_id).await?;
         let mut writer = writer.lock().await;
         let frame = IpcMessage::SelectBranch(SelectBranch {
+            parent_id,
+            variant_index,
+        });
+        write_frame(&mut *writer, &frame).await
+    }
+
+    /// F-145: forward a `delete_branch` request to the session daemon.
+    /// Triggers the daemon to emit `Event::BranchDeleted { parent,
+    /// variant_index }` once the target resolves. Unknown variants are
+    /// surfaced daemon-side as log lines; the Tauri command returns
+    /// `Ok(())` once the frame is written (the emission — or the rejection
+    /// of a root-deletion with live siblings — arrives through the event
+    /// stream).
+    pub async fn delete_branch(
+        &self,
+        session_id: &str,
+        parent_id: String,
+        variant_index: u32,
+    ) -> Result<()> {
+        let writer = self.writer_for(session_id).await?;
+        let mut writer = writer.lock().await;
+        let frame = IpcMessage::DeleteBranch(DeleteBranch {
             parent_id,
             variant_index,
         });

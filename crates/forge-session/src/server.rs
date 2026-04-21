@@ -39,6 +39,7 @@ fn ipc_message_kind(msg: &IpcMessage) -> &'static str {
         IpcMessage::ToolCallRejected(_) => "ToolCallRejected",
         IpcMessage::RerunMessage(_) => "RerunMessage",
         IpcMessage::SelectBranch(_) => "SelectBranch",
+        IpcMessage::DeleteBranch(_) => "DeleteBranch",
     }
 }
 
@@ -610,6 +611,24 @@ async fn handle_connection<P: Provider + 'static>(
                                 orch.select_branch(session, parent, variant_index).await
                             {
                                 eprintln!("select_branch error: {e}");
+                            }
+                        });
+                    }
+
+                    Some(IpcMessage::DeleteBranch(d)) => {
+                        // F-145: tombstone a branch variant. Same spawn pattern
+                        // as select_branch — daemon resolves and emits
+                        // `BranchDeleted` asynchronously; the client observes
+                        // the effect through the event stream.
+                        let session = Arc::clone(&session);
+                        let parent = MessageId::from_string(d.parent_id.clone());
+                        let variant_index = d.variant_index;
+                        tokio::spawn(async move {
+                            let orch = Orchestrator::new();
+                            if let Err(e) =
+                                orch.delete_branch(session, parent, variant_index).await
+                            {
+                                eprintln!("delete_branch error: {e}");
                             }
                         });
                     }

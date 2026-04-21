@@ -4,6 +4,7 @@ mod event;
 mod event_log;
 pub mod ids;
 pub mod meta;
+pub mod settings;
 mod tool;
 mod transcript;
 pub mod types;
@@ -17,6 +18,9 @@ pub use event_log::{read_since, EventLog, MAX_LINE_BYTES};
 pub use ids::{
     AgentId, AgentInstanceId, MessageId, ProviderId, SessionId, StepId, TerminalId, ToolCallId,
     WorkspaceId,
+};
+pub use settings::{
+    AppSettings, NotificationMode, NotificationsSettings, SessionMode, WindowsSettings,
 };
 pub use tool::Tool;
 pub use transcript::{apply_superseded, Transcript};
