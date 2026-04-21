@@ -22,6 +22,29 @@ The `mcpServers` schema is the universal proposal (MCP repo discussion #2218). T
 
 The remaining planned API (`McpManager`, `Scope`, `ImportSource`, `McpStateEvent`, HTTP transport) lands in F-129 / F-130.
 
+## Tests
+
+Most of the suite runs under the default `cargo test -p forge-mcp` lane.
+One integration test is gated off that lane:
+
+- `tests/manager_subprocess.rs` — end-to-end `McpManager` + stdio
+  transport + real subprocess composition (Healthy → forced crash →
+  Degraded → restart via the backoff ladder → tool-call round-trip).
+  Marked `#[ignore]` because tokio installs a single process-wide
+  `SIGCHLD` reaper per process: when `cargo test` runs multiple test
+  binaries in parallel and more than one of them spawns children, their
+  exits race the reaper that a previous binary installed and this test
+  observes spurious transport failures. The manager is not at fault —
+  it's a test-harness interaction, not a correctness bug.
+
+  CI runs it in a dedicated **single-binary, single-thread** pass via
+  `just test-rust-serial` (`cargo test -p forge-mcp -- --ignored
+  --test-threads=1`). Locally: `just test-rust-serial`.
+
+  **Do not lift the `#[ignore]` attribute** to make this test run under
+  the default parallel suite — the race is reproducible and the serial
+  gate is deliberate.
+
 ## Further reading
 
 - [Crate architecture — `forge-mcp`](../../docs/architecture/crate-architecture.md#33-forge-mcp)

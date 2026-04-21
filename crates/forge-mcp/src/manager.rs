@@ -119,8 +119,16 @@ pub struct McpServerInfo {
 struct ManagedServer {
     spec: McpServerSpec,
     /// Task driving this server's lifecycle (spawn + handshake +
-    /// event-pump + restart). Cancelled on `stop`.
-    driver: JoinHandle<()>,
+    /// event-pump + restart). `None` before the first `start()` and
+    /// after `stop()`; `Some` while a driver is running or has
+    /// completed. We treat "completed" (`is_finished() == true`) the
+    /// same as `None` for restart admission — previously a pre-aborted
+    /// dummy handle was used as the `None` sentinel, but a freshly
+    /// aborted `JoinHandle` does not always observe as finished before
+    /// the runtime has polled it once, which caused the first `start()`
+    /// on a brand-new manager to race the abort and occasionally
+    /// return early without spawning any driver.
+    driver: Option<JoinHandle<()>>,
     /// Shared mutable data the driver updates and the public API
     /// (list/call) reads. Separating this out of the driver keeps
     /// calls non-blocking on driver progress.
@@ -305,15 +313,12 @@ impl McpManager {
                     tools: Mutex::new(Vec::new()),
                     state_tx: state_tx.clone(),
                 });
-                // Seed as `Starting` *but* don't spawn yet — start() is
-                // explicit. We model this by using a dummy aborted
-                // driver so `ManagedServer` invariants hold. The driver
-                // handle is overwritten on the first `start()`.
-                let dummy = tokio::spawn(async {});
-                dummy.abort();
+                // Seed as `Starting` but don't spawn yet — `start()` is
+                // explicit. The driver slot is `None` until the first
+                // `start()` replaces it with a real handle.
                 let managed = ManagedServer {
                     spec,
-                    driver: dummy,
+                    driver: None,
                     shared,
                     stop_tx: None,
                 };
@@ -378,11 +383,15 @@ impl McpManager {
             .get_mut(name)
             .ok_or_else(|| anyhow!("unknown MCP server {name:?}"))?;
 
-        // Already running? The driver handle is live (not aborted)
-        // when the lifecycle task is in-flight. We use `is_finished()`
-        // to tell: a freshly-aborted dummy returns true.
-        if !managed.driver.is_finished() {
-            return Ok(());
+        // Already running? A live driver is `Some` and not yet
+        // finished. `None` means we've never started (or have been
+        // stopped) and a `Some(handle).is_finished()` means the
+        // previous driver exited cleanly — in either case we're free
+        // to spawn a fresh one.
+        if let Some(handle) = &managed.driver {
+            if !handle.is_finished() {
+                return Ok(());
+            }
         }
 
         let (stop_tx, stop_rx) = oneshot::channel();
@@ -396,7 +405,7 @@ impl McpManager {
             run_lifecycle(server_name, spec, shared, history, tuning, stop_rx).await;
         });
 
-        managed.driver = driver;
+        managed.driver = Some(driver);
         managed.stop_tx = Some(stop_tx);
         drop(servers);
         Ok(())
@@ -413,7 +422,9 @@ impl McpManager {
         if let Some(tx) = managed.stop_tx.take() {
             let _ = tx.send(());
         }
-        managed.driver.abort();
+        if let Some(handle) = managed.driver.take() {
+            handle.abort();
+        }
         // Drop the live connection explicitly so the pump task aborts.
         let mut conn_guard = managed.shared.conn.lock().await;
         *conn_guard = None;
