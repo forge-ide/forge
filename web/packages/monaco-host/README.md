@@ -39,12 +39,13 @@ The iframe signals readiness with `ready`; the parent should queue `open` messag
 
 ### LSP lifecycle
 
-`MonacoLanguageClient` is instantiated at boot but **not started**. F-123 is responsible for:
+`MonacoLanguageClient` is instantiated at boot but **not started**. The parent webview drives the lifecycle via the F-123 IPC surface in `crates/forge-shell/src/ipc.rs` (PR #286):
 
-1. Wiring the parent side to `forge-lsp` over Tauri IPC.
-2. Telling the iframe when a language is ready so the client can `.start()`.
+1. Parent calls `lsp_start` to launch a `forge-lsp`-supervised server for the active language.
+2. Parent tells the iframe the language is ready so the client can `.start()`. Outbound frames flow as iframe `client.message` / `client.notification` → parent → `lsp_send`; inbound frames flow as the `lsp_message` Tauri event → parent → iframe `client.message`.
+3. Parent calls `lsp_stop` on teardown (owner-label authz rejects cross-session stops).
 
-Until F-123 lands the language client is idle: it holds the postMessage transport so that the construction path is verified on every boot, but no LSP traffic flows.
+When no parent has started a server the language client is idle: the postMessage transport is still wired so the construction path is verified on every boot, but no LSP traffic flows.
 
 ## Test harness
 
@@ -69,5 +70,5 @@ To add coverage that exercises Monaco, write a Playwright test in the parent `ap
 
 - [Build approach — Editor: Monaco in iframe](../../../docs/build/approach.md)
 - [Architecture overview §7](../../../docs/architecture/overview.md)
-- [Frontend architecture §9.3](../../../docs/frontend/architecture.md) — note: §9.3 currently describes direct Tauri process spawn from the iframe; F-121 follows the parent-relay model from the issue scope. Reconcile in a follow-up.
+- [Frontend architecture §9.3](../../../docs/frontend/architecture.md) — parent-relay LSP model matching this package's postMessage contract.
 - [Color system](../../../docs/design/color-system.md)
