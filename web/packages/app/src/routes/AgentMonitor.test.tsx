@@ -8,6 +8,7 @@ import {
   filterAgents,
   sortAgents,
   StepDrawer,
+  stopAgentInstance,
   type AgentInspectorData,
   type AgentRow,
   type AgentStep,
@@ -185,6 +186,46 @@ describe('applyEventToState', () => {
       event: { type: 'user_message', id: 'm', text: 'hi' },
     });
     expect(after).toBe(empty);
+  });
+
+  it('flips a running sub-agent row to done on background_agent_completed', () => {
+    // F-140: Stop button → `stop_background_agent` → orchestrator.stop →
+    // `BackgroundAgentCompleted` on `session:event`. The row must stay
+    // visible but transition to a terminal variant so the user can still
+    // inspect the trace.
+    const spawned = applyEventToState(empty, {
+      event: { type: 'sub_agent_spawned', parent: 'p', child: 'c' },
+    });
+    expect(spawned.subAgents[0]?.state).toBe('running');
+
+    const completed = applyEventToState(spawned, {
+      event: { type: 'background_agent_completed', id: 'c' },
+    });
+    const row = completed.subAgents.find((r) => r.id === 'c');
+    expect(row?.state).toBe('done');
+    expect(row?.progress).toBe(1);
+  });
+
+  it('is a no-op when the completed id has no tracked sub-agent row', () => {
+    const after = applyEventToState(empty, {
+      event: { type: 'background_agent_completed', id: 'unknown' },
+    });
+    expect(after).toBe(empty);
+  });
+
+  it('does not re-flip an already-terminal row', () => {
+    const spawned = applyEventToState(empty, {
+      event: { type: 'sub_agent_spawned', parent: 'p', child: 'c' },
+    });
+    const first = applyEventToState(spawned, {
+      event: { type: 'background_agent_completed', id: 'c' },
+    });
+    const second = applyEventToState(first, {
+      event: { type: 'background_agent_completed', id: 'c' },
+    });
+    // Stable reference proves we did not allocate a new state tree for a
+    // redundant completion event.
+    expect(second).toBe(first);
   });
 });
 
@@ -408,5 +449,40 @@ describe('<StepDrawer>', () => {
     ));
     fireEvent.click(getByLabelText(/Close step detail/i));
     expect(onClose).toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// stopAgentInstance wiring
+//
+// Pins F-140's mandatory fix: the Inspector's Stop button must invoke the
+// `stop_background_agent` Tauri command (F-138's authz-gated command)
+// rather than no-op. The component test exercises the helper directly so
+// the wiring is provable without mounting the full route shell (which needs
+// a router + live session event bus to boot).
+// ---------------------------------------------------------------------------
+describe('stopAgentInstance wiring', () => {
+  it('invokes the stop_background_agent command with the session + instance ids', async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    const result = await stopAgentInstance({ invoke }, 'sess-a', 'kill-me');
+    expect(invoke).toHaveBeenCalledWith('stop_background_agent', {
+      sessionId: 'sess-a',
+      instanceId: 'kill-me',
+    });
+    expect(result).toBe('ok');
+  });
+
+  it('is a no-op when no session id is active (session-root pre-subscribe)', async () => {
+    const invoke = vi.fn();
+    const result = await stopAgentInstance({ invoke }, null, 'whatever');
+    expect(invoke).not.toHaveBeenCalled();
+    expect(result).toBe('skipped');
+  });
+
+  it('swallows invoke rejections so the Stop click stays idempotent', async () => {
+    const invoke = vi.fn().mockRejectedValue(new Error('stale id'));
+    const result = await stopAgentInstance({ invoke }, 'sess-a', 'kill-me');
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(result).toBe('failed');
   });
 });

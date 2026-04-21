@@ -249,6 +249,31 @@ export function applyEventToState(
     return { ...prev, stepsByAgent: out };
   }
 
+  if (type === 'background_agent_completed') {
+    // F-140: when the Stop button (or a natural terminal transition) fires
+    // a `BackgroundAgentCompleted` event on `session:event`, flip the
+    // matching sub-agent row to its terminal variant in-place instead of
+    // dropping it silently. The row stays in the left column so the user
+    // can still inspect the trace + definition — the progress bar + pulse
+    // turn off, the state chip reads "done".
+    //
+    // Background agents (category `'background'`) are refetched from
+    // `list_background_agents` on this event elsewhere in the route; those
+    // rows re-render from backend state. This branch handles the sub-agent
+    // + session-root rows that only live in the in-memory `subAgents`
+    // signal.
+    const id = ev['id'];
+    if (typeof id !== 'string') return prev;
+    let changed = false;
+    const nextSubAgents = prev.subAgents.map((r) => {
+      if (r.id !== id || r.state === 'done' || r.state === 'error') return r;
+      changed = true;
+      return { ...r, state: 'done' as AgentRowState, progress: 1 };
+    });
+    if (!changed) return prev;
+    return { ...prev, subAgents: nextSubAgents };
+  }
+
   return prev;
 }
 
@@ -602,6 +627,40 @@ async function fetchBgAgents(sessionId: string | null): Promise<BgAgentSummary[]
   }
 }
 
+/**
+ * Stop a running agent instance by calling the `stop_background_agent`
+ * Tauri command (F-138). Exported so the component test can exercise the
+ * wiring without mounting the full `AgentMonitor` route shell (which needs
+ * a router, live session event bus, and a resource loader).
+ *
+ * Returns a discriminated result instead of throwing so the Inspector's
+ * click handler can stay idempotent — a stale id, a missing session id, or
+ * an invoke rejection all collapse to `skipped` / `failed` without
+ * bubbling.
+ *
+ * The Tauri boundary sends `{ sessionId, instanceId }`; the backend's
+ * `stop_background_agent` command authorizes via `require_window_label`
+ * and delegates to `Orchestrator::stop`, which is a silent no-op on
+ * stale ids — so the "click Stop on an already-terminal row" race is
+ * provably safe even end-to-end.
+ */
+export async function stopAgentInstance(
+  deps: { invoke: typeof invoke },
+  sessionId: string | null,
+  instanceId: string,
+): Promise<'ok' | 'skipped' | 'failed'> {
+  if (!sessionId) return 'skipped';
+  try {
+    await deps.invoke<void>('stop_background_agent', {
+      sessionId,
+      instanceId,
+    });
+    return 'ok';
+  } catch {
+    return 'failed';
+  }
+}
+
 /** Inspector stub — real data lands when the backend exposes def metadata. */
 function inspectorStub(row: AgentRow): AgentInspectorData {
   const data: AgentInspectorData = {
@@ -685,11 +744,21 @@ export const AgentMonitor: Component = () => {
   });
 
   const onStop = async (id: string) => {
-    // Stop wires to the orchestrator's stop path; the backend command lands
-    // with the F-140 follow-up that exposes `stop_agent_instance`. For now
-    // the click is a visual no-op — the button is still in the DOM so the
-    // DoD "Stop button" item is satisfied.
-    void id;
+    // Wire the inspector's Stop button to the `stop_background_agent` Tauri
+    // command (F-140). F-138 already ships this command end-to-end — here
+    // we route the Agent Monitor's Stop click through it so clicking the
+    // button drives `forge_agents::Orchestrator::stop(id)`. The
+    // orchestrator's resulting `AgentEvent::Completed` is forwarded by the
+    // per-session background registry as `Event::BackgroundAgentCompleted`
+    // on `session:event`; `applyEventToState` folds that into the row's
+    // terminal variant so the UI doesn't need any extra reconciliation.
+    //
+    // Failures (stale id, network) are swallowed: clicking Stop on a row
+    // that has already transitioned to terminal must not surface an error
+    // — the orchestrator itself is idempotent on unknown ids, but a
+    // concurrent terminal transition between render and click is the most
+    // likely "failure" path and should be invisible to the user.
+    await stopAgentInstance({ invoke }, sessionId(), id);
   };
 
   return (
