@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Return `true` iff `s` matches the canonical `SessionId` wire format:
 /// exactly 16 lowercase hex characters (8 random bytes rendered as `{:02x}`
@@ -25,6 +25,21 @@ fn xdg_runtime_dir() -> anyhow::Result<PathBuf> {
     forge_core::runtime_dir::runtime_dir()
 }
 
+/// Pure composition: given a runtime dir `base`, return the Unix socket
+/// path for `session_id`. Separated from [`socket_path`] so tests can
+/// exercise the composition without mutating `XDG_RUNTIME_DIR` (F-344).
+fn compose_socket_path(base: &Path, session_id: &str) -> PathBuf {
+    base.join("forge/sessions")
+        .join(format!("{session_id}.sock"))
+}
+
+/// Pure composition: given a runtime dir `base`, return the sessions
+/// socket directory. Separated from [`sessions_socket_dir`] so tests
+/// can exercise the composition without env mutation (F-344).
+fn compose_sessions_socket_dir(base: &Path) -> PathBuf {
+    base.join("forge/sessions")
+}
+
 /// Resolve the Unix socket path for a session, using the same logic as `forged`.
 ///
 /// Returns an error when no per-user runtime directory can be established
@@ -43,14 +58,12 @@ pub fn socket_path(session_id: &str) -> anyhow::Result<PathBuf> {
         session_id_is_valid(session_id),
         "socket_path: session_id_is_valid({session_id:?}) == false"
     );
-    Ok(xdg_runtime_dir()?
-        .join("forge/sessions")
-        .join(format!("{session_id}.sock")))
+    Ok(compose_socket_path(&xdg_runtime_dir()?, session_id))
 }
 
 /// Return the directory containing all session sockets.
 pub fn sessions_socket_dir() -> anyhow::Result<PathBuf> {
-    Ok(xdg_runtime_dir()?.join("forge/sessions"))
+    Ok(compose_sessions_socket_dir(&xdg_runtime_dir()?))
 }
 
 /// Resolve the PID file path for a session.
@@ -410,77 +423,41 @@ mod tests {
         }
     }
 
-    /// F-044 + F-339: cover the happy path (XDG_RUNTIME_DIR set -> resolves
-    /// under that dir) on every platform, plus the Linux-only failure path
-    /// (XDG unset -> error, no `/tmp` fallback). The macOS F-339 fallback
-    /// has DI-based unit tests in `forge_core::runtime_dir`; we do not
-    /// mutate `$HOME` here to avoid dragging fragile env state into this
-    /// test binary. A single `#[test]` serializes all env mutation so
-    /// parallel tests in this binary can't race it.
+    /// F-344: exercise the path-composition helpers via DI instead of
+    /// mutating `XDG_RUNTIME_DIR`. The env-reading policy itself
+    /// (XDG-set / macOS fallback / Linux error) is covered by DI unit
+    /// tests in `forge_core::runtime_dir`; this test only pins the
+    /// `<base> + "forge/sessions" + "<id>.sock"` composition the CLI
+    /// layers on top.
     #[test]
-    fn path_resolvers_use_xdg_runtime_dir_when_set() {
-        let prev_xdg = std::env::var("XDG_RUNTIME_DIR").ok();
-        let prev_uid = std::env::var("UID").ok();
+    fn path_composition_matches_daemon_layout() {
+        let base = std::path::Path::new("/run/user/4242");
 
-        // --- Happy path: XDG_RUNTIME_DIR set ---
-        // SAFETY: this is the only test in this binary mutating env vars at
-        // this point; the session_id_is_valid / parse_session_pid tests are
-        // pure and do not read XDG_RUNTIME_DIR / UID.
-        unsafe {
-            std::env::set_var("XDG_RUNTIME_DIR", "/run/user/4242");
-        }
-
-        let sock = socket_path("deadbeefcafebabe").expect("should resolve");
+        let sock = compose_socket_path(base, "deadbeefcafebabe");
         assert_eq!(
             sock.to_string_lossy(),
             "/run/user/4242/forge/sessions/deadbeefcafebabe.sock"
         );
-        let pid = pid_path("abc123def4560000").expect("should resolve");
-        assert!(
-            pid.to_string_lossy().ends_with("abc123def4560000.pid"),
-            "expected .pid extension: {}",
-            pid.display()
-        );
-        let dir = sessions_socket_dir().expect("should resolve");
+
+        let dir = compose_sessions_socket_dir(base);
         assert_eq!(dir.to_string_lossy(), "/run/user/4242/forge/sessions");
 
-        // --- Linux failure path: XDG_RUNTIME_DIR unset, no /tmp fallback ---
-        // On macOS the F-339 fallback kicks in and resolves a per-user
-        // 0o700 directory under `$HOME/Library/...`, so the CLI must NOT
-        // error in that case. The shared `forge_core::runtime_dir` module
-        // covers the macOS branch with dedicated DI-based tests.
-        #[cfg(target_os = "linux")]
-        {
-            unsafe {
-                std::env::remove_var("XDG_RUNTIME_DIR");
-                std::env::remove_var("UID");
-            }
-            let err = socket_path("deadbeefcafebabe").expect_err("no xdg -> err");
-            let msg = err.to_string();
-            assert!(
-                msg.contains("XDG_RUNTIME_DIR"),
-                "error must name XDG_RUNTIME_DIR, got: {msg}"
-            );
-            assert!(
-                !msg.contains("/tmp/forge-"),
-                "error must not advertise /tmp fallback, got: {msg}"
-            );
-            assert!(sessions_socket_dir().is_err());
-            assert!(pid_path("abc123def4560000").is_err());
-        }
-
-        // Restore
-        unsafe {
-            match prev_xdg {
-                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
-                None => std::env::remove_var("XDG_RUNTIME_DIR"),
-            }
-            match prev_uid {
-                Some(v) => std::env::set_var("UID", v),
-                None => std::env::remove_var("UID"),
-            }
-        }
+        // `pid_path` just swaps the extension on `socket_path`, so
+        // assert the same shape on the composed sock path.
+        let pid = compose_socket_path(base, "abc123def4560000").with_extension("pid");
+        assert_eq!(
+            pid.to_string_lossy(),
+            "/run/user/4242/forge/sessions/abc123def4560000.pid"
+        );
     }
+
+    // F-044's Linux "XDG_RUNTIME_DIR unset -> error, no /tmp fallback"
+    // invariant is covered by `forge_core::runtime_dir::tests` via DI
+    // (no env mutation). `socket_path` / `pid_path` /
+    // `sessions_socket_dir` each call `runtime_dir()?` and propagate the
+    // error via `?`, so exercising the error shape again here would only
+    // retest stdlib `?` behaviour at the cost of mutating process-global
+    // env. Deliberately omitted (F-344).
 
     /// Defense-in-depth: if clap's `value_parser` is ever bypassed (e.g. a
     /// future caller constructs a session id from a different source and
