@@ -8,6 +8,11 @@ license = "MIT OR Apache-2.0"
 anyhow = "1"
 bytes = "1"
 forge-core = { path = "../forge-core" }
+# F-155: `IpcMessage::McpServersList` and `McpState` event carry
+# `forge_mcp::McpServerInfo` / `McpStateEvent` / `ServerState` values so the
+# daemon's unified manager view flows to the shell unchanged. forge-mcp itself
+# only depends on forge-core, so the addition stays acyclic.
+forge-mcp = { path = "../forge-mcp" }
 futures = "0.3"
 # `rc` is required because `IpcEvent.event: forge_core::Event` contains
 # `Arc<str>` hot fields (F-112) and the framed reader deserializes `IpcEvent`.

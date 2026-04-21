@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::ids::{AgentId, AgentInstanceId, MessageId, ProviderId, StepId, ToolCallId};
+use crate::mcp_state::McpStateEvent;
 use crate::types::{
     ApprovalScope, CompactTrigger, RosterScope, SessionPersistence, StepKind, StepOutcome,
     TokenUsage,
@@ -225,4 +226,15 @@ pub enum Event {
         ok: bool,
         bytes_out: u64,
     },
+    /// F-155: MCP server lifecycle transition.
+    ///
+    /// Emitted on the session event log by the daemon's state-stream
+    /// forwarder whenever its single authoritative `McpManager` publishes
+    /// a `McpStateEvent`. Subscribers (the shell's session event forwarder
+    /// and any late-joining replay consumer) observe the exact set of
+    /// `Starting / Healthy / Degraded / Failed / Disabled` transitions
+    /// that drove the manager. The event is informational — it is not a
+    /// command and the log is append-only, so `apply_superseded` leaves
+    /// it alone.
+    McpState(McpStateEvent),
 }

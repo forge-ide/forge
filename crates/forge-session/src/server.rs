@@ -98,6 +98,12 @@ fn ipc_message_kind(msg: &IpcMessage) -> &'static str {
         IpcMessage::RerunMessage(_) => "RerunMessage",
         IpcMessage::SelectBranch(_) => "SelectBranch",
         IpcMessage::DeleteBranch(_) => "DeleteBranch",
+        IpcMessage::ListMcpServers(_) => "ListMcpServers",
+        IpcMessage::McpServersList(_) => "McpServersList",
+        IpcMessage::ToggleMcpServer(_) => "ToggleMcpServer",
+        IpcMessage::McpToggleResult(_) => "McpToggleResult",
+        IpcMessage::ImportMcpConfig(_) => "ImportMcpConfig",
+        IpcMessage::McpImportResult(_) => "McpImportResult",
     }
 }
 
@@ -206,6 +212,197 @@ async fn load_mcp_manager(workspace_path: Option<&Path>) -> Option<Arc<forge_mcp
         }
     }
     Some(mgr)
+}
+
+/// F-155: run an `ImportMcpConfig` request on the daemon.
+///
+/// Converts a third-party tool's MCP config into Forge's universal
+/// `.mcp.json` schema, merges it on top of the existing workspace
+/// `.mcp.json` (workspace entries win on name collision), and — when
+/// `imp.apply` is `true` — rewrites the file atomically. Returns the
+/// `IpcMessage::McpImportResult` frame ready to send back to the client.
+///
+/// Dry-run mode (`apply: false`) computes the same merged set but skips
+/// the file write. `destination_path` is populated in both cases so the
+/// UI can show where the apply would land.
+async fn handle_import_mcp_config(
+    imp: &forge_ipc::ImportMcpConfig,
+    workspace_path: Option<&Path>,
+) -> IpcMessage {
+    let import_source = match forge_mcp::import::ImportSource::from_slug(&imp.source) {
+        Some(s) => s,
+        None => {
+            return IpcMessage::McpImportResult(forge_ipc::McpImportResult {
+                source: imp.source.clone(),
+                imported: Vec::new(),
+                destination_path: String::new(),
+                error: Some(format!("unknown import source {:?}", imp.source)),
+            });
+        }
+    };
+
+    let workspace = match workspace_path {
+        Some(p) => p.to_path_buf(),
+        None => {
+            return IpcMessage::McpImportResult(forge_ipc::McpImportResult {
+                source: imp.source.clone(),
+                imported: Vec::new(),
+                destination_path: String::new(),
+                error: Some("daemon has no workspace path configured".into()),
+            });
+        }
+    };
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => {
+            return IpcMessage::McpImportResult(forge_ipc::McpImportResult {
+                source: imp.source.clone(),
+                imported: Vec::new(),
+                destination_path: String::new(),
+                error: Some("could not resolve user home directory".into()),
+            });
+        }
+    };
+
+    let source_path = match import_source.default_path(&workspace, &home) {
+        Some(p) => p,
+        None => {
+            return IpcMessage::McpImportResult(forge_ipc::McpImportResult {
+                source: imp.source.clone(),
+                imported: Vec::new(),
+                destination_path: String::new(),
+                error: Some(format!("no default path known for source {:?}", imp.source)),
+            });
+        }
+    };
+
+    let source_body = match tokio::fs::read_to_string(&source_path).await {
+        Ok(body) => body,
+        Err(e) => {
+            return IpcMessage::McpImportResult(forge_ipc::McpImportResult {
+                source: imp.source.clone(),
+                imported: Vec::new(),
+                destination_path: String::new(),
+                error: Some(format!("reading {}: {e}", source_path.display())),
+            });
+        }
+    };
+    let converted = match import_source.convert(&source_body) {
+        Ok(c) => c,
+        Err(e) => {
+            return IpcMessage::McpImportResult(forge_ipc::McpImportResult {
+                source: imp.source.clone(),
+                imported: Vec::new(),
+                destination_path: String::new(),
+                error: Some(format!("converting {}: {e:#}", source_path.display())),
+            });
+        }
+    };
+
+    let destination_path = workspace.join(".mcp.json");
+    let imported: Vec<String> = converted.keys().cloned().collect();
+
+    if imp.apply {
+        // Merge on top of the existing `.mcp.json` — never clobber
+        // user-curated entries. Parse failures are surfaced because the
+        // user would otherwise lose visibility into a corrupt config.
+        let mut existing = match tokio::fs::read_to_string(&destination_path).await {
+            Ok(body) => match parse_existing_mcp_body(&body) {
+                Ok(m) => m,
+                Err(e) => {
+                    return IpcMessage::McpImportResult(forge_ipc::McpImportResult {
+                        source: imp.source.clone(),
+                        imported: Vec::new(),
+                        destination_path: destination_path.display().to_string(),
+                        error: Some(e),
+                    });
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::collections::BTreeMap::new(),
+            Err(e) => {
+                return IpcMessage::McpImportResult(forge_ipc::McpImportResult {
+                    source: imp.source.clone(),
+                    imported: Vec::new(),
+                    destination_path: destination_path.display().to_string(),
+                    error: Some(format!("reading {}: {e}", destination_path.display())),
+                });
+            }
+        };
+        for (name, spec) in converted {
+            existing.insert(name, spec);
+        }
+        let rendered = match forge_mcp::render_universal(&existing) {
+            Ok(r) => r,
+            Err(e) => {
+                return IpcMessage::McpImportResult(forge_ipc::McpImportResult {
+                    source: imp.source.clone(),
+                    imported: Vec::new(),
+                    destination_path: destination_path.display().to_string(),
+                    error: Some(format!("rendering merged .mcp.json: {e:#}")),
+                });
+            }
+        };
+        if let Some(parent) = destination_path.parent() {
+            if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                return IpcMessage::McpImportResult(forge_ipc::McpImportResult {
+                    source: imp.source.clone(),
+                    imported: Vec::new(),
+                    destination_path: destination_path.display().to_string(),
+                    error: Some(format!("mkdir {}: {e}", parent.display())),
+                });
+            }
+        }
+        if let Err(e) = tokio::fs::write(&destination_path, rendered).await {
+            return IpcMessage::McpImportResult(forge_ipc::McpImportResult {
+                source: imp.source.clone(),
+                imported: Vec::new(),
+                destination_path: destination_path.display().to_string(),
+                error: Some(format!("writing {}: {e}", destination_path.display())),
+            });
+        }
+        // A future revision may rebuild the `McpManager` here so freshly
+        // imported servers reach `Healthy` without a session restart.
+        // F-155 intentionally stops short of that — import is rare, a
+        // session restart is already the user's typical motion, and the
+        // scope here is the lifecycle-unification correctness story.
+    }
+
+    IpcMessage::McpImportResult(forge_ipc::McpImportResult {
+        source: imp.source.clone(),
+        imported,
+        destination_path: destination_path.display().to_string(),
+        error: None,
+    })
+}
+
+/// Shared helper for `handle_import_mcp_config`: parse an existing
+/// `.mcp.json` body into the same `BTreeMap<String, McpServerSpec>` shape
+/// `render_universal` consumes. An empty file is `Ok(empty map)` so the
+/// import path can tolerate a bootstrapped placeholder.
+fn parse_existing_mcp_body(
+    body: &str,
+) -> std::result::Result<std::collections::BTreeMap<String, forge_mcp::McpServerSpec>, String> {
+    if body.trim().is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Doc {
+        #[serde(rename = "mcpServers", default)]
+        servers: std::collections::BTreeMap<String, serde_json::Value>,
+    }
+    let doc: Doc = serde_json::from_str(body).map_err(|e| format!("parsing .mcp.json: {e}"))?;
+    let mut out = std::collections::BTreeMap::new();
+    for (name, raw) in doc.servers {
+        let wrapped = serde_json::json!({ "mcpServers": { &name: raw } });
+        let mut parsed = forge_mcp::import::ImportSource::Cursor
+            .convert(&wrapped.to_string())
+            .map_err(|e| format!("invalid server entry {name:?} in destination: {e:#}"))?;
+        if let Some(spec) = parsed.remove(&name) {
+            out.insert(name, spec);
+        }
+    }
+    Ok(out)
 }
 
 /// Start a session server using the default `MockProvider`.
@@ -352,20 +549,41 @@ pub async fn serve_with_session<P: Provider + 'static>(
         None => None,
     };
 
-    // F-132: build the MCP manager from `.mcp.json` (workspace + user) and
-    // start every configured server. Failures at this layer are non-fatal
-    // — a missing or malformed config, or a server that refuses to
-    // initialize, leaves the session without MCP tools but still
+    // F-132 / F-155: build the MCP manager from `.mcp.json` (workspace +
+    // user) and start every configured server. Failures at this layer are
+    // non-fatal — a missing or malformed config, or a server that refuses
+    // to initialize, leaves the session without MCP tools but still
     // functional. Each server's health is tracked per-server inside the
-    // manager; `list()` reflects the state so `list_mcp_servers`
-    // (shell-side) can show the failure reason.
+    // manager; `list()` reflects the state so the shell's
+    // `list_mcp_servers` command (which now dispatches to this daemon via
+    // UDS) can show the failure reason.
     //
-    // This `McpManager` instance is the daemon-local one. A second
-    // instance lives inside `forge-shell`'s Tauri app for the UI-facing
-    // commands — the two read the same on-disk `.mcp.json`. Toggling a
-    // server from the shell does not affect the daemon's already-running
-    // session (toggle is a UI / next-session concern).
+    // F-155: this is now the single authoritative `McpManager` for the
+    // shell+daemon pair. The shell no longer runs its own manager; every
+    // `list_mcp_servers` / `toggle_mcp_server` / `import_mcp_config`
+    // Tauri command bounces through this session's UDS so a toggle
+    // affects running tool-call dispatch immediately.
     let mcp = load_mcp_manager(workspace_path.as_deref()).await;
+
+    // F-155: fan out `McpManager::state_stream()` onto the session event
+    // log. Every `Starting / Healthy / Degraded / Failed / Disabled`
+    // transition becomes an `Event::McpState(McpStateEvent)` on the log,
+    // which reaches the shell's session event forwarder and the webview
+    // via the normal event pipeline. Subscribe once per daemon (not per
+    // connection) because the broadcast channel fans out identical events
+    // and the session event log is the sole canonical destination.
+    if let Some(mcp_mgr) = mcp.as_ref() {
+        let session_for_mcp = Arc::clone(&session);
+        let mut stream = mcp_mgr.state_stream();
+        tokio::spawn(async move {
+            use futures::StreamExt;
+            while let Some(ev) = stream.next().await {
+                if let Err(e) = session_for_mcp.emit(forge_core::Event::McpState(ev)).await {
+                    eprintln!("mcp: state-event emit failed: {e}");
+                }
+            }
+        });
+    }
 
     // F-140: session-scoped agent runtime so live turns can actually spawn
     // sub-agents via `agent.spawn`.
@@ -804,6 +1022,100 @@ async fn handle_connection<P: Provider + 'static>(
                         });
                     }
 
+                    Some(IpcMessage::ListMcpServers(_)) => {
+                        // F-155: reply with the daemon's authoritative
+                        // snapshot. Empty list when no manager is loaded
+                        // (no `.mcp.json`) — distinguishable from an error
+                        // because the frame shape succeeds.
+                        let servers = match mcp.as_ref() {
+                            Some(mgr) => mgr.list().await,
+                            None => Vec::new(),
+                        };
+                        let frame = IpcMessage::McpServersList(
+                            forge_ipc::McpServersList { servers },
+                        );
+                        if let Err(e) = forge_ipc::write_frame(&mut writer, &frame).await {
+                            eprintln!("McpServersList write failed: {e}");
+                            break;
+                        }
+                    }
+
+                    Some(IpcMessage::ToggleMcpServer(t)) => {
+                        // F-155: run the toggle against the daemon's single
+                        // authoritative manager so running tool calls feel
+                        // the effect. The client sends the *target* state
+                        // (`enabled: true | false`); the daemon maps that
+                        // onto `enable`/`disable`. `McpStateEvent`s emitted
+                        // by the lifecycle transition flow separately through
+                        // the session event log (via the forwarder installed
+                        // at daemon start).
+                        let (enabled_after, error) = match mcp.as_ref() {
+                            Some(mgr) => {
+                                let res = if t.enabled {
+                                    mgr.enable(&t.name).await
+                                } else {
+                                    mgr.disable(&t.name).await
+                                };
+                                match res {
+                                    Ok(()) => (t.enabled, None),
+                                    // Report pre-toggle state on error —
+                                    // look it up from the current list so
+                                    // the UI can reconcile without a
+                                    // follow-up `ListMcpServers`. Unknown
+                                    // name short-circuits with `false`.
+                                    Err(e) => {
+                                        let msg = format!("{e:#}");
+                                        let current = mgr.list().await.into_iter()
+                                            .find(|s| s.name == t.name)
+                                            .map(|s| !matches!(
+                                                s.state,
+                                                forge_mcp::ServerState::Disabled { .. }
+                                                | forge_mcp::ServerState::Failed { .. }
+                                            ))
+                                            .unwrap_or(false);
+                                        (current, Some(msg))
+                                    }
+                                }
+                            }
+                            None => (
+                                false,
+                                Some(
+                                    "daemon has no MCP manager (no .mcp.json loaded)"
+                                        .to_string(),
+                                ),
+                            ),
+                        };
+                        let frame = IpcMessage::McpToggleResult(
+                            forge_ipc::McpToggleResult {
+                                name: t.name,
+                                enabled_after,
+                                error,
+                            },
+                        );
+                        if let Err(e) = forge_ipc::write_frame(&mut writer, &frame).await {
+                            eprintln!("McpToggleResult write failed: {e}");
+                            break;
+                        }
+                    }
+
+                    Some(IpcMessage::ImportMcpConfig(imp)) => {
+                        // F-155: delegate the import to `forge_mcp::import`
+                        // and, on `apply: true`, rewrite
+                        // `<workspace>/.mcp.json` atomically. A dry-run
+                        // (`apply: false`) returns the would-be-imported
+                        // names without touching the file — the webview
+                        // confirms the diff before applying.
+                        let frame = handle_import_mcp_config(
+                            &imp,
+                            workspace_path.as_deref(),
+                        )
+                        .await;
+                        if let Err(e) = forge_ipc::write_frame(&mut writer, &frame).await {
+                            eprintln!("McpImportResult write failed: {e}");
+                            break;
+                        }
+                    }
+
                     // F-074: exhaustive match over the remaining
                     // `IpcMessage` variants — adding a new variant must be a
                     // compile error here so an IPC handler is added
@@ -812,11 +1124,17 @@ async fn handle_connection<P: Provider + 'static>(
                     // frames already consumed before the read loop;
                     // `Subscribe` is reserved for future multi-subscriber
                     // sessions; `Event` is server→client only and would
-                    // indicate a malformed/forged client frame.
+                    // indicate a malformed/forged client frame. F-155
+                    // daemon→client response variants (`McpServersList`,
+                    // `McpToggleResult`, `McpImportResult`) are never
+                    // received from a client either.
                     Some(other @ (IpcMessage::Hello(_)
                         | IpcMessage::HelloAck(_)
                         | IpcMessage::Subscribe(_)
-                        | IpcMessage::Event(_))) => {
+                        | IpcMessage::Event(_)
+                        | IpcMessage::McpServersList(_)
+                        | IpcMessage::McpToggleResult(_)
+                        | IpcMessage::McpImportResult(_))) => {
                         eprintln!(
                             "session: ignoring unexpected client frame {}",
                             ipc_message_kind(&other)

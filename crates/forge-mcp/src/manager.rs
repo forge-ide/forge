@@ -29,7 +29,10 @@ use ts_rs::TS;
 
 use crate::transport::{Http, HttpEvent, Stdio, StdioEvent};
 use crate::{McpServerSpec, ServerKind};
-use forge_core::Tool;
+// F-155: `ServerState` and `McpStateEvent` now live in forge-core so
+// `forge_core::Event::McpState` can carry them without creating a cycle.
+// forge-mcp re-exports them from `lib.rs` for external callers.
+pub use forge_core::{McpStateEvent, ServerState, Tool};
 
 /// Health-check cadence. Every server is pinged with `tools/list` on
 /// this interval while running; a failed ping degrades the server and
@@ -63,44 +66,6 @@ pub const RESTART_BACKOFF_LADDER: &[Duration] = &[
 /// falls more than this many events behind is lagged — UI consumers
 /// treat a lag as "refetch via `list()`" rather than a fatal error.
 const STATE_CHANNEL_CAPACITY: usize = 64;
-
-/// Lifecycle state of one MCP server, as seen by consumers of
-/// [`McpManager::state_stream`] and [`McpManager::list`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum ServerState {
-    /// Spawn/connect in progress (transport connect → `initialize`
-    /// handshake not yet complete).
-    Starting,
-    /// Healthy and responsive — last health-check succeeded.
-    Healthy,
-    /// A health-check failed once. The manager will restart after
-    /// backoff; subsequent repeated failures inside the window
-    /// transition to [`ServerState::Failed`].
-    Degraded { reason: String },
-    /// Terminal until the user re-enables the server — restart window
-    /// exhausted or manually stopped.
-    Failed { reason: String },
-}
-
-/// A record emitted on the state stream when a server transitions.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
-pub struct McpStateEvent {
-    /// Server name, matches the key in the loaded spec map.
-    pub server: String,
-    /// New state the server transitioned to.
-    pub state: ServerState,
-    /// Wall-clock timestamp. Included so the UI can order events
-    /// coming from multiple servers even when the stream lags. ts-rs:
-    /// serialized as an RFC-3339 string on the wire (serde picks the
-    /// default `SystemTime` representation — an object with `secs_since_epoch`).
-    /// We emit `unknown` so the frontend treats the field opaquely and
-    /// reads it as a monotonic ordering key.
-    #[ts(type = "unknown")]
-    pub ts: SystemTime,
-}
 
 /// Opaque summary returned by [`McpManager::list`]. Keep it minimal;
 /// downstream IPC consumers can grow it over time without disturbing
@@ -414,6 +379,44 @@ impl McpManager {
     /// Stop `name`: signal the driver to exit, drop the connection.
     /// Idempotent: stopping a stopped server is a no-op.
     pub async fn stop(&self, name: &str) -> Result<()> {
+        self.stop_with_terminal(
+            name,
+            ServerState::Failed {
+                reason: "stopped".into(),
+            },
+        )
+        .await
+    }
+
+    /// F-155: disable `name` — identical to [`McpManager::stop`] except the
+    /// terminal state is [`ServerState::Disabled`]. The distinction is
+    /// load-bearing: a `Disabled` server's `call()` returns the canonical
+    /// `"MCP server <name> is disabled"` error string that the running-
+    /// session toggle test asserts against, and `toggle_mcp_server(name,
+    /// true)` knows to treat `Disabled` as restartable (same as `Failed`).
+    ///
+    /// Use [`McpManager::enable`] to restart a disabled server — the
+    /// driver resets `restart_history` is *not* cleared, so repeated
+    /// flap-toggles still honour the sliding-window budget.
+    pub async fn disable(&self, name: &str) -> Result<()> {
+        self.stop_with_terminal(
+            name,
+            ServerState::Disabled {
+                reason: "server disabled".into(),
+            },
+        )
+        .await
+    }
+
+    /// F-155: start `name` from a `Disabled`/`Failed` state. Thin wrapper
+    /// over [`McpManager::start`] so callers that toggle a server back on
+    /// can express intent explicitly. Behaves identically to `start` for
+    /// every other initial state.
+    pub async fn enable(&self, name: &str) -> Result<()> {
+        self.start(name).await
+    }
+
+    async fn stop_with_terminal(&self, name: &str, terminal: ServerState) -> Result<()> {
         let mut servers = self.inner.servers.lock().await;
         let managed = servers
             .get_mut(name)
@@ -429,12 +432,7 @@ impl McpManager {
         let mut conn_guard = managed.shared.conn.lock().await;
         *conn_guard = None;
         drop(conn_guard);
-        managed
-            .shared
-            .publish(ServerState::Failed {
-                reason: "stopped".into(),
-            })
-            .await;
+        managed.shared.publish(terminal).await;
         Ok(())
     }
 
@@ -455,11 +453,20 @@ impl McpManager {
 
     /// Acquire a snapshot of the current connection for `name`.
     /// Returns an error when the server is not `Healthy`.
+    ///
+    /// F-155: when the server is in [`ServerState::Disabled`] the error
+    /// surfaces the canonical `"MCP server <name> is disabled"` string so
+    /// the session-side tool dispatch layer and the integration test in
+    /// `forge-shell/tests/ipc_mcp.rs` can both match it.
     async fn connection(&self, name: &str) -> Result<Arc<Connection>> {
         let servers = self.inner.servers.lock().await;
         let managed = servers
             .get(name)
             .ok_or_else(|| anyhow!("unknown MCP server {name:?}"))?;
+        let state = managed.shared.state.lock().await.clone();
+        if matches!(state, ServerState::Disabled { .. }) {
+            return Err(anyhow!("MCP server {name} is disabled"));
+        }
         let guard = managed.shared.conn.lock().await;
         guard
             .clone()

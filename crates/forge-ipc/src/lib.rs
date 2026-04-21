@@ -1,6 +1,11 @@
 use anyhow::bail;
 use bytes::Bytes;
 pub use forge_core::RerunVariant;
+// F-155: the MCP state + response shapes flow verbatim over UDS, so
+// re-export here alongside `RerunVariant` for callers that prefer a single
+// IPC import path.
+pub use forge_core::{McpStateEvent, ServerState};
+pub use forge_mcp::McpServerInfo;
 use futures::{SinkExt, StreamExt};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -27,6 +32,28 @@ pub enum IpcMessage {
     SelectBranch(SelectBranch),
     /// F-145: client → session request to tombstone a branch variant.
     DeleteBranch(DeleteBranch),
+    /// F-155: client → session request for the daemon's MCP server list.
+    /// Response arrives as [`IpcMessage::McpServersList`].
+    ListMcpServers(ListMcpServers),
+    /// F-155: daemon → client response carrying the snapshot the daemon's
+    /// authoritative `McpManager::list` returned.
+    McpServersList(McpServersList),
+    /// F-155: client → session request to toggle an MCP server on/off. The
+    /// daemon acts on its single authoritative `McpManager` so a running
+    /// session's tool dispatch is affected. Response arrives as
+    /// [`IpcMessage::McpToggleResult`] — `error` is `Some` when the name
+    /// is unknown or the lifecycle transition failed.
+    ToggleMcpServer(ToggleMcpServer),
+    /// F-155: daemon → client response for a [`IpcMessage::ToggleMcpServer`].
+    McpToggleResult(McpToggleResult),
+    /// F-155: client → session request to import a third-party MCP config
+    /// into the workspace `.mcp.json`. `apply=false` runs a dry import —
+    /// the daemon computes the new server set and returns it without
+    /// rewriting the file. Response arrives as
+    /// [`IpcMessage::McpImportResult`].
+    ImportMcpConfig(ImportMcpConfig),
+    /// F-155: daemon → client response for a [`IpcMessage::ImportMcpConfig`].
+    McpImportResult(McpImportResult),
 }
 
 /// Client → session: re-run the assistant message with `msg_id` using the
@@ -72,6 +99,74 @@ pub struct DeleteBranch {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SendUserMessage {
     pub text: String,
+}
+
+/// F-155: client → session: list the daemon's managed MCP servers.
+///
+/// No fields today — the daemon reports its own merged view built from
+/// `<workspace>/.mcp.json` + `~/.mcp.json` at session start. A future
+/// revision may add a selector (e.g. filter by server name) but the
+/// frontend doesn't need one.
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct ListMcpServers {}
+
+/// F-155: daemon → client response carrying the snapshot returned by
+/// `McpManager::list()`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct McpServersList {
+    pub servers: Vec<McpServerInfo>,
+}
+
+/// F-155: client → session request to toggle an MCP server on or off.
+///
+/// `enabled` is the *target* state: `true` starts the server if it is not
+/// already running; `false` disables it (parks in `ServerState::Disabled`
+/// so the canonical "server disabled" error surfaces for in-flight /
+/// subsequent tool calls).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ToggleMcpServer {
+    pub name: String,
+    pub enabled: bool,
+}
+
+/// F-155: daemon → client response for a `ToggleMcpServer`. `error` is
+/// `None` on success; when `Some`, the toggle was rejected (unknown
+/// server, lifecycle transition failed) and `enabled_after` reports the
+/// *pre-toggle* state so the UI can reconcile without round-tripping
+/// `ListMcpServers`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct McpToggleResult {
+    pub name: String,
+    pub enabled_after: bool,
+    pub error: Option<String>,
+}
+
+/// F-155: client → session request to import a third-party MCP config
+/// into the workspace's universal `.mcp.json`. `source` is the slug
+/// accepted by `forge_mcp::import::ImportSource::from_slug`. When `apply`
+/// is `false` the daemon runs a dry import — it returns the set of
+/// names that *would* be imported and leaves the on-disk config
+/// untouched; `true` rewrites the workspace file and rebuilds the
+/// manager.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ImportMcpConfig {
+    pub source: String,
+    pub apply: bool,
+}
+
+/// F-155: daemon → client response for an `ImportMcpConfig`.
+///
+/// On success `imported` lists the server names that were applied (or
+/// would be applied under `apply=false`). `destination_path` is the
+/// absolute path of the rewritten workspace `.mcp.json`; empty when the
+/// import was a dry-run. `error` is `Some` when the import failed (bad
+/// slug, source file unreadable, write failed, etc.).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct McpImportResult {
+    pub source: String,
+    pub imported: Vec<String>,
+    pub destination_path: String,
+    pub error: Option<String>,
 }
 
 /// Client → session: approve a pending tool call.
