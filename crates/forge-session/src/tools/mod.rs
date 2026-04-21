@@ -13,6 +13,7 @@ pub mod args;
 pub mod fs_edit;
 pub mod fs_read;
 pub mod fs_write;
+pub mod mcp;
 pub mod shell_exec;
 
 pub use agent_spawn::AgentSpawnTool;
@@ -20,6 +21,7 @@ pub use args::{get_optional_str, get_optional_u64, get_required_str};
 pub use fs_edit::FsEditTool;
 pub use fs_read::FsReadTool;
 pub use fs_write::FsWriteTool;
+pub use mcp::McpTool;
 pub use shell_exec::ShellExecTool;
 
 #[derive(Default)]
@@ -38,6 +40,12 @@ pub struct ToolCtx {
     pub byte_budget: Option<Arc<ByteBudget>>,
     /// F-134: per-turn agent runtime plumbing for the `agent.spawn` tool.
     pub agent_ctx: Option<AgentSpawnCtx>,
+    /// F-132: shared MCP manager for `McpTool` adapters. Threaded through
+    /// the context so the orchestrator can register one `McpTool` per
+    /// advertised tool at turn start without the adapter needing to
+    /// re-lookup the manager on every invoke. `None` when the session
+    /// runs without MCP — adapters are simply not registered.
+    pub mcp: Option<std::sync::Arc<forge_mcp::McpManager>>,
 }
 
 /// F-134: context threaded to the `agent.spawn` tool so it can resolve a
@@ -77,6 +85,18 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn approval_preview(&self, args: &serde_json::Value) -> ApprovalPreview;
     async fn invoke(&self, args: &serde_json::Value, ctx: &ToolCtx) -> serde_json::Value;
+    /// F-132: `true` when calling the tool never mutates external state.
+    ///
+    /// The orchestrator skips the user-approval prompt for read-only tools and
+    /// logs an `ApprovalSource::Auto` entry so the event stream still shows the
+    /// tool was admitted. Defaults to `false` so every existing built-in (all
+    /// of which may mutate: `fs.write`, `fs.edit`, `shell.exec`, `agent.spawn`)
+    /// continues to hit the approval path — this is the safer-by-default
+    /// contract mirroring `forge_core::Tool.read_only`. MCP tools override this
+    /// with the server-declared `readOnlyHint` annotation.
+    fn read_only(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -396,6 +416,7 @@ mod tests {
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
             byte_budget: None,
             agent_ctx: None,
+            mcp: None,
         };
         let result = d.dispatch("shell.exec", &json!({}), &ctx).await.unwrap();
         assert_eq!(
@@ -421,6 +442,7 @@ mod tests {
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
             byte_budget: None,
             agent_ctx: None,
+            mcp: None,
         };
         let result = d
             .dispatch("shell.exec", &json!({ "command": "" }), &ctx)
@@ -542,6 +564,7 @@ mod tests {
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
             byte_budget: None,
             agent_ctx: None,
+            mcp: None,
         };
         let result = d
             .dispatch(
@@ -577,6 +600,7 @@ mod tests {
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
             byte_budget: None,
             agent_ctx: None,
+            mcp: None,
         };
 
         let result = d
@@ -615,6 +639,7 @@ mod tests {
             child_registry: Some(registry.clone()),
             byte_budget: None,
             agent_ctx: None,
+            mcp: None,
         };
 
         // Background a long sleep, write its pid, detach its stdio from
@@ -729,6 +754,7 @@ mod tests {
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
             byte_budget: None,
             agent_ctx: None,
+            mcp: None,
         };
         let result = d
             .dispatch(
@@ -770,6 +796,7 @@ mod tests {
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
             byte_budget: None,
             agent_ctx: None,
+            mcp: None,
         };
         let result = d
             .dispatch(
@@ -807,6 +834,7 @@ mod tests {
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
             byte_budget: None,
             agent_ctx: None,
+            mcp: None,
         };
         let result = d
             .dispatch(
@@ -851,6 +879,7 @@ mod tests {
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
             byte_budget: None,
             agent_ctx: None,
+            mcp: None,
         };
 
         let started = std::time::Instant::now();
@@ -889,6 +918,7 @@ mod tests {
             child_registry: Some(crate::sandbox::ChildRegistry::new()),
             byte_budget: None,
             agent_ctx: None,
+            mcp: None,
         };
         let result = d
             .dispatch(

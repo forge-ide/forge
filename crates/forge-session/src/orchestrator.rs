@@ -17,9 +17,10 @@ use crate::byte_budget::ByteBudget;
 use crate::sandbox::ChildRegistry;
 use crate::session::Session;
 use crate::tools::{
-    AgentSpawnTool, FsEditTool, FsReadTool, FsWriteTool, ShellExecTool, ToolCtx, ToolDispatcher,
-    ToolError,
+    AgentSpawnTool, FsEditTool, FsReadTool, FsWriteTool, McpTool, ShellExecTool, ToolCtx,
+    ToolDispatcher, ToolError,
 };
+use forge_mcp::McpManager;
 
 /// Client decision for a pending tool call approval. Carries the
 /// client-supplied `ApprovalScope` on approval so the event log records
@@ -89,6 +90,7 @@ pub async fn run_turn<P: Provider>(
     child_registry: Option<ChildRegistry>,
     byte_budget: Option<Arc<ByteBudget>>,
     agents_md: Option<Arc<str>>,
+    mcp: Option<Arc<McpManager>>,
 ) -> Result<()> {
     let msg_id = MessageId::new();
 
@@ -144,12 +146,41 @@ pub async fn run_turn<P: Provider>(
     dispatcher
         .register(Box::new(AgentSpawnTool))
         .expect("agent.spawn must register on a fresh dispatcher");
+
+    // F-132: register an `McpTool` adapter per tool advertised by every
+    // currently-connected MCP server. Snapshot at turn start (not
+    // per-chunk) so a mid-turn `tools/list` refresh cannot change the
+    // dispatch table under the running loop. Un-connected servers
+    // contribute zero tools (their `tools` vec is empty until the first
+    // healthy `tools/list` succeeds) — that's the intended fail-open:
+    // a server that's still restarting simply isn't callable this turn.
+    if let Some(mgr) = mcp.as_ref() {
+        for server in mgr.list().await {
+            for tool in server.tools {
+                if let Some(adapter) = McpTool::new(
+                    tool.name.clone(),
+                    tool.description,
+                    tool.read_only,
+                    mgr.clone(),
+                ) {
+                    // Silently skip duplicate registrations — a malformed
+                    // tools/list response that repeats a name shouldn't
+                    // fail the whole turn. The namespace guarantees
+                    // cross-server collision-free names; within a single
+                    // server, the MCP spec forbids duplicates.
+                    let _ = dispatcher.register(Box::new(adapter));
+                }
+            }
+        }
+    }
+
     let ctx = ToolCtx {
         allowed_paths,
         workspace_root,
         child_registry,
         byte_budget,
         agent_ctx: None,
+        mcp,
     };
 
     run_request_loop(
@@ -296,7 +327,15 @@ pub(crate) async fn run_request_loop<P: Provider>(
 
                     let result = match tool {
                         Ok(tool) => {
-                            if auto_approve {
+                            // F-132: read-only tools (MCP tools whose
+                            // `readOnlyHint` is `true`) bypass the
+                            // user-approval prompt. We still emit a
+                            // `ToolCallApproved` with `ApprovalSource::Auto`
+                            // + `ApprovalScope::Once` so replay sees a
+                            // terminated approval event — the invariant
+                            // every `ToolCallStarted` eventually resolves
+                            // via either Approved or Rejected holds.
+                            if auto_approve || tool.read_only() {
                                 session
                                     .emit(Event::ToolCallApproved {
                                         id: call_id.clone(),
@@ -769,6 +808,13 @@ impl Orchestrator {
             child_registry,
             byte_budget,
             agent_ctx: None,
+            // F-132: rerun paths do not re-enter the MCP path. Rerun
+            // regenerates a prior assistant turn against already-recorded
+            // context — the running session's MCP manager already
+            // populated any MCP tool calls in the original transcript,
+            // and replaying those same tool calls through a fresh manager
+            // would be wrong (the external state may have moved on).
+            mcp: None,
         };
 
         let new_id = MessageId::new();
@@ -872,6 +918,13 @@ impl Orchestrator {
             child_registry,
             byte_budget,
             agent_ctx: None,
+            // F-132: rerun paths do not re-enter the MCP path. Rerun
+            // regenerates a prior assistant turn against already-recorded
+            // context — the running session's MCP manager already
+            // populated any MCP tool calls in the original transcript,
+            // and replaying those same tool calls through a fresh manager
+            // would be wrong (the external state may have moved on).
+            mcp: None,
         };
 
         let new_id = MessageId::new();
@@ -958,6 +1011,13 @@ impl Orchestrator {
             child_registry,
             byte_budget,
             agent_ctx: None,
+            // F-132: rerun paths do not re-enter the MCP path. Rerun
+            // regenerates a prior assistant turn against already-recorded
+            // context — the running session's MCP manager already
+            // populated any MCP tool calls in the original transcript,
+            // and replaying those same tool calls through a fresh manager
+            // would be wrong (the external state may have moved on).
+            mcp: None,
         };
 
         let new_id = MessageId::new();
@@ -1358,6 +1418,7 @@ mod tests {
             None,
             None,
             agents_md.clone(),
+            None,
         )
         .await
         .unwrap();
@@ -1379,6 +1440,7 @@ mod tests {
             None,
             None,
             agents_md,
+            None,
         )
         .await
         .unwrap();
@@ -1434,6 +1496,7 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new())),
             vec![],
             true,
+            None,
             None,
             None,
             None,

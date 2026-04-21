@@ -219,6 +219,7 @@ mod tests {
             child_registry: None,
             byte_budget: None,
             agent_ctx: Some(agent_ctx),
+            mcp: None,
         }
     }
 

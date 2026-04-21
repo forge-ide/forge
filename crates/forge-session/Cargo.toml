@@ -16,10 +16,18 @@ path = "src/main.rs"
 anyhow = "1"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+# F-132: `load_mcp_manager` resolves the user-scope `~/.mcp.json` via
+# `dirs::home_dir`. Kept pinned to the same 5.x line `forge-shell` uses.
+dirs = "5"
 forge-agents = { path = "../forge-agents" }
 forge-core = { path = "../forge-core" }
 forge-fs = { path = "../forge-fs" }
 forge-ipc = { path = "../forge-ipc" }
+# F-132: MCP tool dispatch inside `run_turn`. The daemon builds an
+# `McpManager` from workspace + user `.mcp.json`, starts every configured
+# server, and registers each advertised tool as a `Tool` trait impl in the
+# session dispatcher so agents can invoke MCP tools alongside built-ins.
+forge-mcp = { path = "../forge-mcp" }
 forge-providers = { path = "../forge-providers" }
 futures = "0.3"
 libc = "0.2"
