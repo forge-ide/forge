@@ -237,4 +237,26 @@ pub enum Event {
     /// command and the log is append-only, so `apply_superseded` leaves
     /// it alone.
     McpState(McpStateEvent),
+    /// F-152: per-agent-instance resource sample.
+    ///
+    /// Emitted on a steady tick (default 1 Hz, configurable) by
+    /// `forge_session::resource_monitor::ResourceMonitor` while the instance
+    /// is tracked. Populates the AgentMonitor inspector's cpu / rss / fds
+    /// pills (F-140). Emission stops on `untrack(id)` so a terminated
+    /// instance clears its pills back to `—`.
+    ///
+    /// `cpu_pct` is a rolling average over the last tick window (0..=100);
+    /// `rss_bytes` is resident set size in bytes; `fd_count` is the live
+    /// file-descriptor count sampled from the platform probe. All three are
+    /// `Option<_>` on the wire because per-platform probes may legitimately
+    /// fail for a given field (e.g. fd count via `libproc` on macOS is
+    /// best-effort) — the UI renders `None` as the `—` placeholder the
+    /// pre-F-152 stub already rendered.
+    ResourceSample {
+        instance_id: AgentInstanceId,
+        cpu_pct: Option<f64>,
+        rss_bytes: Option<u64>,
+        fd_count: Option<u64>,
+        sampled_at: DateTime<Utc>,
+    },
 }
