@@ -24,8 +24,9 @@ use std::sync::{Arc, Mutex};
 /// of sibling sandboxes and the daemon's own uid.
 ///
 /// Defaults are conservative values intended for short-lived tool invocations;
-/// callers should override via [`SandboxedCommand::with_config`] for workloads
-/// that need more:
+/// callers should override via `SandboxedCommand::with_config` for workloads
+/// that need more (`SandboxedCommand` is Linux-only, defined in the module's
+/// `imp` submodule):
 ///
 /// - `cpu_seconds`: 30 s of CPU time (SIGXCPU on overflow).
 /// - `address_space_bytes`: 512 MiB of virtual memory.
