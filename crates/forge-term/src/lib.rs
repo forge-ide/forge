@@ -11,12 +11,25 @@
 //!
 //! ## Two-layer VT state
 //!
-//! Forge's authoritative VT state is tracked on the Rust side (see
+//! Forge's authoritative VT state lives on the Rust side (see
 //! `docs/architecture/overview.md` "Terminal backend" and
-//! `docs/architecture/crate-architecture.md` §3.7). The `ghostty-vt` drive
-//! step is wired behind the off-by-default `ghostty-vt` cargo feature; it
-//! currently observes the byte stream without altering it so the xterm.js
-//! renderer sees identical bytes whether the feature is enabled or not.
+//! `docs/architecture/crate-architecture.md` §3.7). With the
+//! [`ghostty-vt`](#cargo-features) cargo feature enabled, the PTY reader tees
+//! the byte stream into a dedicated driver thread that owns a
+//! [`libghostty_vt::Terminal`]. The authoritative VT state is queryable via
+//! [`TerminalSession::cursor_position`], [`TerminalSession::total_rows`],
+//! and [`TerminalSession::scrollback_rows`] — answers come from the
+//! ghostty-vt parser, not from the raw bytes. The byte stream delivered to
+//! consumers is byte-identical with or without the feature so the xterm.js
+//! renderer (F-125) behaves the same either way; the feature adds query
+//! authority, not stream rewriting.
+//!
+//! ## Cargo features
+//!
+//! - `ghostty-vt` (off by default) — enables the ghostty-vt driver thread
+//!   and the VT-state query methods. Building this feature requires `zig`
+//!   on the host because the underlying sys crate vendor-fetches Ghostty C
+//!   sources at build time.
 //!
 //! ## Lifecycle
 //!
@@ -33,7 +46,10 @@
 //! `portable-pty`'s reader/writer are blocking `std::io` handles. We drive
 //! them from dedicated OS threads and forward events to async consumers
 //! via a tokio `mpsc` channel; the public API is async-friendly without
-//! requiring callers to pin the session to a single thread.
+//! requiring callers to pin the session to a single thread. When the
+//! `ghostty-vt` feature is enabled a third OS thread owns the ghostty-vt
+//! [`Terminal`](libghostty_vt::Terminal) (which is `!Send + !Sync`) and
+//! serializes every VT mutation and query through a command channel.
 
 #![warn(missing_docs)]
 
@@ -46,6 +62,11 @@ use std::time::Duration;
 
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use tokio::sync::mpsc;
+
+#[cfg(feature = "ghostty-vt")]
+mod vt;
+#[cfg(feature = "ghostty-vt")]
+pub use vt::{CursorPosition, VtError};
 
 /// Result alias for fallible [`TerminalSession`] operations.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -179,6 +200,11 @@ pub struct TerminalSession {
     // killed_by_drop before it sends the final event. Arc<Mutex<..>> is
     // the simplest shape that works across an OS thread boundary.
     drop_flag: Arc<Mutex<bool>>,
+    /// Handle to the ghostty-vt driver thread + its command channel.
+    /// Present iff the `ghostty-vt` feature is enabled — reader tees bytes
+    /// into `vt.tx`; queries dispatch commands + block on oneshot replies.
+    #[cfg(feature = "ghostty-vt")]
+    vt: vt::VtHandle,
 }
 
 impl std::fmt::Debug for TerminalSession {
@@ -233,7 +259,19 @@ impl TerminalSession {
 
         let (tx, rx) = mpsc::channel::<TerminalEvent>(128);
 
-        let reader_thread = spawn_reader_thread(reader, tx.clone());
+        // With ghostty-vt on, the reader tees into the driver thread which
+        // owns the VT state machine. The driver is `!Send + !Sync` internally
+        // so it lives on its own dedicated OS thread; the reader just pushes
+        // bytes via a bounded channel. See `vt::spawn_vt_driver`.
+        #[cfg(feature = "ghostty-vt")]
+        let vt = vt::spawn_vt_driver(size.cols, size.rows);
+
+        let reader_thread = spawn_reader_thread(
+            reader,
+            tx.clone(),
+            #[cfg(feature = "ghostty-vt")]
+            vt.tx.clone(),
+        );
         let drop_flag = Arc::new(Mutex::new(false));
         // Reaper waits on child.wait(), then drains the reader so Exit is
         // always the last event the receiver sees. Without the join, a fast
@@ -247,6 +285,8 @@ impl TerminalSession {
                 child_killer,
                 reaper_thread: Some(reaper_thread),
                 drop_flag,
+                #[cfg(feature = "ghostty-vt")]
+                vt,
             },
             rx,
         ))
@@ -260,6 +300,9 @@ impl TerminalSession {
     }
 
     /// Resize the PTY window (delivers SIGWINCH to the child on Unix).
+    ///
+    /// When the `ghostty-vt` feature is enabled, the VT state machine is
+    /// resized to the same dimensions so queries reflect the new geometry.
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
         let size = PtySize {
             cols,
@@ -269,7 +312,44 @@ impl TerminalSession {
         };
         self.master
             .resize(size)
-            .map_err(|e| Error::Resize(e.to_string()))
+            .map_err(|e| Error::Resize(e.to_string()))?;
+
+        #[cfg(feature = "ghostty-vt")]
+        {
+            // Best-effort: a resize failure on the VT side must not mask a
+            // successful PTY resize. We surface it separately.
+            if let Err(e) = self.vt.resize(cols, rows) {
+                tracing::warn!(error = ?e, "ghostty-vt resize failed");
+            }
+        }
+        Ok(())
+    }
+
+    /// Get the authoritative cursor position as tracked by the ghostty-vt
+    /// parser. Available only with the `ghostty-vt` feature enabled.
+    ///
+    /// The returned value reflects every VT sequence the PTY has emitted
+    /// up to the time the reader thread handed it to the driver. Under
+    /// heavy output it may lag the byte stream slightly; callers that need
+    /// perfectly synchronous readings should drain the byte-stream receiver
+    /// first.
+    #[cfg(feature = "ghostty-vt")]
+    pub fn cursor_position(&self) -> std::result::Result<CursorPosition, VtError> {
+        self.vt.cursor_position()
+    }
+
+    /// Total rows (active + scrollback) in the authoritative VT grid.
+    /// Available only with the `ghostty-vt` feature enabled.
+    #[cfg(feature = "ghostty-vt")]
+    pub fn total_rows(&self) -> std::result::Result<usize, VtError> {
+        self.vt.total_rows()
+    }
+
+    /// Rows currently in the scrollback buffer (total rows minus viewport
+    /// rows). Available only with the `ghostty-vt` feature enabled.
+    #[cfg(feature = "ghostty-vt")]
+    pub fn scrollback_rows(&self) -> std::result::Result<usize, VtError> {
+        self.vt.scrollback_rows()
     }
 }
 
@@ -289,12 +369,18 @@ impl Drop for TerminalSession {
         if let Some(handle) = self.reaper_thread.take() {
             let _ = handle.join();
         }
+
+        // Tear down the VT driver after the reader thread has drained so
+        // any final bytes reach the state machine before we ask it to exit.
+        #[cfg(feature = "ghostty-vt")]
+        self.vt.shutdown();
     }
 }
 
 fn spawn_reader_thread(
     mut reader: Box<dyn Read + Send>,
     tx: mpsc::Sender<TerminalEvent>,
+    #[cfg(feature = "ghostty-vt")] vt_tx: std::sync::mpsc::SyncSender<vt::VtCommand>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
@@ -303,6 +389,17 @@ fn spawn_reader_thread(
                 Ok(0) => break, // EOF: PTY closed, child exited
                 Ok(n) => {
                     let chunk = buf[..n].to_vec();
+
+                    // Tee to the VT driver *first*: the driver's job is to
+                    // keep its state machine in sync with the stream, and
+                    // in-order delivery matters. A dropped send on the VT
+                    // side is fatal for queries but not for rendering, so
+                    // we don't abort the public channel if it fails.
+                    #[cfg(feature = "ghostty-vt")]
+                    {
+                        let _ = vt_tx.send(vt::VtCommand::Bytes(chunk.clone()));
+                    }
+
                     // blocking_send: we're on a dedicated OS thread.
                     if tx.blocking_send(TerminalEvent::Bytes(chunk)).is_err() {
                         // Receiver dropped; no one listening.
@@ -518,5 +615,91 @@ mod tests {
 
         let s2 = ShellSpec::with_args("/bin/sh", ["-c", "echo hi"]);
         assert_eq!(s2.args.len(), 2);
+    }
+
+    // ----------------------------------------------------------------------
+    // F-146: VT state authority on the Rust side.
+    //
+    // These tests are gated on `ghostty-vt` because the feature pulls in a
+    // C/zig build dep that isn't universally available. With the feature
+    // off the existing F-124 tests above still define the pass-through
+    // contract — those MUST stay green either way.
+    // ----------------------------------------------------------------------
+
+    #[cfg(feature = "ghostty-vt")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn vt_state_reflects_child_output_via_ghostty_vt() {
+        // DoD (F-146): "New test verifies VT state authority on the Rust
+        // side — e.g., a cursor_position() or scrollback_lines() query API
+        // on TerminalSession returns values driven by ghostty-vt's parser."
+        //
+        // We spawn a shell that prints exactly five characters and exits.
+        // After the byte stream settles, TerminalSession::cursor_position()
+        // must report col=5/row=0, proving the VT driver — not the raw PTY
+        // stream — is the source of truth.
+        let cwd = std::env::temp_dir();
+        let (session, mut rx) = TerminalSession::spawn(
+            ShellSpec::with_args("/bin/sh", ["-c", "printf hello"]),
+            cwd,
+            TerminalSize::default(),
+        )
+        .expect("spawn");
+
+        // Drain until the child exits so we know the driver has seen every
+        // byte the child produced.
+        let (bytes, exit) = drain_until_exit(&mut rx, Duration::from_secs(5)).await;
+        assert!(
+            bytes.windows(b"hello".len()).any(|w| w == b"hello"),
+            "expected child output in byte stream (pass-through invariant)"
+        );
+        assert!(exit.is_some(), "child must reap before we query");
+
+        // Give the VT driver a beat to drain its own channel after the
+        // PTY reader pushed the final chunk — they're independent threads.
+        for _ in 0..20 {
+            if let Ok(pos) = session.cursor_position() {
+                if pos.col == 5 {
+                    return; // pass
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let pos = session
+            .cursor_position()
+            .expect("cursor_position must succeed while session is alive");
+        assert_eq!(
+            pos,
+            CursorPosition { col: 5, row: 0 },
+            "ghostty-vt must be authoritative after `printf hello`"
+        );
+    }
+
+    #[cfg(feature = "ghostty-vt")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn vt_query_before_any_output_returns_origin() {
+        // DoD (F-146): the query API is usable from the moment the session
+        // exists — not just after we've seen bytes. Spawns a `sleep`, asks
+        // for the cursor immediately, expects (0, 0).
+        let cwd = std::env::temp_dir();
+        let (session, _rx) = TerminalSession::spawn(
+            ShellSpec::with_args("/bin/sh", ["-c", "sleep 2"]),
+            cwd,
+            TerminalSize::default(),
+        )
+        .expect("spawn");
+
+        let pos = session
+            .cursor_position()
+            .expect("cursor_position must succeed on a live session");
+        assert_eq!(
+            pos,
+            CursorPosition { col: 0, row: 0 },
+            "fresh VT state starts at origin"
+        );
+
+        // Before the sleep finishes, total_rows must match the viewport
+        // height (24 cells) and scrollback must be zero.
+        assert_eq!(session.total_rows().expect("total_rows"), 24);
+        assert_eq!(session.scrollback_rows().expect("scrollback_rows"), 0);
     }
 }

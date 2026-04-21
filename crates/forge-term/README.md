@@ -35,12 +35,24 @@ can surface exit codes in the UI.
 Forge commits to the two-layer terminal model in
 `docs/architecture/overview.md` "Terminal backend" and
 `docs/architecture/crate-architecture.md` §3.7: authoritative VT state
-lives on the Rust side, the frontend runs a thin xterm.js renderer. Raw
-PTY bytes are xterm.js-compatible by construction (xterm.js is itself a
-VT state machine), so the current implementation forwards them directly.
-Driving `ghostty-vt` as the authoritative state machine is staged as a
-follow-up once the crate is pulled into CI with its zig/C toolchain
-prerequisites.
+lives on the Rust side, the frontend runs a thin xterm.js renderer.
+Raw PTY bytes are xterm.js-compatible by construction, so the byte
+stream delivered to consumers is a direct pass-through (F-124).
+
+With the **`ghostty-vt` cargo feature enabled** (F-146), the PTY reader
+tees bytes into a dedicated driver thread that owns a
+`libghostty_vt::Terminal`. VT state — cursor position, total/scrollback
+rows, modes, title, etc. — is then queryable *authoritatively* from the
+Rust side without parsing the stream ourselves:
+
+- `TerminalSession::cursor_position() -> Result<CursorPosition, VtError>`
+- `TerminalSession::total_rows() -> Result<usize, VtError>`
+- `TerminalSession::scrollback_rows() -> Result<usize, VtError>`
+
+The byte stream stays byte-identical to feature-off; the feature adds
+query authority, not stream rewriting. Building the feature requires
+`zig` on the host because `libghostty-vt-sys` vendor-fetches the
+Ghostty C sources at build time.
 
 ## Further reading
 

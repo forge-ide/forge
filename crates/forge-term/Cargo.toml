@@ -8,11 +8,22 @@ license = "MIT OR Apache-2.0"
 name = "forge_term"
 path = "src/lib.rs"
 
+[features]
+# Drive `libghostty-vt` as the authoritative Rust-side VT state machine
+# (F-146). Off by default: building `libghostty-vt` requires `zig` on the
+# host because the sys crate vendor-fetches Ghostty C sources at build
+# time. With the feature on, `TerminalSession` exposes `cursor_position`,
+# `total_rows`, and `scrollback_rows` backed by the ghostty-vt parser;
+# the byte stream delivered to consumers is byte-identical to feature-off
+# (xterm.js-compatible pass-through), so the F-124 contract is preserved.
+ghostty-vt = ["dep:libghostty-vt"]
+
 [dependencies]
 portable-pty = "0.9"
 thiserror = "1"
 tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
 tracing = "0.1"
+libghostty-vt = { version = "0.1.1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time", "test-util"] }
