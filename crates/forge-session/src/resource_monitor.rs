@@ -1,4 +1,4 @@
-//! Per-agent-instance resource sampler (F-152).
+//! Per-agent-instance resource sampler (F-152 Linux, F-156 macOS/Windows).
 //!
 //! Populates the AgentMonitor inspector's cpu / rss / fds pills (F-140).
 //! F-140 shipped the pill chrome with placeholder dashes because there was
@@ -7,10 +7,13 @@
 //! # Architecture
 //!
 //! - [`Sampler`] is the trait every platform probe implements. Tests use
-//!   the [`FakeSampler`] below; Linux is backed by `/proc/<pid>`. macOS and
-//!   Windows ship `None`-returning stubs today — the DoD explicitly names
-//!   those platforms so the `#[cfg]` gating + future probe slots are
-//!   present from day one, even though CI is Linux.
+//!   the [`FakeSampler`] below; Linux is backed by `/proc/<pid>`, macOS
+//!   by `libproc`, Windows by the `GetProcessTimes` /
+//!   `GetProcessMemoryInfo` / `GetProcessHandleCount` trio. Targets
+//!   outside those three fail to compile at the module-level
+//!   `compile_error!` — the F-152 silent `Sample::default()` stub was
+//!   removed in F-156 because all-zero pills masquerading as real
+//!   readings are worse than a build error.
 //!
 //! - [`ResourceMonitor::track`] registers a `(instance_id, pid)` pair and
 //!   spawns a per-instance tokio tick task. On each tick the task asks the
@@ -404,49 +407,391 @@ Threads:   3
     }
 }
 
-/// Non-Linux placeholder probe. The DoD names macOS (`libproc` /
-/// `sysctl`) and Windows (`GetProcessTimes` / `GetProcessHandleCount` /
-/// `GetProcessMemoryInfo`) as the real implementations; those are
-/// out-of-scope for CI-on-Linux but the stub holds the `#[cfg]` slot so
-/// a follow-up doesn't have to restructure the module.
-#[cfg(not(target_os = "linux"))]
-pub mod unsupported {
+/// macOS `libproc`-backed probe. Reads `proc_taskinfo` for cumulative
+/// user+system CPU nanoseconds and resident memory, and counts open file
+/// descriptors via `listpidinfo::<ListFDs>`.
+///
+/// `proc_taskinfo`'s `pti_total_user` / `pti_total_system` are in
+/// nanoseconds (see `<sys/proc_info.h>` in the macOS SDK). The Linux
+/// probe returns seconds, so we convert. `pti_resident_size` is already
+/// in bytes. `pbi_nfiles` on the BSD-info flavor gives the fd count
+/// without enumerating them — far cheaper than listing — but the listing
+/// path is the one the DoD names and it's the path that matches how the
+/// Linux probe physically counts entries in `/proc/<pid>/fd`, so we use
+/// it for behavioral parity.
+#[cfg(target_os = "macos")]
+pub mod macos {
     use super::{Sample, Sampler};
+    use std::collections::HashMap;
+    use tokio::sync::Mutex;
 
-    pub struct UnsupportedSampler;
+    use libproc::bsd_info::BSDInfo;
+    use libproc::file_info::{ListFDs, ProcFDType};
+    use libproc::proc_pid::{listpidinfo, pidinfo};
+    use libproc::task_info::TaskInfo;
 
-    impl UnsupportedSampler {
+    /// `libproc`-backed sampler. Holds a per-PID CPU-time baseline in
+    /// nanoseconds so the public `Sample::cpu_seconds` can report a
+    /// delta rather than a cumulative total — matching the Linux probe.
+    pub struct LibprocSampler {
+        previous_ns: Mutex<HashMap<u32, u64>>, // pid -> utime+stime ns
+    }
+
+    impl LibprocSampler {
         pub fn new() -> Self {
-            Self
+            Self {
+                previous_ns: Mutex::new(HashMap::new()),
+            }
         }
     }
 
-    impl Default for UnsupportedSampler {
+    impl Default for LibprocSampler {
         fn default() -> Self {
             Self::new()
         }
     }
 
     #[async_trait::async_trait]
-    impl Sampler for UnsupportedSampler {
-        async fn sample(&self, _pid: u32) -> Sample {
-            // Returning an empty sample preserves the Option-per-field
-            // contract without panicking on non-Linux platforms.
-            Sample::default()
+    impl Sampler for LibprocSampler {
+        async fn sample(&self, pid: u32) -> Sample {
+            // `libproc` is synchronous FFI. Calls resolve in microseconds
+            // per the XNU syscall tables, so staying on the tokio worker
+            // is preferable to the allocation cost of `spawn_blocking`.
+            let (cpu_seconds, rss_bytes) = match pidinfo::<TaskInfo>(pid as i32, 0) {
+                Ok(ti) => {
+                    let total_ns = ti.pti_total_user.saturating_add(ti.pti_total_system);
+                    let mut prev = self.previous_ns.lock().await;
+                    let delta_ns = match prev.get(&pid).copied() {
+                        Some(previous) if total_ns >= previous => total_ns - previous,
+                        _ => 0,
+                    };
+                    prev.insert(pid, total_ns);
+                    let seconds = delta_ns as f64 / 1_000_000_000.0;
+                    (Some(seconds), Some(ti.pti_resident_size))
+                }
+                Err(_) => (None, None),
+            };
+            let fd_count = count_fds(pid);
+            Sample {
+                cpu_seconds,
+                rss_bytes,
+                fd_count,
+            }
+        }
+    }
+
+    /// Counts open file descriptors by asking the kernel to enumerate
+    /// them. `listpidinfo::<ListFDs>` takes a max-entries bound; BSDInfo
+    /// carries `pbi_nfiles` which is the kernel's live count. Use that
+    /// as the bound, then count the returned entries — if the kernel
+    /// filled the buffer we still get an accurate count.
+    fn count_fds(pid: u32) -> Option<u64> {
+        let bsd = pidinfo::<BSDInfo>(pid as i32, 0).ok()?;
+        // `pbi_nfiles` is a u32; cast up front so overflow-on-pathological
+        // process is a saturating cast rather than a wrap.
+        let cap = bsd.pbi_nfiles as usize;
+        // A zero cap means the kernel says "no open fds" — return it
+        // straight rather than asking `listpidinfo` for a zero-size Vec.
+        if cap == 0 {
+            return Some(0);
+        }
+        let fds = listpidinfo::<ListFDs>(pid as i32, cap).ok()?;
+        // Filter to the set `pbi_nfiles` really counts: regular
+        // vnode/socket/pipe fds, matching what `/proc/<pid>/fd` on Linux
+        // shows. Kernel-internal entries like fsevents aren't visible on
+        // Linux either.
+        let n = fds
+            .iter()
+            .filter(|fd| {
+                matches!(
+                    fd.proc_fdtype.into(),
+                    ProcFDType::VNode
+                        | ProcFDType::Socket
+                        | ProcFDType::Pipe
+                        | ProcFDType::PSEM
+                        | ProcFDType::PSHM
+                        | ProcFDType::KQueue
+                )
+            })
+            .count() as u64;
+        Some(n)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn libproc_sampler_returns_non_none_rss_and_fds_for_self() {
+            // Mirrors the Linux sibling test
+            // (`proc_sampler_returns_a_non_none_rss_for_self`). The DoD's
+            // per-platform invariant is "monitor emits non-zero samples
+            // for a self-process"; probing the real libproc sampler
+            // against the test's own PID is the strongest live check we
+            // can run inside `cargo test`. `cpu_seconds` is a delta, so
+            // the first call reports 0.0 — hence only RSS and fd_count
+            // carry the "non-None" assertion, matching Linux.
+            //
+            // This test ships live on macOS CI (F-158 added the
+            // macos-latest runner that calls `just test-rust`) so a
+            // regression on the real syscall path fails the PR.
+            let s = LibprocSampler::new();
+            let sample = s.sample(std::process::id()).await;
+            assert!(
+                sample.rss_bytes.is_some(),
+                "libproc must parse live self RSS"
+            );
+            assert!(
+                sample.fd_count.is_some(),
+                "libproc must count live self fds"
+            );
+            let rss = sample.rss_bytes.unwrap();
+            assert!(rss > 0, "test process must report non-zero RSS, got {rss}");
+            let fds = sample.fd_count.unwrap();
+            assert!(
+                fds > 0,
+                "test process must have at least one open fd, got {fds}"
+            );
         }
     }
 }
 
+/// Windows `kernel32` / `psapi`-backed probe. Reads cumulative kernel +
+/// user CPU time via `GetProcessTimes` (returned as 100ns FILETIME
+/// units), working-set bytes via `GetProcessMemoryInfo`, and open kernel
+/// handle count via `GetProcessHandleCount`.
+///
+/// Windows "handles" aren't a perfect analogue of POSIX file descriptors
+/// — they include window handles, event handles, mutex handles, etc. —
+/// but they're the closest off-the-shelf count and the DoD explicitly
+/// names `GetProcessHandleCount` as the probe, so we follow it.
+#[cfg(target_os = "windows")]
+pub mod windows {
+    use super::{Sample, Sampler};
+    use std::collections::HashMap;
+    use tokio::sync::Mutex;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetProcessHandleCount, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_VM_READ,
+    };
+
+    /// `windows-sys`-backed sampler. Same delta-from-previous CPU pattern
+    /// as the Linux and macOS probes.
+    pub struct WindowsSampler {
+        /// pid -> cumulative (kernel + user) CPU in 100ns FILETIME units.
+        previous_100ns: Mutex<HashMap<u32, u64>>,
+    }
+
+    impl WindowsSampler {
+        pub fn new() -> Self {
+            Self {
+                previous_100ns: Mutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    impl Default for WindowsSampler {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    /// Merge two 32-bit halves of a FILETIME into a single u64. Windows
+    /// lays FILETIME out as a struct of `dwLowDateTime` + `dwHighDateTime`
+    /// instead of a u64 for historical 16-bit-alignment reasons.
+    fn filetime_to_u64(ft: FILETIME) -> u64 {
+        ((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64
+    }
+
+    /// RAII wrapper around a `HANDLE` so the sampler can't leak handles
+    /// through a `?` / early return. `OpenProcess` returns a handle that
+    /// must be `CloseHandle`'d; forgetting it is the classic long-lived
+    /// Windows service leak.
+    struct OwnedHandle(HANDLE);
+
+    impl Drop for OwnedHandle {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: self.0 came from OpenProcess which returns
+                // either a valid kernel handle or null. The null branch
+                // is skipped above.
+                unsafe {
+                    CloseHandle(self.0);
+                }
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Sampler for WindowsSampler {
+        async fn sample(&self, pid: u32) -> Sample {
+            // Ask for the minimum access rights each probe needs.
+            // PROCESS_QUERY_LIMITED_INFORMATION covers GetProcessTimes and
+            // GetProcessHandleCount; PROCESS_VM_READ is required by the
+            // psapi memory probe. An AV/EDR can still deny this — callers
+            // degrade gracefully (all-None Sample) in that case.
+            //
+            // `HANDLE` is `*mut c_void` and therefore `!Send`. To keep the
+            // `sample()` future `Send` (the `Sampler` trait requires it
+            // through `async_trait`'s `+ Send` bound), we do every syscall
+            // in a tight non-await scope, drop the handle at the end of
+            // it, and only then `.await` the mutex that stores previous
+            // CPU totals. Nothing in the sync block suspends, so there's
+            // no behavioral downside.
+            let (total_100ns_opt, rss_bytes, fd_count) = {
+                let handle = unsafe {
+                    OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid)
+                };
+                if handle.is_null() {
+                    return Sample::default();
+                }
+                let handle = OwnedHandle(handle);
+                (
+                    read_cpu_total_100ns(handle.0),
+                    read_working_set_bytes(handle.0),
+                    read_handle_count(handle.0),
+                )
+            };
+
+            let cpu_seconds = match total_100ns_opt {
+                Some(total_100ns) => {
+                    let mut prev = self.previous_100ns.lock().await;
+                    let delta = match prev.get(&pid).copied() {
+                        Some(previous) if total_100ns >= previous => total_100ns - previous,
+                        _ => 0,
+                    };
+                    prev.insert(pid, total_100ns);
+                    // FILETIME ticks are 100ns. 10_000_000 per second.
+                    Some(delta as f64 / 10_000_000.0)
+                }
+                None => None,
+            };
+
+            Sample {
+                cpu_seconds,
+                rss_bytes,
+                fd_count,
+            }
+        }
+    }
+
+    fn read_cpu_total_100ns(h: HANDLE) -> Option<u64> {
+        let mut creation = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut exit = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut kernel = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut user = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        // SAFETY: `h` is a live process handle from OpenProcess; all four
+        // output pointers target stack-allocated FILETIME locals that
+        // outlive the call.
+        let ok =
+            unsafe { GetProcessTimes(h, &mut creation, &mut exit, &mut kernel, &mut user) != 0 };
+        if !ok {
+            return None;
+        }
+        Some(filetime_to_u64(kernel).saturating_add(filetime_to_u64(user)))
+    }
+
+    fn read_working_set_bytes(h: HANDLE) -> Option<u64> {
+        let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
+        counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        // SAFETY: `h` is a live process handle. `counters` is a stack
+        // struct sized correctly via the `cb` field set above.
+        let ok = unsafe { GetProcessMemoryInfo(h, &mut counters, counters.cb) != 0 };
+        if !ok {
+            return None;
+        }
+        Some(counters.WorkingSetSize as u64)
+    }
+
+    fn read_handle_count(h: HANDLE) -> Option<u64> {
+        let mut count: u32 = 0;
+        // SAFETY: `h` is a live process handle; `count` is a live stack
+        // local the kernel writes through the out-pointer.
+        let ok = unsafe { GetProcessHandleCount(h, &mut count) != 0 };
+        if !ok {
+            return None;
+        }
+        Some(count as u64)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        // CI gap: there is no Windows GitHub Actions runner wired up to
+        // forge-ide/forge today (F-158 added macOS-latest but Windows is
+        // out of scope for that issue). This test compiles in-tree on
+        // Windows hosts and is the self-process equivalent of the Linux
+        // and macOS siblings; it must be run manually on a Windows dev
+        // box to validate. The `#[cfg(target_os = "windows")]` on the
+        // enclosing module keeps the build green on Linux/macOS CI by
+        // excluding the whole tree from compilation there.
+        #[tokio::test]
+        async fn windows_sampler_returns_non_none_rss_and_fds_for_self() {
+            let s = WindowsSampler::new();
+            let sample = s.sample(std::process::id()).await;
+            assert!(
+                sample.rss_bytes.is_some(),
+                "GetProcessMemoryInfo must succeed for self"
+            );
+            assert!(
+                sample.fd_count.is_some(),
+                "GetProcessHandleCount must succeed for self"
+            );
+            let rss = sample.rss_bytes.unwrap();
+            assert!(rss > 0, "test process must report non-zero RSS, got {rss}");
+            let fds = sample.fd_count.unwrap();
+            assert!(
+                fds > 0,
+                "test process must have at least one handle, got {fds}"
+            );
+        }
+    }
+}
+
+// Any target that isn't one of the three we support fails to compile
+// with a loud error. The F-152 stub's Sample::default() silently produced
+// all-zero pill values on unsupported platforms, which is worse than a
+// hard stop — consumers would think the monitor was working.
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+compile_error!(
+    "forge-session resource monitor is not implemented on this target. \
+     Supported platforms: linux, macos, windows."
+);
+
 /// Return the compile-time "best available" sampler for the current
-/// platform. Linux → `ProcSampler`; everything else → the stub.
+/// platform. One arm per supported OS; unsupported targets fail to
+/// compile at the module-level `compile_error!` above, so this function
+/// is a single `cfg` dispatch with no fallback.
 pub fn default_sampler() -> std::sync::Arc<dyn Sampler> {
     #[cfg(target_os = "linux")]
     {
         std::sync::Arc::new(linux::ProcSampler::new())
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     {
-        std::sync::Arc::new(unsupported::UnsupportedSampler::new())
+        std::sync::Arc::new(macos::LibprocSampler::new())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::sync::Arc::new(windows::WindowsSampler::new())
     }
 }
 
