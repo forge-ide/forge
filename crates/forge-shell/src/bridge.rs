@@ -26,8 +26,10 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use forge_core::{ApprovalScope, RerunVariant};
 use forge_ipc::{
-    read_frame, write_frame, ClientInfo, DeleteBranch, Hello, HelloAck, IpcMessage, RerunMessage,
-    SelectBranch, SendUserMessage, Subscribe, ToolCallApproved, ToolCallRejected, PROTO_VERSION,
+    read_frame, write_frame, ClientInfo, DeleteBranch, Hello, HelloAck, ImportMcpConfig,
+    IpcMessage, ListMcpServers, McpImportResult, McpServersList, McpToggleResult, RerunMessage,
+    SelectBranch, SendUserMessage, Subscribe, ToggleMcpServer, ToolCallApproved, ToolCallRejected,
+    PROTO_VERSION,
 };
 use serde::Serialize;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -65,6 +67,29 @@ struct Connection {
     writer: Arc<Mutex<OwnedWriteHalf>>,
     reader: Option<OwnedReadHalf>,
     reader_task: Option<JoinHandle<()>>,
+    /// F-155: shared with the event-pump task so responses to MCP
+    /// request frames (`McpServersList`, `McpToggleResult`,
+    /// `McpImportResult`) can be routed back to the Tauri command
+    /// awaiting them. Every other frame the pump sees still flows to
+    /// the event sink unchanged.
+    mcp_replies: Arc<McpReplySlots>,
+}
+
+/// Per-kind reply slot queues used by `pump_events` to correlate
+/// daemon→client MCP response frames with the Tauri commands that
+/// issued them.
+///
+/// Each MCP command flow is: acquire the per-kind lock, register a
+/// one-shot receiver, send the request frame, await the receiver. The
+/// pump pops the oldest waiter from the queue when it observes a
+/// matching response frame. Serialising by kind (rather than by any
+/// correlation id) avoids adding request-id wire bytes for a low-traffic
+/// command while still tolerating pipelined requests of different kinds.
+#[derive(Default)]
+pub(crate) struct McpReplySlots {
+    list: Mutex<std::collections::VecDeque<tokio::sync::oneshot::Sender<McpServersList>>>,
+    toggle: Mutex<std::collections::VecDeque<tokio::sync::oneshot::Sender<McpToggleResult>>>,
+    import: Mutex<std::collections::VecDeque<tokio::sync::oneshot::Sender<McpImportResult>>>,
 }
 
 /// Session-id keyed registry of active bridge connections.
@@ -221,6 +246,7 @@ impl SessionBridge {
             writer: Arc::new(Mutex::new(writer)),
             reader: Some(reader),
             reader_task: None,
+            mcp_replies: Arc::new(McpReplySlots::default()),
         };
         self.connections
             .inner
@@ -286,7 +312,7 @@ impl SessionBridge {
     ) -> Result<()> {
         // Step 1: capture per-connection handles under the map lock, then
         // drop the lock before any `.await`.
-        let (writer, reader) = {
+        let (writer, reader, mcp_replies) = {
             let mut map = self.connections.inner.lock().await;
             let conn = map.get_mut(session_id).ok_or_else(|| {
                 anyhow!("session_subscribe: no active connection for {session_id}")
@@ -303,7 +329,8 @@ impl SessionBridge {
             // `reader: None` and bails early rather than duplicating the
             // subscribe frame or fighting for the reader half.
             let reader = conn.reader.take().expect("reader present per check above");
-            (writer, reader)
+            let mcp_replies = Arc::clone(&conn.mcp_replies);
+            (writer, reader, mcp_replies)
         };
 
         // Step 2: await the Subscribe frame with the map lock released.
@@ -328,7 +355,7 @@ impl SessionBridge {
 
         let session_id_owned = session_id.to_string();
         let task = tokio::spawn(async move {
-            pump_events(reader, session_id_owned, sink).await;
+            pump_events(reader, session_id_owned, sink, mcp_replies).await;
         });
         conn.reader_task = Some(task);
 
@@ -430,6 +457,110 @@ impl SessionBridge {
         write_frame(&mut *writer, &frame).await
     }
 
+    /// F-155: list the session daemon's MCP servers. The daemon returns
+    /// its authoritative `McpManager::list()` snapshot — the shell no
+    /// longer maintains its own manager.
+    pub async fn list_mcp_servers(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<forge_ipc::McpServerInfo>> {
+        let (writer, mcp_replies) = self.mcp_handles_for(session_id).await?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        mcp_replies.list.lock().await.push_back(tx);
+
+        let frame = IpcMessage::ListMcpServers(ListMcpServers::default());
+        let send_result = {
+            let mut guard = writer.lock().await;
+            write_frame(&mut *guard, &frame).await
+        };
+        if let Err(e) = send_result {
+            // Drop the registered slot so a future call doesn't consume a
+            // stale reply. Take the first slot we registered — there may
+            // be a racing caller, but the pop returns exactly one.
+            let _ = mcp_replies.list.lock().await.pop_front();
+            return Err(e);
+        }
+        let reply = rx
+            .await
+            .map_err(|_| anyhow!("list_mcp_servers: reply channel closed"))?;
+        Ok(reply.servers)
+    }
+
+    /// F-155: toggle an MCP server on the session daemon. `enabled` is
+    /// the target state — `true` starts (or no-ops), `false` parks the
+    /// server in `ServerState::Disabled` so in-flight + subsequent tool
+    /// calls surface the canonical "server disabled" error.
+    pub async fn toggle_mcp_server(
+        &self,
+        session_id: &str,
+        name: String,
+        enabled: bool,
+    ) -> Result<McpToggleResult> {
+        let (writer, mcp_replies) = self.mcp_handles_for(session_id).await?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        mcp_replies.toggle.lock().await.push_back(tx);
+
+        let frame = IpcMessage::ToggleMcpServer(ToggleMcpServer {
+            name: name.clone(),
+            enabled,
+        });
+        let send_result = {
+            let mut guard = writer.lock().await;
+            write_frame(&mut *guard, &frame).await
+        };
+        if let Err(e) = send_result {
+            let _ = mcp_replies.toggle.lock().await.pop_front();
+            return Err(e);
+        }
+        let reply = rx
+            .await
+            .map_err(|_| anyhow!("toggle_mcp_server: reply channel closed"))?;
+        Ok(reply)
+    }
+
+    /// F-155: import a third-party MCP config through the session
+    /// daemon. `apply=false` is a dry-run that reports the merged server
+    /// list without rewriting `<workspace>/.mcp.json`.
+    pub async fn import_mcp_config(
+        &self,
+        session_id: &str,
+        source: String,
+        apply: bool,
+    ) -> Result<McpImportResult> {
+        let (writer, mcp_replies) = self.mcp_handles_for(session_id).await?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        mcp_replies.import.lock().await.push_back(tx);
+
+        let frame = IpcMessage::ImportMcpConfig(ImportMcpConfig { source, apply });
+        let send_result = {
+            let mut guard = writer.lock().await;
+            write_frame(&mut *guard, &frame).await
+        };
+        if let Err(e) = send_result {
+            let _ = mcp_replies.import.lock().await.pop_front();
+            return Err(e);
+        }
+        let reply = rx
+            .await
+            .map_err(|_| anyhow!("import_mcp_config: reply channel closed"))?;
+        Ok(reply)
+    }
+
+    /// F-155: capture the writer handle and MCP reply-slots arc for
+    /// `session_id` under a single map-lock acquisition. Mirrors the
+    /// `writer_for` pattern but also hands out the reply slots — which
+    /// `pump_events` uses to deliver MCP responses.
+    async fn mcp_handles_for(
+        &self,
+        session_id: &str,
+    ) -> Result<(Arc<Mutex<OwnedWriteHalf>>, Arc<McpReplySlots>)> {
+        let map = self.connections.inner.lock().await;
+        let conn = map
+            .get(session_id)
+            .ok_or_else(|| anyhow!("no active connection for session {session_id}"))?;
+        Ok((Arc::clone(&conn.writer), Arc::clone(&conn.mcp_replies)))
+    }
+
     async fn writer_for(&self, session_id: &str) -> Result<Arc<Mutex<OwnedWriteHalf>>> {
         let map = self.connections.inner.lock().await;
         let conn = map
@@ -469,7 +600,12 @@ fn scope_to_wire(scope: &ApprovalScope) -> String {
     .to_string()
 }
 
-async fn pump_events(mut reader: OwnedReadHalf, session_id: String, sink: Arc<dyn EventSink>) {
+async fn pump_events(
+    mut reader: OwnedReadHalf,
+    session_id: String,
+    sink: Arc<dyn EventSink>,
+    mcp_replies: Arc<McpReplySlots>,
+) {
     loop {
         match read_frame(&mut reader).await {
             Ok(IpcMessage::Event(event)) => {
@@ -479,9 +615,29 @@ async fn pump_events(mut reader: OwnedReadHalf, session_id: String, sink: Arc<dy
                     event: event.event,
                 });
             }
+            // F-155: route MCP responses into the per-kind reply slot
+            // queue. The command awaiting the response pops its own
+            // oneshot before calling us — a missing slot means the
+            // command gave up (e.g. timed out), so we drop the reply
+            // silently rather than pile up stale data.
+            Ok(IpcMessage::McpServersList(list)) => {
+                if let Some(slot) = mcp_replies.list.lock().await.pop_front() {
+                    let _ = slot.send(list);
+                }
+            }
+            Ok(IpcMessage::McpToggleResult(res)) => {
+                if let Some(slot) = mcp_replies.toggle.lock().await.pop_front() {
+                    let _ = slot.send(res);
+                }
+            }
+            Ok(IpcMessage::McpImportResult(res)) => {
+                if let Some(slot) = mcp_replies.import.lock().await.pop_front() {
+                    let _ = slot.send(res);
+                }
+            }
             Ok(_) => {
-                // Non-event frames (e.g. late HelloAck) are ignored; only
-                // session events flow to the webview.
+                // Non-event, non-MCP-response frames (e.g. late HelloAck)
+                // are ignored; only session events flow to the webview.
             }
             Err(_) => {
                 // Peer closed or unrecoverable framing error. Task exits.

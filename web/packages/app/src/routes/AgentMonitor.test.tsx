@@ -17,6 +17,7 @@ import {
   AgentTrace,
   applyEventToState,
   filterAgents,
+  inspectorStub,
   sortAgents,
   StepDrawer,
   stopAgentInstance,
@@ -101,7 +102,7 @@ describe('AgentMonitor: filter + sort helpers', () => {
 // ---------------------------------------------------------------------------
 
 describe('applyEventToState', () => {
-  const empty: LiveAgentState = { subAgents: [], stepsByAgent: {} };
+  const empty: LiveAgentState = { subAgents: [], stepsByAgent: {}, resourcesByAgent: {} };
 
   it('upserts a session row the first time StepStarted arrives with an instance id', () => {
     const after = applyEventToState(empty, {
@@ -238,6 +239,169 @@ describe('applyEventToState', () => {
     // Stable reference proves we did not allocate a new state tree for a
     // redundant completion event.
     expect(second).toBe(first);
+  });
+
+  // F-152: resource_sample fold — populates the pills, clears on termination.
+
+  it('upserts a resource snapshot on resource_sample', () => {
+    const after = applyEventToState(empty, {
+      event: {
+        type: 'resource_sample',
+        instance_id: 'inst-1',
+        cpu_pct: 12.5,
+        rss_bytes: 4 * 1024 * 1024,
+        fd_count: 18,
+        sampled_at: '2026-04-20T12:00:00Z',
+      },
+    });
+    expect(after.resourcesByAgent['inst-1']).toEqual({
+      cpu: 12.5,
+      rss: 4 * 1024 * 1024,
+      fds: 18,
+    });
+  });
+
+  it('preserves missing fields as undefined on resource_sample', () => {
+    // Partial platform probes send `null` for fields they could not read;
+    // those survive as undefined in the snapshot so the Inspector renders
+    // the `—` placeholder without falsely reading the pill value as zero.
+    const after = applyEventToState(empty, {
+      event: {
+        type: 'resource_sample',
+        instance_id: 'inst-2',
+        cpu_pct: 5.0,
+        rss_bytes: null,
+        fd_count: null,
+        sampled_at: '2026-04-20T12:00:00Z',
+      },
+    });
+    const snapshot = after.resourcesByAgent['inst-2'];
+    expect(snapshot).toBeDefined();
+    expect(snapshot?.cpu).toBe(5.0);
+    expect(snapshot?.rss).toBeUndefined();
+    expect(snapshot?.fds).toBeUndefined();
+  });
+
+  it('overwrites an earlier resource snapshot for the same instance', () => {
+    const first = applyEventToState(empty, {
+      event: {
+        type: 'resource_sample',
+        instance_id: 'inst-3',
+        cpu_pct: 1.0,
+        rss_bytes: 1000,
+        fd_count: 1,
+        sampled_at: '2026-04-20T12:00:00Z',
+      },
+    });
+    const second = applyEventToState(first, {
+      event: {
+        type: 'resource_sample',
+        instance_id: 'inst-3',
+        cpu_pct: 9.0,
+        rss_bytes: 9000,
+        fd_count: 9,
+        sampled_at: '2026-04-20T12:00:01Z',
+      },
+    });
+    expect(second.resourcesByAgent['inst-3']).toEqual({
+      cpu: 9.0,
+      rss: 9000,
+      fds: 9,
+    });
+  });
+
+  it('keeps snapshots for other instances when a new one arrives', () => {
+    const a = applyEventToState(empty, {
+      event: {
+        type: 'resource_sample',
+        instance_id: 'a',
+        cpu_pct: 1,
+        rss_bytes: 1,
+        fd_count: 1,
+        sampled_at: '2026-04-20T12:00:00Z',
+      },
+    });
+    const b = applyEventToState(a, {
+      event: {
+        type: 'resource_sample',
+        instance_id: 'b',
+        cpu_pct: 2,
+        rss_bytes: 2,
+        fd_count: 2,
+        sampled_at: '2026-04-20T12:00:01Z',
+      },
+    });
+    expect(Object.keys(b.resourcesByAgent)).toEqual(['a', 'b']);
+  });
+
+  it('drops the resource snapshot on background_agent_completed', () => {
+    // DoD: "pills clear back to '—' when the instance terminates". The
+    // Inspector reads from `resourcesByAgent`, so clearing the entry is
+    // the mechanism.
+    const populated = applyEventToState(empty, {
+      event: {
+        type: 'resource_sample',
+        instance_id: 'term',
+        cpu_pct: 7,
+        rss_bytes: 77,
+        fd_count: 777,
+        sampled_at: '2026-04-20T12:00:00Z',
+      },
+    });
+    expect(populated.resourcesByAgent['term']).toBeDefined();
+    const spawned = applyEventToState(populated, {
+      event: { type: 'sub_agent_spawned', parent: 'p', child: 'term' },
+    });
+    const completed = applyEventToState(spawned, {
+      event: { type: 'background_agent_completed', id: 'term' },
+    });
+    expect(completed.resourcesByAgent['term']).toBeUndefined();
+  });
+
+  it('is a no-op on malformed resource_sample (missing instance_id)', () => {
+    const after = applyEventToState(empty, {
+      event: {
+        type: 'resource_sample',
+        cpu_pct: 1,
+        rss_bytes: 1,
+        fd_count: 1,
+        sampled_at: '2026-04-20T12:00:00Z',
+      },
+    });
+    expect(after).toBe(empty);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// inspectorStub resource mapping (F-152)
+// ---------------------------------------------------------------------------
+
+describe('inspectorStub', () => {
+  it('returns em-dash placeholders when no resources are supplied', () => {
+    const data = inspectorStub(row());
+    expect(data.resources).toEqual({});
+  });
+
+  it('converts rss_bytes to MB for the pill label', () => {
+    // The pill template renders `${rss}MB` — the backend emits bytes, so
+    // the adapter must convert. 10 MiB should render as 10.
+    const data = inspectorStub(row(), {
+      cpu: 12.5,
+      rss: 10 * 1024 * 1024,
+      fds: 17,
+    });
+    expect(data.resources.cpu).toBe(12.5);
+    expect(data.resources.rss).toBe(10);
+    expect(data.resources.fds).toBe(17);
+  });
+
+  it('omits a field when the snapshot value is undefined', () => {
+    // A partial platform probe yields e.g. `{cpu: 5}` with rss/fds absent.
+    // The pill for the missing fields must render `—`, not `0MB` / `0`.
+    const data = inspectorStub(row(), { cpu: 5 });
+    expect(data.resources.cpu).toBe(5);
+    expect(data.resources.rss).toBeUndefined();
+    expect(data.resources.fds).toBeUndefined();
   });
 });
 

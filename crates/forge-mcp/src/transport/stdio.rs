@@ -302,11 +302,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn surfaces_exit_event_when_child_exits_immediately() {
-        // `/bin/true` spawns, writes nothing, exits 0. We expect exactly
-        // one Exit event and then a closed channel.
-        let mut t = Stdio::connect(&stdio_spec("/bin/true", &[]))
+        // `sh -c 'exit 0'` spawns, writes nothing, exits 0. We expect
+        // exactly one Exit event and then a closed channel.
+        // (Using `/bin/sh` rather than `/bin/true` because GitHub's
+        // macos-latest runner image ships without `/bin/true`.)
+        let mut t = Stdio::connect(&stdio_spec("/bin/sh", &["-c", "exit 0"]))
             .await
-            .expect("spawn /bin/true");
+            .expect("spawn sh exit 0");
         let ev = tokio::time::timeout(std::time::Duration::from_secs(5), t.recv())
             .await
             .expect("recv did not yield Exit in time")
@@ -352,11 +354,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn send_errors_when_child_stdin_is_closed() {
-        // `/bin/true` exits before we can send; stdin pipe is broken.
-        // Give the child a moment to actually reap.
-        let t = Stdio::connect(&stdio_spec("/bin/true", &[]))
+        // Short-lived shell exits before we can send; stdin pipe is
+        // broken. Give the child a moment to actually reap.
+        // (Using `/bin/sh` rather than `/bin/true` because GitHub's
+        // macos-latest runner image ships without `/bin/true`.)
+        let t = Stdio::connect(&stdio_spec("/bin/sh", &["-c", "exit 0"]))
             .await
-            .expect("spawn /bin/true");
+            .expect("spawn sh exit 0");
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let err = t.send(serde_json::json!({"jsonrpc":"2.0","id":1})).await;
         // Either the write fails outright, or it succeeds into a closed

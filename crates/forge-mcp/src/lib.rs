@@ -14,9 +14,13 @@ pub mod manager;
 pub mod transport;
 
 pub use manager::{
-    LifecycleTuning, McpManager, McpServerInfo, McpStateEvent, ServerState, HEALTH_CHECK_INTERVAL,
-    MAX_RESTARTS_PER_WINDOW, REQUEST_TIMEOUT, RESTART_BACKOFF_LADDER, RESTART_WINDOW,
+    LifecycleTuning, McpManager, McpServerInfo, HEALTH_CHECK_INTERVAL, MAX_RESTARTS_PER_WINDOW,
+    REQUEST_TIMEOUT, RESTART_BACKOFF_LADDER, RESTART_WINDOW,
 };
+// F-155: lifecycle state types now live in forge-core so `forge_core::Event`
+// can carry them without creating a dependency cycle. Re-export here so
+// existing callers that reach for `forge_mcp::ServerState` still compile.
+pub use forge_core::{McpStateEvent, ServerState};
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};

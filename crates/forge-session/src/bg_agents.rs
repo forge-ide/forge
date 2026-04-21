@@ -34,6 +34,8 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex};
 
+use crate::resource_monitor::{default_sampler, ResourceMonitor, DEFAULT_TICK};
+
 /// Channel capacity for the background-agent event bus. Matches
 /// `forge-session`'s `Session::event_tx` capacity (1024). A dropped
 /// subscriber is a non-fatal warmup state — the event is still registered
@@ -84,11 +86,18 @@ pub enum BgAgentError {
 /// defs the `start` call resolves `agent_name` against, and a local
 /// broadcast channel the caller subscribes to for the two
 /// `BackgroundAgent*` session events.
+///
+/// F-152: the registry also owns a [`ResourceMonitor`] that ticks per-
+/// instance resource samples while the instance is tracked. The monitor's
+/// broadcast stream is forwarded onto the same `events` channel so the
+/// shell's `session:event` forwarder delivers `Event::ResourceSample`
+/// to the webview alongside every other `forge_core::Event` variant.
 pub struct BackgroundAgentRegistry {
     orchestrator: Arc<Orchestrator>,
     agent_defs: Arc<Vec<AgentDef>>,
     tracked: Arc<Mutex<HashSet<AgentInstanceId>>>,
     events: broadcast::Sender<Event>,
+    monitor: Arc<ResourceMonitor>,
 }
 
 impl BackgroundAgentRegistry {
@@ -96,13 +105,65 @@ impl BackgroundAgentRegistry {
     /// The returned instance starts empty — call [`Self::start`] to spawn a
     /// background agent and [`Self::events`] to subscribe to lifecycle
     /// events.
+    ///
+    /// The resource monitor uses the platform default sampler (`/proc` on
+    /// Linux, no-op stub elsewhere) and the [`DEFAULT_TICK`] cadence. A
+    /// forwarder task pipes every `Event::ResourceSample` the monitor
+    /// emits onto the registry's own `events` bus so subscribers see one
+    /// unified stream.
     pub fn new(orchestrator: Arc<Orchestrator>, agent_defs: Arc<Vec<AgentDef>>) -> Self {
+        Self::with_monitor(
+            orchestrator,
+            agent_defs,
+            Arc::new(ResourceMonitor::new(default_sampler(), DEFAULT_TICK)),
+        )
+    }
+
+    /// Construct with an externally-provided [`ResourceMonitor`]. Used by
+    /// integration tests that need a deterministic sampler or tick
+    /// cadence; production callers go through [`Self::new`].
+    pub fn with_monitor(
+        orchestrator: Arc<Orchestrator>,
+        agent_defs: Arc<Vec<AgentDef>>,
+        monitor: Arc<ResourceMonitor>,
+    ) -> Self {
         let (events, _rx) = broadcast::channel(EVENT_BUS_CAPACITY);
+
+        // Forward every ResourceSample the monitor emits onto the
+        // registry's own events bus. Subscribers then see lifecycle
+        // events and resource samples on a single channel — the shell's
+        // existing `session:event` forwarder needs no extra plumbing.
+        //
+        // Production `with_monitor` is called from Tauri's setup hook, which
+        // runs inside the Tauri-managed tokio runtime, so `Handle::current`
+        // is always available. The `try_current` guard makes the function
+        // safe to call from sync test harnesses (webview-test suite
+        // constructs `BridgeState` outside any runtime); when no runtime is
+        // available the monitor-forwarding task is simply skipped — tests
+        // that assert bg_agents lifecycle don't depend on resource samples
+        // flowing through this channel.
+        let mut monitor_rx = monitor.events();
+        let events_tx = events.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                loop {
+                    match monitor_rx.recv().await {
+                        Ok(ev) => {
+                            let _ = events_tx.send(ev);
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+        }
+
         Self {
             orchestrator,
             agent_defs,
             tracked: Arc::new(Mutex::new(HashSet::new())),
             events,
+            monitor,
         }
     }
 
@@ -162,6 +223,14 @@ impl BackgroundAgentRegistry {
 
         self.tracked.lock().await.insert(id.clone());
 
+        // F-152: start per-instance resource sampling. No per-agent
+        // sidecar process exists yet, so we sample the daemon's own PID
+        // — this gives the AgentMonitor inspector a *live* pill stream
+        // today and lets a future step executor swap in the real PID by
+        // calling `monitor().track(id, child_pid)` at spawn time without
+        // reshaping the event wiring.
+        self.monitor.track(id.clone(), std::process::id()).await;
+
         // `broadcast::Sender::send` errors only when no subscribers are
         // attached — a valid warmup state for an embedded registry whose
         // events only matter once a webview has subscribed.
@@ -177,6 +246,7 @@ impl BackgroundAgentRegistry {
         let target_id = id.clone();
         let events = self.events.clone();
         let tracked = Arc::clone(&self.tracked);
+        let monitor = Arc::clone(&self.monitor);
         tokio::spawn(async move {
             while let Some(next) = stream.next().await {
                 let event = match next {
@@ -198,6 +268,11 @@ impl BackgroundAgentRegistry {
                 }
                 if is_terminal {
                     tracked.lock().await.remove(&target_id);
+                    // F-152: stop sampling for the terminated instance so
+                    // the UI pills clear back to `—` (no further
+                    // `ResourceSample` events reach the webview for this
+                    // id).
+                    monitor.untrack(&target_id).await;
                     let _ = events.send(Event::BackgroundAgentCompleted {
                         id: target_id.clone(),
                         at: Utc::now(),
@@ -252,6 +327,15 @@ impl BackgroundAgentRegistry {
     pub fn orchestrator(&self) -> &Arc<Orchestrator> {
         &self.orchestrator
     }
+
+    /// F-152: accessor for the resource monitor. A future step executor
+    /// that forks a provider sidecar per instance can call
+    /// `registry.monitor().track(id, child_pid)` to swap the degenerate
+    /// daemon-PID sampling set up in `start()` for real per-child
+    /// sampling.
+    pub fn monitor(&self) -> &Arc<ResourceMonitor> {
+        &self.monitor
+    }
 }
 
 #[cfg(test)]
@@ -273,6 +357,24 @@ mod tests {
         let orch = Arc::new(Orchestrator::new());
         let defs = Arc::new(vec![def("writer"), def("reviewer")]);
         BackgroundAgentRegistry::new(orch, defs)
+    }
+
+    /// Construct a registry with a fast-tick resource monitor so the
+    /// end-to-end integration test below doesn't wait a full second.
+    async fn fresh_with_fast_monitor() -> BackgroundAgentRegistry {
+        use crate::resource_monitor::{FakeSampler, ResourceMonitor, Sample};
+        let orch = Arc::new(Orchestrator::new());
+        let defs = Arc::new(vec![def("writer"), def("reviewer")]);
+        let fake = Arc::new(FakeSampler::new(Sample {
+            cpu_seconds: Some(0.001),
+            rss_bytes: Some(4096),
+            fd_count: Some(3),
+        }));
+        let monitor = Arc::new(ResourceMonitor::new(
+            fake as Arc<dyn crate::resource_monitor::Sampler>,
+            std::time::Duration::from_millis(20),
+        ));
+        BackgroundAgentRegistry::with_monitor(orch, defs, monitor)
     }
 
     #[tokio::test]
@@ -421,5 +523,74 @@ mod tests {
         assert!(
             matches!(completed, Event::BackgroundAgentCompleted { id: ev_id, .. } if ev_id == id),
         );
+    }
+
+    // F-152: end-to-end wiring — spawning a background agent must produce
+    // `Event::ResourceSample` on the registry's event bus. This pins the
+    // integration that connects the sampler to the webview-facing stream.
+
+    #[tokio::test]
+    async fn start_drives_resource_samples_onto_the_registry_event_bus() {
+        let reg = fresh_with_fast_monitor().await;
+        let mut rx = reg.events();
+        let id = reg.start("writer", Arc::from("p")).await.unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut saw_sample = false;
+        while std::time::Instant::now() < deadline {
+            let next = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
+            match next {
+                Ok(Ok(Event::ResourceSample { instance_id, .. })) if instance_id == id => {
+                    saw_sample = true;
+                    break;
+                }
+                Ok(Ok(_other)) => continue,
+                Ok(Err(_)) => break,
+                Err(_elapsed) => continue,
+            }
+        }
+        assert!(
+            saw_sample,
+            "registry event bus must surface ResourceSample after start"
+        );
+    }
+
+    #[tokio::test]
+    async fn termination_stops_sample_emission_for_that_id() {
+        // After the orchestrator drives an instance to terminal, the
+        // `untrack(id)` side-effect in the forwarder must stop any further
+        // `ResourceSample` events for that id. Any sample observed after a
+        // wait window past completion fails the invariant.
+        let reg = fresh_with_fast_monitor().await;
+        let mut rx = reg.events();
+        let id = reg.start("writer", Arc::from("p")).await.unwrap();
+
+        // Wait for at least one resource sample so we know the sampler is live.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await {
+                Ok(Ok(Event::ResourceSample { instance_id, .. })) if instance_id == id => break,
+                _ => continue,
+            }
+        }
+
+        reg.orchestrator().stop(&id).await.unwrap();
+        // Let the forwarder's `monitor.untrack(id)` land before draining.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Drain anything already queued.
+        while rx.try_recv().is_ok() {}
+        // Now sample for 200ms more — no ResourceSample for `id` should
+        // arrive. Samples for other ids are fine (there are none in this
+        // test, but the assertion tolerates them anyway).
+        let post_deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        while std::time::Instant::now() < post_deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await {
+                Ok(Ok(Event::ResourceSample { instance_id, .. })) if instance_id == id => {
+                    panic!("untrack failed: ResourceSample arrived after termination");
+                }
+                _ => continue,
+            }
+        }
     }
 }

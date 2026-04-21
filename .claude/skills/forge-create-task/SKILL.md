@@ -7,23 +7,19 @@ description: Use when you need to add a new task to the Forge backlog — create
 
 ## Overview
 
-New tasks are GitHub Issues with a consistent format: `[F-NNN] <title>`, a **Scope** section, and a **Definition of Done** checklist. Use the next available F-number.
+New tasks are GitHub Issues with a consistent format: `[F-NNN] <title>`, a **Scope** section, and a **Definition of Done** checklist. The F-number matches the GitHub-assigned issue number; since GitHub assigns numbers, capture the assigned number from the create-command output and rewrite the title to match.
+
+**Do not** precompute the next F-number with `gh issue list ... | max + 1`. Issues and PRs share GitHub's number sequence, but `gh issue list` only returns issues — so the formula is systematically wrong whenever any PR has been opened since the last issue, and also stale against any activity between lookup and create.
 
 ## Steps
 
-1. **Find the next issue number**
+1. **Choose the right milestone and type label** (see tables below)
+
+2. **Create the issue with an `[F-TBD]` placeholder title**
 
 ```bash
-gh issue list --repo forge-ide/forge --state all --json number --jq '[.[].number] | max + 1'
-```
-
-2. **Choose the right milestone and type label** (see tables below)
-
-3. **Create the issue**
-
-```bash
-gh issue create \
-  --title "[F-NNN] <short imperative title>" \
+URL=$(gh issue create \
+  --title "[F-TBD] <short imperative title>" \
   --milestone "<Phase N: Title>" \
   --label "type: feat" \
   --repo forge-ide/forge \
@@ -38,8 +34,21 @@ gh issue create \
 - [ ] <Another criterion>
 - [ ] Tests pass in CI
 EOF
-)"
+)")
 ```
+
+3. **Extract the assigned number and rewrite the title**
+
+```bash
+NUM=$(basename "$URL")
+gh issue edit "$NUM" --repo forge-ide/forge \
+  --title "[F-$NUM] <short imperative title>"
+echo "Filed F-$NUM: $URL"
+```
+
+### Cross-referencing other issues
+
+If the body needs to reference another issue by F-number, file that issue first so you know its real number. Do not self-reference the issue's own F-number in its body — the body is written before the number is known.
 
 ## Issue Format Rules
 

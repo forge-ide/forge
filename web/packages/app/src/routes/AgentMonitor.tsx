@@ -89,6 +89,17 @@ export interface AgentInspectorData {
   };
 }
 
+/** Per-instance resource-sample snapshot folded from F-152
+ * `Event::ResourceSample`. Stored in the live state map so the Inspector's
+ * cpu / rss / fds pills read the most recent value. `null` fields in the
+ * wire payload survive as `undefined` here so the pill renders the `—`
+ * placeholder the design calls out. */
+export interface ResourceSnapshot {
+  cpu?: number;
+  rss?: number;
+  fds?: number;
+}
+
 // ---------------------------------------------------------------------------
 // Filter + sort
 // ---------------------------------------------------------------------------
@@ -144,6 +155,10 @@ interface InternalAgentState {
 export interface LiveAgentState {
   subAgents: AgentRow[];
   stepsByAgent: Record<string, AgentStep[]>;
+  /** F-152: most recent resource sample per instance id. Undefined keys
+   * render as `—` pills in the Inspector. A completion event clears the
+   * entry so the pills reset automatically. */
+  resourcesByAgent: Record<string, ResourceSnapshot>;
 }
 
 /**
@@ -225,6 +240,7 @@ export function applyEventToState(
     };
     const existing = prev.stepsByAgent[agentId] ?? [];
     return {
+      ...prev,
       subAgents,
       stepsByAgent: { ...prev.stepsByAgent, [agentId]: [...existing, newStep] },
     };
@@ -270,8 +286,42 @@ export function applyEventToState(
       changed = true;
       return { ...r, state: 'done' as AgentRowState, progress: 1 };
     });
-    if (!changed) return prev;
-    return { ...prev, subAgents: nextSubAgents };
+    // F-152: clearing the resources map entry on terminal transition is
+    // the mechanism behind "pills clear back to '—' when the instance
+    // terminates" — the inspector reads from this map and an absent key
+    // resolves to undefined → dash.
+    const hadResources = id in prev.resourcesByAgent;
+    if (!changed && !hadResources) return prev;
+    let nextResources = prev.resourcesByAgent;
+    if (hadResources) {
+      const { [id]: _cleared, ...rest } = prev.resourcesByAgent;
+      nextResources = rest;
+    }
+    return {
+      ...prev,
+      subAgents: changed ? nextSubAgents : prev.subAgents,
+      resourcesByAgent: nextResources,
+    };
+  }
+
+  if (type === 'resource_sample') {
+    // F-152: fold the sampler's per-instance emission into the live
+    // resources map. Missing fields (Option<None> on the Rust side) arrive
+    // as `null` on the wire; they're preserved as `undefined` here so the
+    // pill renders the `—` placeholder without falsely reading as zero.
+    const instanceId = ev['instance_id'];
+    if (typeof instanceId !== 'string') return prev;
+    const snapshot: ResourceSnapshot = {};
+    const cpu = ev['cpu_pct'];
+    if (typeof cpu === 'number') snapshot.cpu = cpu;
+    const rss = ev['rss_bytes'];
+    if (typeof rss === 'number') snapshot.rss = rss;
+    const fds = ev['fd_count'];
+    if (typeof fds === 'number') snapshot.fds = fds;
+    return {
+      ...prev,
+      resourcesByAgent: { ...prev.resourcesByAgent, [instanceId]: snapshot },
+    };
   }
 
   return prev;
@@ -661,13 +711,35 @@ export async function stopAgentInstance(
   }
 }
 
-/** Inspector stub — real data lands when the backend exposes def metadata. */
-function inspectorStub(row: AgentRow): AgentInspectorData {
+/** Inspector stub — real data lands when the backend exposes def metadata.
+ *
+ * F-152: the `resources` field accepts the live snapshot from
+ * `resourcesByAgent` so the pills show real sampler output instead of
+ * placeholder dashes. Passing `undefined` preserves pre-F-152 behavior
+ * (pills show `—`), which is exactly what happens when an instance is
+ * untracked or terminated.
+ *
+ * The snapshot carries `rss` in bytes (Rust wire shape `rss_bytes`); the
+ * pill renders the label "MB", so we divide by 1024*1024 here to keep the
+ * display units honest. `cpu` is already a percent (0..=100); `fds` is a
+ * raw count.
+ */
+export function inspectorStub(
+  row: AgentRow,
+  resources?: ResourceSnapshot,
+): AgentInspectorData {
   const data: AgentInspectorData = {
     allowedTools: [],
     allowedPaths: [],
     resources: {},
   };
+  if (resources) {
+    if (resources.cpu !== undefined) data.resources.cpu = resources.cpu;
+    if (resources.rss !== undefined) {
+      data.resources.rss = Math.round(resources.rss / (1024 * 1024));
+    }
+    if (resources.fds !== undefined) data.resources.fds = resources.fds;
+  }
   if (row.model) data.model = row.model;
   return data;
 }
@@ -695,6 +767,11 @@ export const AgentMonitor: Component = () => {
   // hardcoded placeholder competing with the live id.
   const [subAgents, setSubAgents] = createSignal<AgentRow[]>([]);
   const [stepsByAgent, setStepsByAgent] = createSignal<Record<string, AgentStep[]>>({});
+  // F-152: per-instance cpu / rss / fds folded from `resource_sample`
+  // events. A completion event clears the entry so the pills reset.
+  const [resourcesByAgent, setResourcesByAgent] = createSignal<
+    Record<string, ResourceSnapshot>
+  >({});
 
   const rows = createMemo<AgentRow[]>(() => [
     ...bgAgents().map(toBgRow),
@@ -717,11 +794,15 @@ export const AgentMonitor: Component = () => {
     const snapshot: LiveAgentState = {
       subAgents: subAgents(),
       stepsByAgent: stepsByAgent(),
+      resourcesByAgent: resourcesByAgent(),
     };
     const next = applyEventToState(snapshot, payload);
     if (next === snapshot) return;
     if (next.subAgents !== snapshot.subAgents) setSubAgents(next.subAgents);
     if (next.stepsByAgent !== snapshot.stepsByAgent) setStepsByAgent(next.stepsByAgent);
+    if (next.resourcesByAgent !== snapshot.resourcesByAgent) {
+      setResourcesByAgent(next.resourcesByAgent);
+    }
   }
 
   // Auto-select the session root so the trace column isn't empty on mount.
@@ -754,7 +835,9 @@ export const AgentMonitor: Component = () => {
   });
   const inspector = createMemo<AgentInspectorData | null>(() => {
     const row = selected();
-    return row ? inspectorStub(row) : null;
+    if (!row) return null;
+    const resources = resourcesByAgent()[row.id];
+    return inspectorStub(row, resources);
   });
 
   const onStop = async (id: string) => {

@@ -85,11 +85,23 @@ jobs:
       - name: Rust clippy — forge-term ghostty-vt feature
         run: cargo clippy -p forge-term --features ghostty-vt --all-targets -- -D warnings
 
+      # F-155: build the forge-mcp fixture binary so the `ipc_mcp.rs`
+      # running-session test can exercise a real MCP subprocess under the
+      # webview-test run. `forge-mcp-mock-stdio` is declared `test = false,
+      # doc = false` in forge-mcp's manifest — cargo will not build it as
+      # a side effect of `cargo test -p forge-shell`. Without this step
+      # the test silently skips (it returns early when the path is
+      # absent) and the DoD's running-session correctness assertion
+      # never runs in CI.
+      - name: Build forge-mcp-mock-stdio for running-session test
+        run: cargo build -p forge-mcp --bin forge-mcp-mock-stdio
+
       # Tauri webview integration tests (F-020 / F-051 / F-068 / F-069 /
-      # F-036 / F-125). Gated on the `webview-test` feature so the pure-Rust
-      # suite above can run on hosts without WebKitGTK; CI runners have the
-      # Tauri system deps installed earlier in this job, so enabling the
-      # feature here lights up these integration tests as a separate step.
+      # F-036 / F-125 / F-155). Gated on the `webview-test` feature so the
+      # pure-Rust suite above can run on hosts without WebKitGTK; CI runners
+      # have the Tauri system deps installed earlier in this job, so
+      # enabling the feature here lights up these integration tests as a
+      # separate step.
       - name: Rust webview integration tests
         run: just test-rust-webview
 
@@ -107,6 +119,102 @@ jobs:
 
       - name: Check TS bindings are up to date
         run: just ts-check
+
+  # F-158: parallel macOS CI job mirroring the Linux `check` above.
+  # Closes the dual-platform gap F-146 (zig install) and F-156 (macOS
+  # resource sampler) assumed. `macos-latest` is Apple Silicon (arm64)
+  # as of 2026; `wry` bundles WebKit.framework, so no apt-style system
+  # deps are needed — the Linux-only "Install Tauri system
+  # dependencies" step has no counterpart here. `cargo deny` and
+  # `ts-check` also run Linux-side only; both are platform-independent
+  # and running them twice adds cost without signal.
+  check-macos:
+    name: Check (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # F-146: libghostty-vt-sys vendor-fetches the Ghostty C sources and
+      # compiles them via zig at build time. Same zig version as Linux so
+      # both platforms exercise the identical VT state authority.
+      - name: Install zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Enable pnpm via corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@9.12.0 --activate
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      - name: Install web workspace deps
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web app (Tauri frontendDist)
+        working-directory: web
+        run: pnpm --filter app build
+
+      - name: Rust checks (fmt, cargo check, clippy, rustdoc)
+        run: just check-rust
+
+      # Temporary override for the F-158 fallout sweep: `--no-fail-fast`
+      # so a single macOS CI run surfaces every cross-platform regression
+      # at once (instead of stopping at the first failing test binary,
+      # which forced a per-binary PR cascade during F-158). Matches the
+      # flags the Linux `just test-rust` recipe would use otherwise;
+      # remove and restore `just test-rust` once macOS is stably green.
+      - name: Rust tests
+        run: cargo test --all --no-fail-fast
+
+      # F-154: McpManager + stdio transport + real subprocess composition
+      # test. Same serial-single-binary constraint applies on macOS:
+      # tokio's SIGCHLD reaper is a process-wide primitive on every Unix.
+      - name: Rust tests -- McpManager subprocess (serial)
+        run: just test-rust-serial
+
+      - name: Rust tests — forge-term ghostty-vt feature
+        run: cargo test -p forge-term --features ghostty-vt --all-targets --no-fail-fast
+
+      - name: Rust clippy — forge-term ghostty-vt feature
+        run: cargo clippy -p forge-term --features ghostty-vt --all-targets -- -D warnings
+
+      # F-155: same reason as Linux — the running-session webview test
+      # silently skips without this fixture binary on PATH.
+      - name: Build forge-mcp-mock-stdio for running-session test
+        run: cargo build -p forge-mcp --bin forge-mcp-mock-stdio
+
+      # Tauri webview integration tests on macOS use the native
+      # WebKit.framework that `wry` bundles — no system-dep install
+      # needed (unlike Linux, which needs libwebkit2gtk).
+      #
+      # Temporary F-158 override: inlined with `--no-fail-fast` for the
+      # same reason as the earlier `Rust tests` step — restore
+      # `just test-rust-webview` once macOS is stably green.
+      - name: Rust webview integration tests
+        run: cargo test -p forge-shell --features webview-test --no-fail-fast
+
+      # Web lane runs here too so any macOS-specific node/pnpm
+      # regression (native binding resolution, path casing) surfaces on
+      # this PR rather than in a downstream report.
+      - name: Web checks (typecheck + token drift)
+        run: just check-web
+
+      - name: Web tests
+        run: just test-web
 
   frontend:
     name: Frontend
