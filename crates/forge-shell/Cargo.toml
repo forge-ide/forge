@@ -42,6 +42,10 @@ forge-term = { path = "../forge-term" }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 tauri = { version = "2", optional = true , features = [] }
+# F-138: `.plugin(tauri_plugin_notification::init())` powers the OS-notification
+# branch of `notifications.bg_agents`. Gated behind `webview` because the plugin
+# pulls the full Tauri runtime; pure-Rust unit tests build without it.
+tauri-plugin-notification = { version = "2", optional = true }
 tokio = { version = "1", features = ["fs", "net", "io-util", "sync", "time", "rt", "rt-multi-thread", "macros"] }
 # F-151: `set_setting` applies scalar updates against the raw TOML tree of
 # `settings.toml` and round-trips through the canonical serializer to land
@@ -62,7 +66,7 @@ wiremock = "0.6"
 # Disable with `--no-default-features` to run pure-Rust unit tests on a
 # host without WebKitGTK installed.
 default = ["webview"]
-webview = ["dep:tauri", "dep:tauri-build", "dep:png"]
+webview = ["dep:tauri", "dep:tauri-build", "dep:png", "dep:tauri-plugin-notification"]
 # Opt-in feature that activates Tauri's `test` helpers so integration tests
 # can use `tauri::test::mock_builder`. Implies `webview`. Not on by default
 # so production builds don't pull test scaffolding.

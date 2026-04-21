@@ -188,9 +188,17 @@ describe('SessionWindow', () => {
 
   it('detaches the session:event listener on unmount', async () => {
     const { unmount } = renderAt('/session/abc123');
-    await waitFor(() => expect(listenMock).toHaveBeenCalled());
+    // F-138: both the SessionWindow adapter listener and the StatusBar's
+    // bg-agents listener attach to `session:event`. Wait for both before
+    // asserting unlisten counts so a race on whichever resolves last doesn't
+    // under-count.
+    await waitFor(() =>
+      expect(listenMock).toHaveBeenCalledTimes(2),
+    );
     unmount();
-    await waitFor(() => expect(unlistenMock).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(unlistenMock).toHaveBeenCalledTimes(2),
+    );
   });
 
   it('renders exactly one pane slot (no splitter or dock zones)', async () => {
@@ -272,32 +280,43 @@ describe('SessionWindow', () => {
   });
 
   it('routes Rust-shaped session:event payloads through the adapter into the chat pane', async () => {
-    let captured: ((ev: { payload: unknown }) => void) | null = null;
+    // F-138: multiple callers attach listeners (SessionWindow's adapter and
+    // the StatusBar's bg-agents subscriber). Capture every handler so the
+    // test can dispatch to all of them and the adapter path is still
+    // exercised regardless of attachment order.
+    const handlers: Array<(ev: { payload: unknown }) => void> = [];
     listenMock.mockImplementation(async (_name: string, handler: (ev: { payload: unknown }) => void) => {
-      captured = handler;
+      handlers.push(handler);
       return unlistenMock;
     });
 
     const { findByTestId } = renderAt('/session/abc123');
     await findByTestId('chat-pane');
-    await waitFor(() => expect(captured).not.toBeNull());
+    // Both listeners (SessionWindow adapter + StatusBar bg-agents) must be
+    // attached before we dispatch, otherwise the adapter handler can miss
+    // the event that was supposed to reach the chat pane.
+    await waitFor(() => expect(handlers.length).toBeGreaterThanOrEqual(2));
 
     // Fire a real Rust-shaped user_message event — the adapter must rename
     // id → message_id and discriminate on kind so the store renders it.
-    captured!({
-      payload: {
-        session_id: 'abc123',
-        seq: 1,
-        event: {
-          type: 'user_message',
-          id: 'u-wire-1',
-          at: '2026-04-18T10:00:00Z',
-          text: 'hello from the wire',
-          context: [],
-          branch_parent: null,
+    // Fan out to every attached handler; the bg-agents subscriber
+    // classifies this as a non-bg event and ignores it.
+    for (const h of handlers) {
+      h({
+        payload: {
+          session_id: 'abc123',
+          seq: 1,
+          event: {
+            type: 'user_message',
+            id: 'u-wire-1',
+            at: '2026-04-18T10:00:00Z',
+            text: 'hello from the wire',
+            context: [],
+            branch_parent: null,
+          },
         },
-      },
-    });
+      });
+    }
 
     const list = await findByTestId('message-list');
     await waitFor(() => expect(list.textContent).toContain('hello from the wire'));

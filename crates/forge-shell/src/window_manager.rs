@@ -62,6 +62,12 @@ impl<R: Runtime> WindowManager<R> {
 /// session IPC bridge + dashboard commands, and opens the Dashboard on setup.
 pub fn run() -> Result<()> {
     tauri::Builder::default()
+        // F-138: OS-notification branch of `notifications.bg_agents`.
+        // `.plugin(init())` registers `plugin:notification|*` commands that
+        // the webview calls via `@tauri-apps/plugin-notification`. The
+        // capability file grants the browser-facing permissions; see
+        // `crates/forge-shell/capabilities/default.json`.
+        .plugin(tauri_plugin_notification::init())
         .manage(ProviderStatusCache::new(CACHE_TTL))
         .invoke_handler(tauri::generate_handler![
             dashboard::provider_status,
@@ -85,11 +91,34 @@ pub fn run() -> Result<()> {
             crate::ipc::lsp_start,
             crate::ipc::lsp_stop,
             crate::ipc::lsp_send,
+            // F-137: background-agent lifecycle commands. Registered here
+            // alongside F-138's `stop_background_agent` so the shell binary
+            // exposes the full quartet in production. Tests reach the same
+            // commands through `build_invoke_handler` in `ipc.rs`; until this
+            // list is deduplicated against that helper, both call sites must
+            // be updated in lockstep.
+            crate::ipc::start_background_agent,
+            crate::ipc::promote_background_agent,
+            crate::ipc::list_background_agents,
+            // F-138: stop completes the quartet.
+            crate::ipc::stop_background_agent,
+            // F-151: persistent settings store. Required by F-138's
+            // `notifications.bg_agents` read; without it, `getSettings`
+            // fails and the status-bar notification handler falls back to
+            // the default `toast` mode.
+            crate::ipc::get_settings,
+            crate::ipc::set_setting,
         ])
         .setup(|app| {
             crate::ipc::manage_bridge(&app.handle().clone());
             crate::ipc::manage_terminals(&app.handle().clone());
             crate::ipc::manage_lsp(&app.handle().clone());
+            // F-137 / F-138: background-agent lifecycle state. Each session's
+            // `BackgroundAgentRegistry` is lazily populated by
+            // `resolve_bg_session` on first invoke; the state container has
+            // to be managed up-front so the `State<'_, BgAgentState>` extractor
+            // on each command doesn't panic.
+            crate::ipc::manage_bg_agents(&app.handle().clone());
             let manager = WindowManager::new(app.handle().clone());
             manager.open_dashboard()?;
             Ok(())

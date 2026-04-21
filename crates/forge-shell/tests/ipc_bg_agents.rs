@@ -194,6 +194,30 @@ fn cross_session_promote_is_rejected_with_label_mismatch() {
     );
 }
 
+#[test]
+fn cross_session_stop_is_rejected_with_label_mismatch() {
+    // F-138: session-A webview must not stop session-B's background agents.
+    // Authz fires before `orchestrator.stop`, so we see LABEL_MISMATCH rather
+    // than a "missing registry" fall-through.
+    let app = make_app();
+    install_registry(&app, "session-B");
+    let window = make_window(&app, "session-A");
+
+    let err = invoke(
+        &window,
+        "stop_background_agent",
+        serde_json::json!({
+            "sessionId": "session-B",
+            "instanceId": "deadbeefcafebabe",
+        }),
+    )
+    .expect_err("session-A must not stop session-B's agents");
+    assert!(
+        err.contains(LABEL_MISMATCH),
+        "expected label-mismatch error, got: {err}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // DoD: start + list + completion event forwarding + promote round trip.
 // ---------------------------------------------------------------------------
@@ -447,6 +471,118 @@ fn promote_removes_from_list_without_stopping_underlying_instance() {
     assert!(
         still_alive.is_some(),
         "promote must not stop the orchestrator instance — UX re-attribution only"
+    );
+}
+
+/// F-138: `stop_background_agent` drives `Orchestrator::stop(id)` through the
+/// registry. Because the registry's forwarder already converts a terminal
+/// lifecycle event into `BackgroundAgentCompleted` and drops the id from the
+/// tracked set, a successful stop must (a) return Ok, (b) emit the
+/// `background_agent_completed` event on `session:event`, and (c) drop the id
+/// from `list_background_agents`.
+#[tokio::test(flavor = "multi_thread")]
+async fn stop_completes_instance_and_emits_completion_event() {
+    use std::sync::Mutex;
+
+    let app = make_app();
+    install_registry(&app, "sess-stop");
+    let window = make_window(&app, "session-sess-stop");
+
+    let collected: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let saw_completed: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+    let collected_ev = Arc::clone(&collected);
+    let completed_flag = Arc::clone(&saw_completed);
+    let _listener = window.listen("session:event", move |ev| {
+        let payload: Value = match serde_json::from_str(ev.payload()) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        if payload["event"]["type"] == "background_agent_completed" {
+            *completed_flag.lock().unwrap() = true;
+        }
+        collected_ev.lock().unwrap().push(payload);
+    });
+
+    let start_res = invoke(
+        &window,
+        "start_background_agent",
+        serde_json::json!({
+            "sessionId": "sess-stop",
+            "agentName": "writer",
+            "prompt": "keep working",
+        }),
+    )
+    .expect("start must succeed");
+    let instance_id = start_res
+        .deserialize::<serde_json::Value>()
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    invoke(
+        &window,
+        "stop_background_agent",
+        serde_json::json!({
+            "sessionId": "sess-stop",
+            "instanceId": instance_id.clone(),
+        }),
+    )
+    .expect("stop must succeed under matching label");
+
+    // Poll for the completion event (two broadcast hops need to drain).
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if *saw_completed.lock().unwrap() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let events = collected.lock().unwrap().clone();
+    let saw = events.iter().any(|p| {
+        p["event"]["type"] == "background_agent_completed"
+            && p["event"]["id"].as_str() == Some(instance_id.as_str())
+    });
+    assert!(
+        saw,
+        "stop_background_agent must fan out BackgroundAgentCompleted on session:event; got: {events:?}"
+    );
+
+    // list must no longer surface the id — the registry's forwarder drops it
+    // when it observes the orchestrator's terminal event.
+    let list_res = invoke(
+        &window,
+        "list_background_agents",
+        serde_json::json!({ "sessionId": "sess-stop" }),
+    )
+    .expect("list must succeed post-stop");
+    let rows: serde_json::Value = list_res.deserialize().unwrap();
+    assert_eq!(
+        rows.as_array().unwrap().len(),
+        0,
+        "stopped agent must drop from list, got: {rows}"
+    );
+}
+
+#[test]
+fn stop_rejects_oversize_instance_id_at_command_layer() {
+    let app = make_app();
+    install_registry(&app, "sess-stop-oversize");
+    let window = make_window(&app, "session-sess-stop-oversize");
+
+    let err = invoke(
+        &window,
+        "stop_background_agent",
+        serde_json::json!({
+            "sessionId": "sess-stop-oversize",
+            "instanceId": "A".repeat(1024),
+        }),
+    )
+    .expect_err("oversize instance_id must be rejected by the size gate");
+    assert!(
+        err.contains("payload too large") && err.contains("instance_id"),
+        "expected size-cap error mentioning instance_id, got: {err}"
     );
 }
 
