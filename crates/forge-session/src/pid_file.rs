@@ -1,18 +1,20 @@
-//! `forged`'s pid-file lifecycle (F-049).
+//! `forged`'s pid-file lifecycle (F-049, cross-platform via F-338).
 //!
 //! Persistent-mode `forged` owns the pid file pointed at by
 //! `$FORGE_PID_FILE`. It writes `"<pid>\n<start_time>\n"` atomically via
 //! `O_EXCL` (so a leftover file from a crashed prior run cannot be
 //! silently clobbered), and removes the file on clean shutdown.
 //!
-//! The start-time field is `/proc/self/stat` field 22, which `forge-cli`'s
-//! `session_kill` uses to detect kernel PID reuse before signalling.
+//! The start-time field is an opaque, platform-dependent `u64` produced
+//! by [`crate::starttime::read_self_starttime`]; `forge-cli`'s
+//! `session_kill` uses it to detect kernel PID reuse before signalling.
 //! See `forge_cli::socket::{parse_pid_file_record, kill_session_from_pid_file}`.
 //!
 //! Ephemeral `forged` does not write a pid file — it's spawned by
 //! `forge run agent` whose wait is synchronous, so there is no external
 //! caller that would need to locate its pid.
 
+use crate::starttime::read_self_starttime;
 use anyhow::{Context, Result};
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -32,8 +34,8 @@ impl OwnedPidFile {
     pub fn create(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         let pid = std::process::id() as libc::pid_t;
-        let start_time =
-            read_self_starttime().context("failed to read /proc/self/stat for pid-file record")?;
+        let start_time = read_self_starttime()
+            .context("failed to read process start-time for pid-file record")?;
         let contents = format!("{pid}\n{start_time}\n");
 
         if let Some(parent) = path.parent() {
@@ -73,35 +75,14 @@ impl Drop for OwnedPidFile {
     }
 }
 
-/// Read `/proc/self/stat` and return field 22 (start-time in clock ticks
-/// since boot). Separate from `forge_cli::socket::read_process_starttime`
-/// because that helper targets an arbitrary pid; `forged` can take the
-/// fast path of `/proc/self/stat` and avoid re-parsing its own pid.
-fn read_self_starttime() -> Result<u64> {
-    let contents = std::fs::read_to_string("/proc/self/stat").context("read /proc/self/stat")?;
-    parse_proc_stat_starttime(&contents)
-}
-
-/// Extract field 22 (`starttime`) from a `/proc/<pid>/stat` line.
-///
-/// Mirrors `forge_cli::socket::parse_proc_stat_starttime`. Duplicated
-/// here to avoid a forge-cli -> forge-session dep in production code;
-/// the two implementations are tested against each other in the
-/// `pid_file_lifecycle` integration test.
-fn parse_proc_stat_starttime(line: &str) -> Result<u64> {
-    let close = line
-        .rfind(')')
-        .ok_or_else(|| anyhow::anyhow!("malformed /proc/self/stat: no closing paren"))?;
-    let tail = &line[close + 1..];
-    let st = tail
-        .split_ascii_whitespace()
-        .nth(19)
-        .ok_or_else(|| anyhow::anyhow!("malformed /proc/self/stat: not enough fields"))?;
-    st.parse::<u64>()
-        .map_err(|_| anyhow::anyhow!("invalid starttime field: {st:?}"))
-}
-
-#[cfg(all(test, target_os = "linux"))]
+// Unit tests exercise the pid-file lifecycle (create / O_EXCL refusal /
+// drop-removes-file). They are platform-agnostic now that the start-time
+// probe lives behind `crate::starttime::read_self_starttime` (F-338), so
+// the unit-gate introduced by #333 (`target_os = "linux"`-only) has been
+// lifted. The parser-level tests that used to live here moved into
+// `crate::starttime::linux::tests` because only the Linux probe parses
+// text — macOS/Windows go through FFI.
+#[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
@@ -144,18 +125,37 @@ mod tests {
         assert!(!p.exists(), "pid file must be removed on drop");
     }
 
+    /// F-338: macOS-specific end-to-end coverage of the pid-file
+    /// lifecycle on the cross-platform starttime path. The generic
+    /// lifecycle tests above already run on macOS now (the unit gate
+    /// from #333 is lifted), but this test pins the macOS-specific DoD
+    /// item: "returns a usable record on macOS". Asserts the recorded
+    /// start-time is a plausible microseconds-since-epoch value from
+    /// libproc (non-zero, > 10^15 so it can't collide with a Linux
+    /// clock-ticks value that's always < 10^12 even after a century
+    /// uptime). Keeps the invariant readable for future maintainers.
+    #[cfg(target_os = "macos")]
     #[test]
-    fn parses_self_stat_field_22() {
-        let line = "1 (init) S 0 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 7 0 0 0 0 0 0 0";
-        let st = parse_proc_stat_starttime(line).expect("parses");
-        assert_eq!(st, 7);
-    }
-
-    #[test]
-    fn parses_comm_with_spaces() {
-        let line =
-            "1234 (weird (comm) name) S 1 0 0 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 98765 0 0 0 0 0";
-        let st = parse_proc_stat_starttime(line).expect("parses comm with parens");
-        assert_eq!(st, 98765);
+    fn create_records_macos_style_starttime() {
+        let td = TempDir::new().unwrap();
+        let p = td.path().join("session.pid");
+        let _owned = OwnedPidFile::create(&p).expect("create");
+        let raw = std::fs::read_to_string(&p).expect("read");
+        let mut lines = raw.lines();
+        let _pid = lines.next().expect("pid");
+        let st: u64 = lines
+            .next()
+            .expect("starttime")
+            .parse()
+            .expect("starttime int");
+        // libproc returns microseconds-since-epoch. At 2026-04-21 the
+        // value is ~1.77e15 (any live process). 10^15 is the smallest
+        // value that cleanly falls outside the Linux /proc/self/stat
+        // clock-ticks range (< 10^12 for any realistic uptime × HZ),
+        // so this threshold documents the platform-shape difference.
+        assert!(
+            st > 1_000_000_000_000_000,
+            "macOS start-time is microseconds since epoch; got implausibly small value {st}"
+        );
     }
 }
