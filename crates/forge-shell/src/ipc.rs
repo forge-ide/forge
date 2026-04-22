@@ -804,9 +804,8 @@ pub async fn save_approval<R: Runtime>(
         ApprovalLevel::Workspace => {
             // F-349: use the server-side authoritative root, not the
             // webview-supplied value.
-            let root =
-                resolve_workspace_root_for_command(webview.label(), &workspace_root, &state)
-                    .await?;
+            let root = resolve_workspace_root_for_command(webview.label(), &workspace_root, &state)
+                .await?;
             let mut cfg = load_workspace_config(&root)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -843,9 +842,8 @@ pub async fn remove_approval<R: Runtime>(
         ApprovalLevel::Session => Ok(()),
         ApprovalLevel::Workspace => {
             // F-349: use the server-side authoritative root.
-            let root =
-                resolve_workspace_root_for_command(webview.label(), &workspace_root, &state)
-                    .await?;
+            let root = resolve_workspace_root_for_command(webview.label(), &workspace_root, &state)
+                .await?;
             let mut cfg = load_workspace_config(&root)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -2436,9 +2434,8 @@ pub async fn set_setting<R: Runtime>(
     match level {
         SettingsLevel::Workspace => {
             // F-349: resolve the authoritative workspace root.
-            let root =
-                resolve_workspace_root_for_command(webview.label(), &workspace_root, &state)
-                    .await?;
+            let root = resolve_workspace_root_for_command(webview.label(), &workspace_root, &state)
+                .await?;
             let path = workspace_settings_path(&root);
             let existing = tokio::fs::read_to_string(&path)
                 .await
