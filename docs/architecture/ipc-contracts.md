@@ -80,8 +80,8 @@ Output bytes flow back via the `terminal:bytes` Tauri event (see §4.1 events).
 
 | Command | Args | Response | Authz |
 |---------|------|----------|-------|
-| `read_layouts` | `workspace_root: String` | `Layouts { active, named: HashMap<String, Layout> }` | `dashboard` |
-| `write_layouts` | `workspace_root: String, layouts: Layouts` | `()` | `dashboard` |
+| `read_layouts` | `workspace_root: String` | `Layouts { active, named: HashMap<String, Layout> }` | `dashboard + session-*` |
+| `write_layouts` | `workspace_root: String, layouts: Layouts` | `()` | `dashboard + session-*` |
 
 **Filesystem** (F-126 / F-143 / F-150) — session-scoped and routed through the session daemon so edits stay inside the sandboxed workspace root:
 
