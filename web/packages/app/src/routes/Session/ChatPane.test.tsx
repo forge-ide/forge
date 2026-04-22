@@ -42,6 +42,30 @@ describe('ChatPane rendering', () => {
     expect(getByTestId('composer-textarea')).toBeInTheDocument();
   });
 
+  // F-415: fresh-session mount renders the empty-state placeholder inside
+  // the message list so the composer isn't floating alone in a blank pane.
+  // Copy matches the canonical `// noun-phrase` form from voice-terminology
+  // §8 / ai-patterns §"Interaction states".
+  it('renders the fresh-session empty-state placeholder when no turns exist', () => {
+    const { getByTestId } = render(() => <ChatPane />);
+    const placeholder = getByTestId('chat-pane-empty-state');
+    expect(placeholder).toBeInTheDocument();
+    expect(placeholder).toHaveTextContent('// composer ready');
+  });
+
+  it('hides the empty-state placeholder once the first turn arrives', () => {
+    const { getByTestId, queryByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('chat-pane-empty-state')).toBeInTheDocument();
+    pushEvent(SID, { kind: 'UserMessage', text: 'First!', message_id: 'u0' });
+    expect(queryByTestId('chat-pane-empty-state')).not.toBeInTheDocument();
+  });
+
+  it('hides the empty-state placeholder while awaiting a response', () => {
+    setAwaitingResponse(SID, true);
+    const { queryByTestId } = render(() => <ChatPane />);
+    expect(queryByTestId('chat-pane-empty-state')).not.toBeInTheDocument();
+  });
+
   it('renders a user message turn', () => {
     pushEvent(SID, { kind: 'UserMessage', text: 'Hello world', message_id: 'u1' });
     const { getByText } = render(() => <ChatPane />);

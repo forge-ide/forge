@@ -1067,6 +1067,15 @@ export const ChatPane: Component<ChatPaneProps> = (props) => {
         ref={listRef}
         onScroll={handleListScroll}
       >
+        {/* F-415: fresh-session mount placeholder. Shown while the list has
+            no visible turns AND we aren't already awaiting a response (the
+            streaming indicator owns that state). Canonical `// noun-phrase`
+            form from voice-terminology §8 / ai-patterns §"Interaction states". */}
+        <Show when={visibleTurns().length === 0 && !state().awaitingResponse}>
+          <p class="chat-pane__empty" data-testid="chat-pane-empty-state">
+            // composer ready
+          </p>
+        </Show>
         <For each={visibleTurns()}>
           {(turn) => {
             switch (turn.type) {

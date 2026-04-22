@@ -47,6 +47,8 @@
 - Composer ctx chip row can scroll horizontally instead of wrapping
 - Cost meter in header collapses to `$<cost>` only; tokens appear in a tooltip
 
+**Empty state (fresh-session mount).** When the message list has no visible turns and no response is in flight, the body renders a single comment-syntax placeholder — `// composer ready` — in mono 11px `iron-300`, matching the canonical empty-state treatment (voice-terminology §8, ai-patterns §"Interaction states"). The placeholder lives inside the message list container so it flows with existing padding and is replaced the moment the first turn arrives. It is suppressed whenever `awaitingResponse` is true — the streaming indicator owns that state.
+
 ### 4.1 Composer
 
 **Size.** Auto-sized to content, min-height ~94px collapsed, max 40% of pane height before scrolling.

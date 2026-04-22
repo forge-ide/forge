@@ -51,6 +51,17 @@
   gap: var(--sp-5);
 }
 
+/* F-415: fresh-session empty-state placeholder. Matches the canonical
+   comment-syntax treatment used by `.sessions__empty` and
+   `.agent-monitor__empty` — mono 11px, iron-300 (text-tertiary), no
+   illustration. */
+.chat-pane__empty {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin: 0;
+}
+
 /* -------------------------------------------------------------------------
    Turn bubbles
    ---------------------------------------------------------------------- */
