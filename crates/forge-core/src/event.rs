@@ -125,10 +125,22 @@ pub enum Event {
         duration_ms: u64,
         at: DateTime<Utc>,
     },
+    /// F-136 / F-448: orchestrator spawned a sub-agent.
+    ///
+    /// Phase-3 additions (F-448): optional `model` and `tool_count` feed the
+    /// banner's header chips on the webview side. Both are `Option<_>` +
+    /// `skip_serializing_if = "Option::is_none"` so absent values roundtrip
+    /// as the Phase-2 wire shape (no new keys) and the UI hides the chip.
+    /// When `Some`, they serialize as `model: "..."` / `tool_count: <int>`
+    /// alongside the existing `parent`/`child`/`from_msg` triple.
     SubAgentSpawned {
         parent: AgentInstanceId,
         child: AgentInstanceId,
         from_msg: MessageId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_count: Option<u32>,
     },
     BackgroundAgentStarted {
         id: AgentInstanceId,

@@ -556,5 +556,36 @@ describe('messages store', () => {
       pushEvent(SID, { kind: 'BackgroundAgentCompleted', instance_id: 'nobody' });
       expect(getMessagesState(SID).turns).toHaveLength(0);
     });
+
+    // F-448 Phase 3: optional model / tool_count fields flow from the wire
+    // event onto the banner turn. Omitted fields leave the turn fields
+    // `undefined` so the component can hide chips cleanly.
+    it('carries model + tool_count onto the banner turn when the event provides them', () => {
+      pushEvent(SID, {
+        kind: 'SubAgentSpawned',
+        parent_instance_id: 'p',
+        child_instance_id: 'c-enriched',
+        from_msg: 'm',
+        model: 'sonnet-4.5',
+        tool_count: 4,
+      });
+      const turn = getMessagesState(SID).turns[0]!;
+      if (turn.type !== 'sub_agent_banner') throw new Error('expected banner');
+      expect(turn.model).toBe('sonnet-4.5');
+      expect(turn.tool_count).toBe(4);
+    });
+
+    it('leaves model / tool_count undefined when the event omits them', () => {
+      pushEvent(SID, {
+        kind: 'SubAgentSpawned',
+        parent_instance_id: 'p',
+        child_instance_id: 'c-bare',
+        from_msg: 'm',
+      });
+      const turn = getMessagesState(SID).turns[0]!;
+      if (turn.type !== 'sub_agent_banner') throw new Error('expected banner');
+      expect(turn.model).toBeUndefined();
+      expect(turn.tool_count).toBeUndefined();
+    });
   });
 });

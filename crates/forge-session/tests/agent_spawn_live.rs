@@ -110,6 +110,7 @@ async fn agent_spawn_from_live_turn_registers_child_and_emits_sub_agent_spawned(
             parent,
             child,
             from_msg,
+            ..
         } = event
         {
             spawned = Some((parent, child, from_msg));

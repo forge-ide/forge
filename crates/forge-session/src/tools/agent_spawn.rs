@@ -19,11 +19,14 @@
 //! only. The follow-up that wires an actual step-executor reads the stored
 //! prompt to materialise the child's first user turn.
 //!
-//! The event wire shape matches the existing `forge_core::Event::SubAgentSpawned
-//! { parent, child, from_msg }` variant — the DoD in issue #248 names a
-//! hypothetical `{ parent_id, child_id, agent_name }` shape that does not
-//! exist in the tree. Adjusting the event variant would ripple through the
-//! `event_wire_shape` regression tests and is deliberately out of scope here.
+//! The event wire shape matches `forge_core::Event::SubAgentSpawned
+//! { parent, child, from_msg, model?, tool_count? }`. The optional
+//! `model`/`tool_count` chip fields were added in F-448 Phase 3 with
+//! `skip_serializing_if = "Option::is_none"` so absent values roundtrip as
+//! the Phase-2 wire shape. The tool emits `None` for both today — `AgentDef`
+//! carries no model field and the dispatcher's tool surface is session-
+//! scoped rather than per-child; the pipe is wired so a follow-up can
+//! populate them without a wire change.
 
 use std::sync::Arc;
 
@@ -131,15 +134,22 @@ impl Tool for AgentSpawnTool {
         };
 
         // Emit the session-level event so replay / UI banners pick up the
-        // spawn. We use the existing `SubAgentSpawned { parent, child,
-        // from_msg }` variant — see module docs for why `agent_name` is
-        // not carried on the event itself.
+        // spawn. F-448 Phase 3 added optional `model` + `tool_count` to the
+        // variant; see module docs for why both are `None` today.
         if let Err(e) = agent_ctx
             .session
             .emit(Event::SubAgentSpawned {
                 parent: agent_ctx.parent_instance_id.clone(),
                 child: instance.id.clone(),
                 from_msg: agent_ctx.current_msg_id.clone(),
+                // F-448 Phase 3: `model` and `tool_count` are wired through
+                // the event variant but `AgentDef` does not carry a model
+                // today and the dispatcher's tool surface is session-wide,
+                // not per-child. Emit `None` until a follow-up teaches
+                // `AgentDef` a `model` field and scopes the tool registry
+                // per instance. The webview hides absent chips cleanly.
+                model: None,
+                tool_count: None,
             })
             .await
         {
@@ -420,6 +430,7 @@ mod tests {
                 parent,
                 child,
                 from_msg: emitted_from,
+                ..
             } = event
             {
                 found = Some((parent, child, emitted_from));
