@@ -21,9 +21,9 @@
 Gridlines are 1px in `--color-border-1`. Dragging resizes in 4px snaps; Alt+drag is unsnapped. Double-clicking a gridline resets to balanced split.
 
 ### 3.2 Pane types
-Three types: `chat`, `terminal`, `editor`. Each pane header shows its type.
+Five types: `chat`, `terminal`, `editor`, `files`, `agentmonitor`. Each pane header shows its type. The authoritative list is the `PaneType` enum in `crates/forge-shell/src/ipc.rs`; see `docs/architecture/session-layout.md §4.1` for the full variant table.
 
-**Files is not a pane type.** The file tree lives in the sidebar (part of the activity-bar-driven shell). `Cmd/Ctrl+Shift+E` toggles the files sidebar.
+The activity-bar sidebar file tree is independent of the `files` pane variant — the sidebar is part of the shell chrome (`Cmd/Ctrl+Shift+E` toggles it), while the `files` pane is a main-area dockable variant for users who want the tree inside the pane grid.
 
 ### 3.3 Pane header (28px)
 - Left: type label in `--label` style (mono xs, uppercase, tracked) — e.g. `CHAT`, `TERMINAL`

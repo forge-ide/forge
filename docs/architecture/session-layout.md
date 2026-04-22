@@ -10,21 +10,23 @@ Sessions use standard editor layout semantics. There is no fixed layout; users c
 
 ### 4.1 Pane types
 
-| Pane type | Purpose |
-|---|---|
-| **Chat** | Agent conversation. Streaming, tool calls inline, sub-agent banners, `@`-context. |
-| **Terminal** | Shell emulation via Ghostty's VT library. Shared or agent-controlled. |
-| **Editor** | Buffer on disk or in memory. Monaco in a webview (see §7). |
+Source of truth: `PaneType` in `crates/forge-shell/src/ipc.rs`. Five variants, persisted on every leaf in `.forge/layouts.json` and carried on the IPC contract. An unknown variant fails deserialization loudly, so a new pane type must land as an enum variant before it can ship.
 
-Files is **not** a pane type. The file tree lives in the sidebar slot (part of the shell), toggleable from the activity bar with `Cmd/Ctrl+Shift+E` to reveal. It never takes a main-pane slot.
+| Pane type | Variant (`pane_type`) | Purpose |
+|---|---|---|
+| **Chat** | `chat` | Agent conversation. Streaming, tool calls inline, sub-agent banners, `@`-context. |
+| **Terminal** | `terminal` | Shell emulation via Ghostty's VT library. Shared or agent-controlled. |
+| **Editor** | `editor` | Buffer on disk or in memory. Monaco in a webview (see §7). |
+| **Files** | `files` | File tree surfaced as a main-area pane. Distinct from the activity-bar sidebar file tree — the sidebar remains the primary entry point (toggle: `Cmd/Ctrl+Shift+E`); this variant exists for users who want the tree docked inside the pane grid. |
+| **Agent monitor** | `agentmonitor` | Three-column agent monitor view (F-140): agent list, trace timeline, inspector. Dockable so multi-agent workflows don't compete with the chat pane for space. |
 
 ### 4.2 Layout rules
 - Standard splits: single, horizontal, vertical, grid
 - No hard cap on pane count — users split as needed
-- Any pane can hold chat, terminal, or editor; pane type is not fixed at creation
+- Any pane can hold any of the five `PaneType` variants; pane type is not fixed at creation
 - Panes can be resized; minimum width 320px (below that, pane header collapses to icons)
 - Drag any pane to any edge of another pane to re-dock (including effectively sidebar-sized positions)
-- Layouts persist per-workspace in `.forge/layouts.json`
+- Layouts persist per-workspace in `.forge/layouts.json`; see §4.1 for the enum that gates what a leaf may hold
 
 ### 4.3 Default layout
 A new session opens with **a single chat pane** filling the main area. When the user opens a file (from the files sidebar, `@`-ref click, or a tool call that reads/edits one), an editor pane opens via a sensible split — first file splits right; subsequent files become tabs in that editor pane.
