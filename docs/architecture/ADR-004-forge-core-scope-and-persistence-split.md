@@ -9,12 +9,12 @@
 
 `crates/forge-core` is the declared dependency root for every other Forge crate. Its original charter (see `crate-architecture.md §3.1`) is narrow: shared types, ids, the `Event` enum, the `ForgeError` type, and cross-crate trait surface. Everything that depends on `forge-core` does so to agree on that vocabulary — not to inherit runtime I/O.
 
-During Phase 2 the crate's surface area grew past that charter. `lib.rs` now exposes thirteen `pub` modules, four of which carry significant TOML / JSONL persistence machinery:
+During Phase 2 the crate's surface area grew past that charter. `lib.rs` exposes nine `pub` modules with five additional private `mod` declarations (fourteen total), four of which carry significant TOML / JSONL persistence machinery:
 
 | Module | Lines | What it owns |
 |---|---|---|
-| `settings.rs` | 736 | TOML atomic-write, deep-merge on raw `toml::Value`, dotted-key update (PR #299 / F-151) |
-| `approvals.rs` | 279 | Two-tier TOML load/save with workspace-wins whole-entry merge (PR #272 / F-036) |
+| `settings.rs` | 702 | TOML atomic-write, deep-merge on raw `toml::Value`, dotted-key update (PR #299 / F-151) |
+| `approvals.rs` | 252 | Two-tier TOML load/save with workspace-wins whole-entry merge (PR #272 / F-036) |
 | `transcript.rs` | 359 | Event-stream filter + `apply_superseded` persistence helper |
 | `event_log.rs` | 284 | Bounded line reader over `events.jsonl` |
 
@@ -25,6 +25,8 @@ The drift matters because `forge-core` is the base of an eight-crate dependency 
 This ADR records the scope boundary `forge-core` is supposed to hold and the phased plan for restoring it. It is written now, before the split lands, so the next contributor who considers adding a persistence helper to `forge-core` has an explicit place to read "not here."
 
 Cross-references: `crate-architecture.md §3.1` (current responsibilities), `persistence.md §7.7, §7.8` (approvals and settings schemas that will follow the split), `ADR-002` (the `McpStateEvent`-in-`forge-core` precedent for "shared types only").
+
+_Inventory snapshot as of commit HEAD at PR submission; see `git log` for drift._
 
 ---
 
