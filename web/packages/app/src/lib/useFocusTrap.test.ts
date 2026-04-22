@@ -12,7 +12,7 @@
 // the onMount/onCleanup lifecycle is observable without mounting a real
 // component.
 
-import { describe, expect, it, beforeEach } from 'vitest';
+import { describe, expect, it, beforeEach, vi } from 'vitest';
 import { createRoot } from 'solid-js';
 import { useFocusTrap } from './useFocusTrap';
 
@@ -131,5 +131,102 @@ describe('useFocusTrap — focus restore', () => {
 
     outside.remove();
     expect(() => dispose()).not.toThrow();
+  });
+});
+
+// F-402-followup: menu path — when the caller is a non-modal popover/menu,
+// opt out of focus-trap semantics by passing `trap: false` and wire dismissal
+// via `onDismiss`. The hook then owns window-level Esc + outside-click
+// handlers, so the host component no longer duplicates that wiring inline.
+describe('useFocusTrap — menu path (trap: false + onDismiss)', () => {
+  it('does not move focus into the container when trap is false', () => {
+    const outside = document.createElement('button');
+    outside.textContent = 'outside';
+    document.body.appendChild(outside);
+    outside.focus();
+
+    const container = makeContainer(['one', 'two']);
+    createRoot(() => {
+      useFocusTrap(() => container, { trap: false, onDismiss: () => {} });
+    });
+
+    // Focus stayed on the trigger; the menu path never steals focus.
+    expect(document.activeElement).toBe(outside);
+  });
+
+  it('fires onDismiss on window-level Escape even when popover is not focused', () => {
+    // Regression: with `trap: false`, Esc must fire regardless of where focus
+    // lives. The host should not need to force-focus the container on open.
+    const outside = document.createElement('button');
+    document.body.appendChild(outside);
+    outside.focus();
+
+    const container = makeContainer(['one']);
+    const onDismiss = vi.fn();
+    createRoot(() => {
+      useFocusTrap(() => container, { trap: false, onDismiss });
+    });
+
+    expect(document.activeElement).toBe(outside);
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it('fires onDismiss on mousedown outside the container', () => {
+    const container = makeContainer(['one']);
+    const onDismiss = vi.fn();
+    createRoot(() => {
+      useFocusTrap(() => container, { trap: false, onDismiss });
+    });
+
+    document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT fire onDismiss on mousedown inside the container', () => {
+    const container = makeContainer(['one']);
+    const onDismiss = vi.fn();
+    createRoot(() => {
+      useFocusTrap(() => container, { trap: false, onDismiss });
+    });
+
+    const inside = container.querySelector<HTMLButtonElement>('[data-label="one"]')!;
+    inside.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    expect(onDismiss).not.toHaveBeenCalled();
+  });
+
+  it('removes window-level listeners on cleanup', () => {
+    const container = makeContainer(['one']);
+    const onDismiss = vi.fn();
+    const dispose = createRoot((disposeFn) => {
+      useFocusTrap(() => container, { trap: false, onDismiss });
+      return disposeFn;
+    });
+
+    dispose();
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    expect(onDismiss).not.toHaveBeenCalled();
+  });
+
+  it('does not install Tab-cycling when trap is false', () => {
+    // The menu path never intercepts Tab — focus should behave exactly as
+    // the browser dictates for whatever happens to be focused.
+    const outside = document.createElement('button');
+    outside.textContent = 'outside';
+    document.body.appendChild(outside);
+    const container = makeContainer(['one']);
+    createRoot(() => {
+      useFocusTrap(() => container, { trap: false, onDismiss: () => {} });
+    });
+
+    const only = container.querySelector<HTMLButtonElement>('[data-label="one"]')!;
+    only.focus();
+    const ev = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    only.dispatchEvent(ev);
+    // In modal/trap mode this would have been prevented (one focusable = first=last);
+    // in menu mode the hook never touches Tab.
+    expect(ev.defaultPrevented).toBe(false);
   });
 });

@@ -1,4 +1,5 @@
-import { type Component, For, Show, createMemo, onCleanup, onMount } from 'solid-js';
+import { type Component, For, Show, createMemo } from 'solid-js';
+import { useFocusTrap } from '../lib/useFocusTrap';
 import './BranchMetadataPopover.css';
 
 /**
@@ -77,32 +78,13 @@ function formatTime(at: string | undefined): string {
 export const BranchMetadataPopover: Component<BranchMetadataPopoverProps> = (props) => {
   const liveCount = createMemo(() => props.variants.length);
 
-  // F-402: this surface is not modal; it is a contextual menu with its own
-  // dismiss affordances (Esc, outside-click). Exposed as role="menu" with
-  // window-level outside-click dismissal.
+  // F-402 / F-402-followup: this surface is not modal; it is a contextual
+  // menu with its own dismissal affordances (Esc, outside-click). The menu
+  // path of useFocusTrap owns both — window-level keydown for Esc (fires
+  // regardless of where focus lives) and document-level mousedown for
+  // outside-click dismissal.
   let rootRef: HTMLDivElement | undefined;
-
-  const handleKey = (e: KeyboardEvent): void => {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      props.onDismiss();
-    }
-  };
-
-  const handleOutsideMouseDown = (e: MouseEvent): void => {
-    if (!rootRef) return;
-    const target = e.target as Node | null;
-    if (target && rootRef.contains(target)) return;
-    props.onDismiss();
-  };
-
-  onMount(() => {
-    document.addEventListener('mousedown', handleOutsideMouseDown);
-  });
-
-  onCleanup(() => {
-    document.removeEventListener('mousedown', handleOutsideMouseDown);
-  });
+  useFocusTrap(() => rootRef, { trap: false, onDismiss: () => props.onDismiss() });
 
   const canDelete = (row: VariantRow): boolean => {
     // Guard against deleting the root while siblings remain. The sibling
@@ -121,8 +103,6 @@ export const BranchMetadataPopover: Component<BranchMetadataPopoverProps> = (pro
       data-testid="branch-metadata-popover"
       role="menu"
       aria-label="Branch variants"
-      tabIndex={-1}
-      onKeyDown={handleKey}
     >
       <header class="branch-popover__header">
         {liveCount()} variant{liveCount() === 1 ? '' : 's'} of this response
