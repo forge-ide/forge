@@ -186,7 +186,7 @@ impl Http {
                 "POST {} returned HTTP {}: {}",
                 self.url,
                 status,
-                truncate(&body, 512),
+                super::truncate(&body, 512),
             ));
         }
 
@@ -205,7 +205,7 @@ impl Http {
             format!(
                 "parsing POST {} response as JSON: {}",
                 self.url,
-                truncate(&String::from_utf8_lossy(&body), 512),
+                super::truncate(&String::from_utf8_lossy(&body), 512),
             )
         })?;
 
@@ -373,7 +373,7 @@ async fn open_and_read_sse(
                         tracing::warn!(
                             target: "forge_mcp::transport::http",
                             error = %err,
-                            payload = %truncate(&payload, 512),
+                            payload = %super::truncate(&payload, 512),
                             "dropping malformed SSE JSON frame",
                         );
                     }
@@ -453,22 +453,6 @@ fn parse_event_data(event_bytes: &[u8]) -> Option<String> {
     } else {
         None
     }
-}
-
-/// Cap a log field at `max` bytes on a char boundary so a runaway frame
-/// can't flood the log ring.
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max;
-    for (i, _) in s.char_indices() {
-        if i > max {
-            break;
-        }
-        end = i;
-    }
-    format!("{}…", &s[..end])
 }
 
 #[cfg(test)]
@@ -553,13 +537,5 @@ mod tests {
         assert_eq!(b.delim_len, 4);
 
         assert!(find_event_boundary(b"data: partial\n").is_none());
-    }
-
-    #[test]
-    fn truncate_is_utf8_safe() {
-        let s = "a".repeat(600) + "é";
-        let out = truncate(&s, 300);
-        assert!(out.ends_with('…'));
-        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
     }
 }
