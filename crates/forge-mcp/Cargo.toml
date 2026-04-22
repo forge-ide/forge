@@ -6,6 +6,9 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 anyhow = "1"
+# F-380: `McpStateEvent.at` carries a `chrono::DateTime<Utc>` now; the manager
+# stamps each state transition with `Utc::now()`.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dirs = "6.0.0"
 forge-core = { path = "../forge-core" }
 # `futures::StreamExt` drives the SSE `bytes_stream()` in the HTTP transport

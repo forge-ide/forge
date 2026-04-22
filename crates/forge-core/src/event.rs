@@ -181,6 +181,10 @@ pub enum Event {
         step_id: StepId,
         instance_id: Option<AgentInstanceId>,
         kind: StepKind,
+        /// Step-open wall-clock. F-380 retains `started_at` rather than the
+        /// project-wide `at` convention because multiple webview consumers
+        /// pin on this field name; the divergence is documented in
+        /// `docs/architecture/event-conventions.md` as a pinned exception.
         started_at: DateTime<Utc>,
     },
     /// F-139: fine-grained step trace — closes a step.
@@ -257,6 +261,10 @@ pub enum Event {
         cpu_pct: Option<f64>,
         rss_bytes: Option<u64>,
         fd_count: Option<u64>,
+        /// Sample wall-clock. F-380 retains `sampled_at` rather than the
+        /// project-wide `at` convention because the AgentMonitor webview
+        /// pins on this field name; the divergence is documented in
+        /// `docs/architecture/event-conventions.md` as a pinned exception.
         sampled_at: DateTime<Utc>,
     },
 }

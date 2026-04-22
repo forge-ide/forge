@@ -14,9 +14,9 @@ server: string,
  */
 state: ServerState, 
 /**
- * Wall-clock timestamp. Included so the UI can order events
- * coming from multiple servers even when the stream lags. ts-rs:
- * emitted as `unknown` so the frontend treats the field opaquely
- * and reads it as a monotonic ordering key.
+ * Wall-clock timestamp (F-380: renamed from `ts: SystemTime`). Serializes
+ * as an RFC3339 string via chrono's `Serialize` impl, matching every
+ * other event timestamp across `forge_core::Event`. ts-rs emits the
+ * field as a plain `string` so the TS mirror carries the same shape.
  */
-ts: unknown, };
+at: string, };

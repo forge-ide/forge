@@ -16,9 +16,10 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
+use chrono::Utc;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -127,7 +128,7 @@ impl ServerShared {
         let _ = self.state_tx.send(McpStateEvent {
             server: self.name.clone(),
             state,
-            ts: SystemTime::now(),
+            at: Utc::now(),
         });
     }
 }
