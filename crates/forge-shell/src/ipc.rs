@@ -30,7 +30,9 @@ use forge_core::approvals::{
 };
 use forge_core::{ApprovalLevel, ApprovalScope, RerunVariant, TerminalId};
 use forge_ipc::HelloAck;
-use forge_lsp::{MessageTransport, Server as LspServer, ServerEvent as LspServerEvent};
+use forge_lsp::{
+    Bootstrap as LspBootstrap, MessageTransport, Server as LspServer, ServerEvent as LspServerEvent,
+};
 use forge_term::{ShellSpec, TerminalEvent, TerminalSession, TerminalSize};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, EventTarget, Manager, Runtime, State, Webview};
@@ -466,9 +468,73 @@ pub fn manage_terminals<R: Runtime>(app: &AppHandle<R>) {
 /// Attach the `LspState` to an app builder. Idempotent — parallels
 /// [`manage_terminals`] so tests can wire both and production `window_manager`
 /// can call once.
+///
+/// Also attaches an [`LspBootstrapState`] holding the bundled-registry
+/// [`forge_lsp::Bootstrap`] (F-353). `lsp_start` resolves a webview-supplied
+/// server id against this bootstrap's registry, then binds the resolved
+/// binary path to the cache-root sandbox — the webview never names a
+/// filesystem path.
+///
+/// On a host where the platform cache dir cannot be resolved
+/// (`BootstrapError::NoCacheDir`), no state is attached and `lsp_start`
+/// returns a plain string error on every invoke. Tests that want a custom
+/// registry (e.g. pointing at the in-tree `forge-lsp-mock-stdio` fixture)
+/// override the managed state *after* this call via
+/// [`LspBootstrapState::override_for_tests`].
 pub fn manage_lsp<R: Runtime>(app: &AppHandle<R>) {
     if app.try_state::<LspState>().is_none() {
         app.manage(LspState::default());
+    }
+    if app.try_state::<LspBootstrapState>().is_none() {
+        app.manage(LspBootstrapState::new());
+    }
+}
+
+/// Tauri-managed [`forge_lsp::Bootstrap`] singleton. Wraps an `Arc` so the
+/// async `lsp_start` handler can clone a reference without holding a mutex
+/// guard across the `Server::from_registry` path-resolution work.
+///
+/// Initialized to the platform default (`Bootstrap::new()`), or `None` if
+/// the host lacks a cache dir. Integration tests override this via
+/// [`LspBootstrapState::override_for_tests`] so the `lsp_start` call
+/// resolves to an in-tree fixture instead of making network I/O inevitable
+/// for a real registered server.
+pub struct LspBootstrapState {
+    inner: Mutex<Option<Arc<LspBootstrap>>>,
+}
+
+impl Default for LspBootstrapState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LspBootstrapState {
+    /// Populate from [`LspBootstrap::new`]. Swallows a `NoCacheDir` error
+    /// and leaves the slot empty; `lsp_start` surfaces that to the webview
+    /// as a string error instead of panicking app startup.
+    pub fn new() -> Self {
+        let inner = LspBootstrap::new().ok().map(Arc::new);
+        Self {
+            inner: Mutex::new(inner),
+        }
+    }
+
+    /// Snapshot the current bootstrap, if any. Returns a clone of the
+    /// `Arc` so handlers can drop the mutex guard before awaiting.
+    pub fn snapshot(&self) -> Option<Arc<LspBootstrap>> {
+        self.inner
+            .lock()
+            .expect("lsp bootstrap state poisoned")
+            .clone()
+    }
+
+    /// Replace the managed bootstrap. Integration tests use this to
+    /// substitute a tempdir-rooted `Bootstrap` with a single-spec
+    /// `Registry` pointing at the stub LSP fixture.
+    #[doc(hidden)]
+    pub fn override_for_tests(&self, bootstrap: Arc<LspBootstrap>) {
+        *self.inner.lock().expect("lsp bootstrap state poisoned") = Some(bootstrap);
     }
 }
 
@@ -1497,22 +1563,27 @@ pub const LSP_MESSAGE_EVENT: &str = "lsp_message";
 /// uris run tens of KiB), so the ceiling is generous but still bounded so a
 /// compromised webview can't loop 1 MiB sends billing server memory.
 pub(crate) const MAX_LSP_SERVER_ID_BYTES: usize = 128;
-pub(crate) const MAX_LSP_BINARY_PATH_BYTES: usize = 4096;
 pub(crate) const MAX_LSP_MESSAGE_BYTES: usize = 512 * 1024;
 
 /// Wire-format arguments for `lsp_start`.
+///
+/// F-353: the binary path is no longer part of the wire format. The webview
+/// names a server by id; the shell resolves the binary through the bundled
+/// [`forge_lsp::Registry`] plus [`forge_lsp::Bootstrap`]'s cache-root
+/// sandbox. A compromised or buggy webview that forwarded an
+/// attacker-controlled path used to land as `Command::new(path).spawn()`;
+/// that surface is closed.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
 pub struct LspStartArgs {
     /// Server identifier (matches `forge_lsp::ServerId` entries in the
-    /// bundled registry). Used as the routing key on `lsp_message` events.
+    /// bundled registry). Used as the routing key on `lsp_message` events
+    /// and as the registry lookup key for the binary path — the webview
+    /// never names a filesystem path directly.
     pub server: String,
-    /// Absolute path to the server binary. Callers resolve this via
-    /// `forge-lsp::Bootstrap::ensure` before invoking; the command does not
-    /// download. Keeps the download path out of the Tauri trust boundary.
-    pub binary_path: String,
-    /// Optional argv after the binary path. Bounded via the server-id cap
-    /// since each arg is expected to be short; oversize argv is a misuse.
+    /// Optional extra argv appended to the spec's declared args. Bounded
+    /// via the server-id cap since each arg is expected to be short;
+    /// oversize argv is a misuse.
     #[serde(default)]
     pub args: Vec<String>,
 }
@@ -1623,10 +1694,19 @@ fn spawn_lsp_forwarder<R: Runtime>(
 /// as the server's owner; subsequent commands targeting this `server` id
 /// are rejected unless they come from the same webview.
 ///
+/// F-353: the binary is resolved through the bundled [`forge_lsp::Registry`]
+/// + [`forge_lsp::Bootstrap`]'s cache-root sandbox. The webview cannot
+/// supply a filesystem path; an unknown `server` id returns
+/// `"unknown lsp server: <id>"`; any registry entry whose resolved path
+/// escapes the cache root is rejected with a sandbox error before
+/// `Command::new` is ever called.
+///
 /// Errors:
 /// - label not `session-*` → `forbidden: window label mismatch`
-/// - oversize `server` / `binary_path` → size-cap error
+/// - oversize `server` → size-cap error
 /// - duplicate `server` id → `"lsp server already running: <id>"`
+/// - unknown `server` id → `"unknown lsp server: <id>"`
+/// - lsp bootstrap not wired → `"lsp bootstrap unavailable"`
 /// - spawn failure surfaces the `forge-lsp` error
 #[tauri::command]
 pub async fn lsp_start<R: Runtime>(
@@ -1634,20 +1714,35 @@ pub async fn lsp_start<R: Runtime>(
     app: AppHandle<R>,
     webview: Webview<R>,
     state: State<'_, LspState>,
+    bootstrap: State<'_, LspBootstrapState>,
 ) -> Result<(), String> {
     // LSP servers are session-scoped. Dashboard and any other label is
     // rejected — mirrors the terminal authz shape on the LSP axis.
     require_window_label_in(&webview, &[], true)?;
 
     require_size("server", &args.server, MAX_LSP_SERVER_ID_BYTES)?;
-    require_size("binary_path", &args.binary_path, MAX_LSP_BINARY_PATH_BYTES)?;
 
     let owner_label = webview.label().to_string();
     let server_id = args.server.clone();
 
+    let bootstrap = bootstrap
+        .snapshot()
+        .ok_or_else(|| "lsp bootstrap unavailable".to_string())?;
+
+    // Registry gate: a webview-supplied id must match a known spec. This
+    // is what replaces the raw `binary_path` surface — the IPC cannot
+    // name an executable, only an id the shell already trusts.
+    let spec = bootstrap
+        .registry()
+        .get_by_str(&server_id)
+        .ok_or_else(|| format!("unknown lsp server: {server_id}"))?;
+
     // Build the supervisor + transport before registering, so spawn failures
-    // don't leave a zombie entry.
-    let mut supervisor = LspServer::new(args.binary_path.into(), args.args);
+    // don't leave a zombie entry. `from_registry` enforces the cache-root
+    // sandbox on the resolved binary path; any `BootstrapError::SandboxEscape`
+    // surfaces as `ServerError::SandboxEscape` and never reaches `Command`.
+    let mut supervisor =
+        LspServer::from_registry(spec.id, &bootstrap, args.args).map_err(|e| e.to_string())?;
     let transport = supervisor.transport();
     let rx = supervisor
         .take_events()

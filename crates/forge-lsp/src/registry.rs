@@ -93,6 +93,13 @@ impl Registry {
         self.entries.iter().find(|s| s.id == id)
     }
 
+    /// Look up a spec by id-as-string. Used at the IPC boundary where the
+    /// id arrives as a runtime-allocated [`String`] and cannot construct a
+    /// [`ServerId`] (its inner field is `&'static str`).
+    pub fn get_by_str(&self, id: &str) -> Option<&'static ServerSpec> {
+        self.entries.iter().find(|s| s.id.0 == id)
+    }
+
     /// Look up a spec by Monaco language id (e.g. `"rust"`, `"typescript"`).
     /// Returns the first match; multiple servers may claim a language but
     /// the bundled set is currently one-per-language.
@@ -104,6 +111,18 @@ impl Registry {
 impl Default for Registry {
     fn default() -> Self {
         Self::bundled()
+    }
+}
+
+impl Registry {
+    /// Construct a registry from an arbitrary `&'static` slice of specs.
+    /// Hidden from rustdoc — production callers should use
+    /// [`Registry::bundled`]. Integration tests and in-tree fixtures use
+    /// this to build a single-entry registry pointing at the stub LSP
+    /// fixture without leaking test scaffolding into the public API.
+    #[doc(hidden)]
+    pub fn from_entries(entries: &'static [ServerSpec]) -> Self {
+        Self { entries }
     }
 }
 
