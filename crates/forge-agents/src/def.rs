@@ -20,9 +20,12 @@ use crate::error::{Error, Result};
 /// future work can attach a `ContainerSpec` without a breaking rename.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Isolation {
+    /// No sandbox; reserved for built-in skills shipped with Forge.
     Trusted,
+    /// Sandboxed subprocess isolation (default for user agents).
     #[default]
     Process,
+    /// Container-backed isolation; reserved for a later phase.
     Container,
 }
 
@@ -33,10 +36,15 @@ pub enum Isolation {
 /// `allowed_paths` scopes filesystem access for tools the agent may invoke.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentDef {
+    /// Agent identifier; defaults to the source file stem when frontmatter omits it.
     pub name: String,
+    /// Human-readable description surfaced in pickers and UI banners.
     pub description: Option<String>,
+    /// Prompt body with the YAML frontmatter stripped.
     pub body: String,
+    /// Filesystem scopes the agent's tools are permitted to access.
     pub allowed_paths: Vec<String>,
+    /// Runtime isolation policy applied when this def is spawned.
     pub isolation: Isolation,
 }
 
