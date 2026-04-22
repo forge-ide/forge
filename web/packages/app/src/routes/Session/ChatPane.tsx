@@ -332,7 +332,9 @@ const UserBubble: Component<{ turn: Extract<ChatTurn, { type: 'user' }> }> = (pr
 const AssistantBubble: Component<{ turn: Extract<ChatTurn, { type: 'assistant' }> }> = (
   props,
 ) => (
-  <article class="turn turn--assistant">
+  // F-405: aria-busy="true" while the turn is still streaming lets AT
+  // users know the content is live.
+  <article class="turn turn--assistant" aria-busy={props.turn.isStreaming ? 'true' : undefined}>
     <header class="turn__author">● assistant</header>
     <p class="turn__body">
       {props.turn.text}
@@ -882,7 +884,7 @@ export const Composer: Component<ComposerProps> = (props) => {
               data-testid="composer-stop-btn"
               onClick={() => props.onCancel?.()}
             >
-              STOP
+              STOP TURN
             </button>
           </Show>
           {/* F-391: Send is a real primary/ember button, UPPERCASE per
@@ -1068,6 +1070,15 @@ export const ChatPane: Component<ChatPaneProps> = (props) => {
         ref={listRef}
         onScroll={handleListScroll}
       >
+        {/* F-415: fresh-session mount placeholder. Shown while the list has
+            no visible turns AND we aren't already awaiting a response (the
+            streaming indicator owns that state). Canonical `// noun-phrase`
+            form from voice-terminology §8 / ai-patterns §"Interaction states". */}
+        <Show when={visibleTurns().length === 0 && !state().awaitingResponse}>
+          <p class="chat-pane__empty" data-testid="chat-pane-empty-state">
+            // composer ready
+          </p>
+        </Show>
         <For each={visibleTurns()}>
           {(turn) => {
             switch (turn.type) {
