@@ -109,6 +109,7 @@ async fn initialize_and_shutdown_round_trip() {
                 break;
             }
             Ok(Some(ServerEvent::GaveUp { .. })) => break,
+            Ok(Some(ServerEvent::Malformed { .. })) => continue,
             Ok(None) => break,
             Err(_) => break,
         }
