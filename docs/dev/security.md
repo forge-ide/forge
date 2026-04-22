@@ -24,17 +24,17 @@ Tool invocations that the user has approved are spawned through `crates/forge-se
 |---|---|---|
 | `RLIMIT_CPU` | 30 s | runaway CPU on a single tool call (SIGXCPU) |
 | `RLIMIT_AS` | 512 MiB | address-space exhaustion / large allocations |
-| `RLIMIT_NPROC` | 4096 | fork bombs (see caveat below) |
+| `RLIMIT_NPROC` | 4096 | uid-wide backstop for fork bombs; the authoritative per-sandbox cap is cgroup v2 `pids.max` (F-149) — see [`sandbox-limits.md`](sandbox-limits.md) |
 | `RLIMIT_NOFILE` | 256 | fd-table exhaustion |
 | `RLIMIT_FSIZE` | 100 MiB | cat-to-disk attacks (SIGXFSZ on overflow) |
 
 Soft and hard limits are set to the same value, so the child cannot raise them. The `rlimits_bound_child_via_setrlimit` test in the same module probes `/proc/self/limits` from inside the sandbox to confirm `pre_exec` actually applied them — that test is the load-bearing regression for F-055.
 
-### NPROC scope and cgroup follow-up
+### Per-sandbox PID limit (F-149)
 
-Of the five `setrlimit(2)` caps above, four are per-process and one is uid-wide: `RLIMIT_NPROC` is checked against the count of processes already owned by the calling task's real uid, not against a per-sandbox counter. Two sandboxes started on the same daemon therefore **do not** each get an independent budget, and a tool running on a busy desktop session sees very different headroom than the same tool on a bare CI host.
+Of the five `setrlimit(2)` caps above, four are per-process and one is uid-wide: `RLIMIT_NPROC` is checked against the count of processes already owned by the calling task's real uid, not against a per-sandbox counter. That alone is insufficient — two sandboxes on the same daemon share one uid-wide budget, and desktop sessions carry very different baselines than bare CI hosts. F-149 closed that gap: the authoritative per-sandbox task cap is now the cgroup v2 `pids` controller (`pids.max`), configured via `SandboxConfig::max_processes` (default 256). The `CgroupLeaf` helper in `crates/forge-session/src/sandbox.rs` creates a fresh leaf sibling-to-daemon at spawn, enrolls the child in `pre_exec` (closing the fork-escape race), and tears the leaf down via `cgroup.kill` + `rmdir` on drop. `RLIMIT_NPROC` remains as a uid-wide backstop for hosts where cgroup v2 delegation is unavailable (cgroup v1, containers without delegation, non-Linux).
 
-Full operator reference — scenarios, `max_processes` tuning guidance, and the cgroup v2 `pids.max` follow-up plan — lives in [`sandbox-limits.md`](sandbox-limits.md). The per-sandbox cgroup integration is tracked on [F-149](https://github.com/forge-ide/forge/issues/274).
+Full operator reference — scenarios, `max_processes` tuning guidance, and the cgroup-leaf lifecycle — lives in [`sandbox-limits.md`](sandbox-limits.md). The regression is pinned by `cgroup_pids_max_caps_sandbox_tasks_per_f149` in the same module.
 
 ## Webview Content Security Policy (F-050)
 
@@ -84,8 +84,8 @@ The 500 MiB default lives in `ByteBudget::DEFAULT_BUDGET_BYTES`. Every new tool 
 ## Operator runbook cross-reference
 
 - Full Phase 1 threat models, exploit walk-throughs, and audit evidence: [`docs/audits/phase-1/`](../audits/phase-1/) — start with `REPORT.md`, then individual `H#.md` / `M#.md` / `L#.md` findings. These files are immutable snapshots; they are not updated as code evolves.
-- Tracking issues for follow-up hardening:
-  - [F-149](https://github.com/forge-ide/forge/issues/274) — cgroup v2 `pids.max` per-sandbox process limit (replaces the uid-wide `RLIMIT_NPROC` backstop described in [`sandbox-limits.md`](sandbox-limits.md)).
+- Shipped hardening referenced above:
+  - cgroup v2 `pids.max` per-sandbox process limit — shipped in [F-149](https://github.com/forge-ide/forge/issues/274); the uid-wide `RLIMIT_NPROC` is retained as a degraded-host backstop. See [`sandbox-limits.md`](sandbox-limits.md) for operator tuning.
 
 # Supply-chain security
 
