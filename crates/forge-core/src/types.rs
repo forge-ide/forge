@@ -76,6 +76,9 @@ pub enum RerunVariant {
 ///
 /// `model` — one pass through the provider stream (text deltas, tool calls).
 /// `tool`  — one tool invocation (start → invoke → return → complete).
+/// `mcp`   — one MCP server tool call; rendered with `info-bg` chip so the
+///           Agent Monitor separates MCP traffic from local tool calls at a
+///           glance (see `docs/ui-specs/agent-monitor.md §9.2`).
 /// `plan`  — reserved for future agent planning phases; not emitted today.
 /// `wait`  — reserved for approval/idle gaps; not emitted today.
 /// `spawn` — reserved for sub-agent spawn steps (F-140); not emitted today.
@@ -85,6 +88,7 @@ pub enum RerunVariant {
 pub enum StepKind {
     Plan,
     Tool,
+    Mcp,
     Model,
     Wait,
     Spawn,
@@ -209,6 +213,7 @@ mod tests {
         for (kind, wire) in [
             (StepKind::Plan, "\"plan\""),
             (StepKind::Tool, "\"tool\""),
+            (StepKind::Mcp, "\"mcp\""),
             (StepKind::Model, "\"model\""),
             (StepKind::Wait, "\"wait\""),
             (StepKind::Spawn, "\"spawn\""),
