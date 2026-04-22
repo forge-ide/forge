@@ -256,6 +256,26 @@ pub struct LspMessageEvent {
 
 `forge_core::Event` is a `#[serde(tag = "type")]` union covering session, provider, MCP, usage, and agent state. MCP state transitions ride inside it as `Event::McpState(McpStateEvent)` — F-155 retired the per-topic `mcp:state` channel, so there is no longer a top-level event for MCP state. All MCP state changes arrive on `session:event`.
 
+```rust
+// crates/forge-core/src/mcp_state.rs — re-exported as `forge_mcp::{McpStateEvent, ServerState}`.
+pub struct McpStateEvent {
+    pub server: String,       // server name — matches the key in the loaded spec map
+    pub state: ServerState,
+    pub ts: SystemTime,       // ts-rs wire type is `unknown`; used only as a monotonic ordering key
+}
+
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ServerState {
+    Starting,                         // spawn/connect in progress; `initialize` handshake not yet complete
+    Healthy,                          // last health-check succeeded
+    Degraded { reason: String },      // one health-check failed; manager will restart after backoff
+    Failed   { reason: String },      // terminal until re-enabled — restart window exhausted or crashed beyond policy
+    Disabled { reason: String },      // F-155: explicit user toggle-off; surfaces `"MCP server <name> is disabled"` from `McpManager::call` and `toggle_mcp_server(name, true)` re-enters via `Starting`
+}
+```
+
+`Disabled` is distinct from `Failed { reason: "stopped" }` — it marks an explicit toggle-off so the manager surfaces a canonical error on `call()` and the running-session toggle can resume through `Starting`. The TS mirror lives at `web/packages/ipc/src/generated/McpStateEvent.ts` (and `ServerState.ts`) — regenerated from the Rust source, not hand-edited.
+
 The webview subscribes with `listen<T>(channel, handler)` from `@tauri-apps/api/event` (typically wrapped by a helper in `web/packages/ipc`).
 
 Events are fire-and-forget; critical state is also fetchable via commands for late-join cases.
