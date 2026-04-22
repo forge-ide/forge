@@ -4,11 +4,16 @@ import './SubAgentBanner.css';
 
 // ---------------------------------------------------------------------------
 // SubAgentBanner — inline representation of a spawned sub-agent in the
-// parent's ChatPane (F-136). Matches `docs/ui-specs/sub-agent-banner.md` §6:
-// 2px ember left-border accent, header row (`↳ spawned · <name>`), model +
-// step-count + state chips, click header to toggle collapse. Double-click
-// navigates to the Agent Monitor (F-140) with the child instance pre-selected
-// — the route 404s until F-140 lands.
+// parent's ChatPane (F-136). Matches `docs/ui-specs/sub-agent-banner.md` §6
+// Phase-2 anatomy: 2px ember left-border accent, header row
+// (`↳ spawned · <name>  delegated at HH:MM  [state]  [chevron]`), click
+// header to toggle collapse. Double-click navigates to the Agent Monitor
+// (F-140) with the child instance pre-selected — the route 404s until F-140
+// lands.
+//
+// Phase-3 deferred (per spec §6): model + tool-count chips require wire
+// fields (`model`, `tool_count`) the orchestrator does not forward today;
+// the state chip becomes an interactive popover trigger at the same time.
 //
 // Backend gap (flagged in the PR body): today no step events ride the
 // child's `instance_id` so live step streaming is wired through props but
