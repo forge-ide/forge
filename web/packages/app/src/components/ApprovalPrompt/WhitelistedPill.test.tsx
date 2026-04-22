@@ -111,3 +111,47 @@ describe('WhitelistedPill — popover behavior', () => {
     expect(queryByTestId('whitelist-popover')).not.toBeInTheDocument();
   });
 });
+
+// F-402: the popover is a contextual menu, not a modal dialog. Verify the
+// role, and verify window-level Esc and outside-click both dismiss.
+describe('WhitelistedPill — a11y (F-402)', () => {
+  it('popover uses role="menu" (not role="dialog")', () => {
+    const { getByTestId } = render(() => (
+      <WhitelistedPill label="this file" level="session" onRevoke={vi.fn()} />
+    ));
+    fireEvent.click(getByTestId('whitelisted-pill'));
+    const popover = getByTestId('whitelist-popover');
+    expect(popover.getAttribute('role')).toBe('menu');
+  });
+
+  it('Escape at the window closes the popover', () => {
+    const { getByTestId, queryByTestId } = render(() => (
+      <WhitelistedPill label="this file" level="session" onRevoke={vi.fn()} />
+    ));
+    fireEvent.click(getByTestId('whitelisted-pill'));
+    expect(getByTestId('whitelist-popover')).toBeInTheDocument();
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(queryByTestId('whitelist-popover')).not.toBeInTheDocument();
+  });
+
+  it('outside-click closes the popover', () => {
+    const { getByTestId, queryByTestId } = render(() => (
+      <WhitelistedPill label="this file" level="session" onRevoke={vi.fn()} />
+    ));
+    fireEvent.click(getByTestId('whitelisted-pill'));
+    expect(getByTestId('whitelist-popover')).toBeInTheDocument();
+    fireEvent.mouseDown(document.body);
+    expect(queryByTestId('whitelist-popover')).not.toBeInTheDocument();
+  });
+
+  it('click inside the popover does NOT close it', () => {
+    const { getByTestId } = render(() => (
+      <WhitelistedPill label="this file" level="session" onRevoke={vi.fn()} />
+    ));
+    fireEvent.click(getByTestId('whitelisted-pill'));
+    const popover = getByTestId('whitelist-popover');
+    fireEvent.mouseDown(popover);
+    // Still visible — the revoke button was not clicked, popover remains.
+    expect(getByTestId('whitelist-popover')).toBeInTheDocument();
+  });
+});

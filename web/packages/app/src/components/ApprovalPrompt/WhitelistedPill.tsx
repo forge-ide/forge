@@ -1,4 +1,10 @@
-import { type Component, createSignal, Show } from 'solid-js';
+import {
+  type Component,
+  createEffect,
+  createSignal,
+  onCleanup,
+  Show,
+} from 'solid-js';
 import type { ApprovalLevel } from '@forge/ipc';
 import './WhitelistedPill.css';
 
@@ -37,9 +43,39 @@ function revokeLabel(level: ApprovalLevel): string {
 
 export const WhitelistedPill: Component<WhitelistedPillProps> = (props) => {
   const [popoverOpen, setPopoverOpen] = createSignal(false);
+  let wrapperRef: HTMLDivElement | undefined;
+
+  // F-402: the popover is a non-modal menu — attach window-level Esc and
+  // outside-click dismissal while open, detach when closed. Keeps listener
+  // lifetimes tied to visibility, not to component lifetime.
+  createEffect(() => {
+    if (!popoverOpen()) return;
+
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setPopoverOpen(false);
+      }
+    };
+
+    const onOutsideMouseDown = (e: MouseEvent): void => {
+      if (!wrapperRef) return;
+      const target = e.target as Node | null;
+      if (target && wrapperRef.contains(target)) return;
+      setPopoverOpen(false);
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    document.addEventListener('mousedown', onOutsideMouseDown);
+
+    onCleanup(() => {
+      window.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('mousedown', onOutsideMouseDown);
+    });
+  });
 
   return (
-    <div class="whitelisted-pill-wrapper">
+    <div ref={wrapperRef} class="whitelisted-pill-wrapper">
       <button
         type="button"
         class="whitelisted-pill"
@@ -54,11 +90,17 @@ export const WhitelistedPill: Component<WhitelistedPillProps> = (props) => {
       </button>
 
       <Show when={popoverOpen()}>
-        <div class="whitelisted-pill__popover" data-testid="whitelist-popover" role="dialog">
+        <div
+          class="whitelisted-pill__popover"
+          data-testid="whitelist-popover"
+          role="menu"
+          aria-label="Revoke approval"
+        >
           <button
             type="button"
             class="whitelisted-pill__revoke-btn"
             data-testid="revoke-btn"
+            role="menuitem"
             onClick={() => {
               setPopoverOpen(false);
               props.onRevoke();

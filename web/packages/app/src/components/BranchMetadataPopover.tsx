@@ -1,4 +1,4 @@
-import { type Component, For, Show, createMemo } from 'solid-js';
+import { type Component, For, Show, createMemo, onCleanup, onMount } from 'solid-js';
 import './BranchMetadataPopover.css';
 
 /**
@@ -77,12 +77,32 @@ function formatTime(at: string | undefined): string {
 export const BranchMetadataPopover: Component<BranchMetadataPopoverProps> = (props) => {
   const liveCount = createMemo(() => props.variants.length);
 
+  // F-402: this surface is not modal; it is a contextual menu with its own
+  // dismiss affordances (Esc, outside-click). Exposed as role="menu" with
+  // window-level outside-click dismissal.
+  let rootRef: HTMLDivElement | undefined;
+
   const handleKey = (e: KeyboardEvent): void => {
     if (e.key === 'Escape') {
       e.preventDefault();
       props.onDismiss();
     }
   };
+
+  const handleOutsideMouseDown = (e: MouseEvent): void => {
+    if (!rootRef) return;
+    const target = e.target as Node | null;
+    if (target && rootRef.contains(target)) return;
+    props.onDismiss();
+  };
+
+  onMount(() => {
+    document.addEventListener('mousedown', handleOutsideMouseDown);
+  });
+
+  onCleanup(() => {
+    document.removeEventListener('mousedown', handleOutsideMouseDown);
+  });
 
   const canDelete = (row: VariantRow): boolean => {
     // Guard against deleting the root while siblings remain. The sibling
@@ -96,9 +116,10 @@ export const BranchMetadataPopover: Component<BranchMetadataPopoverProps> = (pro
 
   return (
     <div
+      ref={rootRef}
       class="branch-popover"
       data-testid="branch-metadata-popover"
-      role="dialog"
+      role="menu"
       aria-label="Branch variants"
       tabIndex={-1}
       onKeyDown={handleKey}
