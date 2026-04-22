@@ -1320,7 +1320,10 @@ export const ChatPane: Component<ChatPaneProps> = (props) => {
     const deps: BuildRegistryDeps = {
       file: { sessionId: id, workspaceRoot: root },
       directory: { sessionId: id, workspaceRoot: root },
-      url: {},
+      // F-359: the URL resolver is now session-scoped — fetches go through
+      // the Rust-side `context_fetch_url` IPC command which authz-checks
+      // against the owning session window.
+      url: { sessionId: id },
     };
     return buildRegistry(deps);
   });

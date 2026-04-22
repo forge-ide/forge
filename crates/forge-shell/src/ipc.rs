@@ -504,6 +504,9 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         list_mcp_servers,
         toggle_mcp_server,
         import_mcp_config,
+        // F-359: server-side URL context fetch + allowlist setter.
+        context_fetch_url,
+        set_context_allowed_hosts,
     ])
 }
 
@@ -2775,4 +2778,203 @@ pub async fn import_mcp_config<R: Runtime>(
         .import_mcp_config(&session_id, source, apply)
         .await
         .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// F-359: server-side URL context fetch with SSRF hardening.
+//
+// Scope. Replaces the webview's direct `fetch()` call in the @-context URL
+// resolver with a Tauri-gated path. The webview cannot lie about the target
+// host: the allowlist lives server-side in [`AllowedHostsState`] (populated
+// via `set_context_allowed_hosts`), and the fetch goes through
+// [`crate::context_fetch::fetch_url`] which enforces scheme / userinfo /
+// IP-range / port checks *and* re-validates every redirect hop.
+//
+// Authz. `context_fetch_url` is session-scoped — only the session's window
+// label may invoke, mirroring F-122's read_file / tree gate.
+// `set_context_allowed_hosts` allows both `dashboard` and any `session-*`
+// label so the settings panel (which lives on the dashboard) can manage the
+// list; either way the list is server-side-only.
+//
+// Rationale for appending at EOF. The concurrent-worktree convention used
+// by F-137 / F-144 / F-151 keeps additions at the bottom to minimize
+// rebase conflicts.
+// ---------------------------------------------------------------------------
+
+/// Upper bound on the URL byte length a webview may submit. 8 KiB covers
+/// any realistic web URL while stopping a compromised renderer from
+/// looping megabyte-long strings through serde before the policy runs.
+pub(crate) const MAX_CONTEXT_URL_BYTES: usize = 8 * 1024;
+
+/// Upper bound on any single hostname in the allowlist. RFC 1035 maxes
+/// DNS names at 255 octets — 256 leaves one byte of slack.
+pub(crate) const MAX_ALLOWED_HOST_BYTES: usize = 256;
+
+/// Upper bound on the allowlist length. 256 entries is well above any
+/// realistic user-maintained list; the goal is to keep a compromised
+/// renderer from loading an unbounded list that would slow every fetch.
+pub(crate) const MAX_ALLOWED_HOSTS_LEN: usize = 256;
+
+/// Tauri-managed, per-App allowlist for the URL context fetcher. Written
+/// by `set_context_allowed_hosts`, read by `context_fetch_url`. Wrapped
+/// in a `Mutex<Vec<String>>` — the critical section is a clone on read,
+/// so contention is negligible even with many concurrent fetches.
+#[derive(Default)]
+pub struct AllowedHostsState {
+    hosts: Mutex<Vec<String>>,
+}
+
+impl AllowedHostsState {
+    /// Fresh empty state — no host is allowed until the webview publishes
+    /// its settings. Matches the webview-side `settings.ts` default.
+    pub fn new() -> Self {
+        Self {
+            hosts: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Snapshot the current allowlist. Returns a plain `Vec` so callers
+    /// can drop the mutex guard before any `.await` point.
+    pub fn snapshot(&self) -> Vec<String> {
+        self.hosts
+            .lock()
+            .expect("allowed hosts state poisoned")
+            .clone()
+    }
+
+    /// Replace the allowlist wholesale. Whitespace is trimmed off each
+    /// entry; empty entries are dropped. Case-insensitive matching runs
+    /// inside `context_fetch::enforce_url_policy`, so the stored form
+    /// keeps the user-visible casing.
+    pub fn replace(&self, hosts: Vec<String>) {
+        let cleaned: Vec<String> = hosts
+            .into_iter()
+            .map(|h| h.trim().to_string())
+            .filter(|h| !h.is_empty())
+            .collect();
+        let mut guard = self.hosts.lock().expect("allowed hosts state poisoned");
+        *guard = cleaned;
+    }
+}
+
+/// Tauri-managed client pool for the context fetcher. One client per App,
+/// built lazily on the first fetch so a startup without any @-URL usage
+/// doesn't pay the TLS-setup cost. The client is rebuilt whenever the
+/// allowlist changes — `reqwest::Client` captures the redirect policy at
+/// build time, so the client must see the new allowlist to keep the
+/// redirect re-validation coherent.
+#[derive(Default)]
+pub struct ContextFetchState {
+    client: Mutex<Option<(Vec<String>, reqwest::Client)>>,
+}
+
+impl ContextFetchState {
+    /// Return a client whose redirect policy is bound to the current
+    /// allowlist. Rebuilds on allowlist drift.
+    fn client_for(&self, allowed: &[String]) -> Result<reqwest::Client, String> {
+        let mut guard = self.client.lock().expect("context fetch state poisoned");
+        if let Some((ref cached, ref client)) = *guard {
+            if cached.as_slice() == allowed {
+                return Ok(client.clone());
+            }
+        }
+        let client = crate::context_fetch::build_client(allowed.to_vec())
+            .map_err(|e| format!("context_fetch_url: client build failed: {e}"))?;
+        *guard = Some((allowed.to_vec(), client.clone()));
+        Ok(client)
+    }
+}
+
+/// Attach [`AllowedHostsState`] and [`ContextFetchState`] to the app.
+/// Idempotent — safe to call from both `window_manager::run` and any
+/// integration-test harness that wires state twice.
+pub fn manage_context_fetch<R: Runtime>(app: &AppHandle<R>) {
+    if app.try_state::<AllowedHostsState>().is_none() {
+        app.manage(AllowedHostsState::new());
+    }
+    if app.try_state::<ContextFetchState>().is_none() {
+        app.manage(ContextFetchState::default());
+    }
+}
+
+/// Wire shape returned by `context_fetch_url`. `body` is already wrapped
+/// in a fresh per-request pair of dual-LLM containment markers
+/// (see [`crate::context_fetch::make_markers`]); callers splice it into
+/// the prompt verbatim. The per-call markers carry a 128-bit hex nonce
+/// so an attacker-controlled body cannot close the boundary mid-response.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct FetchedUrl {
+    /// Fetched body wrapped in the containment markers.
+    pub body: String,
+    /// HTTP status of the final (post-redirect) response.
+    pub status: u16,
+    /// `Content-Type` header, if any. Informational.
+    pub content_type: Option<String>,
+    /// Whether the body was truncated at the 32 KiB cap.
+    pub truncated: bool,
+}
+
+impl From<crate::context_fetch::FetchUrlOk> for FetchedUrl {
+    fn from(ok: crate::context_fetch::FetchUrlOk) -> Self {
+        Self {
+            body: ok.body,
+            status: ok.status,
+            content_type: ok.content_type,
+            truncated: ok.truncated,
+        }
+    }
+}
+
+/// Fetch `url` under the F-359 SSRF policy. Authz-scoped to the session's
+/// window. The webview supplies the URL; the **allowlist is server-side**
+/// (`AllowedHostsState`), so a lying webview cannot widen its reach. On
+/// rejection, returns a plain `Err(String)` — same wire shape every other
+/// Tauri command uses. The returned body carries the dual-LLM containment
+/// markers; the webview splices it into the prompt verbatim.
+#[tauri::command]
+pub async fn context_fetch_url<R: Runtime>(
+    session_id: String,
+    url: String,
+    webview: Webview<R>,
+    allowed: State<'_, AllowedHostsState>,
+    fetch_state: State<'_, ContextFetchState>,
+) -> Result<FetchedUrl, String> {
+    require_window_label(
+        &webview,
+        &format!("session-{session_id}"),
+        "context_fetch_url",
+    )?;
+    require_size("url", &url, MAX_CONTEXT_URL_BYTES)?;
+
+    let hosts = allowed.snapshot();
+    let client = fetch_state.client_for(&hosts)?;
+    let ok = crate::context_fetch::fetch_url(&client, &url, &hosts)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(FetchedUrl::from(ok))
+}
+
+/// Replace the server-side URL allowlist. The webview's settings panel
+/// calls this whenever the user adds / removes an entry. Authz allows the
+/// dashboard label and any `session-*` label — the same gate the F-151
+/// settings commands use, because the allowlist is a user-level artifact
+/// (not per-session) but may be surfaced from either window.
+#[tauri::command]
+pub async fn set_context_allowed_hosts<R: Runtime>(
+    hosts: Vec<String>,
+    webview: Webview<R>,
+    allowed: State<'_, AllowedHostsState>,
+) -> Result<(), String> {
+    require_window_label_in(&webview, &["dashboard"], true, "set_context_allowed_hosts")?;
+    if hosts.len() > MAX_ALLOWED_HOSTS_LEN {
+        return Err(format!(
+            "payload too large: hosts exceeds {MAX_ALLOWED_HOSTS_LEN}-entry limit",
+        ));
+    }
+    for h in &hosts {
+        require_size("host", h, MAX_ALLOWED_HOST_BYTES)?;
+    }
+    allowed.replace(hosts);
+    Ok(())
 }

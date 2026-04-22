@@ -44,6 +44,21 @@ forge-providers = { path = "../forge-providers" }
 # `forge-session` is not pulled into the shell binary — only the library.
 forge-session = { path = "../forge-session" }
 forge-term = { path = "../forge-term" }
+# F-359: `context_fetch_url` IPC command replaces webview-side `fetch()` for
+# @-context URL resolution. `rustls-tls` keeps us off OpenSSL so the fetch
+# path remains reproducible across our CI targets.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+# F-359 code-review fix: per-request nonce for dual-LLM containment markers
+# so an attacker-controlled body cannot close the boundary mid-response.
+rand = "0.8"
+# F-359 code-review fix: hex-encode the 128-bit marker nonce for human-readable
+# prompt markers.
+hex = "0.4"
+thiserror = "1"
+# F-359: typed `Host<&str>` discriminates DNS names from IP literals
+# *without* requiring bracket-stripping on `Url::host_str()`. reqwest
+# already pulls this transitively; naming it here is explicit.
+url = "2"
 # `rc`: `SessionEventPayload.event` embeds `forge_core::Event`, whose hot
 # variants carry `Arc<str>` fields (F-112). `rc` lets serde serialize those
 # without `ArcStr` workarounds; the payload is Serialize-only so this is
