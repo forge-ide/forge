@@ -36,6 +36,9 @@ serde_json = "1"
 sha2 = "0.10"
 thiserror = "1"
 tokio = { version = "1", features = ["net", "io-util", "fs", "rt-multi-thread", "macros", "sync", "process", "time", "signal"] }
+# F-371: structured tracing across daemon-side emit failures, turn errors,
+# and MCP lifecycle. Emission only — no subscriber is installed in `forged`.
+tracing = "0.1"
 
 # F-156: macOS resource sampler. `libproc` wraps the Apple
 # `proc_pidinfo` syscalls used to read task CPU time, resident-size, and
@@ -63,6 +66,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 similar = "2"
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "time", "net", "process"] }
+# F-371: capture subscriber in integration tests pins target + field shape
+# for each tracing emission site.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 
 [[bench]]
 name = "orchestrator"
@@ -128,3 +134,11 @@ path = "tests/agent_spawn_live.rs"
 [[test]]
 name = "step_events"
 path = "tests/step_events.rs"
+
+[[test]]
+name = "bg_agents_tracing"
+path = "tests/bg_agents_tracing.rs"
+
+[[test]]
+name = "eprintln_audit"
+path = "tests/eprintln_audit.rs"

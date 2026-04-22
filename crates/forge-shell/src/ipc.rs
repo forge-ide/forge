@@ -105,15 +105,48 @@ fn payload_too_large(field: &str, limit_bytes: usize) -> String {
 /// Assert the calling webview's label equals `expected`. Used at the top of
 /// every session/dashboard `#[tauri::command]` to reject cross-window invokes
 /// before the bridge sees the frame.
+///
+/// F-371: on rejection emits a `warn!` under target `forge_shell::ipc::authz`
+/// with structured `expected`, `actual`, `command` fields so authz refusals
+/// leave an audit trail instead of disappearing into silence. `command` is
+/// the Tauri command name — each call site passes its own literal so the
+/// filter `command == "session_send_message"` works reliably.
 pub(crate) fn require_window_label<R: Runtime>(
     webview: &Webview<R>,
     expected: &str,
+    command: &'static str,
 ) -> Result<(), String> {
-    if webview.label() == expected {
-        Ok(())
-    } else {
-        Err(LABEL_MISMATCH_ERROR.to_string())
+    authz_check(webview.label(), expected, command)
+}
+
+/// Bridge between the `Runtime`-generic `require_window_label` and a plain
+/// string-based test harness. Keeps the emission logic identical across
+/// production and tests — the only thing the generic helper does is
+/// extract `webview.label()`.
+fn authz_check(actual: &str, expected: &str, command: &'static str) -> Result<(), String> {
+    if actual == expected {
+        return Ok(());
     }
+    tracing::warn!(
+        target: "forge_shell::ipc::authz",
+        expected = %expected,
+        actual = %actual,
+        command = %command,
+        "authz rejection: window label mismatch",
+    );
+    Err(LABEL_MISMATCH_ERROR.to_string())
+}
+
+/// F-371 test seam: drives the same authz emission logic as
+/// [`require_window_label`] without needing a live Tauri `Webview`. Public
+/// so integration tests under `tests/` can pin the schema.
+#[doc(hidden)]
+pub fn require_window_label_for_test(
+    actual: &str,
+    expected: &str,
+    command: &'static str,
+) -> Result<(), String> {
+    authz_check(actual, expected, command)
 }
 
 /// F-068 / L4 (T7): reject payloads whose byte length exceeds `limit_bytes`.
@@ -215,7 +248,15 @@ impl<R: Runtime> EventSink for AppHandleSink<R> {
         // redirect delivery.
         let target = EventTarget::webview_window(format!("session-{}", self.session_id));
         if let Err(e) = self.app.emit_to(target, "session:event", payload) {
-            eprintln!("session:event emit failed: {e}");
+            // F-371: structured emit-failure log with the session id so an
+            // operator can correlate dropped events to a specific window.
+            tracing::error!(
+                target: "forge_shell::ipc",
+                session_id = %self.session_id,
+                event = "session:event",
+                error = %e,
+                "Tauri emit failed",
+            );
         }
     }
 }
@@ -237,7 +278,7 @@ pub async fn session_hello<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<HelloAck, String> {
-    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_window_label(&webview, &format!("session-{session_id}"), "session_hello")?;
     // F-052 (H11 / T7): the socket path is never taken from the invoke
     // payload — a webview cannot redirect this connection to an arbitrary
     // UDS. Production always resolves through `default_socket_path`; tests
@@ -261,7 +302,11 @@ pub async fn session_subscribe<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_window_label(
+        &webview,
+        &format!("session-{session_id}"),
+        "session_subscribe",
+    )?;
     let sink: Arc<dyn EventSink> = Arc::new(AppHandleSink {
         app,
         session_id: session_id.clone(),
@@ -280,7 +325,11 @@ pub async fn session_send_message<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_window_label(
+        &webview,
+        &format!("session-{session_id}"),
+        "session_send_message",
+    )?;
     // F-068 / L4 (T7): bound `text` before the bridge allocates a frame or
     // the provider is billed. Runs after authz so unauthorized windows
     // don't learn the cap value.
@@ -305,7 +354,7 @@ pub async fn session_cancel<R: Runtime>(
     webview: Webview<R>,
     _state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_window_label(&webview, &format!("session-{session_id}"), "session_cancel")?;
     Ok(())
 }
 
@@ -317,7 +366,11 @@ pub async fn session_approve_tool<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_window_label(
+        &webview,
+        &format!("session-{session_id}"),
+        "session_approve_tool",
+    )?;
     // F-068 / L4 (T7): tool_call_id is a short opaque handle; bound it here.
     // F-069 / L5 (T7): `scope` is typed as `forge_core::ApprovalScope` — serde
     // rejects any non-variant string at Tauri arg-deserialization (before this
@@ -343,7 +396,7 @@ pub async fn rerun_message<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_window_label(&webview, &format!("session-{session_id}"), "rerun_message")?;
     // F-068 / L4: bound `msg_id` before the bridge allocates a frame.
     require_size("msg_id", &msg_id, MAX_MESSAGE_ID_BYTES)?;
     state
@@ -370,7 +423,7 @@ pub async fn select_branch<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_window_label(&webview, &format!("session-{session_id}"), "select_branch")?;
     require_size("parent_id", &parent_id, MAX_MESSAGE_ID_BYTES)?;
     state
         .bridge
@@ -387,7 +440,11 @@ pub async fn session_reject_tool<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_window_label(
+        &webview,
+        &format!("session-{session_id}"),
+        "session_reject_tool",
+    )?;
     // F-068 / L4 (T7): bound tool_call_id and — only when present — reason.
     // `None` reason is the common case and must skip the size check.
     require_size("tool_call_id", &tool_call_id, MAX_TOOL_CALL_ID_BYTES)?;
@@ -614,7 +671,7 @@ pub async fn get_persistent_approvals<R: Runtime>(
     // default capability glob allows `session-*` and `dashboard`; per-command
     // label authz would add nothing here (the data is user-scoped, not
     // per-session), so we accept any window that cleared the ACL.
-    require_window_label_in(&webview, &["dashboard"], true)?;
+    require_window_label_in(&webview, &["dashboard"], true, "get_persistent_approvals")?;
     require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
 
     let workspace_cfg = load_workspace_config(std::path::Path::new(&workspace_root))
@@ -663,7 +720,7 @@ pub async fn save_approval<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label_in(&webview, &["dashboard"], true)?;
+    require_window_label_in(&webview, &["dashboard"], true, "save_approval")?;
     require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
     require_size("scope_key", &entry.scope_key, MAX_SCOPE_KEY_BYTES)?;
     let total = entry.scope_key.len() + entry.tool_name.len() + entry.label.len();
@@ -708,7 +765,7 @@ pub async fn remove_approval<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label_in(&webview, &["dashboard"], true)?;
+    require_window_label_in(&webview, &["dashboard"], true, "remove_approval")?;
     require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
     require_size("scope_key", &scope_key, MAX_SCOPE_KEY_BYTES)?;
 
@@ -765,15 +822,49 @@ pub(crate) fn require_window_label_in<R: Runtime>(
     webview: &Webview<R>,
     exact: &[&str],
     allow_session_prefix: bool,
+    command: &'static str,
 ) -> Result<(), String> {
-    let label = webview.label();
-    if exact.contains(&label) {
+    authz_check_in(webview.label(), exact, allow_session_prefix, command)
+}
+
+fn authz_check_in(
+    actual: &str,
+    exact: &[&str],
+    allow_session_prefix: bool,
+    command: &'static str,
+) -> Result<(), String> {
+    if exact.contains(&actual) {
         return Ok(());
     }
-    if allow_session_prefix && label.starts_with("session-") {
+    if allow_session_prefix && actual.starts_with("session-") {
         return Ok(());
     }
+    // F-371: render the accept list so operators can diagnose which command
+    // expected which set without chasing the literal in source.
+    let expected = if allow_session_prefix {
+        format!("{:?} or session-*", exact)
+    } else {
+        format!("{:?}", exact)
+    };
+    tracing::warn!(
+        target: "forge_shell::ipc::authz",
+        expected = %expected,
+        actual = %actual,
+        command = %command,
+        "authz rejection: window label mismatch",
+    );
     Err(LABEL_MISMATCH_ERROR.to_string())
+}
+
+/// F-371 test seam for `require_window_label_in`.
+#[doc(hidden)]
+pub fn require_window_label_in_for_test(
+    actual: &str,
+    exact: &[&str],
+    allow_session_prefix: bool,
+    command: &'static str,
+) -> Result<(), String> {
+    authz_check_in(actual, exact, allow_session_prefix, command)
 }
 
 // ---------------------------------------------------------------------------
@@ -948,7 +1039,17 @@ fn spawn_event_forwarder<R: Runtime>(
                     };
                     let target = EventTarget::webview_window(&owner_label);
                     if let Err(e) = app.emit_to(target, TERMINAL_BYTES_EVENT, payload) {
-                        eprintln!("terminal:bytes emit failed: {e}");
+                        // F-371: structured emit-failure with window + terminal
+                        // ids so one stuck PTY can be traced without grep on
+                        // a timestamp.
+                        tracing::error!(
+                            target: "forge_shell::ipc",
+                            window_label = %owner_label,
+                            terminal_id = %terminal_id,
+                            event = "terminal:bytes",
+                            error = %e,
+                            "Tauri emit failed",
+                        );
                     }
                 }
                 TerminalEvent::Exit(status) => {
@@ -959,7 +1060,14 @@ fn spawn_event_forwarder<R: Runtime>(
                     };
                     let target = EventTarget::webview_window(&owner_label);
                     if let Err(e) = app.emit_to(target, TERMINAL_EXIT_EVENT, payload) {
-                        eprintln!("terminal:exit emit failed: {e}");
+                        tracing::error!(
+                            target: "forge_shell::ipc",
+                            window_label = %owner_label,
+                            terminal_id = %terminal_id,
+                            event = "terminal:exit",
+                            error = %e,
+                            "Tauri emit failed",
+                        );
                     }
                 }
             }
@@ -986,7 +1094,7 @@ pub async fn terminal_spawn<R: Runtime>(
 ) -> Result<(), String> {
     // F-125: terminals are session-scoped. Dashboard and any other label is
     // rejected. This mirrors the chat-pane authz shape on the terminal axis.
-    require_window_label_in(&webview, &[], true)?;
+    require_window_label_in(&webview, &[], true, "terminal_spawn")?;
 
     require_size("cwd", &args.cwd, MAX_TERMINAL_CWD_BYTES)?;
     if let Some(shell) = args.shell.as_deref() {
@@ -1040,7 +1148,7 @@ pub async fn terminal_write<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, TerminalState>,
 ) -> Result<(), String> {
-    require_window_label_in(&webview, &[], true)?;
+    require_window_label_in(&webview, &[], true, "terminal_write")?;
 
     if data.len() > MAX_TERMINAL_WRITE_BYTES {
         return Err(payload_too_large("data", MAX_TERMINAL_WRITE_BYTES));
@@ -1061,7 +1169,7 @@ pub async fn terminal_resize<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, TerminalState>,
 ) -> Result<(), String> {
-    require_window_label_in(&webview, &[], true)?;
+    require_window_label_in(&webview, &[], true, "terminal_resize")?;
     let caller_label = webview.label().to_string();
     state.with_owned_session_mut(&terminal_id, &caller_label, |session| {
         session.resize(cols, rows).map_err(|e| e.to_string())
@@ -1076,7 +1184,7 @@ pub async fn terminal_kill<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, TerminalState>,
 ) -> Result<(), String> {
-    require_window_label_in(&webview, &[], true)?;
+    require_window_label_in(&webview, &[], true, "terminal_kill")?;
     let caller_label = webview.label().to_string();
     // Removing the entry drops its `TerminalSession` — forge-term's `impl Drop`
     // SIGTERMs the child and joins the reaper thread, which emits the final
@@ -1287,7 +1395,7 @@ pub async fn read_layouts<R: Runtime>(
     workspace_root: String,
     webview: Webview<R>,
 ) -> Result<Layouts, String> {
-    require_window_label_in(&webview, &["dashboard"], true)?;
+    require_window_label_in(&webview, &["dashboard"], true, "read_layouts")?;
     require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
     Ok(load_layouts_from_disk(std::path::Path::new(&workspace_root)).await)
 }
@@ -1309,7 +1417,7 @@ pub async fn write_layouts<R: Runtime>(
     layouts: Layouts,
     webview: Webview<R>,
 ) -> Result<(), String> {
-    require_window_label_in(&webview, &["dashboard"], true)?;
+    require_window_label_in(&webview, &["dashboard"], true, "write_layouts")?;
     require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
 
     let forge_dir = std::path::Path::new(&workspace_root).join(".forge");
@@ -1461,7 +1569,7 @@ pub async fn read_file<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<FileContent, String> {
-    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_window_label(&webview, &format!("session-{session_id}"), "read_file")?;
     require_size("path", &path, MAX_FS_PATH_BYTES)?;
 
     let workspace = cached_workspace_root(&state, &session_id).await?;
@@ -1484,7 +1592,7 @@ pub async fn write_file<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_window_label(&webview, &format!("session-{session_id}"), "write_file")?;
     require_size("path", &path, MAX_FS_PATH_BYTES)?;
     // Pre-check before `forge-fs` copies the buffer into the atomic-write
     // temp file. `forge-fs` also enforces; belt-and-braces keeps the error
@@ -1514,7 +1622,7 @@ pub async fn tree<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<TreeNodeDto, String> {
-    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_window_label(&webview, &format!("session-{session_id}"), "tree")?;
     require_size("root", &root, MAX_FS_PATH_BYTES)?;
 
     let workspace = cached_workspace_root(&state, &session_id).await?;
@@ -1704,7 +1812,17 @@ fn spawn_lsp_forwarder<R: Runtime>(
                 };
                 let target = EventTarget::webview_window(&owner_label);
                 if let Err(e) = app.emit_to(target, LSP_MESSAGE_EVENT, payload) {
-                    eprintln!("lsp_message emit failed: {e}");
+                    // F-371: structured emit-failure with window + server
+                    // ids so a webview-gone race against a live LSP is
+                    // visible in the log without parsing free-form strings.
+                    tracing::error!(
+                        target: "forge_shell::ipc",
+                        window_label = %owner_label,
+                        server_id = %server_id,
+                        event = "lsp_message",
+                        error = %e,
+                        "Tauri emit failed",
+                    );
                 }
             }
             // `Exited` / `GaveUp` events are observable only server-side
@@ -1742,7 +1860,7 @@ pub async fn lsp_start<R: Runtime>(
 ) -> Result<(), String> {
     // LSP servers are session-scoped. Dashboard and any other label is
     // rejected — mirrors the terminal authz shape on the LSP axis.
-    require_window_label_in(&webview, &[], true)?;
+    require_window_label_in(&webview, &[], true, "lsp_start")?;
 
     require_size("server", &args.server, MAX_LSP_SERVER_ID_BYTES)?;
 
@@ -1809,7 +1927,7 @@ pub async fn lsp_stop<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, LspState>,
 ) -> Result<(), String> {
-    require_window_label_in(&webview, &[], true)?;
+    require_window_label_in(&webview, &[], true, "lsp_stop")?;
     require_size("server", &server, MAX_LSP_SERVER_ID_BYTES)?;
     let caller_label = webview.label().to_string();
     let entry = state.remove_owned_by(&server, &caller_label)?;
@@ -1828,7 +1946,7 @@ pub async fn lsp_send<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, LspState>,
 ) -> Result<(), String> {
-    require_window_label_in(&webview, &[], true)?;
+    require_window_label_in(&webview, &[], true, "lsp_send")?;
     require_size("server", &server, MAX_LSP_SERVER_ID_BYTES)?;
     // Rough byte cap: serialize once and check length. Avoids building a
     // serialized frame twice (send path also serializes) by short-circuiting
@@ -2129,7 +2247,11 @@ pub async fn start_background_agent<R: Runtime>(
     state: State<'_, BridgeState>,
     bg_state: State<'_, BgAgentState>,
 ) -> Result<String, String> {
-    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_window_label(
+        &webview,
+        &format!("session-{session_id}"),
+        "start_background_agent",
+    )?;
     require_size("agent_name", &agent_name, MAX_AGENT_NAME_BYTES)?;
     require_size("prompt", &prompt, MAX_BG_PROMPT_BYTES)?;
 
@@ -2155,7 +2277,11 @@ pub async fn promote_background_agent<R: Runtime>(
     state: State<'_, BridgeState>,
     bg_state: State<'_, BgAgentState>,
 ) -> Result<(), String> {
-    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_window_label(
+        &webview,
+        &format!("session-{session_id}"),
+        "promote_background_agent",
+    )?;
     require_size("instance_id", &instance_id, MAX_AGENT_INSTANCE_ID_BYTES)?;
 
     let entry = resolve_bg_session(&app, &state, &bg_state, &session_id).await?;
@@ -2173,7 +2299,11 @@ pub async fn list_background_agents<R: Runtime>(
     state: State<'_, BridgeState>,
     bg_state: State<'_, BgAgentState>,
 ) -> Result<Vec<BgAgentSummary>, String> {
-    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_window_label(
+        &webview,
+        &format!("session-{session_id}"),
+        "list_background_agents",
+    )?;
 
     let entry = resolve_bg_session(&app, &state, &bg_state, &session_id).await?;
     let rows = entry.registry.list().await;
@@ -2214,7 +2344,7 @@ pub async fn rename_path<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_window_label(&webview, &format!("session-{session_id}"), "rename_path")?;
     require_size("from", &from, MAX_FS_PATH_BYTES)?;
     require_size("to", &to, MAX_FS_PATH_BYTES)?;
 
@@ -2235,7 +2365,7 @@ pub async fn delete_path<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_window_label(&webview, &format!("session-{session_id}"), "delete_path")?;
     require_size("path", &path, MAX_FS_PATH_BYTES)?;
 
     let workspace = cached_workspace_root(&state, &session_id).await?;
@@ -2306,7 +2436,7 @@ pub async fn get_settings<R: Runtime>(
 ) -> Result<AppSettings, String> {
     // Same authz model as F-036's approval commands: dashboard + any
     // session-* window may read.
-    require_window_label_in(&webview, &["dashboard"], true)?;
+    require_window_label_in(&webview, &["dashboard"], true, "get_settings")?;
     require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
 
     let user_dir = resolve_user_config_dir(&state);
@@ -2324,7 +2454,7 @@ pub async fn set_setting<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label_in(&webview, &["dashboard"], true)?;
+    require_window_label_in(&webview, &["dashboard"], true, "set_setting")?;
     require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
     require_size("key", &key, MAX_SETTING_KEY_BYTES)?;
 
@@ -2413,7 +2543,11 @@ pub async fn stop_background_agent<R: Runtime>(
     state: State<'_, BridgeState>,
     bg_state: State<'_, BgAgentState>,
 ) -> Result<(), String> {
-    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_window_label(
+        &webview,
+        &format!("session-{session_id}"),
+        "stop_background_agent",
+    )?;
     require_size("instance_id", &instance_id, MAX_AGENT_INSTANCE_ID_BYTES)?;
 
     let entry = resolve_bg_session(&app, &state, &bg_state, &session_id).await?;
@@ -2481,7 +2615,7 @@ pub async fn delete_branch<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_window_label(&webview, &format!("session-{session_id}"), "delete_branch")?;
     require_size("parent_id", &parent_id, MAX_MESSAGE_ID_BYTES)?;
     state
         .bridge
@@ -2550,7 +2684,11 @@ pub async fn list_mcp_servers<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<Vec<forge_ipc::McpServerInfo>, String> {
-    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_window_label(
+        &webview,
+        &format!("session-{session_id}"),
+        "list_mcp_servers",
+    )?;
     state
         .bridge
         .list_mcp_servers(&session_id)
@@ -2577,7 +2715,11 @@ pub async fn toggle_mcp_server<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<forge_ipc::McpToggleResult, String> {
-    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_window_label(
+        &webview,
+        &format!("session-{session_id}"),
+        "toggle_mcp_server",
+    )?;
     require_size("name", &name, MAX_MCP_SERVER_NAME_BYTES)?;
     state
         .bridge
@@ -2603,7 +2745,11 @@ pub async fn import_mcp_config<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<forge_ipc::McpImportResult, String> {
-    require_window_label(&webview, &format!("session-{session_id}"))?;
+    require_window_label(
+        &webview,
+        &format!("session-{session_id}"),
+        "import_mcp_config",
+    )?;
     require_size("source", &source, MAX_MCP_SLUG_BYTES)?;
     state
         .bridge

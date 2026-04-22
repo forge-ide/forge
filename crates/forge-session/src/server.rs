@@ -79,7 +79,15 @@ async fn build_agent_runtime(workspace_path: Option<&Path>) -> Option<AgentRunti
     let defs = match defs {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("agent runtime: skipping (load_agents failed: {e})");
+            // F-371: emission-only structured log; no subscriber is
+            // installed in the daemon binary, so a consumer (forge-ide or
+            // an operator piping through `tracing-subscriber`) attaches
+            // upstream.
+            tracing::warn!(
+                target: "forge_session::server",
+                error = %e,
+                "agent runtime: skipping (load_agents failed)",
+            );
             return None;
         }
     };
@@ -103,7 +111,11 @@ async fn build_agent_runtime(workspace_path: Option<&Path>) -> Option<AgentRunti
     {
         Ok(inst) => inst,
         Err(e) => {
-            eprintln!("agent runtime: session-root spawn failed: {e}");
+            tracing::warn!(
+                target: "forge_session::server",
+                error = %e,
+                "agent runtime: session-root spawn failed",
+            );
             return None;
         }
     };
@@ -206,13 +218,21 @@ async fn load_mcp_manager(workspace_path: Option<&Path>) -> Option<Arc<forge_mcp
                     merged
                 }
                 (Err(e), _) | (_, Err(e)) => {
-                    eprintln!("mcp: failed to load .mcp.json: {e:#}; continuing without MCP");
+                    tracing::warn!(
+                        target: "forge_session::mcp",
+                        error = %format!("{e:#}"),
+                        "failed to load .mcp.json; continuing without MCP",
+                    );
                     return None;
                 }
             },
             (None, Ok(ws_specs)) => ws_specs,
             (None, Err(e)) => {
-                eprintln!("mcp: failed to load workspace .mcp.json: {e:#}");
+                tracing::warn!(
+                    target: "forge_session::mcp",
+                    error = %format!("{e:#}"),
+                    "failed to load workspace .mcp.json",
+                );
                 return None;
             }
         },
@@ -220,7 +240,11 @@ async fn load_mcp_manager(workspace_path: Option<&Path>) -> Option<Arc<forge_mcp
             Some(home) => match forge_mcp::config::load_user_from(home) {
                 Ok(specs) => specs,
                 Err(e) => {
-                    eprintln!("mcp: failed to load user .mcp.json: {e:#}");
+                    tracing::warn!(
+                        target: "forge_session::mcp",
+                        error = %format!("{e:#}"),
+                        "failed to load user .mcp.json",
+                    );
                     return None;
                 }
             },
@@ -241,7 +265,12 @@ async fn load_mcp_manager(workspace_path: Option<&Path>) -> Option<Arc<forge_mcp
     let names: Vec<String> = mgr.list().await.into_iter().map(|s| s.name).collect();
     for name in names {
         if let Err(e) = mgr.start(&name).await {
-            eprintln!("mcp: start({name}) failed: {e:#}");
+            tracing::warn!(
+                target: "forge_session::mcp",
+                server_id = %name,
+                error = %format!("{e:#}"),
+                "mcp server start failed",
+            );
         }
     }
     Some(mgr)
@@ -575,7 +604,11 @@ pub async fn serve_with_session<P: Provider + 'static>(
             Ok(Some(content)) => Some(Arc::from(content)),
             Ok(None) => None,
             Err(e) => {
-                eprintln!("AGENTS.md: skipping injection: {e}");
+                tracing::warn!(
+                    target: "forge_session::server",
+                    error = %e,
+                    "AGENTS.md: skipping injection",
+                );
                 None
             }
         },
@@ -598,6 +631,12 @@ pub async fn serve_with_session<P: Provider + 'static>(
     // affects running tool-call dispatch immediately.
     let mcp = load_mcp_manager(workspace_path.as_deref()).await;
 
+    // F-371: build `session_id` before spawning the MCP state forwarder so
+    // the forwarder can carry it on every structured log line. Moved up
+    // from its original position near `socket_path`; other consumers
+    // (`agent_runtime`) still read it below through the `Arc` clone.
+    let session_id = Arc::new(session_id.unwrap_or_else(|| SessionId::new().to_string()));
+
     // F-155: fan out `McpManager::state_stream()` onto the session event
     // log. Every `Starting / Healthy / Degraded / Failed / Disabled`
     // transition becomes an `Event::McpState(McpStateEvent)` on the log,
@@ -607,12 +646,18 @@ pub async fn serve_with_session<P: Provider + 'static>(
     // and the session event log is the sole canonical destination.
     if let Some(mcp_mgr) = mcp.as_ref() {
         let session_for_mcp = Arc::clone(&session);
+        let session_id_for_mcp = Arc::clone(&session_id);
         let mut stream = mcp_mgr.state_stream();
         tokio::spawn(async move {
             use futures::StreamExt;
             while let Some(ev) = stream.next().await {
                 if let Err(e) = session_for_mcp.emit(forge_core::Event::McpState(ev)).await {
-                    eprintln!("mcp: state-event emit failed: {e}");
+                    tracing::error!(
+                        target: "forge_session::mcp",
+                        session_id = %session_id_for_mcp,
+                        error = %e,
+                        "mcp state-event emit failed",
+                    );
                 }
             }
         });
@@ -637,7 +682,8 @@ pub async fn serve_with_session<P: Provider + 'static>(
             .map(|w| w.display().to_string())
             .unwrap_or_default(),
     );
-    let session_id = Arc::new(session_id.unwrap_or_else(|| SessionId::new().to_string()));
+    // `session_id` already constructed above (F-371) so the MCP forwarder
+    // could attach it to its structured logs.
 
     let socket_path = Arc::new(path.to_path_buf());
     // Session-scoped registry of sandboxed child process groups. Killed on
@@ -729,6 +775,9 @@ pub async fn serve_with_session<P: Provider + 'static>(
                 let mcp = mcp.clone();
                 let agent_runtime = Arc::clone(&agent_runtime);
                 tokio::spawn(async move {
+                    // F-371: capture session_id for logging *before* the move
+                    // into `handle_connection` consumes the Arc.
+                    let session_id_for_log = Arc::clone(&session_id);
                     if let Err(e) = handle_connection(
                         stream,
                         session,
@@ -748,7 +797,12 @@ pub async fn serve_with_session<P: Provider + 'static>(
                     )
                     .await
                     {
-                        eprintln!("connection error: {e}");
+                        tracing::error!(
+                            target: "forge_session::server",
+                            session_id = %session_id_for_log,
+                            error = %e,
+                            "connection error",
+                        );
                     }
                 });
             }
@@ -891,7 +945,12 @@ async fn handle_connection<P: Provider + 'static>(
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Closed) => break,
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        eprintln!("subscriber dropped {n} events; closing connection");
+                        tracing::warn!(
+                            target: "forge_session::server",
+                            session_id = %session_id,
+                            dropped = n,
+                            "subscriber dropped events; closing connection",
+                        );
                         break;
                     }
                 }
@@ -911,6 +970,7 @@ async fn handle_connection<P: Provider + 'static>(
                         let agents_md = agents_md.clone();
                         let mcp = mcp.clone();
                         let agent_runtime = (*agent_runtime).clone();
+                        let session_id_for_turn = Arc::clone(&session_id);
                         tokio::spawn(async move {
                             let result = run_turn(
                                 Arc::clone(&session),
@@ -927,7 +987,12 @@ async fn handle_connection<P: Provider + 'static>(
                                 mcp,
                             ).await;
                             if let Err(e) = &result {
-                                eprintln!("turn error: {e}");
+                                tracing::warn!(
+                                    target: "forge_session::server",
+                                    session_id = %session_id_for_turn,
+                                    error = %e,
+                                    "turn error",
+                                );
                             }
                             if ephemeral {
                                 let reason = match result {
@@ -939,7 +1004,12 @@ async fn handle_connection<P: Provider + 'static>(
                                     reason,
                                     archived: false,
                                 }).await {
-                                    eprintln!("failed to emit SessionEnded: {e}");
+                                    tracing::error!(
+                                        target: "forge_session::server",
+                                        session_id = %session_id_for_turn,
+                                        error = %e,
+                                        "failed to emit SessionEnded",
+                                    );
                                 }
                             }
                         });
@@ -965,9 +1035,11 @@ async fn handle_connection<P: Provider + 'static>(
                             let decision = match parsed {
                                 Ok(scope) => ApprovalDecision::Approved(scope),
                                 Err(_) => {
-                                    eprintln!(
-                                        "ToolCallApproved: unknown scope {:?}, rejecting approval",
-                                        a.scope
+                                    tracing::warn!(
+                                        target: "forge_session::server",
+                                        session_id = %session_id,
+                                        scope = ?a.scope,
+                                        "ToolCallApproved: unknown scope, rejecting approval",
                                     );
                                     ApprovalDecision::Rejected
                                 }
@@ -1004,6 +1076,7 @@ async fn handle_connection<P: Provider + 'static>(
                         // one). No pre-validation here.
                         let target = MessageId::from_string(r.msg_id.clone());
                         let variant = r.variant;
+                        let session_id_for_rerun = Arc::clone(&session_id);
                         tokio::spawn(async move {
                             let orch = Orchestrator::new();
                             if let Err(e) = orch
@@ -1022,7 +1095,12 @@ async fn handle_connection<P: Provider + 'static>(
                                 )
                                 .await
                             {
-                                eprintln!("rerun error: {e}");
+                                tracing::warn!(
+                                    target: "forge_session::server",
+                                    session_id = %session_id_for_rerun,
+                                    error = %e,
+                                    "rerun error",
+                                );
                             }
                         });
                     }
@@ -1035,12 +1113,18 @@ async fn handle_connection<P: Provider + 'static>(
                         let session = Arc::clone(&session);
                         let parent = MessageId::from_string(s.parent_id.clone());
                         let variant_index = s.variant_index;
+                        let session_id_for_select = Arc::clone(&session_id);
                         tokio::spawn(async move {
                             let orch = Orchestrator::new();
                             if let Err(e) =
                                 orch.select_branch(session, parent, variant_index).await
                             {
-                                eprintln!("select_branch error: {e}");
+                                tracing::warn!(
+                                    target: "forge_session::server",
+                                    session_id = %session_id_for_select,
+                                    error = %e,
+                                    "select_branch error",
+                                );
                             }
                         });
                     }
@@ -1053,12 +1137,18 @@ async fn handle_connection<P: Provider + 'static>(
                         let session = Arc::clone(&session);
                         let parent = MessageId::from_string(d.parent_id.clone());
                         let variant_index = d.variant_index;
+                        let session_id_for_delete = Arc::clone(&session_id);
                         tokio::spawn(async move {
                             let orch = Orchestrator::new();
                             if let Err(e) =
                                 orch.delete_branch(session, parent, variant_index).await
                             {
-                                eprintln!("delete_branch error: {e}");
+                                tracing::warn!(
+                                    target: "forge_session::server",
+                                    session_id = %session_id_for_delete,
+                                    error = %e,
+                                    "delete_branch error",
+                                );
                             }
                         });
                     }
@@ -1076,7 +1166,12 @@ async fn handle_connection<P: Provider + 'static>(
                             forge_ipc::McpServersList { servers },
                         );
                         if let Err(e) = forge_ipc::write_frame(&mut writer, &frame).await {
-                            eprintln!("McpServersList write failed: {e}");
+                            tracing::error!(
+                                target: "forge_session::mcp",
+                                session_id = %session_id,
+                                error = %e,
+                                "McpServersList write failed",
+                            );
                             break;
                         }
                     }
@@ -1134,7 +1229,12 @@ async fn handle_connection<P: Provider + 'static>(
                             },
                         );
                         if let Err(e) = forge_ipc::write_frame(&mut writer, &frame).await {
-                            eprintln!("McpToggleResult write failed: {e}");
+                            tracing::error!(
+                                target: "forge_session::mcp",
+                                session_id = %session_id,
+                                error = %e,
+                                "McpToggleResult write failed",
+                            );
                             break;
                         }
                     }
@@ -1152,7 +1252,12 @@ async fn handle_connection<P: Provider + 'static>(
                         )
                         .await;
                         if let Err(e) = forge_ipc::write_frame(&mut writer, &frame).await {
-                            eprintln!("McpImportResult write failed: {e}");
+                            tracing::error!(
+                                target: "forge_session::mcp",
+                                session_id = %session_id,
+                                error = %e,
+                                "McpImportResult write failed",
+                            );
                             break;
                         }
                     }
@@ -1176,9 +1281,11 @@ async fn handle_connection<P: Provider + 'static>(
                         | IpcMessage::McpServersList(_)
                         | IpcMessage::McpToggleResult(_)
                         | IpcMessage::McpImportResult(_))) => {
-                        eprintln!(
-                            "session: ignoring unexpected client frame {}",
-                            ipc_message_kind(&other)
+                        tracing::warn!(
+                            target: "forge_session::server",
+                            session_id = %session_id,
+                            frame = ipc_message_kind(&other),
+                            "ignoring unexpected client frame",
                         );
                     }
                     None => break,
@@ -1199,7 +1306,12 @@ async fn handle_connection<P: Provider + 'static>(
             if let Err(e) =
                 archive_or_purge(session_dir, SessionPersistence::Ephemeral, &socket_path).await
             {
-                eprintln!("archive_or_purge failed: {e}");
+                tracing::error!(
+                    target: "forge_session::server",
+                    session_id = %session_id,
+                    error = %e,
+                    "archive_or_purge failed",
+                );
             }
         }
     }

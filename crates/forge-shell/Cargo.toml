@@ -60,6 +60,10 @@ tokio = { version = "1", features = ["fs", "net", "io-util", "sync", "time", "rt
 # `settings.toml` and round-trips through the canonical serializer to land
 # on disk.
 toml = "0.8"
+# F-371: structured tracing across authz rejections, emit failures, and
+# background-agent lifecycle transitions. No subscriber is installed in
+# production; emission sites only.
+tracing = "0.1"
 ts-rs = "12"
 
 [dev-dependencies]
@@ -67,6 +71,9 @@ ts-rs = "12"
 # own a `BackgroundAgentRegistry` per session.
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "time"] }
+# F-371: capture subscriber in integration tests pins target + field shape
+# for each tracing emission site.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 wiremock = "0.6"
 
 [features]

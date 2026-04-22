@@ -155,7 +155,7 @@ pub async fn provider_status<R: tauri::Runtime>(
     webview: tauri::Webview<R>,
     cache: tauri::State<'_, ProviderStatusCache>,
 ) -> std::result::Result<ProviderStatus, String> {
-    crate::ipc::require_window_label(&webview, "dashboard")?;
+    crate::ipc::require_window_label(&webview, "dashboard", "provider_status")?;
     Ok(cache.get_or_probe(DEFAULT_OLLAMA_URL, PROBE_TIMEOUT).await)
 }
 
