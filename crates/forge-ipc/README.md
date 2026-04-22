@@ -1,11 +1,11 @@
 # forge-ipc
 
-The shared IPC types and framing used on both Forge boundaries: shell ↔ session over a Unix domain socket, and (via `ts-rs`-exported types in `forge-core`) Tauri ↔ webview. Defines the tagged `IpcMessage` envelope, the `Hello` / `HelloAck` handshake with `PROTO_VERSION` / `SCHEMA_VERSION` advertisement, the client-to-session command set (`SendUserMessage`, `ToolCallApproved`, `ToolCallRejected`, `Subscribe`), and the length-delimited framing helpers (`read_frame`, `write_frame`, `FramedStream`) with a shared 4 MiB max frame size.
+The shared IPC types and framing used on both Forge boundaries: shell ↔ session over a Unix domain socket, and (via `ts-rs`-exported types in `forge-core`) Tauri ↔ webview. Defines the tagged `IpcMessage` envelope, the `Hello` / `HelloAck` handshake with `PROTO_VERSION` / `SCHEMA_VERSION` advertisement, the client-to-session command set (`SendUserMessage`, `ToolCallApproved`, `ToolCallRejected`, `Subscribe`), and the length-delimited framing helpers (`read_frame`, `write_frame`, `read_frame_with_deadline`) with a shared 4 MiB max frame size.
 
 ## Role in the workspace
 
 - Depended on by: `forge-session`, `forge-shell`, `forge-cli` — every component that speaks the session protocol.
-- Depends on: `tokio` (net + io-util), `tokio-util` (`LengthDelimitedCodec`), `serde`, `serde_json`, `bytes`, `futures`, `anyhow`.
+- Depends on: `tokio` (net + io-util + time), `serde`, `serde_json`, `anyhow`.
 
 ## Key types / entry points
 
@@ -15,8 +15,8 @@ The shared IPC types and framing used on both Forge boundaries: shell ↔ sessio
 - `Subscribe { since: u64 }` — request a replay-then-tail stream from a given event sequence.
 - `IpcEvent { seq, event }` — server-to-client event frame.
 - `SendUserMessage`, `ToolCallApproved`, `ToolCallRejected` — client-to-server commands.
-- `read_frame` / `write_frame` — bare async helpers over any `AsyncRead` / `AsyncWrite`, capped at 4 MiB.
-- `FramedStream` — `LengthDelimitedCodec`-backed wrapper over `tokio::net::UnixStream` with `send` / `recv` for any `Serialize` / `DeserializeOwned` payload.
+- `read_frame` / `write_frame` — canonical async helpers over any `AsyncRead` / `AsyncWrite`, capped at 4 MiB. Every production call site and every integration test uses these directly.
+- `read_frame_with_deadline` — `read_frame` wrapped in a `tokio::time::timeout`; used on the session accept path so a silent peer cannot stall a daemon task (F-354).
 
 ## Further reading
 

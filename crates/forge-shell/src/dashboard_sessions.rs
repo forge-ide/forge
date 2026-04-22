@@ -208,30 +208,31 @@ const PING_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis
 #[async_trait]
 impl Pinger for UdsPinger {
     async fn ping(&self, socket: &Path) -> bool {
-        use forge_ipc::{ClientInfo, FramedStream, Hello, IpcMessage, PROTO_VERSION};
+        use forge_ipc::{read_frame, write_frame, ClientInfo, Hello, IpcMessage, PROTO_VERSION};
         use tokio::net::UnixStream;
 
         let connect = tokio::time::timeout(PING_CONNECT_TIMEOUT, UnixStream::connect(socket));
-        let stream = match connect.await {
+        let mut stream = match connect.await {
             Ok(Ok(s)) => s,
             _ => return false,
         };
 
         let handshake = async {
-            let mut framed = FramedStream::new(stream);
-            framed
-                .send(&IpcMessage::Hello(Hello {
+            write_frame(
+                &mut stream,
+                &IpcMessage::Hello(Hello {
                     proto: PROTO_VERSION,
                     client: ClientInfo {
                         kind: "forge-shell".into(),
                         pid: std::process::id(),
                         user: whoami(),
                     },
-                }))
-                .await
-                .ok()?;
-            match framed.recv::<IpcMessage>().await.ok()? {
-                Some(IpcMessage::HelloAck(_)) => Some(()),
+                }),
+            )
+            .await
+            .ok()?;
+            match read_frame(&mut stream).await.ok()? {
+                IpcMessage::HelloAck(_) => Some(()),
                 _ => None,
             }
         };

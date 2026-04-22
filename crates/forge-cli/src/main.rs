@@ -111,7 +111,7 @@ async fn session_new(kind: SessionNewKind) -> Result<()> {
 }
 
 async fn session_list() -> Result<()> {
-    use forge_ipc::{ClientInfo, FramedStream, Hello, IpcMessage, PROTO_VERSION};
+    use forge_ipc::{read_frame, write_frame, ClientInfo, Hello, IpcMessage, PROTO_VERSION};
     use tokio::net::UnixStream;
 
     let dir = forge_cli::socket::sessions_socket_dir()?;
@@ -136,8 +136,7 @@ async fn session_list() -> Result<()> {
             .to_string();
 
         match UnixStream::connect(&path).await {
-            Ok(stream) => {
-                let mut framed = FramedStream::new(stream);
+            Ok(mut stream) => {
                 let hello = IpcMessage::Hello(Hello {
                     proto: PROTO_VERSION,
                     client: ClientInfo {
@@ -146,8 +145,8 @@ async fn session_list() -> Result<()> {
                         user: whoami(),
                     },
                 });
-                if framed.send(&hello).await.is_ok() {
-                    if let Ok(Some(IpcMessage::HelloAck(ack))) = framed.recv().await {
+                if write_frame(&mut stream, &hello).await.is_ok() {
+                    if let Ok(IpcMessage::HelloAck(ack)) = read_frame(&mut stream).await {
                         println!(
                             "{id}  active  workspace={}  started={}",
                             ack.workspace, ack.started_at
@@ -171,38 +170,39 @@ async fn session_list() -> Result<()> {
 
 async fn session_tail(id: &str) -> Result<()> {
     use forge_core::Event;
-    use forge_ipc::{ClientInfo, FramedStream, Hello, IpcMessage, Subscribe, PROTO_VERSION};
+    use forge_ipc::{
+        read_frame, write_frame, ClientInfo, Hello, IpcMessage, Subscribe, PROTO_VERSION,
+    };
     use tokio::net::UnixStream;
 
     let sock = forge_cli::socket::socket_path(id)?;
-    let stream = UnixStream::connect(&sock)
+    let mut stream = UnixStream::connect(&sock)
         .await
         .map_err(|e| anyhow::anyhow!("cannot connect to session {id}: {e}"))?;
 
-    let mut framed = FramedStream::new(stream);
-
-    framed
-        .send(&IpcMessage::Hello(Hello {
+    write_frame(
+        &mut stream,
+        &IpcMessage::Hello(Hello {
             proto: PROTO_VERSION,
             client: ClientInfo {
                 kind: "forge-cli".into(),
                 pid: std::process::id(),
                 user: whoami(),
             },
-        }))
-        .await?;
-    let _ack: IpcMessage = framed
-        .recv()
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("server closed connection during handshake"))?;
+        }),
+    )
+    .await?;
+    let _ack = read_frame(&mut stream).await?;
 
-    framed
-        .send(&IpcMessage::Subscribe(Subscribe { since: 0 }))
-        .await?;
+    write_frame(&mut stream, &IpcMessage::Subscribe(Subscribe { since: 0 })).await?;
 
     loop {
-        match framed.recv::<IpcMessage>().await? {
-            Some(IpcMessage::Event(ipc_event)) => {
+        // `read_frame` returns `Err` on clean EOF (`read_u32` fails) as
+        // well as on malformed bodies. For a tail command either is a
+        // reason to stop — surface the distinction via a log only if we
+        // ever add structured error reporting here.
+        match read_frame(&mut stream).await {
+            Ok(IpcMessage::Event(ipc_event)) => {
                 // F-112: IpcEvent.event is typed — no Value decode.
                 let event = ipc_event.event;
                 if let Some(line) = forge_cli::display::format_event(&event) {
@@ -212,8 +212,8 @@ async fn session_tail(id: &str) -> Result<()> {
                     break;
                 }
             }
-            None => break,
-            _ => {}
+            Ok(_) => {}
+            Err(_) => break,
         }
     }
     Ok(())
@@ -239,7 +239,8 @@ async fn session_kill(id: &str) -> Result<()> {
 async fn run_agent(name: &str, input_source: &str) -> Result<()> {
     use forge_core::Event;
     use forge_ipc::{
-        ClientInfo, FramedStream, Hello, IpcMessage, SendUserMessage, Subscribe, PROTO_VERSION,
+        read_frame, write_frame, ClientInfo, Hello, IpcMessage, SendUserMessage, Subscribe,
+        PROTO_VERSION,
     };
     use tokio::net::UnixStream;
 
@@ -276,36 +277,39 @@ async fn run_agent(name: &str, input_source: &str) -> Result<()> {
 
     wait_for_socket(&sock).await?;
 
-    let stream = UnixStream::connect(&sock).await?;
-    let mut framed = FramedStream::new(stream);
+    let mut stream = UnixStream::connect(&sock).await?;
 
-    framed
-        .send(&IpcMessage::Hello(Hello {
+    write_frame(
+        &mut stream,
+        &IpcMessage::Hello(Hello {
             proto: PROTO_VERSION,
             client: ClientInfo {
                 kind: "forge-cli".into(),
                 pid: std::process::id(),
                 user: whoami(),
             },
-        }))
-        .await?;
-    framed
-        .recv::<IpcMessage>()
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("handshake failed"))?;
+        }),
+    )
+    .await?;
+    read_frame(&mut stream)
+        .await
+        .map_err(|e| anyhow::anyhow!("handshake failed: {e}"))?;
 
-    framed
-        .send(&IpcMessage::Subscribe(Subscribe { since: 0 }))
-        .await?;
-    framed
-        .send(&IpcMessage::SendUserMessage(SendUserMessage { text }))
-        .await?;
+    write_frame(&mut stream, &IpcMessage::Subscribe(Subscribe { since: 0 })).await?;
+    write_frame(
+        &mut stream,
+        &IpcMessage::SendUserMessage(SendUserMessage { text }),
+    )
+    .await?;
 
-    // Stream events until the session ends.
+    // Stream events until the session ends. An `Err` here means either
+    // clean EOF (the daemon closed the connection) or a malformed frame
+    // — in both cases we stop tailing and let the child exit code
+    // determine the outcome.
     let mut event_exit_code = 0i32;
     loop {
-        match framed.recv::<IpcMessage>().await? {
-            Some(IpcMessage::Event(ipc_event)) => {
+        match read_frame(&mut stream).await {
+            Ok(IpcMessage::Event(ipc_event)) => {
                 // F-112: IpcEvent.event is typed — no Value decode.
                 let event = ipc_event.event;
                 if let Some(line) = forge_cli::display::format_event(&event) {
@@ -318,8 +322,8 @@ async fn run_agent(name: &str, input_source: &str) -> Result<()> {
                     break;
                 }
             }
-            None => break,
-            _ => {}
+            Ok(_) => {}
+            Err(_) => break,
         }
     }
 
