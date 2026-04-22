@@ -67,7 +67,7 @@ The Dashboard itself has no global loading or error state — it always renders 
 
 ### D.6 Cross-spec references
 
-- `session-roster.md` — the in-session roster of loaded assets. Different surface (Session window sidebar) but related vocabulary; the Dashboard's session cards link a user *into* a session whose roster lives there.
+- `session-roster.md` *(deferred post-Phase-2)* — forward-looking spec for an in-session roster of loaded assets. No component or hosting sidebar exists in Phase 2; the Dashboard's session cards still open sessions, but those sessions do not render a roster today.
 - `ai-patterns.md` — provider accent colors used by the provider indicator and any future provider chips on session cards.
 - `provider-selector.md` — composer-time provider switching (Phase 2+). The Dashboard's provider panel is read-only status, not a switcher.
 - `layout-panes.md` — pane model used by the Session window. The Dashboard does not use the pane model.
