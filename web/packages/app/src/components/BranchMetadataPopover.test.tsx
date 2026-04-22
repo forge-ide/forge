@@ -201,4 +201,22 @@ describe('BranchMetadataPopover', () => {
     fireEvent.mouseDown(getByTestId('branch-popover-row-1'));
     expect(onDismiss).not.toHaveBeenCalled();
   });
+
+  // F-411 (V4): per voice-terminology.md §8, action buttons use verb+noun
+  // display caps. Per-row "Delete" becomes "DELETE VARIANT"; footer "Export
+  // all" becomes "EXPORT ALL".
+  it('row delete + footer export buttons carry verb+noun display-caps labels', () => {
+    const { getByTestId } = render(() => (
+      <BranchMetadataPopover
+        variants={rows}
+        activeVariantId="var-1"
+        onSelect={() => {}}
+        onDelete={() => {}}
+        onExportAll={() => {}}
+        onDismiss={() => {}}
+      />
+    ));
+    expect(getByTestId('branch-popover-delete-1').textContent).toContain('DELETE VARIANT');
+    expect(getByTestId('branch-popover-export').textContent).toContain('EXPORT ALL');
+  });
 });

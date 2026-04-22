@@ -569,3 +569,42 @@ describe('Persistence level toggle (F-036)', () => {
     expect(getByTestId('level-user-btn')).toHaveAttribute('aria-checked', 'true');
   });
 });
+
+// ---------------------------------------------------------------------------
+// F-411: voice + terminology — source strings must be literal UPPERCASE so
+// screen readers announce uppercase (voice-terminology.md §8, V13). CSS
+// `text-transform: uppercase` only re-paints the glyph; assistive tech reads
+// the underlying text node.
+// ---------------------------------------------------------------------------
+
+describe('F-411 voice/terminology — literal UPPERCASE source strings', () => {
+  it('level-toggle buttons carry SESSION / WORKSPACE / USER as literal text', () => {
+    const { getByTestId } = renderPrompt();
+    expect(getByTestId('level-session-btn').textContent).toContain('SESSION');
+    expect(getByTestId('level-workspace-btn').textContent).toContain('WORKSPACE');
+    expect(getByTestId('level-user-btn').textContent).toContain('USER');
+  });
+
+  it('action buttons carry verb+noun display caps labels', () => {
+    const { getByTestId } = renderPrompt();
+    expect(getByTestId('reject-btn').textContent).toContain('REJECT CALL');
+    expect(getByTestId('approve-once-btn').textContent).toContain('APPROVE ONCE');
+  });
+
+  it('scope menu items carry APPROVE <NOUN> labels', () => {
+    const { getByTestId } = renderPrompt({ toolName: 'fs.edit', argsJson: FS_EDIT_ARGS });
+    fireEvent.click(getByTestId('approve-dropdown-btn'));
+    expect(getByTestId('scope-once-btn').textContent).toContain('APPROVE ONCE');
+    expect(getByTestId('scope-file-btn').textContent).toContain('APPROVE FILE');
+    expect(getByTestId('scope-pattern-btn').textContent).toContain('APPROVE PATTERN');
+    expect(getByTestId('scope-tool-btn').textContent).toContain('APPROVE TOOL');
+  });
+
+  it('pattern-editor buttons carry CONFIRM PATTERN / CANCEL as literal text', () => {
+    const { getByTestId } = renderPrompt();
+    fireEvent.click(getByTestId('approve-dropdown-btn'));
+    fireEvent.click(getByTestId('scope-pattern-btn'));
+    expect(getByTestId('pattern-confirm-btn').textContent).toContain('CONFIRM PATTERN');
+    expect(getByTestId('pattern-cancel-btn').textContent).toContain('CANCEL');
+  });
+});

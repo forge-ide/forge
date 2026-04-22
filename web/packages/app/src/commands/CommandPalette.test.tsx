@@ -166,6 +166,19 @@ describe('CommandPalette entries + selection (F-157)', () => {
     expect(runA).not.toHaveBeenCalled();
     expect(runB).toHaveBeenCalledTimes(1);
   });
+
+  // F-411 (V9): canonical empty-state form is `// <noun phrase>` per
+  // voice-terminology.md §8, matching the dominant pattern already used by
+  // SessionsPanel (// no active sessions) and AgentMonitor (// no agents).
+  it('empty-state row reads "// no matching commands" when no commands match', async () => {
+    registerCommand({ id: 'a', title: 'Alpha', run: vi.fn() });
+    const { findByTestId } = render(() => <CommandPalette />);
+    openWithCtrlK();
+    const input = (await findByTestId('command-palette-input')) as HTMLInputElement;
+    fireEvent.input(input, { target: { value: 'zzzzz-no-match' } });
+    const empty = await findByTestId('command-palette-empty');
+    expect(empty.textContent?.trim()).toBe('// no matching commands');
+  });
 });
 
 // F-402: dialog contract — aria-modal, focus trap on Tab, focus restore on

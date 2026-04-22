@@ -43,7 +43,7 @@ export const ProviderPanel: Component = () => {
           </div>
         }
       >
-        <Show when={status()} fallback={<p class="provider-panel__loading">PROBING</p>}>
+        <Show when={status()} fallback={<p class="provider-panel__loading">ollama · probing</p>}>
           {(s) => (
             <>
               <div class="provider-panel__row">

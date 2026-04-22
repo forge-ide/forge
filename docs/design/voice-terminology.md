@@ -21,7 +21,8 @@ It is not: Casual, vague, simplified, apologetic, or verbose.
 - Button labels: verb + noun in display caps. `CONNECT PROVIDER` not `Connect to your AI provider`.
 - Section labels: noun only in mono uppercase. `PROVIDERS` not `Your AI Providers`.
 - Toast titles: state + subject. `AI backend connected` not `Successfully connected to your AI backend`.
-- Empty-state copy: noun phrase describing what would be here, plus an optional verb-noun CTA. `No agents running` or `No agents running · start agent`, never `There are no agents currently running`. See [AI Patterns](ai-patterns.md) §"Interaction states" for the surrounding treatment.
+- Empty-state copy: noun phrase describing what would be here, rendered as a mono comment in the canonical form `// <noun phrase>`. Examples: `// no matching commands`, `// no active sessions`, `// no agents`. Skip the leading `//` only when the surface already prints the token in a mono comment frame (code blocks, terminals). Pair with an optional verb-noun CTA when an action recovers the state: `// no agents · start agent`. Never `There are no agents currently running`. See [AI Patterns](ai-patterns.md) §"Interaction states" for the surrounding treatment.
+- Menu items: action rows in a context or overflow menu are buttons, so they obey the verb+noun display-caps rule. When the selected row already supplies the noun (e.g. a file tree row scoping the menu to a single path), a single-word verb is sufficient: `OPEN`, `RENAME`, `DELETE`. Otherwise include the noun: `DELETE VARIANT`, `EXPORT ALL`. Write the source text in literal UPPERCASE so screen readers announce the casing — CSS `text-transform: uppercase` only repaints glyphs.
 
 ### Terminology
 
@@ -36,7 +37,17 @@ Always use these terms, never the alternatives:
 | Tool call | Function call, API call |
 | Streaming | Live, real-time |
 | Pane | Window, panel (for canvas divisions) |
+| Panel | Pane (for Dashboard sections) |
 | Canvas | Editor area, main area |
+
+### Panel vs pane
+
+Forge splits a single-word distinction that DESIGN.md elides. Use each term for exactly one surface:
+
+- **Panel** — a bordered Dashboard section that renders a single status domain (`ProviderPanel`, `SessionsPanel`, `AgentMonitor`). Panels live outside an active session and are chrome-like. Labels that identify a panel use `NOUN` mono-uppercase (`PROVIDER`, `SESSIONS`, `AGENTS`).
+- **Pane** — a resizable canvas division inside an active session (chat pane, files sidebar, editor canvas). Panes carry live work, not status; they always show an active provider badge per §9.
+
+Never call a Dashboard section a "pane" and never call an in-session canvas division a "panel". If a surface is neither — e.g. a toast, a popover, a command palette — call it by its specific component name, not either of these two.
 
 ### Numbers and codes
 

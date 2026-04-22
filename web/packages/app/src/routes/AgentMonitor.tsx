@@ -639,7 +639,7 @@ export const AgentInspector: Component<{
             class="agent-monitor__stop"
             onClick={() => props.onStop(props.agent!.id)}
           >
-            Stop agent
+            STOP AGENT
           </button>
         </section>
       </Show>
