@@ -17,7 +17,7 @@ The sequencing that builds toward v1.0. Milestones are outcome-based.
 - `workspaces.toml` and `meta.toml` readers/writers
 - **Ships**: a CLI-only preview; no GUI.
 
-### Phase 1 — Single provider, minimal GUI (weeks 3–6)
+### Phase 1 — Single provider, minimal GUI (weeks 3–6) ✅ Complete
 **Outcome.** A user can open Forge, start a session, chat with a local Ollama model, and see tool calls. No credentials required (deferred to Phase 3).
 - `forge-providers::OllamaProvider` with streaming chat (NDJSON over HTTP `/api/chat`, model discovery via `/api/tags`)
 - `forge-shell` Tauri bin + webview bootstrap (Solid app)
@@ -38,7 +38,7 @@ The sequencing that builds toward v1.0. Milestones are outcome-based.
 - Background agents
 - Agent monitor view
 - @-context picker
-- Re-run (Replace variant; Branch variant scaffolded per SPECS.md §15)
+- Re-run (Replace + Branch variants with full branch UI)
 
 ### Phase 3 — Breadth (weeks 11–14)
 **Outcome.** Multi-provider with credential management, skills, catalog, usage, containers.
@@ -50,7 +50,6 @@ The sequencing that builds toward v1.0. Milestones are outcome-based.
 - `forge-oci` container support; Level 2 sandbox
 - Context compaction (auto at 98%, user-invoked anytime)
 - Parallel read-only tool calls
-- Re-run Branch UI
 - Opt-in cross-session memory
 
 ### Phase 4 — Polish and v1.0 (weeks 15–18)
@@ -58,8 +57,8 @@ The sequencing that builds toward v1.0. Milestones are outcome-based.
 - LSP bootstrap for the full 16 default servers
 - Markdown preview pane (pulldown-cmark renderer), sticky toggles
 - Built-in static preview server (`forge preview`)
-- Command palette (full scope)
-- Settings UI
+- Command palette (additional commands beyond the Phase-2 registry)
+- Settings UI (surfaces on top of the Phase-2 settings store)
 - Install packages for macOS and Linux (dmg, deb, appimage)
 - Windows install documentation for WSL2 path
 - Public docs site
