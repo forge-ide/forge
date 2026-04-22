@@ -11,6 +11,7 @@ import {
 } from '../ipc/fs';
 import type { Candidate, ContextBlock, Resolver } from './types';
 import { fuzzyMatch } from './types';
+import { makeCandidateList, walkTree } from './helpers';
 
 /** Spec-mandated cap: directory snapshots include at most this many paths. */
 export const DIRECTORY_RESOLVER_MAX_PATHS = 200;
@@ -24,19 +25,18 @@ export interface DirectoryResolverDeps {
   tree?: typeof defaultTree;
 }
 
-/** Emit `[path, name]` pairs for directory nodes only (root included). */
+/** Emit `[path, name]` pairs for directory nodes only (root included).
+ *  `kind` is the Rust-side enum 'File' | 'Dir' | 'Symlink' | 'Other'. */
 export function flattenDirectories(
   node: TreeNodeDto,
   out: Array<{ path: string; name: string }> = [],
 ): Array<{ path: string; name: string }> {
-  // `kind` is the Rust-side enum 'File' | 'Dir' | 'Symlink' | 'Other'.
-  if (node.kind === 'Dir') {
-    out.push({ path: node.path, name: node.name });
-  }
-  if (node.children) {
-    for (const child of node.children) flattenDirectories(child, out);
-  }
-  return out;
+  return walkTree(
+    node,
+    (n) => n.kind === 'Dir',
+    (n) => ({ path: n.path, name: n.name }),
+    out,
+  );
 }
 
 /**
@@ -48,11 +48,7 @@ export function flattenAllPaths(
   node: TreeNodeDto,
   out: string[] = [],
 ): string[] {
-  out.push(node.path);
-  if (node.children) {
-    for (const child of node.children) flattenAllPaths(child, out);
-  }
-  return out;
+  return walkTree(node, () => true, (n) => n.path, out);
 }
 
 export function createDirectoryResolver(deps: DirectoryResolverDeps): Resolver<string> {
@@ -61,13 +57,16 @@ export function createDirectoryResolver(deps: DirectoryResolverDeps): Resolver<s
   return {
     async list(query: string): Promise<Candidate[]> {
       const node = await treeFn(deps.sessionId, deps.workspaceRoot);
-      const dirs = flattenDirectories(node);
-      const matched = dirs.filter((d) => fuzzyMatch(query, d.path));
-      return matched.slice(0, DIRECTORY_RESOLVER_MAX_RESULTS).map((d) => ({
-        category: 'directory' as const,
-        label: d.name || d.path,
-        value: d.path,
-      }));
+      return makeCandidateList({
+        items: flattenDirectories(node),
+        match: (d) => fuzzyMatch(query, d.path),
+        toCandidate: (d) => ({
+          category: 'directory',
+          label: d.name || d.path,
+          value: d.path,
+        }),
+        max: DIRECTORY_RESOLVER_MAX_RESULTS,
+      });
     },
 
     async resolve(dirPath: string): Promise<ContextBlock> {

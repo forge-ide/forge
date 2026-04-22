@@ -12,6 +12,7 @@
 
 import type { Candidate, ContextBlock, Resolver } from './types';
 import { fuzzyMatch } from './types';
+import { makeCandidateList } from './helpers';
 
 export interface SkillCandidateSource {
   name: string;
@@ -26,20 +27,20 @@ export interface SkillResolverDeps {
 export function createSkillResolver(deps: SkillResolverDeps): Resolver<string> {
   return {
     async list(query: string): Promise<Candidate[]> {
-      const skills = deps.listSkills();
-      const matched = skills.filter(
-        (s) =>
+      return makeCandidateList({
+        items: deps.listSkills(),
+        match: (s) =>
           fuzzyMatch(query, s.name) ||
           (s.description !== undefined && fuzzyMatch(query, s.description)),
-      );
-      return matched.map((s) => ({
-        category: 'skill' as const,
-        label:
-          s.description !== undefined && s.description.length > 0
-            ? `${s.name} — ${s.description}`
-            : s.name,
-        value: s.name,
-      }));
+        toCandidate: (s) => ({
+          category: 'skill',
+          label:
+            s.description !== undefined && s.description.length > 0
+              ? `${s.name} — ${s.description}`
+              : s.name,
+          value: s.name,
+        }),
+      });
     },
 
     async resolve(name: string): Promise<ContextBlock> {
