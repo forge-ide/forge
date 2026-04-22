@@ -22,6 +22,18 @@ The `mcpServers` schema is the universal proposal (MCP repo discussion #2218). T
 
 The remaining planned API (`McpManager`, `Scope`, `ImportSource`, `McpStateEvent`, HTTP transport) lands in F-129 / F-130.
 
+## Security: stdio child environment is deny-by-default
+
+`transport::Stdio::connect` clears the inherited process environment before spawning an MCP server and re-injects only an explicit allow-list, with the spec's `env` map layered on top. MCP servers declared in `.mcp.json` **never** see parent-process secrets (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GITHUB_TOKEN`, `AWS_*`, arbitrary shell exports) unless the spec re-declares them explicitly.
+
+Rationale: `.mcp.json` is a checked-in workspace file; any collaborator or merged workspace can add a server entry. Default-inherit would make it a silent exfiltration channel (F-345, CWE-526 / CWE-200).
+
+Forwarded by default (read from the parent if present, skipped otherwise):
+
+`PATH`, `HOME`, `LANG`, `LC_ALL`, `USER`, `LOGNAME`, `TMPDIR`, `TMP`, `TEMP`, `SystemRoot`, `ComSpec`, `PATHEXT`.
+
+Callers that need the child to see additional parent-held values must surface them through the spec's `env` map — the workspace config — not the daemon's ambient environment.
+
 ## Tests
 
 Most of the suite runs under the default `cargo test -p forge-mcp` lane.

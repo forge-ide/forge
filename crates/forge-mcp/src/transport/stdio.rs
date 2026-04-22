@@ -39,6 +39,36 @@ pub enum StdioEvent {
 /// scheduling delay in the consumer doesn't back-pressure the reader task.
 const EVENT_CHANNEL_CAPACITY: usize = 128;
 
+/// Variables forwarded from the parent process into every stdio MCP child.
+///
+/// Security posture: the child environment is **deny-by-default**. We
+/// `env_clear()` the `Command` and then re-inject only this allow-list
+/// plus whatever the spec's `env` map declares. This prevents a hostile
+/// or careless `.mcp.json` entry from silently exfiltrating parent-held
+/// credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GITHUB_TOKEN`,
+/// `AWS_*`, arbitrary shell exports, etc.) — see F-345.
+///
+/// Entries are the minimal set the overwhelming majority of MCP servers
+/// need to locate binaries and render text correctly: `PATH` (command
+/// resolution), `HOME` (per-user config), `LANG` / `LC_ALL` (locale),
+/// `USER` / `LOGNAME` (user identity), `TMPDIR` / `TMP` / `TEMP` (tempdir
+/// discovery, platform-dependent), `SystemRoot` / `ComSpec` / `PATHEXT`
+/// (Windows subprocess basics).
+const PARENT_ENV_ALLOWLIST: &[&str] = &[
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "USER",
+    "LOGNAME",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "SystemRoot",
+    "ComSpec",
+    "PATHEXT",
+];
+
 /// An active stdio JSON-RPC connection to one MCP server subprocess.
 ///
 /// Construct with [`Stdio::connect`]. The handle owns the child's stdin
@@ -101,7 +131,18 @@ impl Stdio {
 
         let mut cmd = Command::new(command);
         cmd.args(args)
-            .envs(env)
+            // Security (F-345): wipe the inherited environment first, then
+            // re-inject an explicit allow-list, then the spec's declared
+            // `env` map last so spec values override allow-list values for
+            // the same key. Without `env_clear()`, a hostile `.mcp.json`
+            // can silently exfiltrate every credential in the parent's env.
+            .env_clear();
+        for key in PARENT_ENV_ALLOWLIST {
+            if let Ok(val) = std::env::var(key) {
+                cmd.env(key, val);
+            }
+        }
+        cmd.envs(env)
             .stdin(StdStdio::piped())
             .stdout(StdStdio::piped())
             .stderr(StdStdio::piped())
@@ -381,5 +422,101 @@ mod tests {
         assert!(out.ends_with('…'));
         // And it must parse as valid UTF-8 (the slice is on a boundary).
         assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    /// Drain events until the child exits, returning the exit status.
+    /// Fails the test if recv times out or the channel closes before Exit.
+    async fn drain_to_exit(t: &mut Stdio) -> ExitStatus {
+        loop {
+            let ev = tokio::time::timeout(std::time::Duration::from_secs(5), t.recv())
+                .await
+                .expect("recv timed out")
+                .expect("channel closed before Exit");
+            if let StdioEvent::Exit(status) = ev {
+                return status;
+            }
+        }
+    }
+
+    /// F-345 regression: the child must NOT inherit parent-process env vars
+    /// outside the allow-list. We set a sentinel in the parent, then spawn
+    /// a shell that exits 0 only if the sentinel is **absent** from its
+    /// env. Pre-fix (no `env_clear`), `$CANARY` would be "leak-me" and the
+    /// shell would exit 1. Post-fix the child sees nothing and exits 0.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn child_does_not_inherit_parent_env_secrets() {
+        // Unique per-process so concurrent tests don't collide on the
+        // global env.
+        let key = format!("FORGE_MCP_F345_CANARY_{}", std::process::id());
+        std::env::set_var(&key, "leak-me-if-you-can");
+
+        // `[ -z "$VAR" ]` is true iff the var is unset or empty. Exit 0
+        // means the leak was blocked; exit 1 means the child saw it.
+        let script = format!("[ -z \"${key}\" ]");
+        let spec = stdio_spec("/bin/sh", &["-c", &script]);
+
+        let mut t = Stdio::connect(&spec).await.expect("spawn sh env-check");
+        let status = drain_to_exit(&mut t).await;
+
+        std::env::remove_var(&key);
+
+        assert!(
+            status.success(),
+            "child inherited parent env secret {key}; shell exited {status:?}",
+        );
+    }
+
+    /// Positive control: the allow-list must still forward `PATH` so the
+    /// child can resolve binaries. Exit 0 iff the child's PATH matches
+    /// the parent's — proves env isolation isn't also starving the child.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn child_inherits_path_from_allowlist() {
+        let parent_path = std::env::var("PATH").unwrap_or_default();
+        assert!(
+            !parent_path.is_empty(),
+            "test precondition: parent PATH must be non-empty"
+        );
+
+        // `test "$PATH" = "<parent>"` exits 0 iff they match.
+        let script = format!("test \"$PATH\" = {parent:?}", parent = parent_path);
+        let spec = stdio_spec("/bin/sh", &["-c", &script]);
+
+        let mut t = Stdio::connect(&spec).await.expect("spawn sh path-check");
+        let status = drain_to_exit(&mut t).await;
+
+        assert!(
+            status.success(),
+            "child PATH did not carry parent PATH; shell exited {status:?}",
+        );
+    }
+
+    /// The spec-declared `env` map must still reach the child after we
+    /// clear the inherited environment. Regression guard against an
+    /// over-zealous filter that drops caller-provided vars.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spec_env_reaches_child_after_clear() {
+        let mut env = BTreeMap::new();
+        env.insert(
+            "FORGE_MCP_SPEC_VAR".to_string(),
+            "declared-value".to_string(),
+        );
+        let spec = McpServerSpec {
+            kind: ServerKind::Stdio {
+                command: "/bin/sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "test \"$FORGE_MCP_SPEC_VAR\" = declared-value".into(),
+                ],
+                env,
+            },
+        };
+
+        let mut t = Stdio::connect(&spec).await.expect("spawn sh spec-env");
+        let status = drain_to_exit(&mut t).await;
+
+        assert!(
+            status.success(),
+            "spec-declared env did not reach child; shell exited {status:?}",
+        );
     }
 }
