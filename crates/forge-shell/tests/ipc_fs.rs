@@ -688,3 +688,92 @@ async fn delete_path_returns_not_connected_when_cache_is_empty() {
     );
     assert!(file.exists(), "file must remain on not-connected");
 }
+
+// ---------------------------------------------------------------------------
+// F-365: sandbox-escape coverage on the shell side.
+//
+// The existing tests above cover out-of-workspace *destinations* for rename
+// and out-of-workspace *paths* for delete. The F-365 review flagged that the
+// `from` side of `rename_path` was not exercised, and that neither command
+// had an assertion aligned with the concrete attack shape called out in the
+// issue:
+//
+//     rename_path(session_id, "/etc/passwd", "/tmp/x")
+//
+// i.e. both endpoints are absolute paths outside the primed workspace_root.
+// These tests pin that exact shape so a regression that loosens the
+// `forge-fs` allowlist check cannot land silently.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rename_path_rejects_absolute_paths_outside_primed_workspace() {
+    // Cache is primed with an empty workspace; the webview supplies absolute
+    // paths pointing completely outside it. Both endpoints must be path-denied
+    // via the `forge-fs` allowlist, and neither path may be created, moved,
+    // or otherwise touched on disk.
+    let workspace = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let canonical_outside = fs::canonicalize(outside.path()).unwrap();
+    let from = canonical_outside.join("source.txt");
+    let to = canonical_outside.join("destination.txt");
+    fs::write(&from, "source").unwrap();
+
+    let (app, _conn) = make_app_with_workspace(workspace.path(), TEST_SESSION).await;
+    let window = make_session_window(&app, TEST_SESSION);
+
+    let err = invoke_err(
+        &window,
+        "rename_path",
+        serde_json::json!({
+            "sessionId": TEST_SESSION,
+            "from": from,
+            "to": to,
+        }),
+    );
+    assert!(
+        err.contains("not allowed") || err.contains("PathDenied"),
+        "rename_path with an out-of-workspace `from` must be denied by forge-fs, got: {err}"
+    );
+    assert!(
+        from.exists(),
+        "source outside workspace must remain untouched"
+    );
+    assert!(
+        !to.exists(),
+        "destination outside workspace must not be created"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_path_rejects_absolute_path_outside_primed_workspace() {
+    // Mirrors the `rename_path` absolute-path escape: a delete targeting an
+    // absolute path fully outside the session's workspace must be rejected,
+    // and the target must remain on disk.
+    let workspace = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let canonical_outside = fs::canonicalize(outside.path()).unwrap();
+    let victim = canonical_outside.join("keep.txt");
+    fs::write(&victim, "do not delete").unwrap();
+
+    let (app, _conn) = make_app_with_workspace(workspace.path(), TEST_SESSION).await;
+    let window = make_session_window(&app, TEST_SESSION);
+
+    let err = invoke_err(
+        &window,
+        "delete_path",
+        serde_json::json!({
+            "sessionId": TEST_SESSION,
+            "path": victim,
+        }),
+    );
+    assert!(
+        err.contains("not allowed") || err.contains("PathDenied"),
+        "delete_path with an out-of-workspace absolute path must be denied by forge-fs, got: {err}"
+    );
+    assert!(victim.exists(), "victim outside workspace must remain");
+    assert_eq!(
+        fs::read_to_string(&victim).unwrap(),
+        "do not delete",
+        "victim contents must be unchanged"
+    );
+}
