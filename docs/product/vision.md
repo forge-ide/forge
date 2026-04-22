@@ -16,7 +16,7 @@ The original PDF described Forge in IDE terms (activity bar, file explorer, git)
 
 - The **session** is the unit of work, not the workspace.
 - The **dashboard** is the home screen, not the editor.
-- The **editor** is one of three peer pane types (chat, terminal, editor) that live inside a session, not the main event.
+- The **editor** is one of several peer pane types that live inside a session — chat, terminal, editor, files, and agent monitor — not the main event. See `architecture/session-layout.md §4.1` for the full list.
 
 This matters because it determines everything downstream: window hierarchy, the CLI surface, sandboxing boundaries, config file locations, and what we even call the top-level concept.
 
