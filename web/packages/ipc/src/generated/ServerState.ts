@@ -9,4 +9,4 @@
  * surface the literal error text `"MCP server <name> is disabled"` that
  * the running-session toggle test asserts against.
  */
-export type ServerState = { "state": "starting" } | { "state": "healthy" } | { "state": "degraded", reason: string, } | { "state": "failed", reason: string, } | { "state": "disabled", reason: string, };
+export type ServerState = { "type": "starting" } | { "type": "healthy" } | { "type": "degraded", reason: string, } | { "type": "failed", reason: string, } | { "type": "disabled", reason: string, };

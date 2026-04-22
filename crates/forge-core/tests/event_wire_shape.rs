@@ -23,8 +23,6 @@
 //! adding a new variant without a pin is a compile error, not a runtime
 //! regression that surfaces in the UI.
 
-use std::time::{Duration, SystemTime};
-
 use chrono::{DateTime, Utc};
 use forge_core::{
     AgentId, AgentInstanceId, ApprovalPreview, ApprovalScope, ApprovalSource, CompactTrigger,
@@ -364,14 +362,6 @@ fn provider_id(s: &str) -> ProviderId {
 
 fn step_id(s: &str) -> StepId {
     serde_json::from_value(Value::String(s.to_string())).unwrap()
-}
-
-/// Deterministic `SystemTime` for `McpStateEvent.ts`. Serde's default
-/// `Serialize` impl for `SystemTime` emits
-/// `{ "secs_since_epoch": N, "nanos_since_epoch": N }` — the pin below asserts
-/// exactly that shape so a switch to a humantime-style adapter is caught.
-fn fixed_system_time() -> SystemTime {
-    SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)
 }
 
 // ---------------------------------------------------------------------------
@@ -761,34 +751,31 @@ fn mcp_state_wire_shape_healthy() {
     // F-155: `McpState(McpStateEvent)` is a newtype variant carrying a
     // struct. Serde's internal tagging flattens the struct fields into the
     // outer object, so the wire shape is the outer `type` discriminator
-    // plus every field of `McpStateEvent` — including its `ts: SystemTime`
-    // (serde default: `{secs_since_epoch, nanos_since_epoch}`). The pin
-    // below locks that flattening; if it drifts to a wrapped `payload`,
-    // the TS adapter (`applyEventToState` / `McpStatePanel`) breaks
-    // silently until this test fails.
+    // plus every field of `McpStateEvent`.
+    //
+    // F-380: `at` is a `DateTime<Utc>` (was `ts: SystemTime`) — serializes
+    // as an RFC3339 string matching every other event timestamp. The inner
+    // `ServerState` tag is `"type"` (was `"state"`).
     assert_wire_eq(
         Event::McpState(McpStateEvent {
             server: "ripgrep".into(),
             state: ServerState::Healthy,
-            ts: fixed_system_time(),
+            at: fixed_time(),
         }),
         json!({
             "type": "mcp_state",
             "server": "ripgrep",
-            "state": { "state": "healthy" },
-            "ts": {
-                "secs_since_epoch": 1_700_000_000u64,
-                "nanos_since_epoch": 0u64,
-            },
+            "state": { "type": "healthy" },
+            "at": "2026-04-18T10:00:00Z",
         }),
     );
 }
 
 #[test]
 fn mcp_state_wire_shape_degraded_with_reason() {
-    // `ServerState` is internally tagged on `state` — data-carrying arms
-    // (Degraded/Failed/Disabled) hang their `reason` alongside. Pin both
-    // the healthy (no-reason) and degraded (with-reason) shapes so a
+    // `ServerState` is internally tagged on `type` (F-380) — data-carrying
+    // arms (Degraded/Failed/Disabled) hang their `reason` alongside. Pin
+    // both the healthy (no-reason) and degraded (with-reason) shapes so a
     // rename on either side surfaces.
     assert_wire_eq(
         Event::McpState(McpStateEvent {
@@ -796,16 +783,13 @@ fn mcp_state_wire_shape_degraded_with_reason() {
             state: ServerState::Degraded {
                 reason: "health check timeout".into(),
             },
-            ts: fixed_system_time(),
+            at: fixed_time(),
         }),
         json!({
             "type": "mcp_state",
             "server": "shell",
-            "state": { "state": "degraded", "reason": "health check timeout" },
-            "ts": {
-                "secs_since_epoch": 1_700_000_000u64,
-                "nanos_since_epoch": 0u64,
-            },
+            "state": { "type": "degraded", "reason": "health check timeout" },
+            "at": "2026-04-18T10:00:00Z",
         }),
     );
 }

@@ -226,8 +226,11 @@ mod tests {
 
     #[test]
     fn step_outcome_wire_shape_tagged_snake_case() {
-        // F-381: `StepFinished.outcome` is a tagged union with `status: "ok" | "error"`.
-        // Lock both tags and the error payload field name.
+        // `StepFinished.outcome` is a tagged union with `status: "ok" | "error"`.
+        // F-380: `StepOutcome` retains `tag = "status"` as a pinned exception to
+        // the project-wide `type` discriminator convention; see
+        // `docs/architecture/event-conventions.md` for the rationale
+        // (AgentMonitor webview reads `.status` directly).
         assert_eq!(
             serde_json::to_string(&StepOutcome::Ok).unwrap(),
             "{\"status\":\"ok\"}"

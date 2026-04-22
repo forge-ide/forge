@@ -256,15 +256,17 @@ pub struct LspMessageEvent {
 
 `forge_core::Event` is a `#[serde(tag = "type")]` union covering session, provider, MCP, usage, and agent state. MCP state transitions ride inside it as `Event::McpState(McpStateEvent)` — F-155 retired the per-topic `mcp:state` channel, so there is no longer a top-level event for MCP state. All MCP state changes arrive on `session:event`.
 
+All internally-tagged enums that cross the IPC boundary — `Event`, `ServerState` — share the discriminator name `type` as of F-380. `StepOutcome` retains `tag = "status"` as a pinned exception. See `docs/architecture/event-conventions.md` for the full rules and pinned exceptions.
+
 ```rust
 // crates/forge-core/src/mcp_state.rs — re-exported as `forge_mcp::{McpStateEvent, ServerState}`.
 pub struct McpStateEvent {
-    pub server: String,       // server name — matches the key in the loaded spec map
+    pub server: String,        // server name — matches the key in the loaded spec map
     pub state: ServerState,
-    pub ts: SystemTime,       // ts-rs wire type is `unknown`; used only as a monotonic ordering key
+    pub at: DateTime<Utc>,     // F-380: RFC3339 wall-clock; renamed from `ts: SystemTime`
 }
 
-#[serde(tag = "state", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerState {
     Starting,                         // spawn/connect in progress; `initialize` handshake not yet complete
     Healthy,                          // last health-check succeeded

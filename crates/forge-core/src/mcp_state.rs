@@ -5,9 +5,14 @@
 //! forge-mcp dependency cycle. `forge-mcp` re-exports them unchanged, so
 //! external callers still reach for `forge_mcp::ServerState` /
 //! `forge_mcp::McpStateEvent`.
+//!
+//! F-380 normalized the wire shape:
+//! - `ts: SystemTime` → `at: DateTime<Utc>` (matches every other
+//!   timestamp-carrying event — single field name across the union).
+//! - `ServerState` serde tag `state` → `type` (single discriminator name
+//!   across `Event`, `ServerState`, and `StepOutcome`).
 
-use std::time::SystemTime;
-
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -20,7 +25,7 @@ use ts_rs::TS;
 /// the running-session toggle test asserts against.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
-#[serde(tag = "state", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerState {
     /// Spawn/connect in progress (transport connect → `initialize`
     /// handshake not yet complete).
@@ -49,10 +54,10 @@ pub struct McpStateEvent {
     pub server: String,
     /// New state the server transitioned to.
     pub state: ServerState,
-    /// Wall-clock timestamp. Included so the UI can order events
-    /// coming from multiple servers even when the stream lags. ts-rs:
-    /// emitted as `unknown` so the frontend treats the field opaquely
-    /// and reads it as a monotonic ordering key.
-    #[ts(type = "unknown")]
-    pub ts: SystemTime,
+    /// Wall-clock timestamp (F-380: renamed from `ts: SystemTime`). Serializes
+    /// as an RFC3339 string via chrono's `Serialize` impl, matching every
+    /// other event timestamp across `forge_core::Event`. ts-rs emits the
+    /// field as a plain `string` so the TS mirror carries the same shape.
+    #[ts(type = "string")]
+    pub at: DateTime<Utc>,
 }
