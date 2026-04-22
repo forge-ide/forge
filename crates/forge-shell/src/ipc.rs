@@ -1348,23 +1348,6 @@ fn layouts_file_path(workspace_root: &std::path::Path) -> PathBuf {
     workspace_root.join(".forge").join("layouts.json")
 }
 
-/// Sibling `<path>.tmp` for the atomic tmp+rename write in `write_layouts`.
-/// Mirrors the `tmp_path_for` helpers in `forge_core::approvals` and
-/// `forge_core::settings` — same-directory by construction so the rename is
-/// same-filesystem (POSIX-atomic). F-372 tracks promoting this to a shared
-/// `forge_core::atomic_write`; this keeps the 90-min fix local.
-fn layouts_tmp_path(path: &std::path::Path) -> PathBuf {
-    let mut file_name = path
-        .file_name()
-        .map(|n| n.to_os_string())
-        .unwrap_or_default();
-    file_name.push(".tmp");
-    match path.parent() {
-        Some(parent) => parent.join(file_name),
-        None => PathBuf::from(file_name),
-    }
-}
-
 /// Load `.forge/layouts.json` under `workspace_root`, degrading to
 /// [`Layouts::default`] on any failure.
 ///
@@ -1379,11 +1362,7 @@ fn layouts_tmp_path(path: &std::path::Path) -> PathBuf {
 /// blank window. Losing the persisted layout is recoverable; losing the
 /// ability to open the session is not.
 async fn load_layouts_from_disk(workspace_root: &std::path::Path) -> Layouts {
-    let path = layouts_file_path(workspace_root);
-    let Ok(bytes) = tokio::fs::read(&path).await else {
-        return Layouts::default();
-    };
-    serde_json::from_slice(&bytes).unwrap_or_default()
+    forge_core::config_file::load_json_or_default(&layouts_file_path(workspace_root)).await
 }
 
 /// Read the persisted layouts for `workspace_root`. Missing or corrupt files
@@ -1406,11 +1385,10 @@ pub async fn read_layouts<R: Runtime>(
 /// frontend debouncer will retry on the next layout change, so a transient
 /// failure does not need a retry loop here.
 ///
-/// F-363: mirrors the `approvals::save_to_path` / `settings::save_raw_to_path`
-/// atomic tmp+rename pattern. The rename is atomic on POSIX for same-
-/// filesystem targets (same directory here by construction), so a crash
-/// between the write and the rename leaves either the prior `layouts.json`
-/// or the new one on disk — never a partial JSON payload.
+/// F-372: delegates to [`forge_core::config_file::save_json_atomic_ipc`] for
+/// the atomic tmp+rename and `Result<(), String>` mapping so this path
+/// cannot drift from its approvals/settings siblings again (F-363 regression
+/// precedent).
 #[tauri::command]
 pub async fn write_layouts<R: Runtime>(
     workspace_root: String,
@@ -1420,20 +1398,8 @@ pub async fn write_layouts<R: Runtime>(
     require_window_label_in(&webview, &["dashboard"], true, "write_layouts")?;
     require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
 
-    let forge_dir = std::path::Path::new(&workspace_root).join(".forge");
-    tokio::fs::create_dir_all(&forge_dir)
-        .await
-        .map_err(|e| format!("create .forge dir: {e}"))?;
-
-    let path = forge_dir.join("layouts.json");
-    let tmp = layouts_tmp_path(&path);
-    let bytes = serde_json::to_vec_pretty(&layouts).map_err(|e| format!("serialize: {e}"))?;
-    tokio::fs::write(&tmp, &bytes)
-        .await
-        .map_err(|e| format!("write layouts.json.tmp: {e}"))?;
-    tokio::fs::rename(&tmp, &path)
-        .await
-        .map_err(|e| format!("rename layouts.json.tmp: {e}"))
+    let path = layouts_file_path(std::path::Path::new(&workspace_root));
+    forge_core::config_file::save_json_atomic_ipc(&path, &layouts, "write layouts.json").await
 }
 
 // ---------------------------------------------------------------------------

@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::config_file::{load_toml_or_default, save_toml_atomic};
 use crate::Result;
 
 /// Single persisted approval entry. Wire-compatible with the frontend
@@ -110,42 +111,14 @@ pub async fn save_workspace_config(workspace_root: &Path, config: &ApprovalConfi
 }
 
 async fn load_from_path(path: &Path) -> Result<ApprovalConfig> {
-    match tokio::fs::read_to_string(path).await {
-        Ok(contents) => {
-            let cfg: ApprovalConfig = toml::from_str(&contents).map_err(|e| anyhow::anyhow!(e))?;
-            Ok(cfg)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ApprovalConfig::default()),
-        Err(e) => Err(e.into()),
-    }
+    load_toml_or_default(path).await
 }
 
-/// Atomically write `config` to `path`. Per DoD: write to `<path>.tmp`, then
-/// rename. The rename is atomic on POSIX for same-filesystem targets, and
-/// same-directory by construction here, so a partially-written tmp file never
-/// becomes the visible config.
+/// Atomically write `config` to `path`. Delegates to
+/// [`crate::config_file::save_toml_atomic`] — the tmp+rename atomicity lives
+/// in one place (F-372).
 async fn save_to_path(path: &Path, config: &ApprovalConfig) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let body = toml::to_string(config).map_err(|e| anyhow::anyhow!(e))?;
-
-    let tmp = tmp_path_for(path);
-    tokio::fs::write(&tmp, body).await?;
-    tokio::fs::rename(&tmp, path).await?;
-    Ok(())
-}
-
-fn tmp_path_for(path: &Path) -> PathBuf {
-    let mut file_name = path
-        .file_name()
-        .map(|n| n.to_os_string())
-        .unwrap_or_default();
-    file_name.push(".tmp");
-    match path.parent() {
-        Some(parent) => parent.join(file_name),
-        None => PathBuf::from(file_name),
-    }
+    save_toml_atomic(path, config).await
 }
 
 #[cfg(test)]

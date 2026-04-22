@@ -33,6 +33,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::config_file::{load_toml_or_default, save_raw_atomic, save_toml_atomic};
 use crate::Result;
 
 /// Notification delivery mode for background-agent events (F-138 consumer).
@@ -133,14 +134,7 @@ pub async fn load_workspace_settings(workspace_root: &Path) -> Result<AppSetting
 }
 
 async fn load_from_path(path: &Path) -> Result<AppSettings> {
-    match tokio::fs::read_to_string(path).await {
-        Ok(contents) => {
-            let cfg: AppSettings = toml::from_str(&contents).map_err(|e| anyhow::anyhow!(e))?;
-            Ok(cfg)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AppSettings::default()),
-        Err(e) => Err(e.into()),
-    }
+    load_toml_or_default(path).await
 }
 
 // ---------------------------------------------------------------------------
@@ -165,23 +159,7 @@ pub async fn save_workspace_settings(workspace_root: &Path, settings: &AppSettin
 }
 
 async fn save_to_path(path: &Path, settings: &AppSettings) -> Result<()> {
-    let body = toml::to_string(settings).map_err(|e| anyhow::anyhow!(e))?;
-    save_raw_to_path(path, &body).await
-}
-
-/// Atomically write `body` verbatim to `path`. Used by the `set_setting`
-/// command path, where the body is the output of [`apply_setting_update`]
-/// — writing that directly preserves the file's sparseness (only keys the
-/// caller ever explicitly set live in the file), which is what the merge
-/// layer depends on.
-async fn save_raw_to_path(path: &Path, body: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let tmp = tmp_path_for(path);
-    tokio::fs::write(&tmp, body).await?;
-    tokio::fs::rename(&tmp, path).await?;
-    Ok(())
+    save_toml_atomic(path, settings).await
 }
 
 /// Atomically write `body` to the workspace settings file. Exposed so the
@@ -189,24 +167,12 @@ async fn save_raw_to_path(path: &Path, body: &str) -> Result<()> {
 /// struct round-trip (see module docs on why that would clobber sibling
 /// fields).
 pub async fn save_workspace_settings_raw(workspace_root: &Path, body: &str) -> Result<()> {
-    save_raw_to_path(&workspace_settings_path(workspace_root), body).await
+    save_raw_atomic(&workspace_settings_path(workspace_root), body.as_bytes()).await
 }
 
 /// Atomically write `body` to `<config_dir>/forge/settings.toml`.
 pub async fn save_user_settings_raw_in(config_dir: &Path, body: &str) -> Result<()> {
-    save_raw_to_path(&user_settings_path_in(config_dir), body).await
-}
-
-fn tmp_path_for(path: &Path) -> PathBuf {
-    let mut file_name = path
-        .file_name()
-        .map(|n| n.to_os_string())
-        .unwrap_or_default();
-    file_name.push(".tmp");
-    match path.parent() {
-        Some(parent) => parent.join(file_name),
-        None => PathBuf::from(file_name),
-    }
+    save_raw_atomic(&user_settings_path_in(config_dir), body.as_bytes()).await
 }
 
 // ---------------------------------------------------------------------------
