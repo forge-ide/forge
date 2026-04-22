@@ -19,10 +19,15 @@
  * raw-hex fallbacks — see `docs/design/color-system.md` for the rules and
  * `StatusBar.css.test.ts` for the regression guard (F-427 + F-392).
  *
- * Interaction surfaces on the bar (`__bg-badge`, `__bg-row-action`) use
- * translucent white overlays to stay legible on the ember background; the
- * popover rises off the bar onto a normal iron surface so the agent list
- * keeps its dense, dark presentation.
+ * Interaction surfaces on the bar (`__bg-badge`, `__bg-row-action`) are
+ * NOT covered by the ember-400 brand exception in
+ * `docs/design/color-system.md §Brand exception — status bar`. The badge is
+ * essential interactive text (it reports live running-agent state), so it
+ * must clear WCAG AA 4.5:1 on its own. F-392-followup swaps the historical
+ * translucent-white overlay (~2.7:1 on ember) for a solid iron chip —
+ * surface-2 + text-primary — giving the badge a fixed, auditable pair
+ * pinned in `StatusBar.css.test.ts`. The popover continues to rise off the
+ * bar onto iron so the agent list keeps its dense, dark presentation.
  */
 
 .status-bar {
@@ -40,9 +45,11 @@
   flex-shrink: 0;
 }
 
-/* Pill-shaped badge that opens the running-agents popover. Rendered on ember,
- * so the surface is a translucent white overlay rather than a warning-tinted
- * pill — warning-on-ember would all but vanish. */
+/* Pill-shaped badge that opens the running-agents popover. F-392-followup
+ * pins this to a solid iron chip: the badge is essential interactive text,
+ * outside the brand exception, and must clear WCAG AA 4.5:1 without relying
+ * on alpha composited over ember-400. surface-2 × text-primary computes to
+ * ~14:1 — comfortable AA on both normal and small text. */
 .status-bar__bg-badge {
   all: unset;
   display: inline-flex;
@@ -51,15 +58,15 @@
   padding: 0 8px;
   height: 18px;
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.15);
-  color: var(--color-text-inverted);
+  background: var(--color-surface-2);
+  color: var(--color-text-primary);
   font-weight: 600;
   cursor: pointer;
   transition: background 120ms ease;
 }
 
 .status-bar__bg-badge:hover {
-  background: rgba(255, 255, 255, 0.25);
+  background: var(--color-surface-3);
 }
 
 .status-bar__bg-badge:focus-visible {

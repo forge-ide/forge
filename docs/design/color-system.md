@@ -82,3 +82,16 @@ When writing or modifying UI code:
 - Active/selected states use `iron-750` background + `ember-400` left border or underline
 - Disabled states use `iron-600` text on `iron-800` background — never reduce opacity on interactive elements
 - Error states use ember-400, not a different red
+
+### Brand exception — status bar
+
+The status bar is the only surface in the system that intentionally ships below WCAG AA 4.5:1. Resolving the tension between the `ember-400` spec-lock (`component-principles.md §Status bar` and `ui-specs/shell.md §2`) and WCAG AA at the per-component level is not possible: the bar is 22px tall, which rules out WCAG Large Text (18pt regular / 14pt bold), and shifting `ember-400` to a higher-luminance shade would break the single most visible brand surface.
+
+**Decision.** The bar body (`--color-ember-400` background with `--color-text-inverted` foreground) is accepted as a brand exception with a contrast ratio of **~3.35:1**. This clears the WCAG 2.1 §1.4.11 Non-text Contrast threshold (3:1) and is treated analogously to a logotype per WCAG §1.4.3 exception for "incidental text that is part of a logo or brand name." The trade-off is documented here, pinned by a regression test in `web/packages/app/src/shell/StatusBar.css.test.ts`, and must not be copied to any other surface.
+
+**Scope of the exception.** The exception applies *only* to the bar body's background and text color. It does **not** cover:
+
+- **Interactive controls rendered on the bar** (e.g. `.status-bar__bg-badge`). These are essential interactive text and must clear AA 4.5:1 on a solid, auditable pair. They are rendered as iron chips (`--color-surface-2` background + `--color-text-primary` text) rather than alpha overlays on ember.
+- **Any future surface** that adopts ember-400 as a primary background. New uses of ember-400 for non-trivial text must either (a) satisfy AA directly or (b) add a new, explicitly-scoped entry to this section.
+
+**Why not shift `ember-400`?** Shifting to a higher-luminance ember to clear 4.5:1 would lighten the brand surface past the point where it reads as heat/ember. The brand color hierarchy (ember-900 → ember-400 → ember-100) encodes depth; compressing the scale to satisfy per-component AA trades whole-system coherence for one rule on one surface. The exception route is narrower and reversible.

@@ -44,6 +44,8 @@ Toasts have a 3px left accent bar (the semantic color), a dark tinted background
 
 The status bar is always `ember-400` background with white text. This is the most visible brand surface in daily use. It always shows: the Forge mark, active provider, streaming state, and file context. Do not change the status bar color under any circumstances, including in light mode.
 
+The ember-400 × white pairing computes to ~3.35:1 contrast — below WCAG AA 4.5:1 for normal text. This is an accepted brand exception documented in [Color System §Brand exception — status bar](color-system.md#brand-exception--status-bar) and pinned by `web/packages/app/src/shell/StatusBar.css.test.ts`. The exception covers only the bar body; interactive controls rendered on the bar (e.g. the background-agents badge) must render on a solid iron chip so they clear WCAG AA 4.5:1 independently of the ember background.
+
 ### Code blocks
 
 Code blocks use `#050709` background (slightly darker than `iron-900`) to create depth. The header bar shows language and copy/insert actions. Highlighted lines use a left border of `ember-400` with `rgba(255,74,18,0.07)` background.
