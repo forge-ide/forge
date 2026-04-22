@@ -10,6 +10,8 @@
 
 The canonical types and shared utilities. Everything depends on this; it depends on nothing Forge-specific.
 
+> See [ADR-004: `forge-core` Scope and the Persistence-Split Plan](./ADR-004-forge-core-scope-and-persistence-split.md) for the scope boundary this crate is expected to hold and the phased plan for moving `settings`, `approvals`, `transcript`, `event_log`, `meta`, and `workspaces` I/O into a sibling `forge-persist` crate. New filesystem / config-file code should not land here — redirect it per ADR-004 §1.
+
 **Responsibilities.**
 - Core types: `WorkspaceId`, `SessionId`, `AgentId`, `ProviderId`, `ToolCallId`, `MessageId`, `AgentInstanceId`
 - `Config` loading (`~/.config/forge/config.toml`, `.agents/*.md` frontmatter, `.mcp.json`, `~/.mcp.json`, `AGENTS.md` workspace instructions)
