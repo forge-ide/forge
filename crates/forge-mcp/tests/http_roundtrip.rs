@@ -429,34 +429,24 @@ async fn sse_sixteen_mib_no_boundary_surfaces_malformed() {
         .await
         .expect("connect");
 
-    let mut saw_malformed = false;
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline {
-        match tokio::time::timeout(Duration::from_secs(10), t.recv()).await {
-            Ok(Some(HttpEvent::Malformed { bytes_discarded })) => {
-                assert!(
-                    bytes_discarded >= MAX_SSE_FRAME_BYTES,
-                    "bytes_discarded must be >= cap: {bytes_discarded}",
-                );
-                saw_malformed = true;
-                break;
-            }
-            // Closed can land if the sustained-failure threshold is
-            // reached before Malformed on a slow CI runner; treat that
-            // as a failure because the DoD specifically asks for the
-            // named Malformed error shape.
-            Ok(Some(HttpEvent::Closed(reason))) => {
-                panic!("expected Malformed before Closed; got Closed({reason})")
-            }
-            Ok(Some(HttpEvent::Message(v))) => {
-                panic!("unexpected Message event in over-cap SSE fixture: {v}")
-            }
-            Ok(None) | Err(_) => break,
+    let ev = tokio::time::timeout(Duration::from_secs(30), t.recv())
+        .await
+        .expect("transport must emit an event within 30s")
+        .expect("transport must not close before emitting Malformed");
+
+    match ev {
+        HttpEvent::Malformed { bytes_discarded } => {
+            assert!(
+                bytes_discarded >= MAX_SSE_FRAME_BYTES,
+                "bytes_discarded must be >= cap: {bytes_discarded}",
+            );
+        }
+        // Closed landing before Malformed means the DoD contract is unmet.
+        HttpEvent::Closed(reason) => {
+            panic!("expected Malformed before Closed; got Closed({reason})")
+        }
+        HttpEvent::Message(v) => {
+            panic!("unexpected Message event in over-cap SSE fixture: {v}")
         }
     }
-
-    assert!(
-        saw_malformed,
-        "over-cap SSE frame must surface HttpEvent::Malformed",
-    );
 }
