@@ -1,8 +1,17 @@
-// UAT-06 — Tool call card rendering (F-026).
+// UAT-06 — Tool call card rendering (F-026 / F-447).
 // Plan: docs/testing/phase1-uat.md §UAT-06
+//
+// F-447 re-enables the Phase 2 skipped interactions:
+//   • expand/collapse toggle on completed cards
+//   • parallel-reads group header for read-only calls sharing a batch_id
+//   • errored-state rendering
+//   • fs.edit diff preview in the expanded body
+//
+// All selectors below are authoritative — the component uses them too.
 
 import { test, expect, type TauriMockHandle } from './fixtures/tauri-mock';
 import {
+  toolCallApprovalRequested,
   toolCallCompleted,
   toolCallStarted,
   userMessage,
@@ -38,34 +47,76 @@ test.describe('UAT-06 — tool call card', () => {
 
     await expect(page.getByTestId('tool-call-card-tc-1')).toBeVisible();
     await expect(page.getByTestId('tool-call-card-tc-1')).toContainText('fs.read');
-    // F-041: the collapsed card header also shows a one-line path summary
-    // next to the tool name.
     await expect(page.getByTestId('tool-call-card-tc-1')).toContainText('readable.txt');
   });
 
-  test('expand/collapse toggle persists while window is open', async () => {
-    test.skip(true, 'interaction selector pending — see phase1-uat.md §UAT-06 step 2-3');
+  test('expand/collapse toggle persists while window is open', async ({ tauri, page }) => {
+    await mountSession(page, tauri);
+    await tauri.emit('session:event', userMessage(SESSION_ID, 'open it'));
+    await tauri.emit(
+      'session:event',
+      toolCallStarted(SESSION_ID, 'tc-xp', 'fs.read', { path: 'a.txt' }),
+    );
+    await tauri.emit(
+      'session:event',
+      toolCallCompleted(SESSION_ID, 'tc-xp', { ok: true, preview: 'payload' }),
+    );
+
+    const card = page.getByTestId('tool-call-card-tc-xp');
+    await expect(card).toHaveAttribute('data-expanded', 'false');
+    await page.getByTestId('tool-call-row-tc-xp').click();
+    await expect(card).toHaveAttribute('data-expanded', 'true');
+    await expect(page.getByTestId('tool-call-body-tc-xp')).toBeVisible();
+    await page.getByTestId('tool-call-row-tc-xp').click();
+    await expect(card).toHaveAttribute('data-expanded', 'false');
   });
 
   test('three read-only calls with shared batch_id render as a group', async ({ tauri, page }) => {
     await mountSession(page, tauri);
-    // Rust's parallel_group is u32; fixture takes a number and the adapter
-    // stringifies it for the store's batch_id field.
+    // Rust's parallel_group is u32; the adapter stringifies it into the
+    // store's batch_id field (see ipc/events.ts).
     for (const id of ['tc-1', 'tc-2', 'tc-3']) {
       await tauri.emit(
         'session:event',
         toolCallStarted(SESSION_ID, id, 'fs.read', { path: `${id}.txt` }, 7),
       );
     }
-    // TODO: assert the group header. Selector not yet established.
-    test.skip(true, 'group header selector pending — see phase1-uat.md §UAT-06 step 4');
+    await expect(page.getByTestId('tool-call-group-7')).toBeVisible();
+    await expect(page.getByTestId('tool-call-group-count-7')).toContainText('3 calls');
   });
 
-  test('errored status renders with error color token', async () => {
-    test.skip(true, 'selector pending — see phase1-uat.md §UAT-06 step 5');
+  test('errored status renders with the ✗ glyph', async ({ tauri, page }) => {
+    await mountSession(page, tauri);
+    await tauri.emit(
+      'session:event',
+      toolCallStarted(SESSION_ID, 'tc-err', 'fs.read', { path: 'missing.txt' }),
+    );
+    await tauri.emit(
+      'session:event',
+      toolCallCompleted(SESSION_ID, 'tc-err', { ok: false, error: 'ENOENT' }),
+    );
+    await expect(page.getByTestId('tool-call-status-tc-err')).toHaveText('✗');
+    await expect(page.getByTestId('tool-call-card-tc-err')).toHaveAttribute(
+      'data-status',
+      'errored',
+    );
   });
 
-  test('fs.edit completion shows unified-diff preview in expanded card', async () => {
-    test.skip(true, 'selector pending — see phase1-uat.md §UAT-06 step 6');
+  test('fs.edit approval surfaces a diff preview in the expanded body', async ({ tauri, page }) => {
+    await mountSession(page, tauri);
+    await tauri.emit(
+      'session:event',
+      toolCallStarted(SESSION_ID, 'tc-edit', 'fs.edit', {
+        path: '/src/foo.ts',
+        patch: '...',
+      }),
+    );
+    await tauri.emit(
+      'session:event',
+      toolCallApprovalRequested(SESSION_ID, 'tc-edit', {
+        description: '--- a\n+++ b\n@@ -1 +1 @@\n-x\n+y',
+      }),
+    );
+    await expect(page.getByTestId('tool-call-diff-tc-edit')).toContainText('+++ b');
   });
 });
