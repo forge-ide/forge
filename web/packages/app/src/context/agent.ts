@@ -13,6 +13,7 @@
 import type { SessionId } from '@forge/ipc';
 import type { Candidate, ContextBlock, Resolver } from './types';
 import { fuzzyMatch } from './types';
+import { makeCandidateList } from './helpers';
 
 export interface AgentCandidateSource {
   id: SessionId;
@@ -58,19 +59,20 @@ export function createAgentResolver(deps: AgentResolverDeps): Resolver<string> {
 
   return {
     async list(query: string): Promise<Candidate[]> {
-      const all = deps.listAgents();
-      const withLabels = all.map((a) => ({
+      const withLabels = deps.listAgents().map((a) => ({
         id: a.id,
         label: a.label ?? String(a.id),
       }));
-      const matched = withLabels.filter(
-        (a) => fuzzyMatch(query, a.label) || fuzzyMatch(query, String(a.id)),
-      );
-      return matched.map((a) => ({
-        category: 'agent' as const,
-        label: a.label,
-        value: String(a.id),
-      }));
+      return makeCandidateList({
+        items: withLabels,
+        match: (a) =>
+          fuzzyMatch(query, a.label) || fuzzyMatch(query, String(a.id)),
+        toCandidate: (a) => ({
+          category: 'agent',
+          label: a.label,
+          value: String(a.id),
+        }),
+      });
     },
 
     async resolve(id: string): Promise<ContextBlock> {

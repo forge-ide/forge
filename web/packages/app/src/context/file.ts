@@ -18,6 +18,7 @@ import {
 } from '../ipc/fs';
 import type { Candidate, ContextBlock, Resolver } from './types';
 import { fuzzyMatch } from './types';
+import { makeCandidateList, walkTree } from './helpers';
 
 /** Maximum bytes included in a resolved file block. Larger files are
  *  truncated with a trailing marker so the model can see the cut happened. */
@@ -39,21 +40,21 @@ export interface FileResolverDeps {
 /**
  * Flatten a tree node into `[path, name]` pairs for file entries only.
  * Directories are descended but not emitted. Exported for test visibility.
+ *
+ * `kind` is the Rust-side enum: 'File' | 'Dir' | 'Symlink' | 'Other'. Only
+ * plain files go into the picker — symlinks and special files are skipped
+ * so the resolver cannot accidentally tunnel outside the gitignore filter.
  */
 export function flattenFiles(
   node: TreeNodeDto,
   out: Array<{ path: string; name: string }> = [],
 ): Array<{ path: string; name: string }> {
-  // `kind` is the Rust-side enum: 'File' | 'Dir' | 'Symlink' | 'Other'. Only
-  // plain files go into the picker — symlinks and special files are skipped
-  // so the resolver cannot accidentally tunnel outside the gitignore filter.
-  if (node.kind === 'File') {
-    out.push({ path: node.path, name: node.name });
-  }
-  if (node.children) {
-    for (const child of node.children) flattenFiles(child, out);
-  }
-  return out;
+  return walkTree(
+    node,
+    (n) => n.kind === 'File',
+    (n) => ({ path: n.path, name: n.name }),
+    out,
+  );
 }
 
 /** Truncate content to `maxBytes` UTF-8 bytes. Appends a visible marker when
@@ -77,13 +78,12 @@ export function createFileResolver(deps: FileResolverDeps): Resolver<string> {
   return {
     async list(query: string): Promise<Candidate[]> {
       const node = await treeFn(deps.sessionId, deps.workspaceRoot);
-      const files = flattenFiles(node);
-      const matched = files.filter((f) => fuzzyMatch(query, f.path));
-      return matched.slice(0, FILE_RESOLVER_MAX_RESULTS).map((f) => ({
-        category: 'file' as const,
-        label: f.name,
-        value: f.path,
-      }));
+      return makeCandidateList({
+        items: flattenFiles(node),
+        match: (f) => fuzzyMatch(query, f.path),
+        toCandidate: (f) => ({ category: 'file', label: f.name, value: f.path }),
+        max: FILE_RESOLVER_MAX_RESULTS,
+      });
     },
 
     async resolve(path: string): Promise<ContextBlock> {
