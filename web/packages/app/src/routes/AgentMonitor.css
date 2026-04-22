@@ -349,6 +349,14 @@
   color: var(--color-ember-100);
 }
 
+/* F-397: MCP tool calls get their own chip palette so MCP traffic is
+ * visually distinct from local tool invocations during the MCP milestone
+ * (see `docs/ui-specs/agent-monitor.md §9.2`). */
+.agent-monitor__step-chip[data-kind='mcp'] {
+  background: var(--color-info-bg);
+  color: var(--color-info);
+}
+
 .agent-monitor__step-chip[data-kind='model'] {
   background: var(--color-surface-2);
   color: var(--color-text-secondary);

@@ -94,6 +94,7 @@ fn step_kind_wire_labels_are_snake_case() {
     for (kind, expected) in [
         (StepKind::Plan, "plan"),
         (StepKind::Tool, "tool"),
+        (StepKind::Mcp, "mcp"),
         (StepKind::Model, "model"),
         (StepKind::Wait, "wait"),
         (StepKind::Spawn, "spawn"),

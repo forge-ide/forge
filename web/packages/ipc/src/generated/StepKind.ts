@@ -7,8 +7,11 @@
  *
  * `model` — one pass through the provider stream (text deltas, tool calls).
  * `tool`  — one tool invocation (start → invoke → return → complete).
+ * `mcp`   — one MCP server tool call; rendered with `info-bg` chip so the
+ *           Agent Monitor separates MCP traffic from local tool calls at a
+ *           glance (see `docs/ui-specs/agent-monitor.md §9.2`).
  * `plan`  — reserved for future agent planning phases; not emitted today.
  * `wait`  — reserved for approval/idle gaps; not emitted today.
  * `spawn` — reserved for sub-agent spawn steps (F-140); not emitted today.
  */
-export type StepKind = "plan" | "tool" | "model" | "wait" | "spawn";
+export type StepKind = "plan" | "tool" | "mcp" | "model" | "wait" | "spawn";

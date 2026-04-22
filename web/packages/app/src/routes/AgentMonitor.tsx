@@ -932,7 +932,14 @@ export const AgentMonitor: Component = () => {
 
 function normaliseKind(raw: string): StepKind {
   const k = raw.toLowerCase();
-  if (k === 'plan' || k === 'tool' || k === 'model' || k === 'wait' || k === 'spawn') {
+  if (
+    k === 'plan' ||
+    k === 'tool' ||
+    k === 'mcp' ||
+    k === 'model' ||
+    k === 'wait' ||
+    k === 'spawn'
+  ) {
     return k;
   }
   return 'model';

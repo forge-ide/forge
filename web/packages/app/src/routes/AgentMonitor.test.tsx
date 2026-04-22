@@ -558,6 +558,40 @@ describe('<AgentTrace>', () => {
     expect(kinds).toEqual(['model', 'tool', 'spawn']);
   });
 
+  // F-397: MCP-kind step renders with its own chip selector so the
+  // `info-bg` palette from `agent-monitor.md §9.2` attaches. An
+  // `Event::StepStarted { kind: StepKind::Mcp }` flowing through
+  // `applyEventToState` must land in the trace column with
+  // `data-kind='mcp'` — regression guard for the MCP milestone.
+  it('routes a StepStarted{kind:mcp} through applyEventToState into an mcp-kind chip', () => {
+    const empty: LiveAgentState = {
+      subAgents: [],
+      stepsByAgent: {},
+      resourcesByAgent: {},
+    };
+    const after = applyEventToState(empty, {
+      event: {
+        type: 'step_started',
+        step_id: 'mcp-step-1',
+        kind: 'mcp',
+        instance_id: 'agent-mcp',
+        started_at: '2026-04-22T00:00:00Z',
+      },
+    });
+    const steps = after.stepsByAgent['agent-mcp'] ?? [];
+    expect(steps).toHaveLength(1);
+    expect(steps[0]?.kind).toBe('mcp');
+
+    const { container } = render(() => (
+      <AgentTrace agent={row()} steps={steps} onStepClick={() => {}} />
+    ));
+    const chip = container.querySelector(
+      '.agent-monitor__step-chip',
+    ) as HTMLElement | null;
+    expect(chip).toBeTruthy();
+    expect(chip?.getAttribute('data-kind')).toBe('mcp');
+  });
+
   it('renders a running-state dot so pulsing-ring CSS attaches', () => {
     const { container } = render(() => (
       <AgentTrace agent={row()} steps={[step({ status: 'running' })]} onStepClick={() => {}} />
