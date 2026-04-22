@@ -42,6 +42,6 @@ pub use bootstrap::{
 pub use registry::{Checksum, Registry, ServerId, ServerSpec};
 
 pub use server::{
-    BackoffPolicy, Clock, LspServerInfo, LspState, MessageTransport, Server, ServerError,
-    ServerEvent, StdioTransport, SystemClock,
+    BackoffPolicy, Clock, LspServerInfo, LspState, MalformedStream, MessageTransport, Server,
+    ServerError, ServerEvent, StdioTransport, SystemClock, MAX_LSP_LINE_BYTES,
 };

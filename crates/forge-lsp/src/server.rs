@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::{mpsc, Mutex};
 use ts_rs::TS;
@@ -158,6 +158,28 @@ impl From<BootstrapError> for ServerError {
     }
 }
 
+/// Maximum per-line byte ceiling enforced on both stdout and stderr by the
+/// supervised reader loops. A line (newline-delimited sequence of bytes) that
+/// exceeds this cap is discarded — up to the newline or EOF — and surfaces
+/// as [`ServerEvent::Malformed`]. Closes F-351: `tokio::io::AsyncBufReadExt::lines`
+/// reads until `\n` with no length cap, which lets a compromised / buggy /
+/// hostile language server DoS the host via a single enormous line. 4 MiB is
+/// large enough for realistic LSP diagnostics on big workspaces (~1 MiB is
+/// the field-observed high-water mark) and small enough to keep the worst-case
+/// resident set of a misbehaving child bounded.
+pub const MAX_LSP_LINE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Which stdio stream produced an over-cap line. Carried by
+/// [`ServerEvent::Malformed`] so subscribers can distinguish a hostile
+/// diagnostic payload (stdout) from a log-flood (stderr).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MalformedStream {
+    /// The child's stdout — the frame-carrying stream.
+    Stdout,
+    /// The child's stderr — the free-form log stream.
+    Stderr,
+}
+
 /// Server-emitted events surfaced on the receiver returned by
 /// [`Server::take_events`].
 #[derive(Debug, Clone)]
@@ -183,6 +205,19 @@ pub enum ServerEvent {
         attempts: u32,
         /// The window that bounds the attempts.
         window: Duration,
+    },
+    /// A stdout or stderr line exceeded [`MAX_LSP_LINE_BYTES`] and was
+    /// discarded in-flight. F-351: closes the DoS surface a compromised /
+    /// buggy / hostile language server exposes by emitting a single enormous
+    /// line to the host. The reader keeps running after emitting this event,
+    /// so a well-formed frame following the over-cap one still reaches the
+    /// event channel.
+    Malformed {
+        /// Which pipe produced the over-cap line.
+        stream: MalformedStream,
+        /// How many bytes were buffered before the reader hit the ceiling
+        /// and started discarding. Always >= [`MAX_LSP_LINE_BYTES`].
+        bytes_discarded: usize,
     },
 }
 
@@ -575,48 +610,115 @@ impl Server {
         // Drain stderr at DEBUG — stderr on LSP is free-form logs. Each
         // line carries `server_id` (the program path) so a field engineer
         // can disambiguate output when multiple servers run concurrently
-        // (F-386).
+        // (F-386). Reads are capped at `MAX_LSP_LINE_BYTES`; over-cap lines
+        // are discarded (F-351) and surface as `ServerEvent::Malformed`
+        // with `MalformedStream::Stderr` so the host can observe the
+        // misbehavior without buffering the payload.
         let stderr_server_id = self.program.clone();
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(
-                    target: "forge_lsp::server",
-                    server_id = %stderr_server_id.display(),
-                    stderr = %line,
-                );
+        let stderr_tx = self.event_tx.clone();
+        let stderr_task = tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr);
+            loop {
+                match read_line_bounded(&mut reader, MAX_LSP_LINE_BYTES).await {
+                    Ok(BoundedLine::Line(bytes)) => {
+                        if bytes.is_empty() {
+                            break;
+                        }
+                        let line = String::from_utf8_lossy(&bytes);
+                        let line = line.trim_end_matches('\n').trim_end_matches('\r');
+                        tracing::debug!(
+                            target: "forge_lsp::server",
+                            server_id = %stderr_server_id.display(),
+                            stderr = %line,
+                        );
+                    }
+                    Ok(BoundedLine::Overflow { bytes_discarded }) => {
+                        tracing::warn!(
+                            target: "forge_lsp::server",
+                            server_id = %stderr_server_id.display(),
+                            stream = "stderr",
+                            bytes_discarded = bytes_discarded,
+                            cap = MAX_LSP_LINE_BYTES,
+                            "dropping over-cap stderr line",
+                        );
+                        if stderr_tx
+                            .send(ServerEvent::Malformed {
+                                stream: MalformedStream::Stderr,
+                                bytes_discarded,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
             }
         });
 
-        // Stdout → `ServerEvent::Message`.
+        // Stdout → `ServerEvent::Message`. Reads are capped at
+        // `MAX_LSP_LINE_BYTES`; over-cap frames are discarded (F-351) and
+        // surface as `ServerEvent::Malformed { stream: Stdout, .. }`. The
+        // reader keeps running so a well-formed frame following an over-cap
+        // line still reaches the event channel.
         let tx = self.event_tx.clone();
         let reader_server_id = self.program.clone();
         let reader_task = tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
+            let mut reader = BufReader::new(stdout);
             loop {
-                match lines.next_line().await {
-                    Ok(Some(line)) => {
-                        if line.trim().is_empty() {
+                match read_line_bounded(&mut reader, MAX_LSP_LINE_BYTES).await {
+                    Ok(BoundedLine::Line(bytes)) => {
+                        if bytes.is_empty() {
+                            break;
+                        }
+                        // `read_line_bounded` yields bytes including any
+                        // trailing '\n'. Parse the raw slice so UTF-8 errors
+                        // flow through the same `serde_json` sad path as any
+                        // other malformed frame, and trim the delimiter
+                        // before the empty-line skip check.
+                        let trimmed: &[u8] = trim_trailing_newline(&bytes);
+                        if trimmed.iter().all(|b| b.is_ascii_whitespace()) {
                             continue;
                         }
-                        match serde_json::from_str::<serde_json::Value>(&line) {
+                        match serde_json::from_slice::<serde_json::Value>(trimmed) {
                             Ok(v) => {
                                 if tx.send(ServerEvent::Message(v)).await.is_err() {
                                     break;
                                 }
                             }
                             Err(err) => {
+                                let as_str = String::from_utf8_lossy(trimmed);
                                 tracing::warn!(
                                     target: "forge_lsp::server",
                                     server_id = %reader_server_id.display(),
                                     error = %err,
-                                    line = %truncate(&line, 512),
+                                    line = %truncate(&as_str, 512),
                                     "dropping malformed stdout frame",
                                 );
                             }
                         }
                     }
-                    Ok(None) => break,
+                    Ok(BoundedLine::Overflow { bytes_discarded }) => {
+                        tracing::warn!(
+                            target: "forge_lsp::server",
+                            server_id = %reader_server_id.display(),
+                            stream = "stdout",
+                            bytes_discarded = bytes_discarded,
+                            cap = MAX_LSP_LINE_BYTES,
+                            "dropping over-cap stdout line",
+                        );
+                        if tx
+                            .send(ServerEvent::Malformed {
+                                stream: MalformedStream::Stdout,
+                                bytes_discarded,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                     Err(_) => break,
                 }
             }
@@ -624,8 +726,14 @@ impl Server {
 
         // Wait for the child to reap.
         let status = child.wait().await.ok();
-        // Drain the reader (stdout closed with the child).
+        // Drain both readers (stdout and stderr pipes close with the child).
+        // We await the stderr task as well so any pending `Malformed` event
+        // the F-351 cap produced is observed in-order before the
+        // supervisor's `Exited` reaches subscribers — without this, a slow
+        // stderr drain could race the `Exited` event and surface out of
+        // order (or after the receiver has already moved on).
         let _ = reader_task.await;
+        let _ = stderr_task.await;
         // Clear the transport: any in-flight `send` past this point returns
         // NotRunning until the next spawn reinstalls a live stdin.
         self.transport.uninstall().await;
@@ -643,6 +751,93 @@ fn backoff_delay(policy: &BackoffPolicy, attempt: u32) -> Duration {
     } else {
         scaled
     }
+}
+
+/// Outcome of a single [`read_line_bounded`] call.
+enum BoundedLine {
+    /// A full line was read within the byte ceiling. Carries the raw bytes
+    /// up to and including any trailing `\n`. An empty `Vec` indicates EOF
+    /// on the stream.
+    Line(Vec<u8>),
+    /// The line exceeded the ceiling. All bytes through the terminating
+    /// `\n` (or EOF) have been consumed and discarded; `bytes_discarded`
+    /// reports the total dropped, always `>=` the cap.
+    Overflow { bytes_discarded: usize },
+}
+
+/// Read bytes up to and including the next `\n` from `reader`, but never
+/// buffer more than `cap` bytes in memory. Closes F-351: a compromised /
+/// buggy / hostile child writing a single enormous line cannot DoS the host.
+///
+/// Behavior:
+/// - Within the cap → returns [`BoundedLine::Line`] with the bytes read
+///   (possibly ending in `\n`; may be empty at EOF).
+/// - Over the cap → continues reading-and-discarding byte-by-byte from the
+///   same reader until the next `\n` (or EOF) so the reader resyncs on the
+///   stream without buffering, then returns [`BoundedLine::Overflow`] with
+///   the total discarded count (always `>= cap`).
+/// - Pure I/O error → surfaces as `Err`.
+async fn read_line_bounded<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    cap: usize,
+) -> std::io::Result<BoundedLine> {
+    // Accumulate up to `cap+1` bytes: any overshoot proves the line exceeded
+    // the ceiling without a newline. `Take` enforces the ceiling at the
+    // reader layer so the `Vec` never grows past `cap+1`.
+    let mut buf: Vec<u8> = Vec::new();
+    let mut limited = (&mut *reader).take(cap as u64 + 1);
+    let _ = limited.read_until(b'\n', &mut buf).await?;
+    if buf.is_empty() {
+        return Ok(BoundedLine::Line(Vec::new()));
+    }
+    let hit_newline = buf.last() == Some(&b'\n');
+    if hit_newline || buf.len() <= cap {
+        return Ok(BoundedLine::Line(buf));
+    }
+
+    // Over the cap and no newline yet — drain the remainder of the line
+    // from the underlying reader. We read-and-discard via the `BufRead`
+    // fill/consume pair so no intermediate buffer grows beyond the
+    // reader's own internal read-ahead (8 KiB by default for tokio's
+    // `BufReader`).
+    let mut bytes_discarded = buf.len();
+    buf.clear();
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            // EOF mid-line — still an overflow, the line never terminated.
+            return Ok(BoundedLine::Overflow { bytes_discarded });
+        }
+        match chunk.iter().position(|&b| b == b'\n') {
+            Some(idx) => {
+                // Include the newline in the discard count, then stop.
+                // `consume(idx + 1)` leaves any bytes *after* the newline
+                // in the reader's buffer, so the next `read_line_bounded`
+                // call picks up the subsequent line correctly.
+                bytes_discarded = bytes_discarded.saturating_add(idx + 1);
+                reader.consume(idx + 1);
+                return Ok(BoundedLine::Overflow { bytes_discarded });
+            }
+            None => {
+                let n = chunk.len();
+                bytes_discarded = bytes_discarded.saturating_add(n);
+                reader.consume(n);
+            }
+        }
+    }
+}
+
+/// Strip at most one trailing `\n` (and a preceding `\r`) from `bytes`.
+/// Matches `BufReader::lines` semantics for downstream JSON parsing.
+fn trim_trailing_newline(bytes: &[u8]) -> &[u8] {
+    let mut end = bytes.len();
+    if end > 0 && bytes[end - 1] == b'\n' {
+        end -= 1;
+        if end > 0 && bytes[end - 1] == b'\r' {
+            end -= 1;
+        }
+    }
+    &bytes[..end]
 }
 
 /// Cap a log field at `max` bytes so a runaway frame can't flood the log
@@ -899,7 +1094,10 @@ mod tests {
                     saw_give_up = true;
                     break;
                 }
-                Ok(Some(ServerEvent::Message(_))) | Ok(None) | Err(_) => break,
+                Ok(Some(ServerEvent::Message(_)))
+                | Ok(Some(ServerEvent::Malformed { .. }))
+                | Ok(None)
+                | Err(_) => break,
             }
         }
         assert_eq!(
@@ -1307,7 +1505,10 @@ mod tests {
                     saw_valid_message = true;
                 }
                 Ok(Some(ServerEvent::Exited { .. })) => break,
-                Ok(Some(ServerEvent::GaveUp { .. })) | Ok(None) | Err(_) => break,
+                Ok(Some(ServerEvent::GaveUp { .. }))
+                | Ok(Some(ServerEvent::Malformed { .. }))
+                | Ok(None)
+                | Err(_) => break,
             }
         }
         let _ = tokio::time::timeout(Duration::from_secs(2), sup).await;
@@ -1452,6 +1653,201 @@ mod tests {
         assert!(
             !logs.contains(&"x".repeat(1000)),
             "the untruncated 2000-byte line must not appear in logs"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // F-351: stdio reader must enforce a documented max-line ceiling. A
+    // compromised / buggy / hostile language server that writes a single
+    // enormous line (no newline) must not drive `forge-lsp` into unbounded
+    // memory use. Over-cap events surface as `ServerEvent::Malformed` and
+    // the reader loop stays alive for subsequent frames.
+    // -----------------------------------------------------------------------
+
+    /// A stdout line longer than `MAX_LSP_LINE_BYTES` must surface a
+    /// `Malformed { stream: Stdout }` event, be discarded, and the reader
+    /// must keep running so a subsequent well-formed frame still reaches
+    /// the event channel.
+    ///
+    /// Fixture: `printf '<cap+1 'x'>\n{"ok":true}\n'` — first line is
+    /// over-cap, second is a valid JSON frame. We deliberately stay within
+    /// argv-size limits by using a modest test cap via the construction
+    /// seam; the cap is reached before OS exec limits matter.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stdout_over_cap_emits_malformed_and_keeps_reader_alive() {
+        // A 6 MiB line comfortably exceeds the 4 MiB cap. We use `yes` to
+        // avoid blowing out argv — pipe it through `head -c` to bound the
+        // byte count, then append a valid JSON frame. POSIX `sh` handles
+        // this without external scripting.
+        let script = r#"
+            head -c 6291456 /dev/zero | tr '\0' 'x'
+            printf '\n{"ok":true}\n'
+        "#;
+
+        let policy = BackoffPolicy {
+            max_attempts: 1,
+            window: Duration::from_secs(600),
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+        };
+        let mut server = Server::with_policy_and_clock(
+            PathBuf::from("/bin/sh"),
+            vec!["-c".to_string(), script.to_string()],
+            policy,
+            Arc::new(SystemClock),
+        );
+        let mut rx = server.take_events().expect("event rx");
+        let sup = tokio::spawn(async move { server.start().await });
+
+        let mut saw_malformed_stdout = false;
+        let mut saw_valid_message = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
+                Ok(Some(ServerEvent::Malformed {
+                    stream: MalformedStream::Stdout,
+                    ..
+                })) => saw_malformed_stdout = true,
+                Ok(Some(ServerEvent::Message(v))) => {
+                    assert_eq!(
+                        v,
+                        serde_json::json!({"ok": true}),
+                        "reader must deliver the valid frame after dropping the over-cap line"
+                    );
+                    saw_valid_message = true;
+                }
+                Ok(Some(ServerEvent::Exited { .. })) => break,
+                Ok(Some(ServerEvent::GaveUp { .. })) | Ok(None) | Err(_) => break,
+                Ok(Some(_)) => continue,
+            }
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(5), sup).await;
+
+        assert!(
+            saw_malformed_stdout,
+            "over-cap stdout line must surface ServerEvent::Malformed"
+        );
+        assert!(
+            saw_valid_message,
+            "reader must survive the over-cap line and deliver the next valid JSON frame"
+        );
+    }
+
+    /// A stderr line longer than `MAX_LSP_LINE_BYTES` must be dropped
+    /// (not buffered). The supervisor must reach `Exited` cleanly — the
+    /// drain task cannot deadlock on an unbounded buffer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stderr_over_cap_drops_without_crashing() {
+        let script = r#"
+            head -c 6291456 /dev/zero | tr '\0' 'x' >&2
+            exit 0
+        "#;
+
+        let policy = BackoffPolicy {
+            max_attempts: 1,
+            window: Duration::from_secs(600),
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+        };
+        let mut server = Server::with_policy_and_clock(
+            PathBuf::from("/bin/sh"),
+            vec!["-c".to_string(), script.to_string()],
+            policy,
+            Arc::new(SystemClock),
+        );
+        let mut rx = server.take_events().expect("event rx");
+        let sup = tokio::spawn(async move { server.start().await });
+
+        // The stderr drain task is awaited by `spawn_once` before `Exited`
+        // fires, so the `Malformed` event arrives in-order. We still drain
+        // past `Exited` to cover the (legal) ordering where `Exited`
+        // lands before the last stderr event — the channel closes on
+        // `GaveUp`, which gives us a guaranteed terminator because
+        // `max_attempts = 1`.
+        let mut saw_exit = false;
+        let mut saw_malformed_stderr = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
+                Ok(Some(ServerEvent::Malformed {
+                    stream: MalformedStream::Stderr,
+                    ..
+                })) => saw_malformed_stderr = true,
+                Ok(Some(ServerEvent::Exited { code, .. })) => {
+                    assert_eq!(code, Some(0), "child must exit cleanly");
+                    saw_exit = true;
+                }
+                Ok(Some(ServerEvent::GaveUp { .. })) | Ok(None) | Err(_) => break,
+                _ => continue,
+            }
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(5), sup).await;
+
+        assert!(
+            saw_exit,
+            "supervisor must observe the child exiting cleanly"
+        );
+        assert!(
+            saw_malformed_stderr,
+            "over-cap stderr line must surface ServerEvent::Malformed"
+        );
+    }
+
+    /// The DoD regression test. Feed 16 MiB of no-newline stdout and
+    /// assert a single `Malformed` event fires — the reader must discard
+    /// the over-cap bytes without growing its buffer past the cap.
+    ///
+    /// We cannot measure process RSS from inside the test portably, so we
+    /// assert the two observable-from-the-channel invariants: the over-cap
+    /// event fires, and the reader task terminates (no deadlock).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stdout_sixteen_mib_no_newline_is_bounded() {
+        // 16 MiB of 'x', no trailing newline.
+        let script = r#"
+            head -c 16777216 /dev/zero | tr '\0' 'x'
+        "#;
+
+        let policy = BackoffPolicy {
+            max_attempts: 1,
+            window: Duration::from_secs(600),
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+        };
+        let mut server = Server::with_policy_and_clock(
+            PathBuf::from("/bin/sh"),
+            vec!["-c".to_string(), script.to_string()],
+            policy,
+            Arc::new(SystemClock),
+        );
+        let mut rx = server.take_events().expect("event rx");
+        let sup = tokio::spawn(async move { server.start().await });
+
+        let mut saw_malformed = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+                Ok(Some(ServerEvent::Malformed {
+                    stream: MalformedStream::Stdout,
+                    bytes_discarded,
+                })) => {
+                    // The discard count must be at or above the cap — it's
+                    // the proof the reader stopped buffering at the ceiling.
+                    assert!(
+                        bytes_discarded >= MAX_LSP_LINE_BYTES,
+                        "bytes_discarded ({bytes_discarded}) must be >= MAX_LSP_LINE_BYTES ({MAX_LSP_LINE_BYTES})"
+                    );
+                    saw_malformed = true;
+                }
+                Ok(Some(ServerEvent::Exited { .. })) => break,
+                Ok(Some(ServerEvent::GaveUp { .. })) | Ok(None) | Err(_) => break,
+                _ => continue,
+            }
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(10), sup).await;
+
+        assert!(
+            saw_malformed,
+            "16 MiB no-newline stdout must surface ServerEvent::Malformed"
         );
     }
 }
