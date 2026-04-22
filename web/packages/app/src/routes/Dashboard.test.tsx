@@ -23,9 +23,8 @@ describe('Dashboard', () => {
     cleanup();
   });
 
-  // F-140: Dashboard now renders a router-aware `<A>` link to the Agent
-  // Monitor, so it must mount under a `<MemoryRouter>` for the link to
-  // resolve its route context without erroring.
+  // Dashboard is wrapped in a router-capable context so any descendant
+  // router primitives resolve cleanly, matching the shell's runtime.
   function renderDashboard() {
     return render(() => (
       <MemoryRouter>
@@ -40,9 +39,12 @@ describe('Dashboard', () => {
     expect(heading.textContent).toBe('Forge — Dashboard');
   });
 
-  it('exposes an Agent Monitor link in the app navigation', () => {
-    const { getByRole } = renderDashboard();
-    const link = getByRole('link', { name: /agent monitor/i });
-    expect(link.getAttribute('href')).toBe('/agents');
+  // F-409: spec dashboard.md §D.1 mandates a single flat surface — no tab
+  // bar, no sidebar, no pane splits. A <nav> element violates the flatness
+  // rule; AgentMonitor access is already provided by the StatusBar badge
+  // and session-roster entry.
+  it('renders no <nav> element (spec D.1 flat surface)', () => {
+    const { container } = renderDashboard();
+    expect(container.querySelector('nav')).toBeNull();
   });
 });
