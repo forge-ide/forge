@@ -37,6 +37,53 @@ A new session opens with **a single chat pane** filling the main area. When the 
 - Pane-local actions live in the pane header
 - Streaming state belongs to the chat pane; other panes never show the ember streaming cursor
 
+### 4.5 Persistent schema
+
+Source of truth: `crates/forge-shell/src/ipc.rs` (`Layouts`, `Layout`, `LayoutTree`, `PaneState`, `SplitDirection`, `PaneType`). Shapes are ts-rs-exported to `web/packages/ipc/src/generated/` — the TS and Rust sides evolve in lockstep.
+
+**`Layouts`** — the on-disk root of `.forge/layouts.json`.
+
+| Field | Type | Semantics |
+|---|---|---|
+| `active` | `string` | Key into `named` the UI restores on next session open. |
+| `named` | `map<string, Layout>` | Named layouts sharing the workspace (e.g. `"default"`, `"split-editor"`). |
+
+**`Layout`** — one named layout.
+
+| Field | Type | Semantics |
+|---|---|---|
+| `tree` | `LayoutTree` | The serialized pane tree. |
+| `pane_state` | `map<string, PaneState>` | Side-car state keyed by leaf `id`. Orphan keys are garbage-collected by the frontend without a schema change. Defaults to `{}` on load. |
+
+**`LayoutTree`** — discriminated union on `kind` (`"leaf" | "split"`), mirroring the TS `LayoutNode` shape.
+
+| Variant | Fields | Semantics |
+|---|---|---|
+| `leaf` | `id: string`, `pane_type: PaneType` | A terminal node. `id` is stable across sessions so `pane_state` keys stay valid after tree edits. Unknown `pane_type` values fail deserialization loudly — a future pane type must land as a `PaneType` variant before it can be persisted. |
+| `split` | `id: string`, `direction: SplitDirection`, `ratio: f32`, `a: LayoutTree`, `b: LayoutTree` | An internal node. `ratio` is the fraction of the container occupied by `a`, in `0.0..=1.0`. |
+
+**`PaneState`** — per-leaf runtime state. All fields optional so each pane type persists only what's meaningful.
+
+| Field | Type | Semantics |
+|---|---|---|
+| `active_file` | `string?` | Editor panes: last-focused file path, relative to workspace root. `None` on panes that don't address a file. |
+| `scroll_top` | `i64?` | Editor / chat scroll-back panes: top scroll offset in pixels (rounded). `None` when unknown or inapplicable. |
+| `terminal_pid` | `u32?` | Terminal panes: PID of the live child shell. Carried through restart so the UI can re-attach rather than spawn a new PTY. |
+
+**`SplitDirection`** — `"h" | "v"`. `h` renders children side-by-side; `v` stacks them.
+
+**`PaneType`** — `"chat" | "terminal" | "editor" | "files" | "agentmonitor"`. Same five variants enumerated in §4.1; a typed enum (not a free-form string) so unknown values fail loudly on load.
+
+#### Silent-default fallback
+
+`read_layouts` degrades to `Layouts::default()` — a single `chat` leaf with id `"root"` under the `"default"` key — on any of:
+
+- file missing (fresh workspace, first session open);
+- file unreadable (permissions anomaly);
+- file present but invalid JSON (user hand-edit, crash-during-write, or a forward-incompatible variant).
+
+A surfaced error would leave the webview with no layout to mount and the user with a blank window. Losing the persisted layout is recoverable; losing the ability to open the session is not. See `load_layouts_from_disk` in `crates/forge-shell/src/ipc.rs`.
+
 ---
 
 ## 5. CLI surface
