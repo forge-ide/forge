@@ -17,9 +17,20 @@
 //! derived from `Utc::now()`, no random IDs). IDs deserialize from bare JSON
 //! strings because `MessageId(String)` / `ToolCallId(String)` have private
 //! fields; `serde_json::from_value` is the only stable constructor.
+//!
+//! F-362: the `variant_label` exhaustive match at the bottom of this file
+//! guarantees every `Event` variant has at least one pin in this module —
+//! adding a new variant without a pin is a compile error, not a runtime
+//! regression that surfaces in the UI.
+
+use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Utc};
-use forge_core::{AgentInstanceId, ApprovalPreview, Event, MessageId, ToolCallId};
+use forge_core::{
+    AgentId, AgentInstanceId, ApprovalPreview, ApprovalScope, ApprovalSource, CompactTrigger,
+    EndReason, Event, McpStateEvent, MessageId, ProviderId, RosterScope, ServerState,
+    SessionPersistence, StepId, StepKind, StepOutcome, TokenUsage, ToolCallId,
+};
 use serde_json::{json, Value};
 
 fn fixed_time() -> DateTime<Utc> {
@@ -341,4 +352,516 @@ fn resource_sample_wire_shape_missing_fields_are_null() {
             "sampled_at": "2026-04-18T10:00:00Z",
         }),
     );
+}
+
+fn agent_id(s: &str) -> AgentId {
+    serde_json::from_value(Value::String(s.to_string())).unwrap()
+}
+
+fn provider_id(s: &str) -> ProviderId {
+    serde_json::from_value(Value::String(s.to_string())).unwrap()
+}
+
+fn step_id(s: &str) -> StepId {
+    serde_json::from_value(Value::String(s.to_string())).unwrap()
+}
+
+/// Deterministic `SystemTime` for `McpStateEvent.ts`. Serde's default
+/// `Serialize` impl for `SystemTime` emits
+/// `{ "secs_since_epoch": N, "nanos_since_epoch": N }` — the pin below asserts
+/// exactly that shape so a switch to a humantime-style adapter is caught.
+fn fixed_system_time() -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)
+}
+
+// ---------------------------------------------------------------------------
+// F-362: wire-shape pins for every remaining production-emitted `Event`
+// variant. The Phase-2 landing sweep (F-137, F-138, F-139, F-143, F-152,
+// F-155) added 14 variants without goldens — ts-rs doesn't catch serde
+// discriminator drift, so the TS adapter silently tolerates null fields
+// until a runtime regression surfaces in the UI. Each test below pins one
+// variant; the `event_variant_wire_shape_coverage_is_exhaustive` guard at
+// the bottom of this file forces any *future* variant to add its pin here
+// at compile time.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn session_started_wire_shape() {
+    assert_wire_eq(
+        Event::SessionStarted {
+            at: fixed_time(),
+            workspace: "/work".into(),
+            agent: Some(agent_id("agent-1")),
+            persistence: SessionPersistence::Persist,
+        },
+        json!({
+            "type": "session_started",
+            "at": "2026-04-18T10:00:00Z",
+            "workspace": "/work",
+            "agent": "agent-1",
+            "persistence": "Persist",
+        }),
+    );
+}
+
+#[test]
+fn session_started_without_agent_wire_shape() {
+    // Workspace-level sessions (no bound agent) must keep `agent: null`
+    // on the wire rather than dropping the key — the adapter checks
+    // `event.agent === null` to branch to the "no agent" code path.
+    assert_wire_eq(
+        Event::SessionStarted {
+            at: fixed_time(),
+            workspace: "/work".into(),
+            agent: None,
+            persistence: SessionPersistence::Ephemeral,
+        },
+        json!({
+            "type": "session_started",
+            "at": "2026-04-18T10:00:00Z",
+            "workspace": "/work",
+            "agent": null,
+            "persistence": "Ephemeral",
+        }),
+    );
+}
+
+#[test]
+fn message_superseded_wire_shape() {
+    // F-143: marker consumed by `apply_superseded` on replay and by the
+    // transcript view to hide the superseded turn.
+    assert_wire_eq(
+        Event::MessageSuperseded {
+            old_id: msg_id("old-1"),
+            new_id: msg_id("new-1"),
+        },
+        json!({
+            "type": "message_superseded",
+            "old_id": "old-1",
+            "new_id": "new-1",
+        }),
+    );
+}
+
+#[test]
+fn tool_call_approved_wire_shape() {
+    // F-138: approval-flow milestone — the adapter folds this into the
+    // approval store to unlock the pending tool call.
+    assert_wire_eq(
+        Event::ToolCallApproved {
+            id: tool_call_id("tc-ap-1"),
+            by: ApprovalSource::User,
+            scope: ApprovalScope::Once,
+            at: fixed_time(),
+        },
+        json!({
+            "type": "tool_call_approved",
+            "id": "tc-ap-1",
+            "by": "User",
+            "scope": "Once",
+            "at": "2026-04-18T10:00:00Z",
+        }),
+    );
+}
+
+#[test]
+fn tool_call_approved_auto_wire_shape() {
+    // Auto-approval path (remembered scope) — the UI renders a distinct
+    // badge for `by: "Auto"` so the scope variant and source variant both
+    // need to survive the wire.
+    assert_wire_eq(
+        Event::ToolCallApproved {
+            id: tool_call_id("tc-ap-2"),
+            by: ApprovalSource::Auto,
+            scope: ApprovalScope::ThisTool,
+            at: fixed_time(),
+        },
+        json!({
+            "type": "tool_call_approved",
+            "id": "tc-ap-2",
+            "by": "Auto",
+            "scope": "ThisTool",
+            "at": "2026-04-18T10:00:00Z",
+        }),
+    );
+}
+
+#[test]
+fn sub_agent_spawned_wire_shape() {
+    // F-137: sub-agent spawn edge drawn in the AgentMonitor graph.
+    assert_wire_eq(
+        Event::SubAgentSpawned {
+            parent: instance_id("inst-parent"),
+            child: instance_id("inst-child"),
+            from_msg: msg_id("mid-spawn"),
+        },
+        json!({
+            "type": "sub_agent_spawned",
+            "parent": "inst-parent",
+            "child": "inst-child",
+            "from_msg": "mid-spawn",
+        }),
+    );
+}
+
+#[test]
+fn background_agent_started_wire_shape() {
+    // F-137: background-agent lifecycle — paired with
+    // `background_agent_completed`. AgentMonitor renders a running row.
+    assert_wire_eq(
+        Event::BackgroundAgentStarted {
+            id: instance_id("bg-1"),
+            agent: agent_id("researcher"),
+            at: fixed_time(),
+        },
+        json!({
+            "type": "background_agent_started",
+            "id": "bg-1",
+            "agent": "researcher",
+            "at": "2026-04-18T10:00:00Z",
+        }),
+    );
+}
+
+#[test]
+fn background_agent_completed_wire_shape() {
+    assert_wire_eq(
+        Event::BackgroundAgentCompleted {
+            id: instance_id("bg-1"),
+            at: fixed_time(),
+        },
+        json!({
+            "type": "background_agent_completed",
+            "id": "bg-1",
+            "at": "2026-04-18T10:00:00Z",
+        }),
+    );
+}
+
+#[test]
+fn usage_tick_wire_shape() {
+    // F-155: per-provider token / cost accounting — feeds the usage HUD.
+    assert_wire_eq(
+        Event::UsageTick {
+            provider: provider_id("mock"),
+            model: "mock-1".into(),
+            tokens_in: 128,
+            tokens_out: 256,
+            cost_usd: 0.0125,
+            scope: RosterScope::SessionWide,
+        },
+        json!({
+            "type": "usage_tick",
+            "provider": "mock",
+            "model": "mock-1",
+            "tokens_in": 128,
+            "tokens_out": 256,
+            "cost_usd": 0.0125,
+            "scope": "SessionWide",
+        }),
+    );
+}
+
+#[test]
+fn context_compacted_wire_shape() {
+    // F-155: auto-compaction event — the transcript view collapses
+    // summarized turns under a "compacted N turns" pill anchored on
+    // `summary_msg_id`.
+    assert_wire_eq(
+        Event::ContextCompacted {
+            at: fixed_time(),
+            summarized_turns: 4,
+            summary_msg_id: msg_id("summary-1"),
+            trigger: CompactTrigger::AutoAt98Pct,
+        },
+        json!({
+            "type": "context_compacted",
+            "at": "2026-04-18T10:00:00Z",
+            "summarized_turns": 4,
+            "summary_msg_id": "summary-1",
+            "trigger": "AutoAt98Pct",
+        }),
+    );
+}
+
+#[test]
+fn session_ended_wire_shape() {
+    // Completed session — the dashboard shows "ended cleanly".
+    assert_wire_eq(
+        Event::SessionEnded {
+            at: fixed_time(),
+            reason: EndReason::Completed,
+            archived: true,
+        },
+        json!({
+            "type": "session_ended",
+            "at": "2026-04-18T10:00:00Z",
+            "reason": "Completed",
+            "archived": true,
+        }),
+    );
+}
+
+#[test]
+fn session_ended_with_error_wire_shape() {
+    // `Error(String)` is the only data-carrying arm of `EndReason`. Serde's
+    // default external tagging wraps it as `{ "Error": "<reason>" }` — the
+    // adapter matches on that literal key. Locking both arms' shapes.
+    assert_wire_eq(
+        Event::SessionEnded {
+            at: fixed_time(),
+            reason: EndReason::Error("provider dropped".into()),
+            archived: false,
+        },
+        json!({
+            "type": "session_ended",
+            "at": "2026-04-18T10:00:00Z",
+            "reason": { "Error": "provider dropped" },
+            "archived": false,
+        }),
+    );
+}
+
+#[test]
+fn step_started_wire_shape() {
+    // F-139: step-trace open. `instance_id: None` is the top-level-turn
+    // case (F-140 populates it once `AgentMonitor` is wired through
+    // `run_turn`) — locking the `null` shape prevents the field from
+    // disappearing between emissions.
+    assert_wire_eq(
+        Event::StepStarted {
+            step_id: step_id("step-1"),
+            instance_id: None,
+            kind: StepKind::Model,
+            started_at: fixed_time(),
+        },
+        json!({
+            "type": "step_started",
+            "step_id": "step-1",
+            "instance_id": null,
+            "kind": "model",
+            "started_at": "2026-04-18T10:00:00Z",
+        }),
+    );
+}
+
+#[test]
+fn step_started_with_instance_id_wire_shape() {
+    assert_wire_eq(
+        Event::StepStarted {
+            step_id: step_id("step-2"),
+            instance_id: Some(instance_id("inst-9")),
+            kind: StepKind::Tool,
+            started_at: fixed_time(),
+        },
+        json!({
+            "type": "step_started",
+            "step_id": "step-2",
+            "instance_id": "inst-9",
+            "kind": "tool",
+            "started_at": "2026-04-18T10:00:00Z",
+        }),
+    );
+}
+
+#[test]
+fn step_finished_ok_wire_shape() {
+    // F-139: step-trace close, ok arm. `token_usage: None` is the "provider
+    // didn't report usage" case — today's common path for the mock
+    // provider. Locking the `null` wire shape.
+    assert_wire_eq(
+        Event::StepFinished {
+            step_id: step_id("step-1"),
+            outcome: StepOutcome::Ok,
+            duration_ms: 42,
+            token_usage: None,
+        },
+        json!({
+            "type": "step_finished",
+            "step_id": "step-1",
+            "outcome": { "status": "ok" },
+            "duration_ms": 42,
+            "token_usage": null,
+        }),
+    );
+}
+
+#[test]
+fn step_finished_error_with_token_usage_wire_shape() {
+    // F-139: step-trace close, error arm with provider-reported usage.
+    // `StepOutcome::Error` is internally tagged (`status`) — locking the
+    // shape here guards against a rename of the tag or the field.
+    assert_wire_eq(
+        Event::StepFinished {
+            step_id: step_id("step-3"),
+            outcome: StepOutcome::Error {
+                reason: "provider dropped".into(),
+            },
+            duration_ms: 17,
+            token_usage: Some(TokenUsage {
+                tokens_in: 10,
+                tokens_out: 20,
+            }),
+        },
+        json!({
+            "type": "step_finished",
+            "step_id": "step-3",
+            "outcome": { "status": "error", "reason": "provider dropped" },
+            "duration_ms": 17,
+            "token_usage": { "tokens_in": 10, "tokens_out": 20 },
+        }),
+    );
+}
+
+#[test]
+fn tool_invoked_wire_shape() {
+    // F-139: tool-step boundary, approval → invoke. `args_digest` is a
+    // short SHA-256 hex prefix computed upstream — pin asserts it rides as
+    // a plain string.
+    assert_wire_eq(
+        Event::ToolInvoked {
+            step_id: step_id("step-4"),
+            tool_call_id: tool_call_id("tc-inv"),
+            tool_id: "fs.read".into(),
+            args_digest: "abc12345".into(),
+        },
+        json!({
+            "type": "tool_invoked",
+            "step_id": "step-4",
+            "tool_call_id": "tc-inv",
+            "tool_id": "fs.read",
+            "args_digest": "abc12345",
+        }),
+    );
+}
+
+#[test]
+fn tool_returned_wire_shape() {
+    // F-139: tool-step boundary, invoke → complete. `bytes_out` rides as a
+    // JSON number (u64), `ok` as a JSON bool.
+    assert_wire_eq(
+        Event::ToolReturned {
+            step_id: step_id("step-4"),
+            tool_call_id: tool_call_id("tc-inv"),
+            ok: true,
+            bytes_out: 1024,
+        },
+        json!({
+            "type": "tool_returned",
+            "step_id": "step-4",
+            "tool_call_id": "tc-inv",
+            "ok": true,
+            "bytes_out": 1024,
+        }),
+    );
+}
+
+#[test]
+fn mcp_state_wire_shape_healthy() {
+    // F-155: `McpState(McpStateEvent)` is a newtype variant carrying a
+    // struct. Serde's internal tagging flattens the struct fields into the
+    // outer object, so the wire shape is the outer `type` discriminator
+    // plus every field of `McpStateEvent` — including its `ts: SystemTime`
+    // (serde default: `{secs_since_epoch, nanos_since_epoch}`). The pin
+    // below locks that flattening; if it drifts to a wrapped `payload`,
+    // the TS adapter (`applyEventToState` / `McpStatePanel`) breaks
+    // silently until this test fails.
+    assert_wire_eq(
+        Event::McpState(McpStateEvent {
+            server: "ripgrep".into(),
+            state: ServerState::Healthy,
+            ts: fixed_system_time(),
+        }),
+        json!({
+            "type": "mcp_state",
+            "server": "ripgrep",
+            "state": { "state": "healthy" },
+            "ts": {
+                "secs_since_epoch": 1_700_000_000u64,
+                "nanos_since_epoch": 0u64,
+            },
+        }),
+    );
+}
+
+#[test]
+fn mcp_state_wire_shape_degraded_with_reason() {
+    // `ServerState` is internally tagged on `state` — data-carrying arms
+    // (Degraded/Failed/Disabled) hang their `reason` alongside. Pin both
+    // the healthy (no-reason) and degraded (with-reason) shapes so a
+    // rename on either side surfaces.
+    assert_wire_eq(
+        Event::McpState(McpStateEvent {
+            server: "shell".into(),
+            state: ServerState::Degraded {
+                reason: "health check timeout".into(),
+            },
+            ts: fixed_system_time(),
+        }),
+        json!({
+            "type": "mcp_state",
+            "server": "shell",
+            "state": { "state": "degraded", "reason": "health check timeout" },
+            "ts": {
+                "secs_since_epoch": 1_700_000_000u64,
+                "nanos_since_epoch": 0u64,
+            },
+        }),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Compile-time guard: adding a new `Event` variant must also add its
+// wire-shape pin above. This is enforced by an exhaustive `match` here —
+// `#[deny(non_exhaustive_omitted_patterns)]` is unstable, so we rely on the
+// default "non-exhaustive patterns" compile error emitted by `match` when
+// the enum grows. The match arms return a stable string label that maps to
+// a test name above; any future variant has no arm, the test file fails to
+// compile, and the new variant cannot land without a matching pin.
+//
+// If you hit `non-exhaustive patterns: &Event::XxxYyy not covered`: add a
+// `#[test] fn xxx_yyy_wire_shape()` above and a matching arm below.
+// ---------------------------------------------------------------------------
+
+fn variant_label(e: &Event) -> &'static str {
+    match e {
+        Event::SessionStarted { .. } => "session_started",
+        Event::UserMessage { .. } => "user_message",
+        Event::AssistantMessage { .. } => "assistant_message",
+        Event::AssistantDelta { .. } => "assistant_delta",
+        Event::BranchSelected { .. } => "branch_selected",
+        Event::BranchDeleted { .. } => "branch_deleted",
+        Event::MessageSuperseded { .. } => "message_superseded",
+        Event::ToolCallStarted { .. } => "tool_call_started",
+        Event::ToolCallApprovalRequested { .. } => "tool_call_approval_requested",
+        Event::ToolCallApproved { .. } => "tool_call_approved",
+        Event::ToolCallRejected { .. } => "tool_call_rejected",
+        Event::ToolCallCompleted { .. } => "tool_call_completed",
+        Event::SubAgentSpawned { .. } => "sub_agent_spawned",
+        Event::BackgroundAgentStarted { .. } => "background_agent_started",
+        Event::BackgroundAgentCompleted { .. } => "background_agent_completed",
+        Event::UsageTick { .. } => "usage_tick",
+        Event::ContextCompacted { .. } => "context_compacted",
+        Event::SessionEnded { .. } => "session_ended",
+        Event::StepStarted { .. } => "step_started",
+        Event::StepFinished { .. } => "step_finished",
+        Event::ToolInvoked { .. } => "tool_invoked",
+        Event::ToolReturned { .. } => "tool_returned",
+        Event::McpState(_) => "mcp_state",
+        Event::ResourceSample { .. } => "resource_sample",
+    }
+}
+
+#[test]
+fn event_variant_wire_shape_coverage_is_exhaustive() {
+    // Call `variant_label` on one constructed event so the function is
+    // monomorphized and the exhaustive `match` cannot be dead-code-dropped
+    // by the compiler. The compile-time guarantee is the non-exhaustive
+    // pattern error on the `match` itself — reached at `cargo check`
+    // before this test body ever runs.
+    let sample = Event::BranchSelected {
+        parent: msg_id("root"),
+        selected: msg_id("variant"),
+    };
+    assert_eq!(variant_label(&sample), "branch_selected");
 }
