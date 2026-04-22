@@ -277,3 +277,95 @@ async fn manager_degrades_http_server_on_sustained_reconnect_failure() {
 
     mgr.stop("remote").await.expect("stop remote");
 }
+
+/// F-348: URL credentials (query-string tokens, `user:pass@` userinfo) must
+/// never appear in the error returned by `Http::send`. The MCP server URL is
+/// needed inside reqwest but every user-facing emission routes through the
+/// `redacted()` helper, which strips query, fragment, and userinfo.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn post_error_redacts_query_string_token() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(""),
+        )
+        .mount(&server)
+        .await;
+
+    // Append a secret as a query-string token, mirroring signed-URL /
+    // personal-dev-proxy patterns called out in the threat model.
+    let url_with_token = format!("{}/?access_token=shhh-no-logging", server.uri());
+    let t = Http::connect(&http_spec(&url_with_token, "Bearer token"))
+        .await
+        .expect("connect");
+
+    let err = t
+        .send(serde_json::json!({"jsonrpc":"2.0","id":1}))
+        .await
+        .expect_err("500 must surface");
+    let msg = format!("{err:#}");
+    assert!(
+        !msg.contains("shhh-no-logging"),
+        "query-string token must not appear in error: {msg}"
+    );
+    assert!(
+        !msg.contains("access_token"),
+        "query key must not appear in error: {msg}"
+    );
+    assert!(
+        msg.contains("500"),
+        "error should still name the HTTP status: {msg}"
+    );
+}
+
+/// F-348: sustained SSE failure emits `HttpEvent::Closed(reason)`. That
+/// reason string is broadcast by the manager as `Degraded { reason }`, so
+/// it absolutely must not carry URL credentials.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sse_closed_reason_redacts_query_string_token() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("down"))
+        .mount(&server)
+        .await;
+
+    let url_with_token = format!("{}/?access_token=shhh-no-broadcast", server.uri());
+    let mut t = Http::connect(&http_spec(&url_with_token, "Bearer token"))
+        .await
+        .expect("connect");
+
+    let ev = tokio::time::timeout(Duration::from_secs(10), t.recv())
+        .await
+        .expect("timed out waiting for HttpEvent::Closed")
+        .expect("channel closed before Closed event surfaced");
+
+    match ev {
+        HttpEvent::Closed(reason) => {
+            assert!(
+                !reason.contains("shhh-no-broadcast"),
+                "Closed reason must not carry the token: {reason}"
+            );
+            assert!(
+                !reason.contains("access_token"),
+                "Closed reason must not carry the query key: {reason}"
+            );
+        }
+        HttpEvent::Message(v) => {
+            panic!("expected HttpEvent::Closed after sustained failure, got Message({v})")
+        }
+    }
+}

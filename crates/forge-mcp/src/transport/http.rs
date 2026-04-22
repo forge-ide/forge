@@ -108,8 +108,11 @@ impl Drop for Http {
 
 impl std::fmt::Debug for Http {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Route through `redacted` (F-348) so `{:?}`-style logging — e.g. a
+        // `tracing` field carrying the handle — cannot leak a query-string
+        // token or `user:pass@` userinfo.
         f.debug_struct("Http")
-            .field("url", &self.url)
+            .field("url", &redacted(&self.url))
             .finish_non_exhaustive()
     }
 }
@@ -177,14 +180,14 @@ impl Http {
             .json(&message)
             .send()
             .await
-            .with_context(|| format!("POST {} failed", self.url))?;
+            .with_context(|| format!("POST {} failed", redacted(&self.url)))?;
 
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(anyhow!(
                 "POST {} returned HTTP {}: {}",
-                self.url,
+                redacted(&self.url),
                 status,
                 super::truncate(&body, 512),
             ));
@@ -196,7 +199,7 @@ impl Http {
         let body = resp
             .bytes()
             .await
-            .with_context(|| format!("reading POST {} response body", self.url))?;
+            .with_context(|| format!("reading POST {} response body", redacted(&self.url)))?;
         if body.is_empty() {
             return Ok(());
         }
@@ -204,7 +207,7 @@ impl Http {
         let value: serde_json::Value = serde_json::from_slice(&body).with_context(|| {
             format!(
                 "parsing POST {} response as JSON: {}",
-                self.url,
+                redacted(&self.url),
                 super::truncate(&String::from_utf8_lossy(&body), 512),
             )
         })?;
@@ -227,6 +230,30 @@ impl Http {
     /// is being torn down — see note on [`HttpEvent`]).
     pub async fn recv(&mut self) -> Option<HttpEvent> {
         self.rx.recv().await
+    }
+}
+
+/// Return a log-safe rendering of `url`: scheme + host + path only. Query
+/// strings, fragments, and `user:pass@` userinfo are stripped so signed
+/// one-time URLs (`?X-Amz-Signature=...`), personal-proxy tokens
+/// (`?token=...`), and HTTP basic-auth credentials cannot bleed into
+/// tracing sinks or the `Degraded { reason }` broadcast (F-348).
+///
+/// Every user-facing emission of `url` in this module — error contexts,
+/// `tracing` fields, and any text that ends up in `HttpEvent::Closed` —
+/// must route through this helper. The real URL stays inside reqwest,
+/// where the query string and userinfo are actually needed for the
+/// request.
+fn redacted(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(mut u) => {
+            u.set_query(None);
+            u.set_fragment(None);
+            let _ = u.set_username("");
+            let _ = u.set_password(None);
+            u.into()
+        }
+        Err(_) => "<invalid-url>".to_string(),
     }
 }
 
@@ -265,9 +292,12 @@ async fn sse_reader_loop(
 ) {
     let mut delay = INITIAL_RECONNECT_DELAY;
     let mut consecutive_failures: usize = 0;
+    // Compute the redaction once: `url` is immutable for the reader's
+    // lifetime, so we avoid re-parsing on every retry / log line.
+    let log_url = redacted(&url);
 
     loop {
-        match open_and_read_sse(&client, &url, &headers, &tx).await {
+        match open_and_read_sse(&client, &url, &log_url, &headers, &tx).await {
             Ok(ReaderExit::ConsumerDropped) => {
                 // Nothing left to feed — quit cleanly.
                 return;
@@ -279,7 +309,7 @@ async fn sse_reader_loop(
                 consecutive_failures = 0;
                 tracing::debug!(
                     target: "forge_mcp::transport::http",
-                    url = %url,
+                    url = %log_url,
                     "SSE stream ended cleanly; reconnecting",
                 );
             }
@@ -288,7 +318,7 @@ async fn sse_reader_loop(
                 let reason = format!("{err:#}");
                 tracing::warn!(
                     target: "forge_mcp::transport::http",
-                    url = %url,
+                    url = %log_url,
                     error = %err,
                     attempts = consecutive_failures,
                     "SSE read failed; backing off before reconnect",
@@ -301,7 +331,7 @@ async fn sse_reader_loop(
                     );
                     tracing::warn!(
                         target: "forge_mcp::transport::http",
-                        url = %url,
+                        url = %log_url,
                         %detail,
                         "SSE reader terminating; surfacing Closed to consumer",
                     );
@@ -332,6 +362,7 @@ enum ReaderExit {
 async fn open_and_read_sse(
     client: &reqwest::Client,
     url: &str,
+    log_url: &str,
     headers: &HeaderMap,
     tx: &mpsc::Sender<HttpEvent>,
 ) -> Result<ReaderExit> {
@@ -341,11 +372,11 @@ async fn open_and_read_sse(
         .header(ACCEPT, "text/event-stream")
         .send()
         .await
-        .with_context(|| format!("GET {url} for SSE stream"))?;
+        .with_context(|| format!("GET {log_url} for SSE stream"))?;
 
     let status = resp.status();
     if !status.is_success() {
-        return Err(anyhow!("GET {url} returned HTTP {status}"));
+        return Err(anyhow!("GET {log_url} returned HTTP {status}"));
     }
 
     let mut stream = resp.bytes_stream();
@@ -354,7 +385,7 @@ async fn open_and_read_sse(
     let mut buf: Vec<u8> = Vec::with_capacity(1024);
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.with_context(|| format!("reading SSE chunk from {url}"))?;
+        let chunk = chunk.with_context(|| format!("reading SSE chunk from {log_url}"))?;
         buf.extend_from_slice(&chunk);
 
         while let Some(end) = find_event_boundary(&buf) {
@@ -522,6 +553,51 @@ mod tests {
     fn parse_event_data_returns_none_without_data_field() {
         let frame = b"event: heartbeat\nid: 7";
         assert!(parse_event_data(frame).is_none());
+    }
+
+    #[test]
+    fn redacted_strips_query_string_token() {
+        let input = "https://mcp.example.com/v1?access_token=shhh";
+        let out = redacted(input);
+        assert!(!out.contains("shhh"), "token must not appear: {out}");
+        assert!(
+            !out.contains("access_token"),
+            "query key must be gone: {out}"
+        );
+        assert!(out.contains("mcp.example.com"), "host must survive: {out}");
+        assert!(out.contains("/v1"), "path must survive: {out}");
+    }
+
+    #[test]
+    fn redacted_strips_fragment() {
+        let input = "https://mcp.example.com/v1#tok=shhh";
+        let out = redacted(input);
+        assert!(!out.contains("shhh"), "fragment must be gone: {out}");
+        assert!(!out.contains('#'), "fragment delimiter must be gone: {out}");
+    }
+
+    #[test]
+    fn redacted_strips_userinfo() {
+        let input = "https://alice:s3cret@mcp.example.com/v1";
+        let out = redacted(input);
+        assert!(!out.contains("alice"), "username must be gone: {out}");
+        assert!(!out.contains("s3cret"), "password must be gone: {out}");
+        assert!(out.contains("mcp.example.com"));
+    }
+
+    #[test]
+    fn redacted_falls_back_on_invalid_url() {
+        let out = redacted("not a url at all");
+        assert_eq!(out, "<invalid-url>");
+    }
+
+    #[test]
+    fn redacted_preserves_clean_url_shape() {
+        let input = "https://mcp.example.com/v1";
+        let out = redacted(input);
+        assert!(out.contains("https://"));
+        assert!(out.contains("mcp.example.com"));
+        assert!(out.contains("/v1"));
     }
 
     #[test]

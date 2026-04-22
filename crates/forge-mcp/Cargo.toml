@@ -36,6 +36,11 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 # Codex source format (F-131) stores MCP servers in `~/.codex/config.toml`.
 toml = "0.8"
 tracing = "0.1"
+# F-348: URL parsing for redacting query strings, fragments, and userinfo
+# out of error messages and tracing fields before they reach log sinks or
+# the `Degraded { reason }` broadcast. Already pulled in transitively by
+# reqwest; declared directly so the transport can call `url::Url::parse`.
+url = "2"
 # F-132: `McpServerInfo`, `ServerState`, and `McpStateEvent` cross the Tauri
 # boundary as return types / emitted events; ts-rs emits their TypeScript
 # shapes into `web/packages/ipc/src/generated/` alongside forge-core's types.
