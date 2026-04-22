@@ -26,8 +26,8 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::{McpServerSpec, ServerKind};
 use super::ssrf;
+use crate::{McpServerSpec, ServerKind};
 
 /// Total timeout for the POST round-trip, measured from send to the full
 /// response body. Matches the DoD's "configured headers + 30s timeout".

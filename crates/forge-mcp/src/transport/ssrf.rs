@@ -61,9 +61,7 @@ pub fn check_url(raw: &str) -> Result<()> {
     // mandatory everywhere outside of developer machines.
     #[cfg(not(debug_assertions))]
     if scheme == "http" {
-        bail!(
-            "SSRF guard: MCP URL {raw:?} uses http; only https is permitted in release builds"
-        );
+        bail!("SSRF guard: MCP URL {raw:?} uses http; only https is permitted in release builds");
     }
 
     // Loopback hosts pass after the scheme checks above; skip range checks.
@@ -113,9 +111,7 @@ fn check_ipv4(addr: std::net::Ipv4Addr, raw: &str) -> Result<()> {
     }
     // 169.254.0.0/16 — link-local / IMDS
     if o[0] == 169 && o[1] == 254 {
-        bail!(
-            "SSRF guard: MCP URL {raw:?} targets link-local/IMDS range 169.254.0.0/16 ({addr})"
-        );
+        bail!("SSRF guard: MCP URL {raw:?} targets link-local/IMDS range 169.254.0.0/16 ({addr})");
     }
 
     Ok(())
@@ -247,8 +243,7 @@ mod tests {
 
     #[test]
     fn blocks_rfc1918_192_168_slash_16() {
-        let err =
-            check_url("https://192.168.1.100/mcp").expect_err("192.168/16 must be blocked");
+        let err = check_url("https://192.168.1.100/mcp").expect_err("192.168/16 must be blocked");
         assert!(
             format!("{err}").contains("192.168.0.0/16"),
             "error should name the range: {err}"
