@@ -252,12 +252,22 @@ export function createIframeProtocol(config: IframeProtocolConfig): IframeProtoc
   };
 }
 
-/** Default browser `subscribe` that listens on `window.message`. */
+/**
+ * Default browser `subscribe` that listens on `window.message`, filtering
+ * by `event.origin === expectedParentOrigin`. Messages from any other
+ * origin are silently dropped — defense-in-depth for F-358 in case CSP
+ * `frame-src` or the asset-protocol origin ever relaxes and an unexpected
+ * peer gets a handle to this window.
+ */
 export function browserSubscribe(
   target: Window = window,
+  expectedParentOrigin: string = window.location.origin,
 ): (listener: MessageListener) => { dispose(): void } {
   return (listener) => {
-    const handler = (e: MessageEvent) => listener(e.data);
+    const handler = (e: MessageEvent): void => {
+      if (e.origin !== expectedParentOrigin) return;
+      listener(e.data);
+    };
     target.addEventListener('message', handler);
     return {
       dispose: () => target.removeEventListener('message', handler),
@@ -265,11 +275,25 @@ export function browserSubscribe(
   };
 }
 
-/** Default browser `post` that targets `window.parent`. */
-export function browserPost(parent: Window | null = window.parent): (msg: EditorOutboundMessage) => void {
+/**
+ * Default browser `post` that targets `window.parent` with an explicit
+ * `targetOrigin`. Wildcard (`'*'`) targets are rejected at construction
+ * time (F-358) — Monaco messages carry the full file buffer, so wildcard
+ * targeting would leak contents to any frame that can get a handle on
+ * the parent window.
+ */
+export function browserPost(
+  parent: Window | null = window.parent,
+  targetOrigin: string = window.location.origin,
+): (msg: EditorOutboundMessage) => void {
+  if (targetOrigin === '*') {
+    throw new Error(
+      'browserPost: wildcard target origin ("*") is not allowed; pass the exact parent origin',
+    );
+  }
   return (msg) => {
     if (parent !== null) {
-      parent.postMessage(msg, '*');
+      parent.postMessage(msg, targetOrigin);
     }
   };
 }

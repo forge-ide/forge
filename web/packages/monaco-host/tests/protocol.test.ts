@@ -4,6 +4,8 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import {
+  browserPost,
+  browserSubscribe,
   createIframeProtocol,
   type EditorInboundMessage,
   type EditorLike,
@@ -233,6 +235,53 @@ describe('postMessage protocol', () => {
 
     expect(sink).toHaveBeenCalledTimes(1);
     handles.dispose();
+  });
+
+  // F-358: defense-in-depth for the cross-origin postMessage contract.
+  // Both sides must pass an explicit target origin and validate inbound
+  // `event.origin` so messages cannot leak to, or be injected from, a
+  // frame whose origin diverges from the expected peer.
+  describe('origin enforcement (F-358)', () => {
+    it('browserPost forwards the expected parent origin to postMessage', () => {
+      const postMessage = vi.fn();
+      const fakeParent = { postMessage } as unknown as Window;
+      const post = browserPost(fakeParent, 'https://parent.example');
+      post({ kind: 'ready' });
+      expect(postMessage).toHaveBeenCalledTimes(1);
+      expect(postMessage.mock.calls[0]?.[1]).toBe('https://parent.example');
+    });
+
+    it('browserPost rejects a wildcard target origin', () => {
+      const postMessage = vi.fn();
+      const fakeParent = { postMessage } as unknown as Window;
+      expect(() => browserPost(fakeParent, '*')).toThrow();
+    });
+
+    it('browserSubscribe drops messages whose origin does not match', () => {
+      const addEventListener = vi.fn();
+      const removeEventListener = vi.fn();
+      const fakeTarget = {
+        addEventListener,
+        removeEventListener,
+      } as unknown as Window;
+      const listener = vi.fn();
+
+      const subscribe = browserSubscribe(fakeTarget, 'https://parent.example');
+      const handle = subscribe(listener);
+
+      expect(addEventListener).toHaveBeenCalledTimes(1);
+      const handler = addEventListener.mock.calls[0]?.[1] as (e: MessageEvent) => void;
+
+      handler({ origin: 'https://evil.example', data: { kind: 'open' } } as MessageEvent);
+      expect(listener).not.toHaveBeenCalled();
+
+      handler({ origin: 'https://parent.example', data: { kind: 'focus' } } as MessageEvent);
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener.mock.calls[0]?.[0]).toEqual({ kind: 'focus' });
+
+      handle.dispose();
+      expect(removeEventListener).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('ignores malformed messages silently', () => {
