@@ -81,6 +81,15 @@ export interface EditorPaneProps {
    *  non-content surface on the pane and is the same drag-initiation
    *  affordance every other grid leaf uses. */
   onHeaderPointerDown?: (e: PointerEvent) => void;
+  /**
+   * F-358 defense-in-depth: explicit expected origin of the hosted iframe.
+   * Used as the `targetOrigin` argument to every outbound `postMessage`
+   * and as a strict allow-list for inbound `event.origin`. Wildcard
+   * (`'*'`) is rejected. Defaults to the origin derived from `src`
+   * (relative URLs resolve to `window.location.origin`). Tests that drive
+   * cross-origin scenarios override this.
+   */
+  expectedIframeOrigin?: string;
 }
 
 /** Monaco-style URI. Keeps the round-trip through `readFile` → iframe →
@@ -132,15 +141,46 @@ export const EditorPane: Component<EditorPaneProps> = (props) => {
   let currentValue: string | null = null;
   const currentUri = createMemo(() => pathToUri(props.path));
 
+  const iframeSrc = (): string => props.src ?? DEFAULT_MONACO_HOST_SRC;
+
+  // F-358: target origin for outbound `postMessage` and the allow-list for
+  // inbound `event.origin`. Explicit prop wins; otherwise derive from the
+  // iframe `src` — a relative URL (the default production path) resolves
+  // to `window.location.origin`, so parent and iframe share an origin and
+  // messages stay first-party. Wildcards are rejected below.
+  const expectedIframeOrigin = createMemo(() => {
+    if (props.expectedIframeOrigin !== undefined) {
+      return props.expectedIframeOrigin;
+    }
+    try {
+      return new URL(iframeSrc(), window.location.href).origin;
+    } catch {
+      return window.location.origin;
+    }
+  });
+
   const postToIframe = (msg: unknown): void => {
     if (props.postToIframe) {
       props.postToIframe(msg);
       return;
     }
     const win = iframeRef?.contentWindow;
-    if (win !== null && win !== undefined) {
-      win.postMessage(msg, '*');
+    if (win === null || win === undefined) return;
+    const target = expectedIframeOrigin();
+    if (target === '*') {
+      // Guard against accidental wildcard leakage of file contents to any
+      // frame that can get a handle on `iframeRef.contentWindow`.
+      throw new Error(
+        'EditorPane: wildcard iframe target origin ("*") is not allowed',
+      );
     }
+    // An opaque iframe origin (e.g. `about:blank`, `data:`, sandboxed
+    // without `allow-same-origin`) resolves to the string "null", which
+    // `window.postMessage` refuses as a target. Skip the post in that
+    // case — there is no meaningful peer to address. Production loads the
+    // iframe from a real URL, so this only guards test / boot paths.
+    if (target === 'null') return;
+    win.postMessage(msg, target);
   };
 
   const sendOpen = async (): Promise<void> => {
@@ -183,6 +223,13 @@ export const EditorPane: Component<EditorPaneProps> = (props) => {
   const handleMessage = (event: MessageEvent): void => {
     // Reject messages from windows other than the hosted iframe.
     if (iframeRef && event.source !== iframeRef.contentWindow) return;
+    // F-358: reject messages whose origin diverges from the expected
+    // iframe origin, even if they came from `iframeRef.contentWindow`.
+    // Synthetic MessageEvents dispatched in unit tests carry `origin === ''`;
+    // treat that as "no origin claimed" and fall through to the source check
+    // above so the existing test harness keeps working. Real browser events
+    // always set `origin`.
+    if (event.origin !== '' && event.origin !== expectedIframeOrigin()) return;
     const data = event.data as IframeMessage | undefined;
     if (!data || typeof data !== 'object' || typeof data.kind !== 'string') return;
 
@@ -236,7 +283,6 @@ export const EditorPane: Component<EditorPaneProps> = (props) => {
 
   const { prefix, leaf } = trimmedBreadcrumb(props.path);
   const breadcrumbTitle = (): string => props.path;
-  const iframeSrc = (): string => props.src ?? DEFAULT_MONACO_HOST_SRC;
 
   return (
     <section

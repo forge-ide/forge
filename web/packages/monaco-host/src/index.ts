@@ -18,6 +18,12 @@ if (host === null) {
 
 const editor = mountEditor(host);
 
+// F-358: the default `browserPost` / `browserSubscribe` target and allow
+// only `window.location.origin`. Today the iframe is first-party same-origin
+// (loaded via a relative URL from the parent `app` bundle), so the parent's
+// origin equals the iframe's origin. If the iframe is ever hosted on a
+// foreign origin (e.g. Tauri asset-protocol change, CDN), pass the real
+// parent origin to both factories — never fall back to `'*'`.
 const handles = createIframeProtocol({
   editor,
   post: browserPost(),

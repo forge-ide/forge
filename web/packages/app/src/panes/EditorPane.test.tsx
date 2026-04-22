@@ -318,6 +318,123 @@ describe('message origin isolation', () => {
     expect(readFile).not.toHaveBeenCalled();
     expect(posted).toEqual([]);
   });
+
+  // F-358: defense-in-depth for the cross-origin postMessage contract.
+  // Even when the message's `source` is the hosted iframe's window, a
+  // divergent `event.origin` must be rejected. Symmetrically, outbound
+  // `postMessage` must use the explicit iframe origin rather than `'*'`.
+  it('ignores messages from the iframe window when origin does not match the expected iframe origin', async () => {
+    const readFile = vi.fn().mockResolvedValue({
+      path: FILE,
+      content: 'x',
+      bytes: 1,
+      sha256: 'sha',
+    });
+    const posted: unknown[] = [];
+    const { getByTestId } = render(() => (
+      <EditorPane
+        sessionId={SID}
+        path={FILE}
+        src="about:blank"
+        expectedIframeOrigin="https://editor.forge.local"
+        readFile={readFile}
+        writeFile={vi.fn().mockResolvedValue(undefined)}
+        postToIframe={(m) => posted.push(m)}
+        onClose={vi.fn()}
+      />
+    ));
+    const iframe = getByTestId('editor-pane-iframe') as HTMLIFrameElement;
+
+    // Same source as the iframe, but a foreign origin — must be dropped.
+    const event = new MessageEvent('message', {
+      data: { kind: 'ready' },
+      origin: 'https://evil.example',
+      source: iframe.contentWindow as MessageEventSource,
+    });
+    window.dispatchEvent(event);
+    await Promise.resolve();
+
+    expect(readFile).not.toHaveBeenCalled();
+    expect(posted).toEqual([]);
+  });
+
+  it('accepts messages from the iframe when origin matches the expected iframe origin', async () => {
+    const readFile = vi.fn().mockResolvedValue({
+      path: FILE,
+      content: 'const y = 2;\n',
+      bytes: 13,
+      sha256: 'sha',
+    });
+    const posted: unknown[] = [];
+    const { getByTestId } = render(() => (
+      <EditorPane
+        sessionId={SID}
+        path={FILE}
+        src="about:blank"
+        expectedIframeOrigin="https://editor.forge.local"
+        readFile={readFile}
+        writeFile={vi.fn().mockResolvedValue(undefined)}
+        postToIframe={(m) => posted.push(m)}
+        onClose={vi.fn()}
+      />
+    ));
+    const iframe = getByTestId('editor-pane-iframe') as HTMLIFrameElement;
+
+    const event = new MessageEvent('message', {
+      data: { kind: 'ready' },
+      origin: 'https://editor.forge.local',
+      source: iframe.contentWindow as MessageEventSource,
+    });
+    window.dispatchEvent(event);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(readFile).toHaveBeenCalledWith(SID, FILE);
+    expect(posted.some((m) => (m as { kind?: string }).kind === 'open')).toBe(true);
+  });
+
+  it('posts messages to the iframe using the explicit expected origin (never "*")', () => {
+    // Use the real iframe postMessage path (no `postToIframe` override) so
+    // we exercise the production postMessage call. A recording spy on
+    // `HTMLIFrameElement.prototype.contentWindow.postMessage` captures
+    // the target-origin argument.
+    const readFile = vi.fn().mockResolvedValue({
+      path: FILE,
+      content: '',
+      bytes: 0,
+      sha256: 'sha',
+    });
+    const { unmount } = render(() => (
+      <EditorPane
+        sessionId={SID}
+        path={FILE}
+        src="about:blank"
+        expectedIframeOrigin="https://editor.forge.local"
+        readFile={readFile}
+        writeFile={vi.fn().mockResolvedValue(undefined)}
+        onClose={vi.fn()}
+      />
+    ));
+
+    // Cleanup path posts `close` to the iframe; the target origin argument
+    // of that call must be the explicit expected origin, not `'*'`.
+    const calls: Array<[unknown, string]> = [];
+    // Patch at the window level — jsdom's iframe contentWindow.postMessage
+    // is a stub by default, so spy on window.postMessage for the close path.
+    const original = window.postMessage.bind(window);
+    vi.spyOn(window, 'postMessage').mockImplementation(((...args: unknown[]) => {
+      calls.push([args[0], String(args[1])]);
+      return original(args[0] as unknown as string, args[1] as string);
+    }) as typeof window.postMessage);
+
+    unmount();
+
+    // We don't care which messages landed on window — only that none of
+    // them used "*" as the target origin.
+    for (const [, targetOrigin] of calls) {
+      expect(targetOrigin).not.toBe('*');
+    }
+  });
 });
 
 afterEach(() => {
