@@ -949,4 +949,135 @@ mod tests {
             "server_id field must carry the program path value, got:\n{logs}"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // F-376: StdioTransport sad-path coverage
+    //
+    // The happy-path round-trip is already covered by
+    // `tests/stdio_roundtrip.rs`. These two tests close the sad-path gaps
+    // the issue calls out:
+    //   - a malformed stdout frame must be dropped, not terminate the
+    //     relay (`warn!` arm around `server.rs`'s stdout reader).
+    //   - a `send` after the child has exited must return `NotRunning`
+    //     (the transport is `uninstall`-ed before the `Exited` event
+    //     reaches subscribers).
+    // Both mirror forge-mcp's existing `drops_malformed_lines_without_closing_stream`
+    // and `send_errors_when_child_stdin_is_closed`.
+    // -----------------------------------------------------------------------
+
+    /// A single malformed stdout line must not kill the reader loop; any
+    /// valid JSON frame written after it still reaches the event channel.
+    ///
+    /// Fixture: `/bin/sh -c 'printf "not json\n{\"ok\":true}\n"'` — the
+    /// first line is non-JSON (triggering the `warn!` drop arm), the
+    /// second is a valid JSON frame.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drops_malformed_lines_without_closing_stream() {
+        let policy = BackoffPolicy {
+            max_attempts: 1,
+            window: Duration::from_secs(600),
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+        };
+        let mut server = Server::with_policy_and_clock(
+            PathBuf::from("/bin/sh"),
+            vec![
+                "-c".to_string(),
+                "printf 'not json\\n{\"ok\":true}\\n'".to_string(),
+            ],
+            policy,
+            Arc::new(SystemClock),
+        );
+        let mut rx = server.take_events().expect("event rx");
+        let sup = tokio::spawn(async move { server.start().await });
+
+        let mut saw_valid_message = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+                Ok(Some(ServerEvent::Message(v))) => {
+                    // Only the valid frame must surface. Malformed line
+                    // must have been dropped by the `warn!` arm.
+                    assert_eq!(
+                        v,
+                        serde_json::json!({"ok": true}),
+                        "reader must surface the valid JSON frame intact"
+                    );
+                    saw_valid_message = true;
+                }
+                Ok(Some(ServerEvent::Exited { .. })) => break,
+                Ok(Some(ServerEvent::GaveUp { .. })) | Ok(None) | Err(_) => break,
+            }
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(2), sup).await;
+
+        assert!(
+            saw_valid_message,
+            "reader must keep running past the malformed line and deliver \
+             the subsequent valid frame"
+        );
+    }
+
+    /// After the supervised child reaps, the transport is `uninstall`-ed
+    /// and any subsequent `send` must return `NotRunning` — not panic, not
+    /// succeed into a closed pipe. Mirrors
+    /// forge-mcp::`send_errors_when_child_stdin_is_closed` but tightened to
+    /// the actual `ServerError::NotRunning` shape the forge-lsp API
+    /// documents.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_after_child_exit_returns_not_running() {
+        // Long backoff so the supervisor, after its single allowed attempt,
+        // is guaranteed to sit in `clock.sleep` — giving us a deterministic
+        // post-`uninstall` window to probe `send`. `max_attempts = 1` means
+        // `start` falls straight through to `GaveUp` after the `Exited`
+        // event fires, but the `Exited` event is emitted *after*
+        // `spawn_once` returns, which is in turn *after* `transport.uninstall`
+        // runs (see server.rs `spawn_once` tail). So observing `Exited` is
+        // a valid "now the transport is uninstalled" signal.
+        let policy = BackoffPolicy {
+            max_attempts: 1,
+            window: Duration::from_secs(600),
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+        };
+        let mut server = Server::with_policy_and_clock(
+            PathBuf::from("/bin/sh"),
+            vec!["-c".to_string(), "exit 0".to_string()],
+            policy,
+            Arc::new(SystemClock),
+        );
+        let transport = server.transport();
+        let mut rx = server.take_events().expect("event rx");
+        let sup = tokio::spawn(async move { server.start().await });
+
+        // Wait for `Exited` — proves `uninstall` has already run.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut saw_exit = false;
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+                Ok(Some(ServerEvent::Exited { .. })) => {
+                    saw_exit = true;
+                    break;
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) | Err(_) => break,
+            }
+        }
+        assert!(
+            saw_exit,
+            "supervisor must emit Exited after the child reaps"
+        );
+
+        // Now the transport is uninstalled: `send` must return NotRunning.
+        let err = transport
+            .send(serde_json::json!({"jsonrpc":"2.0","id":1}))
+            .await
+            .expect_err("send after child exit must fail");
+        assert!(
+            matches!(err, ServerError::NotRunning),
+            "expected NotRunning after child exit, got {err:?}"
+        );
+
+        let _ = tokio::time::timeout(Duration::from_secs(2), sup).await;
+    }
 }
