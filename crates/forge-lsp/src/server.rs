@@ -588,6 +588,7 @@ impl Server {
                                     target: "forge_lsp::server",
                                     server_id = %reader_server_id.display(),
                                     error = %err,
+                                    line = %truncate(&line, 512),
                                     "dropping malformed stdout frame",
                                 );
                             }
@@ -620,6 +621,27 @@ fn backoff_delay(policy: &BackoffPolicy, attempt: u32) -> Duration {
     } else {
         scaled
     }
+}
+
+/// Cap a log field at `max` bytes so a runaway frame can't flood the log
+/// ring. `line` is guaranteed UTF-8 here, but we still slice on a char
+/// boundary via `char_indices` to avoid panicking on multi-byte glyphs.
+///
+/// Ported from `forge-mcp`'s `transport::truncate` (F-375). Once the
+/// Phase-3 `forge_core::process::ManagedStdioChild` extraction lands, this
+/// helper will move there and both crates will share a single copy.
+fn truncate(line: &str, max: usize) -> String {
+    if line.len() <= max {
+        return line.to_string();
+    }
+    let mut end = max;
+    for (i, _) in line.char_indices() {
+        if i > max {
+            break;
+        }
+        end = i;
+    }
+    format!("{}…", &line[..end])
 }
 
 /// Byte-transparent stdio transport implementing [`MessageTransport`]. The
@@ -1336,5 +1358,78 @@ mod tests {
         );
 
         let _ = tokio::time::timeout(Duration::from_secs(2), sup).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // F-375: malformed-frame warn must carry a size-capped `line` field so
+    // a runaway stdout frame can't flood the log ring. Ported from
+    // forge-mcp's `truncate` pattern.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn truncate_is_utf8_safe() {
+        // Long ASCII + one multi-byte glyph at the tail forces the slice to
+        // land on a char boundary. A naive byte-index slice would panic.
+        let s = "a".repeat(600) + "é";
+        let out = truncate(&s, 300);
+        assert!(out.ends_with('…'));
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    /// A malformed stdout frame longer than the 512-byte cap must be
+    /// logged with a truncated `line` field, not the raw bytes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)]
+    async fn malformed_frame_warn_carries_truncated_line_field() {
+        let _guard = capture_test_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        install_capture_subscriber();
+        let _ = drain_capture();
+
+        let policy = BackoffPolicy {
+            max_attempts: 1,
+            window: Duration::from_secs(600),
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+        };
+        // 2000-byte non-JSON line — well past the 512-byte cap.
+        let long_bad_line = "x".repeat(2000);
+        let mut server = Server::with_policy_and_clock(
+            PathBuf::from("/bin/sh"),
+            vec!["-c".to_string(), format!("printf '{long_bad_line}\\n'")],
+            policy,
+            Arc::new(SystemClock),
+        );
+        let mut rx = server.take_events().expect("event rx");
+        let sup = tokio::spawn(async move { server.start().await });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+                Ok(Some(ServerEvent::GaveUp { .. })) | Ok(None) | Err(_) => break,
+                _ => continue,
+            }
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(2), sup).await;
+
+        let logs = drain_capture();
+        assert!(
+            logs.contains("dropping malformed stdout frame"),
+            "expected the malformed-frame warn to fire, got:\n{logs}"
+        );
+        assert!(
+            logs.contains("line="),
+            "malformed-frame warn must carry a structured `line` field, got:\n{logs}"
+        );
+        assert!(
+            logs.contains('…'),
+            "the `line` field must be truncated with the ellipsis marker, got:\n{logs}"
+        );
+        // The raw 2000-byte line must not reach the log ring intact.
+        assert!(
+            !logs.contains(&"x".repeat(1000)),
+            "the untruncated 2000-byte line must not appear in logs"
+        );
     }
 }

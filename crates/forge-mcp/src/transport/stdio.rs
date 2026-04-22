@@ -217,7 +217,7 @@ impl Stdio {
                                 tracing::warn!(
                                     target: "forge_mcp::transport::stdio",
                                     error = %err,
-                                    line = %truncate(&line, 512),
+                                    line = %super::truncate(&line, 512),
                                     "dropping malformed JSON-RPC frame",
                                 );
                             }
@@ -292,23 +292,6 @@ impl Stdio {
     pub async fn recv(&mut self) -> Option<StdioEvent> {
         self.rx.recv().await
     }
-}
-
-/// Cap a log field at `max` bytes so a runaway frame can't flood the log
-/// ring. `line` is guaranteed UTF-8 here, but we still slice on a char
-/// boundary via `char_indices` to avoid panicking on multi-byte glyphs.
-fn truncate(line: &str, max: usize) -> String {
-    if line.len() <= max {
-        return line.to_string();
-    }
-    let mut end = max;
-    for (i, _) in line.char_indices() {
-        if i > max {
-            break;
-        }
-        end = i;
-    }
-    format!("{}…", &line[..end])
 }
 
 #[cfg(test)]
@@ -413,15 +396,6 @@ mod tests {
             let err2 = t.send(serde_json::json!({"jsonrpc":"2.0","id":2})).await;
             assert!(err2.is_err(), "expected send to fail after child exit");
         }
-    }
-
-    #[test]
-    fn truncate_is_utf8_safe() {
-        let s = "a".repeat(600) + "é";
-        let out = truncate(&s, 300);
-        assert!(out.ends_with('…'));
-        // And it must parse as valid UTF-8 (the slice is on a boundary).
-        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
     }
 
     /// Drain events until the child exits, returning the exit status.
