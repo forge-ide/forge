@@ -14,7 +14,7 @@
 //! (F-373). Concretely:
 //!
 //! - `forge_shell::ipc::authz` — label-gate rejection in
-//!   [`require_window_label`] / [`require_window_label_in`]
+//!   `require_window_label` / `require_window_label_in`
 //! - `forge_shell::ipc` — Tauri emit failures (session, terminal, LSP)
 //! - `forge_session::server` — connection loop, turn errors, archive
 //! - `forge_session::mcp` — `.mcp.json` load + server start
