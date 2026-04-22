@@ -18,6 +18,19 @@ export const SNAP_PX = 4;
 /** Balanced split used by the §3.1 double-click reset. */
 export const RESET_RATIO = 0.5;
 
+/**
+ * Base keyboard step for arrow-key resize per the ARIA APG window-splitter
+ * pattern (F-404). Expressed as a ratio so it works independently of the
+ * container's pixel extent. 2% matches the issue's Remediation.
+ */
+export const KEYBOARD_STEP = 0.02;
+
+/**
+ * Multiplier applied to {@link KEYBOARD_STEP} when Shift is held, for a
+ * coarser nudge. Matches the issue's "Shift+Arrow → 10×".
+ */
+export const KEYBOARD_SHIFT_MULTIPLIER = 10;
+
 export interface SplitPaneProps {
   /** `"h"` → children stacked top/bottom; `"v"` → side by side. */
   direction: 'h' | 'v';
@@ -109,6 +122,46 @@ export const SplitPane: Component<SplitPaneProps> = (props) => {
     props.onRatioChange(RESET_RATIO);
   };
 
+  // Keyboard resize per ARIA APG window-splitter pattern (F-404). Accepts
+  // arrows on both axes in either orientation so the control is forgiving;
+  // Shift coarsens the step; Home/End snap to the floor/ceiling; Enter
+  // resets to balanced. `preventDefault()` suppresses page scroll for the
+  // keys we consume.
+  const handleKeyDown = (e: KeyboardEvent) => {
+    const step = e.shiftKey ? KEYBOARD_STEP * KEYBOARD_SHIFT_MULTIPLIER : KEYBOARD_STEP;
+    const current = clamp(props.ratio);
+    let next: number | null = null;
+
+    switch (e.key) {
+      case 'ArrowLeft':
+      case 'ArrowUp':
+        next = clamp(current - step);
+        break;
+      case 'ArrowRight':
+      case 'ArrowDown':
+        next = clamp(current + step);
+        break;
+      case 'Home':
+        next = MIN_RATIO;
+        break;
+      case 'End':
+        next = 1 - MIN_RATIO;
+        break;
+      case 'Enter':
+        next = RESET_RATIO;
+        break;
+      default:
+        return;
+    }
+
+    e.preventDefault();
+    props.onRatioChange(next);
+  };
+
+  const ariaValueNow = (): number => Math.round(clamp(props.ratio) * 100);
+  const ariaValueMin = Math.round(MIN_RATIO * 100);
+  const ariaValueMax = Math.round((1 - MIN_RATIO) * 100);
+
   const firstStyle = (): JSX.CSSProperties => {
     const r = clamp(props.ratio);
     return props.direction === 'v'
@@ -145,12 +198,16 @@ export const SplitPane: Component<SplitPaneProps> = (props) => {
         data-testid="split-pane-divider"
         role="separator"
         aria-orientation={props.direction === 'v' ? 'vertical' : 'horizontal'}
+        aria-valuenow={ariaValueNow()}
+        aria-valuemin={ariaValueMin}
+        aria-valuemax={ariaValueMax}
         tabIndex={0}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
         onDblClick={handleDoubleClick}
+        onKeyDown={handleKeyDown}
       />
       <div class="split-pane__child split-pane__child--second" style={secondStyle()}>
         {second}

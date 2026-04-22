@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, fireEvent } from '@solidjs/testing-library';
 import { createSignal } from 'solid-js';
-import { SplitPane, MIN_RATIO, RESET_RATIO, SNAP_PX } from './SplitPane';
+import {
+  SplitPane,
+  MIN_RATIO,
+  RESET_RATIO,
+  SNAP_PX,
+  KEYBOARD_STEP,
+  KEYBOARD_SHIFT_MULTIPLIER,
+} from './SplitPane';
 
 // jsdom returns {0,0,0,0} for getBoundingClientRect by default. The divider
 // drag math multiplies pointer delta by container extent, so we stub a
@@ -296,5 +303,149 @@ describe('SplitPane — double-click reset (§3.1)', () => {
     const divider = getByTestId('split-pane-divider');
     fireEvent.dblClick(divider);
     expect(onChange).toHaveBeenCalledWith(RESET_RATIO);
+  });
+});
+
+describe('SplitPane — ARIA value state (F-404)', () => {
+  it('exposes aria-valuenow/min/max reflecting the current ratio as a percentage', () => {
+    const h = Harness({ direction: 'v', ratio: 0.42 });
+    const { getByTestId } = render(h.component);
+    const divider = getByTestId('split-pane-divider');
+    expect(divider.getAttribute('aria-valuenow')).toBe('42');
+    expect(divider.getAttribute('aria-valuemin')).toBe(String(Math.round(MIN_RATIO * 100)));
+    expect(divider.getAttribute('aria-valuemax')).toBe(String(Math.round((1 - MIN_RATIO) * 100)));
+  });
+
+  it('clamps aria-valuenow into [valuemin, valuemax] for out-of-range ratios', () => {
+    const h = Harness({ direction: 'v', ratio: -0.3 });
+    const { getByTestId } = render(h.component);
+    const divider = getByTestId('split-pane-divider');
+    expect(divider.getAttribute('aria-valuenow')).toBe(String(Math.round(MIN_RATIO * 100)));
+  });
+});
+
+describe('SplitPane — keyboard resize (F-404, ARIA APG splitter)', () => {
+  it('ArrowRight nudges the ratio up by KEYBOARD_STEP on a vertical divider', () => {
+    const onChange = vi.fn();
+    const h = Harness({ direction: 'v', ratio: 0.5, onChange });
+    const { getByTestId } = render(h.component);
+    const divider = getByTestId('split-pane-divider');
+    fireEvent.keyDown(divider, { key: 'ArrowRight' });
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange.mock.calls.at(-1)?.[0] as number).toBeCloseTo(0.5 + KEYBOARD_STEP, 5);
+  });
+
+  it('ArrowLeft nudges the ratio down by KEYBOARD_STEP', () => {
+    const onChange = vi.fn();
+    const h = Harness({ direction: 'v', ratio: 0.5, onChange });
+    const { getByTestId } = render(h.component);
+    const divider = getByTestId('split-pane-divider');
+    fireEvent.keyDown(divider, { key: 'ArrowLeft' });
+    expect(onChange.mock.calls.at(-1)?.[0] as number).toBeCloseTo(0.5 - KEYBOARD_STEP, 5);
+  });
+
+  it('ArrowDown nudges the ratio up on a horizontal divider', () => {
+    const onChange = vi.fn();
+    const h = Harness({ direction: 'h', ratio: 0.5, onChange });
+    const { getByTestId } = render(h.component);
+    const divider = getByTestId('split-pane-divider');
+    fireEvent.keyDown(divider, { key: 'ArrowDown' });
+    expect(onChange.mock.calls.at(-1)?.[0] as number).toBeCloseTo(0.5 + KEYBOARD_STEP, 5);
+  });
+
+  it('ArrowUp nudges the ratio down on a horizontal divider', () => {
+    const onChange = vi.fn();
+    const h = Harness({ direction: 'h', ratio: 0.5, onChange });
+    const { getByTestId } = render(h.component);
+    const divider = getByTestId('split-pane-divider');
+    fireEvent.keyDown(divider, { key: 'ArrowUp' });
+    expect(onChange.mock.calls.at(-1)?.[0] as number).toBeCloseTo(0.5 - KEYBOARD_STEP, 5);
+  });
+
+  it('Shift+Arrow multiplies the step by KEYBOARD_SHIFT_MULTIPLIER', () => {
+    const onChange = vi.fn();
+    const h = Harness({ direction: 'v', ratio: 0.5, onChange });
+    const { getByTestId } = render(h.component);
+    const divider = getByTestId('split-pane-divider');
+    fireEvent.keyDown(divider, { key: 'ArrowRight', shiftKey: true });
+    expect(onChange.mock.calls.at(-1)?.[0] as number).toBeCloseTo(
+      0.5 + KEYBOARD_STEP * KEYBOARD_SHIFT_MULTIPLIER,
+      5,
+    );
+  });
+
+  it('Home snaps to MIN_RATIO', () => {
+    const onChange = vi.fn();
+    const h = Harness({ direction: 'v', ratio: 0.5, onChange });
+    const { getByTestId } = render(h.component);
+    const divider = getByTestId('split-pane-divider');
+    fireEvent.keyDown(divider, { key: 'Home' });
+    expect(onChange).toHaveBeenCalledWith(MIN_RATIO);
+  });
+
+  it('End snaps to 1 - MIN_RATIO', () => {
+    const onChange = vi.fn();
+    const h = Harness({ direction: 'v', ratio: 0.5, onChange });
+    const { getByTestId } = render(h.component);
+    const divider = getByTestId('split-pane-divider');
+    fireEvent.keyDown(divider, { key: 'End' });
+    expect(onChange).toHaveBeenCalledWith(1 - MIN_RATIO);
+  });
+
+  it('Enter resets to RESET_RATIO', () => {
+    const onChange = vi.fn();
+    const h = Harness({ direction: 'v', ratio: 0.22, onChange });
+    const { getByTestId } = render(h.component);
+    const divider = getByTestId('split-pane-divider');
+    fireEvent.keyDown(divider, { key: 'Enter' });
+    expect(onChange).toHaveBeenCalledWith(RESET_RATIO);
+  });
+
+  it('clamps ArrowLeft against MIN_RATIO at the low boundary', () => {
+    const onChange = vi.fn();
+    const h = Harness({ direction: 'v', ratio: MIN_RATIO, onChange });
+    const { getByTestId } = render(h.component);
+    const divider = getByTestId('split-pane-divider');
+    fireEvent.keyDown(divider, { key: 'ArrowLeft' });
+    expect(onChange.mock.calls.at(-1)?.[0] as number).toBeCloseTo(MIN_RATIO, 5);
+  });
+
+  it('clamps ArrowRight against 1 - MIN_RATIO at the high boundary', () => {
+    const onChange = vi.fn();
+    const h = Harness({ direction: 'v', ratio: 1 - MIN_RATIO, onChange });
+    const { getByTestId } = render(h.component);
+    const divider = getByTestId('split-pane-divider');
+    fireEvent.keyDown(divider, { key: 'ArrowRight' });
+    expect(onChange.mock.calls.at(-1)?.[0] as number).toBeCloseTo(1 - MIN_RATIO, 5);
+  });
+
+  it('ignores unrelated keys (does not emit a ratio change)', () => {
+    const onChange = vi.fn();
+    const h = Harness({ direction: 'v', ratio: 0.5, onChange });
+    const { getByTestId } = render(h.component);
+    const divider = getByTestId('split-pane-divider');
+    fireEvent.keyDown(divider, { key: 'a' });
+    fireEvent.keyDown(divider, { key: 'Tab' });
+    fireEvent.keyDown(divider, { key: 'Escape' });
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('calls preventDefault on handled keys to stop page scroll', () => {
+    const h = Harness({ direction: 'v', ratio: 0.5 });
+    const { getByTestId } = render(h.component);
+    const divider = getByTestId('split-pane-divider');
+    for (const key of ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'Enter']) {
+      const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+      fireEvent(divider, event);
+      expect(event.defaultPrevented, `expected preventDefault() on "${key}"`).toBe(true);
+    }
+  });
+
+  it('updates aria-valuenow after a keyboard-driven resize', () => {
+    const h = Harness({ direction: 'v', ratio: 0.5 });
+    const { getByTestId } = render(h.component);
+    const divider = getByTestId('split-pane-divider');
+    fireEvent.keyDown(divider, { key: 'Home' });
+    expect(divider.getAttribute('aria-valuenow')).toBe(String(Math.round(MIN_RATIO * 100)));
   });
 });
