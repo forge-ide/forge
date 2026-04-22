@@ -1,15 +1,28 @@
 /* F-138 status bar.
  *
- * Lives at the bottom of the Session window per docs/ui-specs/shell.md §2.
- * Thin strip, neutral chrome; the `BgAgentsBadge` is the only interactive
- * element today — room reserved for workspace/provider/cost pills in
- * follow-ups.
+ * Lives at the bottom of the Session window per `docs/ui-specs/shell.md` §2.
+ * Thin strip, always rendered on the ember-400 brand surface — this is the
+ * most visible branded surface in daily use. `docs/design/component-principles.md`
+ * §Status bar is a hard spec-lock:
+ *
+ *   "The status bar is always ember-400 background with white text … Do not
+ *    change the status bar color under any circumstances, including in light
+ *    mode."
+ *
+ * F-392 pins this invariant in `StatusBar.css.test.ts` — background MUST be
+ * `var(--color-ember-400)` with no `--color-surface-*` or `--fg-surface-*`
+ * fallback anywhere in the root rule.
  *
  * All colors, spacing, radii, and typography resolve to canonical tokens
  * declared in `web/packages/design/src/tokens.css` and mirrored in
  * `docs/design/token-reference.md`. Do not introduce new namespaces or
  * raw-hex fallbacks — see `docs/design/color-system.md` for the rules and
- * `StatusBar.css.test.ts` for the regression guard (F-427).
+ * `StatusBar.css.test.ts` for the regression guard (F-427 + F-392).
+ *
+ * Interaction surfaces on the bar (`__bg-badge`, `__bg-row-action`) use
+ * translucent white overlays to stay legible on the ember background; the
+ * popover rises off the bar onto a normal iron surface so the agent list
+ * keeps its dense, dark presentation.
  */
 
 .status-bar {
@@ -20,13 +33,16 @@
   padding: 2px 8px;
   min-height: 22px;
   font-size: 12px;
-  background: var(--color-surface-1);
-  border-top: 1px solid var(--color-border-1);
-  color: var(--color-text-secondary);
+  font-weight: 500;
+  background: var(--color-ember-400);
+  color: var(--color-text-inverted);
   position: relative;
   flex-shrink: 0;
 }
 
+/* Pill-shaped badge that opens the running-agents popover. Rendered on ember,
+ * so the surface is a translucent white overlay rather than a warning-tinted
+ * pill — warning-on-ember would all but vanish. */
 .status-bar__bg-badge {
   all: unset;
   display: inline-flex;
@@ -35,19 +51,19 @@
   padding: 0 8px;
   height: 18px;
   border-radius: 10px;
-  background: var(--color-warning-bg);
-  color: var(--color-warning);
+  background: rgba(255, 255, 255, 0.15);
+  color: var(--color-text-inverted);
   font-weight: 600;
   cursor: pointer;
   transition: background 120ms ease;
 }
 
 .status-bar__bg-badge:hover {
-  background: var(--color-warning-border);
+  background: rgba(255, 255, 255, 0.25);
 }
 
 .status-bar__bg-badge:focus-visible {
-  outline: 2px solid var(--color-info);
+  outline: 2px solid var(--color-text-inverted);
   outline-offset: 2px;
 }
 
@@ -60,6 +76,10 @@
   opacity: 0.9;
 }
 
+/* The popover escapes the ember surface back onto the canonical iron scale
+ * — a dense list on top of pure ember would fatigue the eye. Per
+ * `color-system.md`, iron-800 (surface-2) is the correct token for
+ * dropdowns / popovers. */
 .status-bar__bg-popover {
   position: absolute;
   right: 8px;
@@ -70,6 +90,7 @@
   border: 1px solid var(--color-border-2);
   border-radius: 6px;
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+  color: var(--color-text-primary);
   z-index: 40;
 }
 
