@@ -62,6 +62,29 @@ describe('ProviderPanel', () => {
     expect(await findByLabelText(/reachable/i)).toBeInTheDocument();
   });
 
+  // F-413: when reachable, the health dot must be tinted with the provider
+  // accent (steel for Ollama) via an inline `--provider-accent` custom property
+  // so the CSS rule can paint both the fill and the §11.3 glow from one token.
+  it('tints the reachable dot with the Ollama (steel) accent via --provider-accent', async () => {
+    setInvokeForTesting((vi.fn().mockResolvedValue(reachable)) as never);
+
+    const { findByLabelText } = render(() => <ProviderPanel />);
+    const dot = (await findByLabelText(/reachable/i)) as HTMLElement;
+    expect(dot.style.getPropertyValue('--provider-accent')).toBe(
+      'var(--color-provider-local)',
+    );
+  });
+
+  // F-413: the unreachable dot falls back to the error tint — no provider
+  // accent is plumbed, so the CSS default (error) takes over.
+  it('does not plumb a provider accent when unreachable', async () => {
+    setInvokeForTesting((vi.fn().mockResolvedValue(unreachable)) as never);
+
+    const { findByLabelText } = render(() => <ProviderPanel />);
+    const dot = (await findByLabelText(/unreachable/i)) as HTMLElement;
+    expect(dot.style.getPropertyValue('--provider-accent')).toBe('');
+  });
+
   it('shows a voice-compliant Start Ollama message when unreachable', async () => {
     setInvokeForTesting((vi.fn().mockResolvedValue(unreachable)) as never);
 

@@ -1,5 +1,7 @@
 import { type Component, createResource, createSignal, For, Show } from 'solid-js';
+import type { ProviderId } from '@forge/ipc';
 import { invoke } from '../../lib/tauri';
+import { providerAccent } from '../Session/providerAccent';
 import './ProviderPanel.css';
 
 export interface ProviderStatus {
@@ -11,6 +13,10 @@ export interface ProviderStatus {
 }
 
 const fetchStatus = () => invoke<ProviderStatus>('provider_status');
+
+// Phase-1 ships a single provider. Centralising the id here keeps the accent
+// mapping, label, and future multi-provider swap in one spot.
+const PHASE_1_PROVIDER: ProviderId = 'ollama' as ProviderId;
 
 export const ProviderPanel: Component = () => {
   const [status, { refetch }] = createResource<ProviderStatus>(fetchStatus);
@@ -41,7 +47,7 @@ export const ProviderPanel: Component = () => {
           {(s) => (
             <>
               <div class="provider-panel__row">
-                <HealthIndicator reachable={s().reachable} />
+                <HealthIndicator reachable={s().reachable} providerId={PHASE_1_PROVIDER} />
                 <code class="provider-panel__url">{s().base_url}</code>
               </div>
 
@@ -69,13 +75,18 @@ export const ProviderPanel: Component = () => {
   );
 };
 
-const HealthIndicator: Component<{ reachable: boolean }> = (props) => (
+// F-413: when reachable, pass the provider accent via an inline CSS custom
+// property so the `.provider-panel__health--ok` rule can paint the dot and the
+// §11.3 live-connected glow from one token. When unreachable, the inline
+// custom property is omitted and the error tint stays in charge.
+const HealthIndicator: Component<{ reachable: boolean; providerId: ProviderId }> = (props) => (
   <span
     class="provider-panel__health"
     classList={{
       'provider-panel__health--ok': props.reachable,
       'provider-panel__health--down': !props.reachable,
     }}
+    style={props.reachable ? { '--provider-accent': providerAccent(props.providerId) } : undefined}
     role="img"
     aria-label={props.reachable ? 'reachable' : 'unreachable'}
   />

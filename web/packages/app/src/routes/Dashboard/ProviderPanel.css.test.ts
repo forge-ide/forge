@@ -37,3 +37,37 @@ describe('ProviderPanel — design-token adherence (F-090)', () => {
     expect(body).not.toMatch(/color:\s*#ffffff\b/i);
   });
 });
+
+// F-413: the reachable (live-connected) dot must follow the provider accent
+// per ai-patterns.md §Provider identity and carry the §11.3 glow. The --down
+// rule keeps its error tint. Contract is asserted on the source string because
+// jsdom can't resolve var() against a separate sheet.
+describe('ProviderPanel health indicator — provider accent + live-connected glow (F-413)', () => {
+  it('.provider-panel__health--ok paints from --provider-accent with a steel fallback', () => {
+    const body = ruleBody('.provider-panel__health--ok');
+    const normalised = body.replace(/\s+/g, ' ');
+    expect(normalised).toContain(
+      'background: var(--provider-accent, var(--color-provider-local));',
+    );
+  });
+
+  it('.provider-panel__health--ok renders the §11.3 live-connected glow from the same accent', () => {
+    const body = ruleBody('.provider-panel__health--ok');
+    const normalised = body.replace(/\s+/g, ' ');
+    expect(normalised).toContain(
+      'box-shadow: 0 0 6px var(--provider-accent, var(--color-provider-local));',
+    );
+  });
+
+  it('.provider-panel__health--ok no longer hardcodes --color-success (would re-introduce F-413)', () => {
+    const body = ruleBody('.provider-panel__health--ok');
+    expect(body).not.toMatch(/background:\s*var\(--color-success\)/);
+  });
+
+  it('.provider-panel__health--down keeps the error tint for unreachable providers', () => {
+    const body = ruleBody('.provider-panel__health--down');
+    const normalised = body.replace(/\s+/g, ' ');
+    expect(normalised).toContain('background: var(--color-ember-400);');
+    expect(normalised).toContain('box-shadow: 0 0 6px var(--color-error-border);');
+  });
+});

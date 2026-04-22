@@ -55,9 +55,15 @@
   flex-shrink: 0;
 }
 
+/*
+ * F-413: reachable dot follows the active provider accent. Callers set
+ * `--provider-accent` inline (see `providerAccent.ts`); the steel
+ * `--color-provider-local` fallback is the Phase-1 default. The same token
+ * drives both the fill and the §11.3 live-connected glow.
+ */
 .provider-panel__health--ok {
-  background: var(--color-success);
-  box-shadow: 0 0 6px var(--color-success-border);
+  background: var(--provider-accent, var(--color-provider-local));
+  box-shadow: 0 0 6px var(--provider-accent, var(--color-provider-local));
 }
 
 .provider-panel__health--down {
