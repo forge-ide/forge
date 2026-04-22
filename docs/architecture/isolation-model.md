@@ -85,6 +85,7 @@ Implementation:
 - Path access enforced by `forge-fs`: every `fs.*` tool validates the path against the agent's `allowed_paths` glob
 - **Network is open at Level 1.** No per-agent firewall. MCP servers and the built-in `fetch` tool do their own allow-listing. Users who need network restriction use Level 2.
 - CPU/RAM: soft limits via `setrlimit` (Linux/macOS)
+- **Per-sandbox process ceiling via cgroup v2 `pids.max` (F-149).** Each sandbox gets its own leaf under the daemon's cgroup parent so a misbehaving tool cannot starve sibling sandboxes or the daemon itself. Linux-only; requires the host to delegate the `pids` controller to the daemon's slice (default on systemd user sessions). On non-delegated hosts (cgroup v1, containers without delegation, non-Linux) setup is skipped silently and `RLIMIT_NPROC` becomes the only ceiling. `RLIMIT_NPROC` is retained as a uid-wide backstop regardless. See [`docs/dev/sandbox-limits.md`](../dev/sandbox-limits.md) for the full operator-facing reference.
 - Kill on session end: process group guarantees cleanup
 
 ### 8.3 Level 2 — Container
