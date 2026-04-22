@@ -45,10 +45,12 @@ pub struct ScopedRosterEntry {
 
 pub enum Event {
     SessionStarted { at: DateTime<Utc>, workspace: PathBuf, agent: Option<AgentId>, persistence: SessionPersistence },
-    UserMessage { id: MessageId, at: DateTime<Utc>, text: String, context: Vec<ContextRef>, branch_parent: Option<MessageId> },
-    AssistantMessage { id: MessageId, provider: ProviderId, model: String, at: DateTime<Utc>, stream_finalised: bool, text: String, branch_parent: Option<MessageId>, branch_variant_index: u32 },
-    AssistantDelta { id: MessageId, at: DateTime<Utc>, delta: String },
+    UserMessage { id: MessageId, at: DateTime<Utc>, text: Arc<str>, context: Vec<ContextRef>, branch_parent: Option<MessageId> },
+    AssistantMessage { id: MessageId, provider: ProviderId, model: String, at: DateTime<Utc>, stream_finalised: bool, text: Arc<str>, branch_parent: Option<MessageId>, branch_variant_index: u32 },
+    AssistantDelta { id: MessageId, at: DateTime<Utc>, delta: Arc<str> },
     BranchSelected { parent: MessageId, selected: MessageId },
+    BranchDeleted { parent: MessageId, variant_index: u32 },                                    // F-145
+    MessageSuperseded { old_id: MessageId, new_id: MessageId },                                 // F-143
     ToolCallStarted { id: ToolCallId, msg: MessageId, tool: String, args: Value, at: DateTime<Utc>, parallel_group: Option<u32> },
     ToolCallApprovalRequested { id: ToolCallId, preview: ApprovalPreview },
     ToolCallApproved { id: ToolCallId, by: ApprovalSource, scope: ApprovalScope, at: DateTime<Utc> },
@@ -60,11 +62,23 @@ pub enum Event {
     UsageTick { provider: ProviderId, model: String, tokens_in: u64, tokens_out: u64, cost_usd: f64, scope: RosterScope },
     ContextCompacted { at: DateTime<Utc>, summarized_turns: u32, summary_msg_id: MessageId, trigger: CompactTrigger },
     SessionEnded { at: DateTime<Utc>, reason: EndReason, archived: bool },
+    StepStarted { step_id: StepId, instance_id: Option<AgentInstanceId>, kind: StepKind, started_at: DateTime<Utc> },                  // F-139
+    StepFinished { step_id: StepId, outcome: StepOutcome, duration_ms: u64, token_usage: Option<TokenUsage> },                        // F-139
+    ToolInvoked { step_id: StepId, tool_call_id: ToolCallId, tool_id: String, args_digest: String },                                   // F-139
+    ToolReturned { step_id: StepId, tool_call_id: ToolCallId, ok: bool, bytes_out: u64 },                                              // F-139
+    McpState(McpStateEvent),                                                                                                           // F-155
+    ResourceSample { instance_id: AgentInstanceId, cpu_pct: Option<f64>, rss_bytes: Option<u64>, fd_count: Option<u64>, sampled_at: DateTime<Utc> }, // F-152
 }
 
 pub enum ApprovalScope { Once, ThisFile, ThisPattern(String), ThisTool }
+pub enum ApprovalLevel { Session, Workspace, User }  // F-149 — serialized lowercase
 pub enum CompactTrigger { AutoAt98Pct, UserRequested }
 ```
+
+`text` / `delta` carry `Arc<str>` (F-112) for cheap fan-out to multiple
+IPC subscribers; they serialize identically to `String` on the wire
+(plain JSON strings), so the shape pinned by
+`crates/forge-core/tests/event_wire_shape.rs` is unchanged.
 
 **Key trait.**
 ```rust
