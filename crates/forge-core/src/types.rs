@@ -79,8 +79,9 @@ pub enum RerunVariant {
 /// `plan`  — reserved for future agent planning phases; not emitted today.
 /// `wait`  — reserved for approval/idle gaps; not emitted today.
 /// `spawn` — reserved for sub-agent spawn steps (F-140); not emitted today.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
 pub enum StepKind {
     Plan,
     Tool,
@@ -95,8 +96,9 @@ pub enum StepKind {
 /// `error { reason }` — step failed; the reason is a short, display-safe
 /// human-readable string. Intentionally minimal; structured failure
 /// payloads stay on the underlying event (`ToolCallCompleted.result`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "status", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
 pub enum StepOutcome {
     Ok,
     Error { reason: String },
@@ -106,7 +108,8 @@ pub enum StepOutcome {
 /// (`tokens_in`, `tokens_out`) so dashboards can sum step-level with
 /// session-level without a field-name remap. `None` on `StepFinished`
 /// means the provider didn't report usage for this step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
 pub struct TokenUsage {
     pub tokens_in: u64,
     pub tokens_out: u64,
@@ -195,5 +198,55 @@ mod tests {
             serde_json::to_string(&ApprovalLevel::User).unwrap(),
             "\"user\""
         );
+    }
+
+    #[test]
+    fn step_kind_serializes_snake_case() {
+        // F-381: AgentMonitor.tsx reads `StepStarted.kind` and lowercases
+        // it before matching `'plan' | 'tool' | 'model' | 'wait' | 'spawn'`.
+        // Lock the wire shape so the ts-rs binding and the frontend
+        // comparison agree.
+        for (kind, wire) in [
+            (StepKind::Plan, "\"plan\""),
+            (StepKind::Tool, "\"tool\""),
+            (StepKind::Model, "\"model\""),
+            (StepKind::Wait, "\"wait\""),
+            (StepKind::Spawn, "\"spawn\""),
+        ] {
+            assert_eq!(serde_json::to_string(&kind).unwrap(), wire);
+            let decoded: StepKind = serde_json::from_str(wire).unwrap();
+            assert_eq!(decoded, kind);
+        }
+    }
+
+    #[test]
+    fn step_outcome_wire_shape_tagged_snake_case() {
+        // F-381: `StepFinished.outcome` is a tagged union with `status: "ok" | "error"`.
+        // Lock both tags and the error payload field name.
+        assert_eq!(
+            serde_json::to_string(&StepOutcome::Ok).unwrap(),
+            "{\"status\":\"ok\"}"
+        );
+        assert_eq!(
+            serde_json::to_string(&StepOutcome::Error {
+                reason: "boom".into()
+            })
+            .unwrap(),
+            "{\"status\":\"error\",\"reason\":\"boom\"}"
+        );
+    }
+
+    #[test]
+    fn token_usage_wire_shape() {
+        // F-381: `StepFinished.token_usage` mirrors `UsageTick` field names.
+        // Field-name remap on either side must surface here.
+        let usage = TokenUsage {
+            tokens_in: 42,
+            tokens_out: 7,
+        };
+        let json = serde_json::to_string(&usage).unwrap();
+        assert_eq!(json, "{\"tokens_in\":42,\"tokens_out\":7}");
+        let decoded: TokenUsage = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, usage);
     }
 }
