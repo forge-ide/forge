@@ -493,7 +493,11 @@ async fn session_window_forged_write_lands_in_cached_workspace() {
     let window = make_session_window(&app, "sess-b");
 
     let forged_root = forged_ws.path().to_string_lossy().to_string();
-    let _ = invoke_ok(&window, "write_layouts", sample_layouts_payload(&forged_root));
+    let _ = invoke_ok(
+        &window,
+        "write_layouts",
+        sample_layouts_payload(&forged_root),
+    );
 
     assert!(
         real_ws.path().join(".forge").join("layouts.json").exists(),

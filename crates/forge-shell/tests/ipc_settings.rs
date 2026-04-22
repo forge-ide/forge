@@ -375,8 +375,7 @@ async fn dashboard_window_is_allowed() {
     let workspace = TempDir::new().unwrap();
     let user_cfg_dir = TempDir::new().unwrap();
 
-    let (app, _registry) =
-        make_app_with_registry(&[workspace.path()], user_cfg_dir.path()).await;
+    let (app, _registry) = make_app_with_registry(&[workspace.path()], user_cfg_dir.path()).await;
     let window = make_dashboard_window(&app);
 
     let got = invoke_ok(
@@ -562,8 +561,7 @@ async fn dashboard_window_accepts_registered_workspace_root() {
     let workspace = TempDir::new().unwrap();
     let user_cfg_dir = TempDir::new().unwrap();
 
-    let (app, _registry) =
-        make_app_with_registry(&[workspace.path()], user_cfg_dir.path()).await;
+    let (app, _registry) = make_app_with_registry(&[workspace.path()], user_cfg_dir.path()).await;
     let window = make_dashboard_window(&app);
 
     let root = workspace.path().to_string_lossy().to_string();

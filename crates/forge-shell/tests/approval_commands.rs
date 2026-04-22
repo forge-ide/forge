@@ -456,8 +456,7 @@ async fn dashboard_window_is_allowed() {
     let user_cfg_dir = TempDir::new().unwrap();
 
     // Dashboard caller needs the registry.
-    let (app, _registry) =
-        make_app_with_registry(&[workspace.path()], user_cfg_dir.path()).await;
+    let (app, _registry) = make_app_with_registry(&[workspace.path()], user_cfg_dir.path()).await;
     let window = make_dashboard_window(&app);
     let result = invoke_ok(
         &window,
@@ -646,7 +645,11 @@ async fn session_window_forged_workspace_write_lands_in_cached_path() {
 
     // File must appear in the real workspace, not the forged one.
     assert!(
-        real_ws.path().join(".forge").join("approvals.toml").exists(),
+        real_ws
+            .path()
+            .join(".forge")
+            .join("approvals.toml")
+            .exists(),
         "write must land in the real (cached) workspace"
     );
     assert!(
@@ -684,8 +687,7 @@ async fn dashboard_window_accepts_registered_workspace_root() {
     let workspace = TempDir::new().unwrap();
     let user_cfg_dir = TempDir::new().unwrap();
 
-    let (app, _registry) =
-        make_app_with_registry(&[workspace.path()], user_cfg_dir.path()).await;
+    let (app, _registry) = make_app_with_registry(&[workspace.path()], user_cfg_dir.path()).await;
     let window = make_dashboard_window(&app);
 
     let root = workspace.path().to_string_lossy().to_string();
