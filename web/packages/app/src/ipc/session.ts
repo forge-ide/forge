@@ -160,6 +160,41 @@ export async function stopBackgroundAgent(
 }
 
 // ---------------------------------------------------------------------------
+// F-365: session control commands
+// ---------------------------------------------------------------------------
+
+/** Cancel the in-flight turn for the session (F-391). */
+export async function sessionCancel(sessionId: SessionId): Promise<void> {
+  await invoke('session_cancel', { sessionId });
+}
+
+/**
+ * Switch the active variant for a branch group (F-145). `parentId` is the
+ * root message id and `variantIndex` is the index into the group's
+ * `variantIds` array.
+ */
+export async function selectBranch(
+  sessionId: SessionId,
+  parentId: string,
+  variantIndex: number,
+): Promise<void> {
+  await invoke('select_branch', { sessionId, parentId, variantIndex });
+}
+
+/**
+ * Delete a variant from a branch group (F-145). `parentId` is the root
+ * message id and `variantIndex` is the index into the group's `variantIds`
+ * array.
+ */
+export async function deleteBranch(
+  sessionId: SessionId,
+  parentId: string,
+  variantIndex: number,
+): Promise<void> {
+  await invoke('delete_branch', { sessionId, parentId, variantIndex });
+}
+
+// ---------------------------------------------------------------------------
 // F-151: persistent settings commands
 // ---------------------------------------------------------------------------
 

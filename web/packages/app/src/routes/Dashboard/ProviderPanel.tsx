@@ -1,18 +1,12 @@
 import { type Component, createResource, createSignal, For, Show } from 'solid-js';
 import type { ProviderId } from '@forge/ipc';
-import { invoke } from '../../lib/tauri';
+import { providerStatus, type ProviderStatus } from '../../ipc/dashboard';
 import { providerAccent } from '../Session/providerAccent';
 import './ProviderPanel.css';
 
-export interface ProviderStatus {
-  reachable: boolean;
-  base_url: string;
-  models: string[];
-  last_checked: string;
-  error_kind?: string;
-}
+export type { ProviderStatus };
 
-const fetchStatus = () => invoke<ProviderStatus>('provider_status');
+const fetchStatus = () => providerStatus();
 
 // Phase-1 ships a single provider. Centralising the id here keeps the accent
 // mapping, label, and future multi-provider swap in one spot.
