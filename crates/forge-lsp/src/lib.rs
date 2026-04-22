@@ -40,6 +40,6 @@ pub use bootstrap::{Bootstrap, BootstrapError, Downloader, HttpDownloader};
 pub use registry::{Checksum, Registry, ServerId, ServerSpec};
 
 pub use server::{
-    BackoffPolicy, Clock, MessageTransport, Server, ServerError, ServerEvent, StdioTransport,
-    SystemClock,
+    BackoffPolicy, Clock, LspServerInfo, LspState, MessageTransport, Server, ServerError,
+    ServerEvent, StdioTransport, SystemClock,
 };
