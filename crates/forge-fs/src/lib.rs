@@ -11,7 +11,7 @@ pub use limits::Limits;
 pub use mutate::{delete, edit, edit_preview, rename, write, write_bytes, write_preview, FsError};
 pub use tree::{
     list_tree, list_tree_gitignored, list_tree_gitignored_with_limit, list_tree_with_limit,
-    NodeKind, TreeNode, DEFAULT_MAX_ENTRIES,
+    NodeKind, TreeNode, TreeStats, DEFAULT_MAX_ENTRIES,
 };
 
 /// Internal entry points exposed solely for the `benches/mutate.rs` allocation

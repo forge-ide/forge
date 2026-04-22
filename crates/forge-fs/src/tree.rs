@@ -26,12 +26,41 @@ pub const DEFAULT_MAX_ENTRIES: usize = 10_000;
 /// for directories (empty vec for empty dirs). Symlinks are included as
 /// entries with `kind = Symlink` but never recursed into — see the sandbox
 /// rationale at the module head.
+///
+/// F-357: the root node also carries [`TreeStats`] summarizing budget and
+/// per-entry error signals from the whole walk. Nested nodes always carry a
+/// default (zeroed) [`TreeStats`] — the summary is a whole-tree concept, not
+/// per-directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeNode {
     pub name: String,
     pub path: PathBuf,
     pub kind: NodeKind,
     pub children: Option<Vec<TreeNode>>,
+    pub stats: TreeStats,
+}
+
+/// F-357: summary of what the walk elided so the caller can render an
+/// honest "N files not shown" indicator instead of implying a complete
+/// listing. Populated on the root [`TreeNode`] only.
+///
+/// * `truncated` — the entry budget ([`DEFAULT_MAX_ENTRIES`] or the caller's
+///   override) was exhausted mid-walk. More entries exist on disk than the
+///   tree describes.
+/// * `omitted_count` — best-effort count of entries skipped after the budget
+///   tripped. Exact within each directory the walker was traversing when the
+///   budget ran out; directories it never opened are not counted (we refuse
+///   to spend additional I/O inflating a number we already know is
+///   truncated).
+/// * `error_count` — per-entry errors the walker swallowed rather than
+///   failing the whole request. For `list_tree`, this is entries whose
+///   `read_dir` iterator yielded `Err`. For `list_tree_gitignored`, this is
+///   entries the `ignore` crate surfaced as errors (permission denied, etc.).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TreeStats {
+    pub truncated: bool,
+    pub omitted_count: u64,
+    pub error_count: u64,
 }
 
 /// Entry kind. Kept narrow — anything else (block device, socket, FIFO) is
@@ -47,8 +76,10 @@ pub enum NodeKind {
 /// Walk `root` up to `max_depth` levels deep and return a tree rooted at
 /// `root`. Entries beyond the depth cap are omitted (the parent still
 /// appears with `children: Some(vec![])`). Entries beyond
-/// [`DEFAULT_MAX_ENTRIES`] are silently truncated — the cap exists to block
-/// runaway trees, not to surface errors to the user.
+/// [`DEFAULT_MAX_ENTRIES`] are dropped, and the root node's
+/// [`TreeNode::stats`] flags this with `truncated: true` plus an
+/// `omitted_count` so the caller can render an honest "N files not shown"
+/// indicator instead of implying a complete listing (F-357).
 ///
 /// `max_depth == 0` returns the root node alone with no children walked.
 ///
@@ -58,7 +89,8 @@ pub enum NodeKind {
 ///   entry in `allowed_paths`.
 /// - [`FsError::Io`] if `std::fs::canonicalize(root)` fails. Per-child I/O
 ///   errors are swallowed so a transient failure on one entry doesn't hide
-///   the rest of the tree.
+///   the rest of the tree, but each one increments [`TreeStats::error_count`]
+///   on the root.
 pub fn list_tree(
     root: &str,
     allowed_paths: &[String],
@@ -82,6 +114,7 @@ pub fn list_tree_with_limit(
     enforce_allowed(&canonical, allowed_paths)?;
 
     let mut budget = max_entries;
+    let mut stats = TreeStats::default();
     let name = canonical
         .file_name()
         .map(|o| o.to_string_lossy().into_owned())
@@ -91,13 +124,14 @@ pub fn list_tree_with_limit(
         let children = if max_depth == 0 {
             Vec::new()
         } else {
-            walk_dir(&canonical, max_depth, &mut budget)
+            walk_dir(&canonical, max_depth, &mut budget, &mut stats)
         };
         TreeNode {
             name,
             path: canonical,
             kind: NodeKind::Dir,
             children: Some(children),
+            stats,
         }
     } else {
         TreeNode {
@@ -105,6 +139,7 @@ pub fn list_tree_with_limit(
             kind: classify(&canonical),
             path: canonical,
             children: None,
+            stats,
         }
     };
     Ok(root_node)
@@ -153,6 +188,7 @@ pub fn list_tree_gitignored_with_limit(
             kind: classify(&canonical),
             path: canonical,
             children: None,
+            stats: TreeStats::default(),
         });
     }
 
@@ -179,18 +215,30 @@ pub fn list_tree_gitignored_with_limit(
     let mut buckets: HashMap<PathBuf, Vec<TreeNode>> = HashMap::new();
     buckets.insert(canonical.clone(), Vec::new());
     let mut seen_entries: usize = 0;
+    let mut stats = TreeStats::default();
 
+    // F-357: drain the iterator even after the budget trips so we can count
+    // (and report) how many further entries existed rather than silently
+    // dropping them. `ignore::Walk` does not cheaply bound the remaining
+    // stream, so a one-time post-budget drain is the honest way to surface
+    // `omitted_count`. The user already paid for the `read_dir` enumeration
+    // — we just skip the `TreeNode` allocation for anything past the cap.
     for entry in builder.build() {
         let entry = match entry {
             Ok(e) => e,
-            Err(_) => continue,
+            Err(_) => {
+                stats.error_count = stats.error_count.saturating_add(1);
+                continue;
+            }
         };
         let entry_path = entry.path().to_path_buf();
         if entry_path == canonical {
             continue;
         }
         if seen_entries >= max_entries {
-            break;
+            stats.truncated = true;
+            stats.omitted_count = stats.omitted_count.saturating_add(1);
+            continue;
         }
         seen_entries += 1;
 
@@ -211,6 +259,7 @@ pub fn list_tree_gitignored_with_limit(
             } else {
                 None
             },
+            stats: TreeStats::default(),
         };
         if matches!(kind, NodeKind::Dir) {
             // `entry(_).or_insert_with(Vec::new)` is intentional over `.insert`:
@@ -252,6 +301,7 @@ pub fn list_tree_gitignored_with_limit(
         path: canonical.clone(),
         kind: NodeKind::Dir,
         children: Some(Vec::new()),
+        stats,
     };
     Ok(assemble(root_node, &mut buckets))
 }
@@ -259,20 +309,47 @@ pub fn list_tree_gitignored_with_limit(
 /// Walk a single directory, recursing into subdirectories while
 /// `remaining_depth > 0`. Budget is decremented per emitted node. Symlinks
 /// appear as leaves and are never recursed into.
-fn walk_dir(dir: &Path, remaining_depth: u32, budget: &mut usize) -> Vec<TreeNode> {
+///
+/// F-357: when the budget runs out mid-directory, the remaining entries in
+/// the *current* `read_dir` stream are counted into
+/// [`TreeStats::omitted_count`] and `truncated` is set. Subdirectories the
+/// walker never opened are not counted — inflating the count would require
+/// an extra I/O pass we deliberately skip. Per-entry `read_dir` errors
+/// (e.g. a file that vanished mid-walk) bump [`TreeStats::error_count`].
+fn walk_dir(
+    dir: &Path,
+    remaining_depth: u32,
+    budget: &mut usize,
+    stats: &mut TreeStats,
+) -> Vec<TreeNode> {
     let mut out = Vec::new();
     let entries = match std::fs::read_dir(dir) {
         Ok(r) => r,
-        Err(_) => return out,
+        Err(_) => {
+            stats.error_count = stats.error_count.saturating_add(1);
+            return out;
+        }
     };
-    let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+    let mut raw: Vec<_> = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(e) => raw.push(e),
+            Err(_) => stats.error_count = stats.error_count.saturating_add(1),
+        }
+    }
     // Stable ordering so snapshot-like diffs don't flake on platform-specific
     // readdir order. Case-insensitive on the name lower-case keeps mixed-case
     // workspace roots deterministic.
-    entries.sort_by_key(|e| e.file_name().to_string_lossy().to_lowercase());
+    raw.sort_by_key(|e| e.file_name().to_string_lossy().to_lowercase());
 
-    for entry in entries {
+    let mut iter = raw.into_iter();
+    while let Some(entry) = iter.next() {
         if *budget == 0 {
+            stats.truncated = true;
+            // Count this entry plus whatever else sits unread in the iterator.
+            // `size_hint().1` is reliable for a `Vec::IntoIter`.
+            let remaining = iter.size_hint().1.unwrap_or(0) as u64 + 1;
+            stats.omitted_count = stats.omitted_count.saturating_add(remaining);
             break;
         }
         *budget -= 1;
@@ -287,7 +364,7 @@ fn walk_dir(dir: &Path, remaining_depth: u32, budget: &mut usize) -> Vec<TreeNod
         };
 
         let children = if matches!(kind, NodeKind::Dir) && remaining_depth > 1 {
-            Some(walk_dir(&path, remaining_depth - 1, budget))
+            Some(walk_dir(&path, remaining_depth - 1, budget, stats))
         } else if matches!(kind, NodeKind::Dir) {
             Some(Vec::new())
         } else {
@@ -299,6 +376,7 @@ fn walk_dir(dir: &Path, remaining_depth: u32, budget: &mut usize) -> Vec<TreeNod
             path,
             kind,
             children,
+            stats: TreeStats::default(),
         });
     }
     out
@@ -399,8 +477,117 @@ mod tests {
         }
         let tree = list_tree_with_limit(tmp.path().to_str().unwrap(), &allow(tmp.path()), 4, 5)
             .expect("list_tree ok");
-        let children = tree.children.unwrap();
+        // F-357: same budget behavior, but the root now reports truncation.
+        assert!(
+            tree.stats.truncated,
+            "budget exhaustion must flag truncated"
+        );
+        assert_eq!(
+            tree.stats.omitted_count, 15,
+            "15 of 20 files must be reported as omitted"
+        );
+        assert_eq!(tree.stats.error_count, 0);
+        let children = tree.children.as_ref().unwrap();
         assert_eq!(children.len(), 5, "budget should cap children to 5");
+        for child in children {
+            assert_eq!(
+                child.stats,
+                TreeStats::default(),
+                "non-root nodes carry default stats"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // F-357: truncation / error signaling
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn not_truncated_when_under_cap() {
+        let tmp = TempDir::new().unwrap();
+        for i in 0..5 {
+            fs::write(tmp.path().join(format!("f{i}.txt")), "x").unwrap();
+        }
+        let tree = list_tree_with_limit(tmp.path().to_str().unwrap(), &allow(tmp.path()), 4, 100)
+            .expect("list_tree ok");
+        assert_eq!(tree.stats, TreeStats::default());
+    }
+
+    #[test]
+    fn budget_truncation_counts_across_subtree() {
+        // Split entries between root and a subdir so the budget is spent mid-
+        // walk inside the sub. Confirms the omitted count includes leftover
+        // entries in whichever directory was being read when the budget ran
+        // out (but not directories we never opened).
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir(tmp.path().join("sub")).unwrap();
+        for i in 0..5 {
+            fs::write(tmp.path().join(format!("r{i}.txt")), "x").unwrap();
+        }
+        for i in 0..10 {
+            fs::write(tmp.path().join("sub").join(format!("s{i}.txt")), "x").unwrap();
+        }
+        // Budget = 8: 5 root files + "sub" dir = 6, then 2 of sub's 10 files
+        // fit before the budget trips. 8 remaining sub entries must be reported.
+        let tree = list_tree_with_limit(tmp.path().to_str().unwrap(), &allow(tmp.path()), 4, 8)
+            .expect("list_tree ok");
+        assert!(tree.stats.truncated);
+        assert_eq!(tree.stats.omitted_count, 8);
+    }
+
+    #[test]
+    fn regression_20k_entry_dir_reports_truncated() {
+        // F-357 DoD: a 20 000-entry directory at default cap must flag
+        // `truncated: true`. Uses the real `list_tree` (DEFAULT_MAX_ENTRIES
+        // = 10 000) so a future cap change has to update this assertion
+        // deliberately.
+        let tmp = TempDir::new().unwrap();
+        for i in 0..20_000 {
+            fs::write(tmp.path().join(format!("f{i:05}.txt")), "").unwrap();
+        }
+        let tree =
+            list_tree(tmp.path().to_str().unwrap(), &allow(tmp.path()), 4).expect("list_tree ok");
+        assert!(tree.stats.truncated, "20k-entry dir must report truncated");
+        assert_eq!(
+            tree.stats.omitted_count,
+            20_000 - DEFAULT_MAX_ENTRIES as u64,
+            "omitted count must equal total minus cap"
+        );
+    }
+
+    #[test]
+    fn gitignored_walker_reports_truncation() {
+        let tmp = TempDir::new().unwrap();
+        for i in 0..20 {
+            fs::write(tmp.path().join(format!("f{i:02}.txt")), "x").unwrap();
+        }
+        let tree =
+            list_tree_gitignored_with_limit(tmp.path().to_str().unwrap(), &allow(tmp.path()), 4, 5)
+                .expect("gitignored walk ok");
+        assert!(
+            tree.stats.truncated,
+            "budget exhaustion must flag truncated"
+        );
+        assert_eq!(
+            tree.stats.omitted_count, 15,
+            "15 of 20 files must be reported as omitted"
+        );
+    }
+
+    #[test]
+    fn gitignored_walker_not_truncated_when_under_cap() {
+        let tmp = TempDir::new().unwrap();
+        for i in 0..3 {
+            fs::write(tmp.path().join(format!("f{i}.txt")), "x").unwrap();
+        }
+        let tree = list_tree_gitignored_with_limit(
+            tmp.path().to_str().unwrap(),
+            &allow(tmp.path()),
+            4,
+            100,
+        )
+        .expect("gitignored walk ok");
+        assert_eq!(tree.stats, TreeStats::default());
     }
 
     #[test]
