@@ -402,8 +402,8 @@ impl McpManager {
     /// session toggle test asserts against, and `toggle_mcp_server(name,
     /// true)` knows to treat `Disabled` as restartable (same as `Failed`).
     ///
-    /// Use [`McpManager::enable`] to restart a disabled server — the
-    /// driver resets `restart_history` is *not* cleared, so repeated
+    /// Use [`McpManager::enable`] to restart a disabled server. The
+    /// driver does **not** clear `restart_history` on disable, so repeated
     /// flap-toggles still honour the sliding-window budget.
     pub async fn disable(&self, name: &str) -> Result<()> {
         self.stop_with_terminal(
