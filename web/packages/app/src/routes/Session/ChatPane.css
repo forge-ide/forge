@@ -150,10 +150,16 @@
 }
 
 /* -------------------------------------------------------------------------
-   Tool call placeholder (F-026 will replace this)
+   Tool call card (F-026 / F-447)
+   ----------------------------------------------------------------------
+   Phase 3 supersedes the `.tool-placeholder` Phase-2 surface. The class
+   name change is deliberate: the surface is no longer a placeholder; it
+   is the authoritative tool-call card. Icon tint is driven by the
+   `data-tool-kind` attribute (read / agent / general) so the spec §5
+   bullet-1 color rules live in CSS, not JSX.
    ---------------------------------------------------------------------- */
 
-.tool-placeholder {
+.tool-call-card {
   display: flex;
   flex-direction: column;
   padding: var(--sp-2) var(--sp-3);
@@ -165,32 +171,72 @@
   color: var(--color-text-secondary);
 }
 
-.tool-placeholder--awaiting {
+.tool-call-card--awaiting {
   border-color: var(--color-warning-border);
   background: var(--color-surface-2);
 }
 
-.tool-placeholder--awaiting:focus {
+.tool-call-card--awaiting:focus {
   outline: none;
   border-color: var(--color-ember-400);
 }
 
-.tool-placeholder--completed {
+.tool-call-card--completed {
   color: var(--color-text-tertiary);
 }
 
-.tool-placeholder__header {
+.tool-call-card--errored {
+  border-color: var(--color-error-border);
+}
+
+/* F-447: expanded-state chrome per spec §5. Tinted ember background, ember
+   hairline border, sharp 3px radius. `rgba(255,209,102,…)` matches the
+   spec verbatim — the ember-100 hex is #ffd166, and the spec pins the two
+   alpha channels used here. Kept as raw rgba (not a token alias) because
+   these are one-off surface tints the spec anchors to this component. */
+.tool-call-card--expanded {
+  background: rgba(255, 209, 102, 0.04);
+  border-color: rgba(255, 209, 102, 0.15);
+}
+
+/* F-447 §5.1 nested child in a parallel-reads group. Drops the border so
+   the group body reads as one card, flattens the padding, and leaves
+   expansion off — nested rows stay compact. */
+.tool-call-card--nested {
+  padding: var(--sp-1) 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+}
+
+.tool-call-card__row {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
 }
 
-.tool-placeholder__icon {
-  color: var(--color-text-tertiary);
+.tool-call-card__row[role='button'] {
+  cursor: pointer;
+}
+
+/* F-447: per-tool icon color. The spec assigns ember-100 (gold) to general
+   tools, info (steel) to pure reads, and ember-400 to agent spawns. The
+   data attribute keeps the kind→color map in one place and keeps the
+   component code free of inline styles. */
+.tool-call-card__icon {
+  color: var(--color-ember-100);
   flex: 0 0 auto;
 }
 
-.tool-placeholder__name {
+.tool-call-card[data-tool-kind='read'] .tool-call-card__icon {
+  color: var(--color-info);
+}
+
+.tool-call-card[data-tool-kind='agent'] .tool-call-card__icon {
+  color: var(--color-ember-400);
+}
+
+.tool-call-card__name {
   flex: 0 0 auto;
   color: var(--color-text-primary);
 }
@@ -198,7 +244,7 @@
 /* F-041: one-line arg summary sits between the tool name and the status,
    takes the remaining space, and truncates with an ellipsis when narrower
    than the content. Muted so the tool name stays the primary read. */
-.tool-placeholder__args {
+.tool-call-card__args {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -208,9 +254,160 @@
   font-variant-numeric: tabular-nums;
 }
 
-.tool-placeholder__status {
-  color: var(--color-text-tertiary);
+/* F-447: duration readout — text-tertiary mono 11px per spec §5 bullet 3,
+   right-aligned by sitting to the right of the flex-grow args span with
+   no grow of its own. Tabular-nums keeps the column stable when several
+   cards stack. */
+.tool-call-card__duration {
   flex: 0 0 auto;
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+}
+
+/* F-447: status glyph. Colors match the spec's intent: ✓ steel info, ! warn
+   amber, ✗ error ember. Non-grow so it anchors between duration and
+   chevron. */
+.tool-call-card__status {
+  flex: 0 0 auto;
+  color: var(--color-text-tertiary);
+}
+
+.tool-call-card__status[data-status='completed'] {
+  color: var(--color-info);
+}
+
+.tool-call-card__status[data-status='awaiting-approval'] {
+  color: var(--color-warning);
+}
+
+.tool-call-card__status[data-status='errored'] {
+  color: var(--color-error);
+}
+
+/* F-447: chevron affordance. Rotates 90° when the card is expanded so the
+   `›` reads as `v`. `transform-origin: center` keeps the pivot centred
+   under the glyph's visual baseline. */
+.tool-call-card__chevron {
+  flex: 0 0 auto;
+  color: var(--color-text-tertiary);
+  transition: transform var(--ease);
+  transform-origin: center;
+}
+
+.tool-call-card--expanded > .tool-call-card__row > .tool-call-card__chevron {
+  transform: rotate(90deg);
+}
+
+/* F-447: expanded body. Sits inside the tinted card surface, holds the
+   args/result/diff blocks. Vertical stack with generous breathing room. */
+.tool-call-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  margin-top: var(--sp-2);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--color-border-1);
+}
+
+.tool-call-card__block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.tool-call-card__block-label {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-text-tertiary);
+}
+
+.tool-call-card__args-json,
+.tool-call-card__result,
+.tool-call-card__diff,
+.tool-call-card__error {
+  margin: 0;
+  padding: var(--sp-2);
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border-1);
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--color-text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
+.tool-call-card__error {
+  color: var(--color-error);
+  border-color: var(--color-error-border);
+  background: var(--color-error-bg);
+}
+
+.tool-call-card__show-more {
+  align-self: flex-start;
+  padding: var(--sp-1) var(--sp-2);
+  background: transparent;
+  border: 1px solid var(--color-border-2);
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.tool-call-card__show-more:hover {
+  border-color: var(--color-ember-400);
+  color: var(--color-ember-400);
+}
+
+/* -------------------------------------------------------------------------
+   Parallel-reads group (F-447 §5.1)
+   ----------------------------------------------------------------------
+   `.tool-call-group` shares most of its collapsed-row styling with
+   `.tool-call-card` by re-using the same child class names inside the
+   row. The group body indents children per spec: `--sp-5` with a 2px
+   `--color-border-1` left edge.
+   ---------------------------------------------------------------------- */
+
+.tool-call-group {
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border-1);
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+.tool-call-group[data-expanded='true'] {
+  background: rgba(255, 209, 102, 0.04);
+  border-color: rgba(255, 209, 102, 0.15);
+}
+
+.tool-call-group__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  cursor: pointer;
+}
+
+.tool-call-group[data-expanded='true'] .tool-call-card__chevron {
+  transform: rotate(90deg);
+}
+
+.tool-call-group__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin-top: var(--sp-2);
+  padding: var(--sp-1) 0 var(--sp-1) var(--sp-5);
+  border-left: 2px solid var(--color-border-1);
 }
 
 /* -------------------------------------------------------------------------

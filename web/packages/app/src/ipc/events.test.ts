@@ -143,6 +143,10 @@ describe('fromRustEvent — tool_call_completed', () => {
       kind: 'ToolCallCompleted',
       tool_call_id: 'tc-7',
       result_summary: '{"ok":true,"bytes":42}',
+      // F-447: ok/duration forwarded verbatim so the expanded card can
+      // distinguish success from failure without re-parsing the summary.
+      result_ok: true,
+      duration_ms: 12,
     });
   });
 
@@ -159,6 +163,40 @@ describe('fromRustEvent — tool_call_completed', () => {
     const out = fromRustEvent(rust);
     expect(out).toMatchObject({ kind: 'ToolCallCompleted', tool_call_id: 'tc-8' });
     expect((out as { result_summary: string }).result_summary.length).toBe(200);
+  });
+
+  // F-447: the expanded body renders `result.preview` as the up-to-800-char
+  // result preview, independent of the 200-char result_summary truncation.
+  it('forwards result.preview and result.error as structured fields', () => {
+    const rust = {
+      type: 'tool_call_completed',
+      id: 'tc-p',
+      result: { ok: true, preview: 'hello from forge' },
+      duration_ms: 42,
+      at: '2026-04-18T10:00:05Z',
+    };
+    expect(fromRustEvent(rust)).toMatchObject({
+      kind: 'ToolCallCompleted',
+      tool_call_id: 'tc-p',
+      result_ok: true,
+      result_preview: 'hello from forge',
+      duration_ms: 42,
+    });
+
+    const errored = {
+      type: 'tool_call_completed',
+      id: 'tc-e',
+      result: { ok: false, error: 'ENOENT' },
+      duration_ms: 7,
+      at: '2026-04-18T10:00:05Z',
+    };
+    expect(fromRustEvent(errored)).toMatchObject({
+      kind: 'ToolCallCompleted',
+      tool_call_id: 'tc-e',
+      result_ok: false,
+      result_error: 'ENOENT',
+      duration_ms: 7,
+    });
   });
 });
 

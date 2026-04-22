@@ -158,11 +158,13 @@ describe('ChatPane rendering', () => {
       args_json: JSON.stringify(bigArgs),
     });
     const { getByTestId } = render(() => <ChatPane />);
-    const card = getByTestId('tool-call-card-tc-nopath');
+    const summary = getByTestId('tool-call-args-tc-nopath');
     // Contains the leading tokens of the stringified JSON…
-    expect(card).toHaveTextContent('"query"');
+    expect(summary).toHaveTextContent('"query"');
     // …but is bounded by the ~60-char cap, not the full 100+ char payload.
-    expect(card.textContent ?? '').not.toContain('x'.repeat(80));
+    // F-447: the expanded body renders the full pretty-printed args — so
+    // the truncation assertion must scope to the collapsed summary span.
+    expect(summary.textContent ?? '').not.toContain('x'.repeat(80));
   });
 
   // F-080 item 6: the prior "unparseable args_json" test was deleted because
@@ -1675,5 +1677,495 @@ describe('Composer Send button (F-391)', () => {
     );
 
     expect(viaClick).toEqual(viaEnter);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-447 — ToolCallCard Phase 3: expanded body + parallel-reads grouping
+// ---------------------------------------------------------------------------
+
+describe('ToolCallCard Phase 3 — icon kind (F-447)', () => {
+  it('tags pure-read tools with data-tool-kind="read"', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-kind-read',
+      tool_name: 'fs.read',
+      args_json: JSON.stringify({ path: 'a.txt' }),
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('tool-call-card-tc-kind-read')).toHaveAttribute(
+      'data-tool-kind',
+      'read',
+    );
+  });
+
+  it('tags agent-spawn tools with data-tool-kind="agent"', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-kind-agent',
+      tool_name: 'agent.spawn',
+      args_json: '{}',
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('tool-call-card-tc-kind-agent')).toHaveAttribute(
+      'data-tool-kind',
+      'agent',
+    );
+  });
+
+  it('tags everything else with data-tool-kind="general"', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-kind-general',
+      tool_name: 'fs.write',
+      args_json: JSON.stringify({ path: '/tmp/x' }),
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('tool-call-card-tc-kind-general')).toHaveAttribute(
+      'data-tool-kind',
+      'general',
+    );
+  });
+});
+
+describe('ToolCallCard Phase 3 — status glyph (F-447)', () => {
+  it('renders ✓ for completed calls', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-glyph-ok',
+      tool_name: 'fs.read',
+      args_json: JSON.stringify({ path: 'a.txt' }),
+    });
+    pushEvent(SID, {
+      kind: 'ToolCallCompleted',
+      tool_call_id: 'tc-glyph-ok',
+      result_summary: '{"ok":true}',
+      result_ok: true,
+      duration_ms: 12,
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('tool-call-status-tc-glyph-ok')).toHaveTextContent('✓');
+  });
+
+  it('renders ✗ for errored calls', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-glyph-err',
+      tool_name: 'fs.read',
+      args_json: JSON.stringify({ path: 'a.txt' }),
+    });
+    pushEvent(SID, {
+      kind: 'ToolCallFailed',
+      tool_call_id: 'tc-glyph-err',
+      error: 'ENOENT',
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('tool-call-status-tc-glyph-err')).toHaveTextContent('✗');
+  });
+
+  it('renders ! for awaiting-approval calls', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-glyph-wait',
+      tool_name: 'fs.edit',
+      args_json: JSON.stringify({ path: '/src/foo.ts' }),
+    });
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-glyph-wait',
+      tool_name: 'fs.edit',
+      args_json: JSON.stringify({ path: '/src/foo.ts' }),
+      preview: { description: 'Edit' },
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('tool-call-status-tc-glyph-wait')).toHaveTextContent('!');
+  });
+});
+
+describe('ToolCallCard Phase 3 — duration readout (F-447)', () => {
+  it('renders the wire-reported duration in the collapsed row', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-dur',
+      tool_name: 'fs.read',
+      args_json: JSON.stringify({ path: 'a.txt' }),
+    });
+    pushEvent(SID, {
+      kind: 'ToolCallCompleted',
+      tool_call_id: 'tc-dur',
+      result_summary: '{"ok":true}',
+      result_ok: true,
+      duration_ms: 42,
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('tool-call-duration-tc-dur')).toHaveTextContent('42ms');
+  });
+
+  it('collapses to "awaiting approval" while approval is pending', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-aa',
+      tool_name: 'fs.edit',
+      args_json: JSON.stringify({ path: '/x' }),
+    });
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-aa',
+      tool_name: 'fs.edit',
+      args_json: JSON.stringify({ path: '/x' }),
+      preview: { description: 'Edit' },
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('tool-call-duration-tc-aa')).toHaveTextContent(
+      'awaiting approval',
+    );
+  });
+});
+
+describe('ToolCallCard Phase 3 — expand/collapse (F-447)', () => {
+  it('collapses a completed card by default and expands on click', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-xp',
+      tool_name: 'fs.read',
+      args_json: JSON.stringify({ path: 'a.txt' }),
+    });
+    pushEvent(SID, {
+      kind: 'ToolCallCompleted',
+      tool_call_id: 'tc-xp',
+      result_summary: '{"ok":true,"preview":"hello"}',
+      result_ok: true,
+      result_preview: 'hello',
+      duration_ms: 10,
+    });
+    const { getByTestId, queryByTestId } = render(() => <ChatPane />);
+    const card = getByTestId('tool-call-card-tc-xp');
+    expect(card).toHaveAttribute('data-expanded', 'false');
+    expect(queryByTestId('tool-call-body-tc-xp')).not.toBeInTheDocument();
+
+    fireEvent.click(getByTestId('tool-call-row-tc-xp'));
+    expect(card).toHaveAttribute('data-expanded', 'true');
+    expect(getByTestId('tool-call-body-tc-xp')).toBeInTheDocument();
+  });
+
+  it('toggles expanded on keyboard activation (Enter)', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-kb',
+      tool_name: 'fs.read',
+      args_json: JSON.stringify({ path: 'a.txt' }),
+    });
+    pushEvent(SID, {
+      kind: 'ToolCallCompleted',
+      tool_call_id: 'tc-kb',
+      result_summary: '{}',
+      result_ok: true,
+      duration_ms: 3,
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    const row = getByTestId('tool-call-row-tc-kb');
+    fireEvent.keyDown(row, { key: 'Enter' });
+    expect(getByTestId('tool-call-card-tc-kb')).toHaveAttribute(
+      'data-expanded',
+      'true',
+    );
+    fireEvent.keyDown(row, { key: 'Enter' });
+    expect(getByTestId('tool-call-card-tc-kb')).toHaveAttribute(
+      'data-expanded',
+      'false',
+    );
+  });
+
+  // F-447 follow-up (PR #547 review): the row's Enter/Space handler must be a
+  // no-op when the card is awaiting approval — otherwise it collapses the diff
+  // the user just read AND the keydown bubbles to ApprovalPrompt's native
+  // listener, which interprets Enter as "approve once."
+  it('ignores Enter on the row while awaiting-approval (does not collapse the open body)', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-aa-kb',
+      tool_name: 'fs.edit',
+      args_json: JSON.stringify({ path: '/src/foo.ts' }),
+    });
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-aa-kb',
+      tool_name: 'fs.edit',
+      args_json: JSON.stringify({ path: '/src/foo.ts' }),
+      preview: { description: '--- a\n+++ b\n@@ -1 +1 @@\n-x\n+y' },
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    const card = getByTestId('tool-call-card-tc-aa-kb');
+    // awaiting-approval cards open by default
+    expect(card).toHaveAttribute('data-expanded', 'true');
+
+    const row = getByTestId('tool-call-row-tc-aa-kb');
+    // Row must not be in the tab order while the outer card owns activation.
+    expect(row).not.toHaveAttribute('tabindex', '0');
+
+    fireEvent.keyDown(row, { key: 'Enter' });
+    // Row handler was a no-op — body is still expanded.
+    expect(card).toHaveAttribute('data-expanded', 'true');
+  });
+
+  it('ignores Space on the row while awaiting-approval (duplicate-activate guard)', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-aa-sp',
+      tool_name: 'fs.edit',
+      args_json: JSON.stringify({ path: '/src/bar.ts' }),
+    });
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-aa-sp',
+      tool_name: 'fs.edit',
+      args_json: JSON.stringify({ path: '/src/bar.ts' }),
+      preview: { description: 'Edit' },
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    const card = getByTestId('tool-call-card-tc-aa-sp');
+    expect(card).toHaveAttribute('data-expanded', 'true');
+
+    const row = getByTestId('tool-call-row-tc-aa-sp');
+    fireEvent.keyDown(row, { key: ' ' });
+    expect(card).toHaveAttribute('data-expanded', 'true');
+  });
+});
+
+describe('ToolCallCard Phase 3 — expanded body (F-447)', () => {
+  it('pretty-prints args JSON in the expanded body', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-args',
+      tool_name: 'fs.read',
+      args_json: JSON.stringify({ path: 'a.txt', lines: [1, 2, 3] }),
+    });
+    pushEvent(SID, {
+      kind: 'ToolCallCompleted',
+      tool_call_id: 'tc-args',
+      result_summary: '{}',
+      result_ok: true,
+      duration_ms: 3,
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('tool-call-row-tc-args'));
+    const argsBlock = getByTestId('tool-call-args-json-tc-args');
+    // Pretty-printing produces a multi-line indented body.
+    expect(argsBlock.textContent).toContain('\n');
+    expect(argsBlock.textContent).toContain('"path": "a.txt"');
+  });
+
+  it('renders the result preview and caps it at 800 chars with "show more"', () => {
+    const big = 'y'.repeat(2000);
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-big',
+      tool_name: 'fs.read',
+      args_json: JSON.stringify({ path: 'a.txt' }),
+    });
+    pushEvent(SID, {
+      kind: 'ToolCallCompleted',
+      tool_call_id: 'tc-big',
+      result_summary: '{}',
+      result_ok: true,
+      result_preview: big,
+      duration_ms: 5,
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('tool-call-row-tc-big'));
+    const pre = getByTestId('tool-call-result-tc-big');
+    expect((pre.textContent ?? '').length).toBe(800);
+    const showMore = getByTestId('tool-call-show-more-tc-big');
+    fireEvent.click(showMore);
+    const pre2 = getByTestId('tool-call-result-tc-big');
+    expect((pre2.textContent ?? '').length).toBe(2000);
+  });
+
+  it('renders a diff/command preview block for destructive tools', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-edit',
+      tool_name: 'fs.edit',
+      args_json: JSON.stringify({ path: '/src/foo.ts' }),
+    });
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-edit',
+      tool_name: 'fs.edit',
+      args_json: JSON.stringify({ path: '/src/foo.ts' }),
+      preview: { description: '--- a\n+++ b\n@@ -1 +1 @@\n-x\n+y' },
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    // awaiting-approval expands by default
+    const diff = getByTestId('tool-call-diff-tc-edit');
+    expect(diff).toBeInTheDocument();
+    expect(diff.textContent).toContain('+++ b');
+  });
+
+  it('surfaces the error payload in a dedicated block when errored', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-badfail',
+      tool_name: 'fs.read',
+      args_json: JSON.stringify({ path: 'missing.txt' }),
+    });
+    pushEvent(SID, {
+      kind: 'ToolCallFailed',
+      tool_call_id: 'tc-badfail',
+      error: 'ENOENT: no such file',
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('tool-call-row-tc-badfail'));
+    expect(getByTestId('tool-call-error-tc-badfail')).toHaveTextContent('ENOENT');
+  });
+});
+
+describe('ToolCallCard Phase 3 — parallel-reads grouping (F-447 §5.1)', () => {
+  it('collapses consecutive reads with shared batch_id into one aggregate card', () => {
+    for (const id of ['tc-pr-1', 'tc-pr-2', 'tc-pr-3']) {
+      pushEvent(SID, {
+        kind: 'ToolCallStarted',
+        tool_call_id: id,
+        tool_name: 'fs.read',
+        args_json: JSON.stringify({ path: `${id}.txt` }),
+        batch_id: '7',
+      });
+    }
+    const { getByTestId, queryByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('tool-call-group-7')).toBeInTheDocument();
+    expect(getByTestId('tool-call-group-count-7')).toHaveTextContent('3 calls');
+    // Individual cards are NOT rendered at the top level — they're nested
+    // inside the group body (hidden while collapsed).
+    expect(queryByTestId('tool-call-body-tc-pr-1')).not.toBeInTheDocument();
+  });
+
+  it('reports the max duration across children as the aggregate duration', () => {
+    for (const id of ['tc-dur-1', 'tc-dur-2']) {
+      pushEvent(SID, {
+        kind: 'ToolCallStarted',
+        tool_call_id: id,
+        tool_name: 'fs.read',
+        args_json: JSON.stringify({ path: `${id}.txt` }),
+        batch_id: '9',
+      });
+    }
+    pushEvent(SID, {
+      kind: 'ToolCallCompleted',
+      tool_call_id: 'tc-dur-1',
+      result_summary: '{}',
+      result_ok: true,
+      duration_ms: 10,
+    });
+    pushEvent(SID, {
+      kind: 'ToolCallCompleted',
+      tool_call_id: 'tc-dur-2',
+      result_summary: '{}',
+      result_ok: true,
+      duration_ms: 25,
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('tool-call-group-duration-9')).toHaveTextContent('25ms');
+  });
+
+  it('expands the group to show each child card', () => {
+    for (const id of ['tc-xp-1', 'tc-xp-2']) {
+      pushEvent(SID, {
+        kind: 'ToolCallStarted',
+        tool_call_id: id,
+        tool_name: 'fs.read',
+        args_json: JSON.stringify({ path: `${id}.txt` }),
+        batch_id: '11',
+      });
+    }
+    const { getByTestId, queryByTestId } = render(() => <ChatPane />);
+    expect(queryByTestId('tool-call-group-body-11')).not.toBeInTheDocument();
+    fireEvent.click(getByTestId('tool-call-group-row-11'));
+    expect(getByTestId('tool-call-group-body-11')).toBeInTheDocument();
+    expect(getByTestId('tool-call-card-tc-xp-1')).toBeInTheDocument();
+    expect(getByTestId('tool-call-card-tc-xp-2')).toBeInTheDocument();
+  });
+
+  it('renders a single call with batch_id as a standalone card (no group chrome)', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-solo',
+      tool_name: 'fs.read',
+      args_json: JSON.stringify({ path: 'a.txt' }),
+      batch_id: '42',
+    });
+    const { getByTestId, queryByTestId } = render(() => <ChatPane />);
+    expect(queryByTestId('tool-call-group-42')).not.toBeInTheDocument();
+    expect(getByTestId('tool-call-card-tc-solo')).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-447 — CSS drift fixture
+// ---------------------------------------------------------------------------
+//
+// Visual regression for the Phase 3 surfaces. The gate asserts the CSS
+// source pins spec §5's load-bearing values: the tinted expanded-state
+// background (`rgba(255,209,102,0.04)` + `0.15` border), the `--r-sm`
+// radius, the nested group's `--sp-5` indent with a 2px `--color-border-1`
+// left edge, and the `.tool-call-card` class name (Phase 3 supersedes the
+// `.tool-placeholder` name per the DoD). Driven off the source file the
+// same way `ChatPane.css` drift was pinned in F-086 — jsdom doesn't
+// resolve external stylesheets, so the CSS source is the contract.
+
+describe('ToolCallCard Phase 3 — CSS drift fixture (F-447)', () => {
+  const cssSource = readFileSync(
+    resolve(__dirname, 'ChatPane.css'),
+    'utf-8',
+  );
+
+  it('declares the .tool-call-card class (replacing .tool-placeholder)', () => {
+    expect(cssSource).toMatch(/\.tool-call-card\s*\{/);
+    // `.tool-placeholder` must not appear as a live selector — only
+    // referenced inside comments (the migration note).
+    const liveSelectorMatch = cssSource.match(/^\s*\.tool-placeholder/m);
+    expect(liveSelectorMatch).toBeNull();
+  });
+
+  it('pins the expanded-state tinted background and border per spec §5', () => {
+    const expandedRule = cssSource.match(
+      /\.tool-call-card--expanded\s*\{([^}]*)\}/,
+    );
+    expect(expandedRule).not.toBeNull();
+    const body = expandedRule?.[1] ?? '';
+    expect(body).toMatch(/rgba\(\s*255\s*,\s*209\s*,\s*102\s*,\s*0\.04\s*\)/);
+    expect(body).toMatch(/rgba\(\s*255\s*,\s*209\s*,\s*102\s*,\s*0\.15\s*\)/);
+  });
+
+  it('uses --r-sm for the card radius', () => {
+    const cardRule = cssSource.match(/\.tool-call-card\s*\{([^}]*)\}/);
+    expect(cardRule?.[1] ?? '').toMatch(/border-radius\s*:\s*var\(--r-sm\)/);
+  });
+
+  it('indents nested children --sp-5 with a 2px --color-border-1 left edge', () => {
+    const bodyRule = cssSource.match(
+      /\.tool-call-group__body\s*\{([^}]*)\}/,
+    );
+    expect(bodyRule).not.toBeNull();
+    const body = bodyRule?.[1] ?? '';
+    expect(body).toMatch(/var\(--sp-5\)/);
+    expect(body).toMatch(/border-left\s*:\s*2px\s+solid\s+var\(--color-border-1\)/);
+  });
+
+  it('maps tool-kind attribute to its spec §5 icon color token', () => {
+    expect(cssSource).toMatch(
+      /\.tool-call-card\[data-tool-kind='read'\]\s+\.tool-call-card__icon\s*\{[^}]*var\(--color-info\)/,
+    );
+    expect(cssSource).toMatch(
+      /\.tool-call-card\[data-tool-kind='agent'\]\s+\.tool-call-card__icon\s*\{[^}]*var\(--color-ember-400\)/,
+    );
+    // General default — lives on the base .tool-call-card__icon rule.
+    const iconRule = cssSource.match(/\.tool-call-card__icon\s*\{([^}]*)\}/);
+    expect(iconRule?.[1] ?? '').toMatch(/var\(--color-ember-100\)/);
+  });
+
+  it('rotates the chevron 90deg when the card is expanded', () => {
+    expect(cssSource).toMatch(
+      /\.tool-call-card--expanded\s*>\s*\.tool-call-card__row\s*>\s*\.tool-call-card__chevron\s*\{[^}]*transform\s*:\s*rotate\(90deg\)/,
+    );
   });
 });

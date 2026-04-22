@@ -18,6 +18,7 @@ import {
   neighbourVariantId,
   type ChatTurn,
   type BranchGroup,
+  type ToolCallStatus,
 } from '../../stores/messages';
 import { BranchSelectorStrip } from '../../components/BranchSelectorStrip';
 import { BranchGutter } from '../../components/BranchGutter';
@@ -75,7 +76,8 @@ function reportInvokeError(sessionId: SessionId, command: string, err: unknown):
 }
 
 // ---------------------------------------------------------------------------
-// ToolCallCard — inline tool call card with optional approval prompt (F-026/F-027)
+// ToolCallCard — inline tool call card with optional approval prompt
+// (F-026 / F-027 / F-447)
 // ---------------------------------------------------------------------------
 
 /**
@@ -122,11 +124,88 @@ function extractPath(argsJson: string): string {
   return '';
 }
 
-const ToolCallCard: Component<{ turn: Extract<ChatTurn, { type: 'tool_placeholder' }> }> = (
-  props,
-) => {
+// F-447: the Phase 3 spec splits tools into three icon-tinted kinds. Pure
+// read-only tools take the steel/info hue; agent spawns take ember-400;
+// everything else (writes, shell.exec, network calls) inherits the warm
+// ember-100 general-tool hue. The classification lives next to the
+// component because the spec ties it to the visual treatment.
+type ToolKind = 'read' | 'agent' | 'general';
+
+const READ_ONLY_TOOLS = new Set(['fs.read', 'fs.list', 'fs.stat', 'fs.glob']);
+
+function toolKind(toolName: string): ToolKind {
+  if (READ_ONLY_TOOLS.has(toolName)) return 'read';
+  if (toolName.startsWith('agent.') || toolName.startsWith('subagent.')) {
+    return 'agent';
+  }
+  return 'general';
+}
+
+// F-447: writes, shell.exec, and any future destructive kind must surface a
+// diff / command preview in the expanded body. Reads and queries do not.
+function isDestructiveTool(toolName: string): boolean {
+  return (
+    toolName === 'fs.write' ||
+    toolName === 'fs.edit' ||
+    toolName === 'shell.exec' ||
+    toolName.startsWith('process.')
+  );
+}
+
+// F-447: the collapsed-row status glyph. Awaiting-approval renders with the
+// warn `!` — the expanded body surfaces the approval prompt and the pending
+// explanation, so the glyph alone is enough in the row.
+function statusGlyph(status: ToolCallStatus): '✓' | '!' | '✗' {
+  if (status === 'completed') return '✓';
+  if (status === 'errored') return '✗';
+  return '!';
+}
+
+function formatDuration(ms: number | undefined): string | null {
+  if (ms === undefined) return null;
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const mins = Math.floor(ms / 60_000);
+  const rem = Math.round((ms - mins * 60_000) / 1000);
+  return `${mins}m ${rem}s`;
+}
+
+const RESULT_PREVIEW_CAP = 800;
+
+/**
+ * F-447: pretty-print a Rust-side args blob (arrives as valid JSON text).
+ * Indents two spaces; handles the `"null"` edge case (no args) by returning
+ * the literal so the expanded body still has readable text.
+ */
+function prettyPrintArgs(argsJson: string): string {
+  try {
+    return JSON.stringify(JSON.parse(argsJson), null, 2);
+  } catch {
+    return argsJson;
+  }
+}
+
+const ToolCallCard: Component<{
+  turn: Extract<ChatTurn, { type: 'tool_placeholder' }>;
+  /**
+   * F-447 §5.1: when the card is a child inside a parallel-reads group,
+   * the aggregate header owns the expand affordance and the child renders
+   * in a compact "row" mode — no border, no tinted expanded body, no
+   * standalone chevron. Defaults to false.
+   */
+  nested?: boolean;
+}> = (props) => {
   let cardRef: HTMLDivElement | undefined;
   const sessionId = () => activeSessionId();
+  // F-447: expanded state is local to this card. Spec §5 defaults the
+  // currently-streaming (in-progress) and awaiting-approval cards to
+  // expanded; completed / errored collapse by default. The signal tracks
+  // user overrides so a later click can flip either way.
+  const [expanded, setExpanded] = createSignal(
+    props.turn.status === 'awaiting-approval' || props.turn.status === 'in-progress',
+  );
+  // F-447: the "show more" toggle for the 800-char result-preview cap.
+  const [showFullPreview, setShowFullPreview] = createSignal(false);
 
   // Check whitelist on each render
   const whitelistKey = createMemo(() => {
@@ -247,29 +326,114 @@ const ToolCallCard: Component<{ turn: Extract<ChatTurn, { type: 'tool_placeholde
     }
   };
 
+  const kind = createMemo<ToolKind>(() => toolKind(props.turn.tool_name));
+  const durationText = (): string | null => {
+    if (props.turn.status === 'awaiting-approval' && whitelistKey() === null) {
+      return 'awaiting approval';
+    }
+    return formatDuration(props.turn.duration_ms);
+  };
+  const canExpand = (): boolean => !props.nested;
+  const toggleExpanded = (): void => {
+    if (!canExpand()) return;
+    setExpanded((v) => !v);
+  };
+  // F-447: the collapsed row doubles as a button. Clicking the chevron or
+  // pressing Enter / Space anywhere on the header toggles expanded.
+  const handleHeaderKeyDown = (e: KeyboardEvent): void => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    // While awaiting approval, the outer card owns activation and
+    // ApprovalPrompt attaches a native `keydown` listener that treats Enter as
+    // "approve once." Running the row handler would (a) collapse the diff the
+    // user just read and (b) bubble to the approval listener, producing both a
+    // collapse AND an approve on a single key press. No-op here so the prompt
+    // stays in sole control of keyboard activation.
+    if (props.turn.status === 'awaiting-approval') return;
+    if (!canExpand()) return;
+    e.preventDefault();
+    toggleExpanded();
+  };
+
+  // F-447: the destructive preview is whatever the daemon handed us. For
+  // completed writes/execs, this is populated by `result_preview`; for
+  // awaiting approval it comes from `preview.description`. Either way,
+  // renders in a dedicated block separated from the generic result block.
+  const destructivePreview = (): string | null => {
+    if (!isDestructiveTool(props.turn.tool_name)) return null;
+    if (props.turn.status === 'awaiting-approval' && props.turn.preview) {
+      return props.turn.preview.description;
+    }
+    return props.turn.result_preview ?? null;
+  };
+
+  const genericPreview = (): string | null => {
+    if (isDestructiveTool(props.turn.tool_name)) return null;
+    return props.turn.result_preview ?? null;
+  };
+
+  const truncatedPreview = (): { text: string; truncated: boolean } => {
+    const raw = genericPreview() ?? '';
+    if (raw.length <= RESULT_PREVIEW_CAP || showFullPreview()) {
+      return { text: raw, truncated: false };
+    }
+    return {
+      text: raw.slice(0, RESULT_PREVIEW_CAP),
+      truncated: true,
+    };
+  };
+
   return (
     <div
-      class="tool-placeholder"
+      class="tool-call-card"
       data-testid={`tool-call-card-${props.turn.tool_call_id}`}
+      data-tool-kind={kind()}
+      data-status={props.turn.status}
+      data-expanded={expanded() ? 'true' : 'false'}
       classList={{
-        'tool-placeholder--completed': props.turn.status === 'completed',
-        'tool-placeholder--awaiting': props.turn.status === 'awaiting-approval',
+        'tool-call-card--nested': props.nested === true,
+        'tool-call-card--completed': props.turn.status === 'completed',
+        'tool-call-card--errored': props.turn.status === 'errored',
+        'tool-call-card--awaiting': props.turn.status === 'awaiting-approval',
+        'tool-call-card--expanded': expanded(),
       }}
       tabIndex={props.turn.status === 'awaiting-approval' ? 0 : undefined}
       ref={cardRef}
     >
-      <div class="tool-placeholder__header">
-        <span class="tool-placeholder__icon" aria-hidden="true">
+      {/* Collapsed row. Acts as the expand/collapse affordance; keyboard
+          activation via Enter/Space on the role="button" element. */}
+      <div
+        class="tool-call-card__row"
+        data-testid={`tool-call-row-${props.turn.tool_call_id}`}
+        role={canExpand() ? 'button' : undefined}
+        tabIndex={
+          canExpand()
+            ? props.turn.status === 'awaiting-approval'
+              ? -1
+              : 0
+            : undefined
+        }
+        aria-expanded={canExpand() ? expanded() : undefined}
+        aria-controls={
+          canExpand() ? `tool-call-body-${props.turn.tool_call_id}` : undefined
+        }
+        onClick={() => toggleExpanded()}
+        onKeyDown={handleHeaderKeyDown}
+      >
+        <span
+          class="tool-call-card__icon"
+          data-testid={`tool-call-icon-${props.turn.tool_call_id}`}
+          aria-hidden="true"
+        >
           ⚙
         </span>
-        <span class="tool-placeholder__name">{props.turn.tool_name}</span>
+        <span class="tool-call-card__name">{props.turn.tool_name}</span>
 
         {/* One-line arg summary — path for path-taking tools, otherwise a
             short stringified JSON. Skipped when args_json is unparseable. */}
         <Show when={summarizeArgs(props.turn.args_json)}>
           {(summary) => (
             <span
-              class="tool-placeholder__args"
+              class="tool-call-card__args"
               data-testid={`tool-call-args-${props.turn.tool_call_id}`}
             >
               {summary()}
@@ -286,11 +450,113 @@ const ToolCallCard: Component<{ turn: Extract<ChatTurn, { type: 'tool_placeholde
           />
         </Show>
 
-        {/* Status label (hidden when awaiting — prompt fills that role) */}
-        <Show when={props.turn.status !== 'awaiting-approval' || whitelistKey() !== null}>
-          <span class="tool-placeholder__status">{props.turn.status}</span>
+        {/* F-447: duration readout — right-aligned. Spec §5 collapses to
+            `awaiting approval` when approval is pending so the user knows
+            the call is parked on them rather than still running. */}
+        <Show when={durationText()}>
+          {(text) => (
+            <span
+              class="tool-call-card__duration"
+              data-testid={`tool-call-duration-${props.turn.tool_call_id}`}
+            >
+              {text()}
+            </span>
+          )}
+        </Show>
+
+        {/* F-447: status glyph. Replaces the Phase 2 raw-text status. */}
+        <span
+          class="tool-call-card__status"
+          data-testid={`tool-call-status-${props.turn.tool_call_id}`}
+          data-status={props.turn.status}
+        >
+          {statusGlyph(props.turn.status)}
+        </span>
+
+        {/* F-447: chevron affordance; rotates 90° via CSS when expanded. */}
+        <Show when={canExpand()}>
+          <span
+            class="tool-call-card__chevron"
+            data-testid={`tool-call-chevron-${props.turn.tool_call_id}`}
+            aria-hidden="true"
+          >
+            ›
+          </span>
         </Show>
       </div>
+
+      {/* F-447 expanded body — tinted background, pretty-printed args,
+          result preview with show-more, metadata, destructive preview. */}
+      <Show when={expanded() && canExpand()}>
+        <div
+          class="tool-call-card__body"
+          id={`tool-call-body-${props.turn.tool_call_id}`}
+          data-testid={`tool-call-body-${props.turn.tool_call_id}`}
+        >
+          <section class="tool-call-card__block">
+            <header class="tool-call-card__block-label">args</header>
+            <pre
+              class="tool-call-card__args-json"
+              data-testid={`tool-call-args-json-${props.turn.tool_call_id}`}
+            >
+              {prettyPrintArgs(props.turn.args_json)}
+            </pre>
+          </section>
+
+          <Show when={destructivePreview()}>
+            {(text) => (
+              <section class="tool-call-card__block">
+                <header class="tool-call-card__block-label">
+                  {props.turn.tool_name === 'shell.exec' ? 'command' : 'diff'}
+                </header>
+                <pre
+                  class="tool-call-card__diff"
+                  data-testid={`tool-call-diff-${props.turn.tool_call_id}`}
+                >
+                  {text()}
+                </pre>
+              </section>
+            )}
+          </Show>
+
+          <Show when={genericPreview()}>
+            <section class="tool-call-card__block">
+              <header class="tool-call-card__block-label">result</header>
+              <pre
+                class="tool-call-card__result"
+                data-testid={`tool-call-result-${props.turn.tool_call_id}`}
+              >
+                {truncatedPreview().text}
+              </pre>
+              <Show when={truncatedPreview().truncated}>
+                <button
+                  type="button"
+                  class="tool-call-card__show-more"
+                  data-testid={`tool-call-show-more-${props.turn.tool_call_id}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowFullPreview(true);
+                  }}
+                >
+                  show more
+                </button>
+              </Show>
+            </section>
+          </Show>
+
+          <Show when={props.turn.error !== undefined}>
+            <section class="tool-call-card__block tool-call-card__block--error">
+              <header class="tool-call-card__block-label">error</header>
+              <pre
+                class="tool-call-card__error"
+                data-testid={`tool-call-error-${props.turn.tool_call_id}`}
+              >
+                {props.turn.error}
+              </pre>
+            </section>
+          </Show>
+        </div>
+      </Show>
 
       {/* Inline approval prompt */}
       <Show
@@ -309,6 +575,106 @@ const ToolCallCard: Component<{ turn: Extract<ChatTurn, { type: 'tool_placeholde
           onApprove={handleApprove}
           onReject={handleReject}
         />
+      </Show>
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// ParallelReadsGroup — F-447 §5.1
+// ---------------------------------------------------------------------------
+
+/**
+ * Aggregate card for a run of read-only tool calls that share a `batch_id`.
+ * Collapsed: `parallel reads · N calls   48ms ✓ ›`. Expanded: each child
+ * renders as a nested compact row. Aggregate duration is the max across
+ * children (spec §5.1). Writes never enter here — the store tags only reads
+ * with a batch_id via the orchestrator's `parallel_group` field.
+ */
+const ParallelReadsGroup: Component<{
+  batchId: string;
+  calls: Array<Extract<ChatTurn, { type: 'tool_placeholder' }>>;
+}> = (props) => {
+  const [expanded, setExpanded] = createSignal(false);
+
+  const aggregateDuration = createMemo<number | undefined>(() => {
+    let max: number | undefined;
+    for (const c of props.calls) {
+      if (c.duration_ms === undefined) continue;
+      if (max === undefined || c.duration_ms > max) max = c.duration_ms;
+    }
+    return max;
+  });
+
+  const aggregateStatus = createMemo<ToolCallStatus>(() => {
+    if (props.calls.some((c) => c.status === 'errored')) return 'errored';
+    if (props.calls.some((c) => c.status === 'in-progress')) return 'in-progress';
+    if (props.calls.some((c) => c.status === 'awaiting-approval')) {
+      return 'awaiting-approval';
+    }
+    return 'completed';
+  });
+
+  const handleKeyDown = (e: KeyboardEvent): void => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    setExpanded((v) => !v);
+  };
+
+  return (
+    <div
+      class="tool-call-group"
+      data-testid={`tool-call-group-${props.batchId}`}
+      data-expanded={expanded() ? 'true' : 'false'}
+      data-status={aggregateStatus()}
+    >
+      <div
+        class="tool-call-group__row"
+        data-testid={`tool-call-group-row-${props.batchId}`}
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded()}
+        aria-controls={`tool-call-group-body-${props.batchId}`}
+        onClick={() => setExpanded((v) => !v)}
+        onKeyDown={handleKeyDown}
+      >
+        <span class="tool-call-card__icon" aria-hidden="true">⚙</span>
+        <span class="tool-call-card__name">parallel reads</span>
+        <span
+          class="tool-call-card__args"
+          data-testid={`tool-call-group-count-${props.batchId}`}
+        >
+          · {props.calls.length} calls
+        </span>
+        <Show when={formatDuration(aggregateDuration())}>
+          {(text) => (
+            <span
+              class="tool-call-card__duration"
+              data-testid={`tool-call-group-duration-${props.batchId}`}
+            >
+              {text()}
+            </span>
+          )}
+        </Show>
+        <span
+          class="tool-call-card__status"
+          data-status={aggregateStatus()}
+          data-testid={`tool-call-group-status-${props.batchId}`}
+        >
+          {statusGlyph(aggregateStatus())}
+        </span>
+        <span class="tool-call-card__chevron" aria-hidden="true">›</span>
+      </div>
+      <Show when={expanded()}>
+        <div
+          class="tool-call-group__body"
+          id={`tool-call-group-body-${props.batchId}`}
+          data-testid={`tool-call-group-body-${props.batchId}`}
+        >
+          <For each={props.calls}>
+            {(call) => <ToolCallCard turn={call} nested />}
+          </For>
+        </div>
       </Show>
     </div>
   );
@@ -987,6 +1353,48 @@ export const ChatPane: Component<ChatPaneProps> = (props) => {
     });
   });
 
+  // F-447 §5.1: parallel-reads grouping. Bucket consecutive tool_placeholder
+  // turns that share a `batch_id` into a single synthetic group item so
+  // `ParallelReadsGroup` can render the aggregate header + nested children.
+  // Non-placeholder turns break the run; a batch_id mismatch also breaks it.
+  // Runs of length 1 degrade to the standalone card — no group chrome — so
+  // a solo read doesn't awkwardly render as "parallel reads · 1 call".
+  type DisplayItem =
+    | { kind: 'turn'; turn: ChatTurn }
+    | {
+        kind: 'tool_group';
+        batchId: string;
+        calls: Array<Extract<ChatTurn, { type: 'tool_placeholder' }>>;
+      };
+
+  const displayItems = createMemo<DisplayItem[]>(() => {
+    const out: DisplayItem[] = [];
+    const turns = visibleTurns();
+    let i = 0;
+    while (i < turns.length) {
+      const t = turns[i]!;
+      if (t.type === 'tool_placeholder' && t.batch_id !== undefined) {
+        const bid = t.batch_id;
+        const run: Array<Extract<ChatTurn, { type: 'tool_placeholder' }>> = [];
+        while (i < turns.length) {
+          const n = turns[i]!;
+          if (n.type !== 'tool_placeholder' || n.batch_id !== bid) break;
+          run.push(n);
+          i += 1;
+        }
+        if (run.length > 1) {
+          out.push({ kind: 'tool_group', batchId: bid, calls: run });
+        } else {
+          out.push({ kind: 'turn', turn: run[0]! });
+        }
+        continue;
+      }
+      out.push({ kind: 'turn', turn: t });
+      i += 1;
+    }
+    return out;
+  });
+
   let listRef: HTMLDivElement | undefined;
   // Track whether the user has scrolled up (released auto-pin)
   const [userScrolledUp, setUserScrolledUp] = createSignal(false);
@@ -1093,8 +1501,12 @@ export const ChatPane: Component<ChatPaneProps> = (props) => {
             // composer ready
           </p>
         </Show>
-        <For each={visibleTurns()}>
-          {(turn) => {
+        <For each={displayItems()}>
+          {(item) => {
+            if (item.kind === 'tool_group') {
+              return <ParallelReadsGroup batchId={item.batchId} calls={item.calls} />;
+            }
+            const turn = item.turn;
             switch (turn.type) {
               case 'user':
                 return <UserBubble turn={turn} />;

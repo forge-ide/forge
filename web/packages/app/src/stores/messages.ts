@@ -35,7 +35,33 @@ export type SessionEvent =
   // transitions an existing placeholder. They remain for the fallback branch
   // (placeholder missing) used by the pre-wire unit tests.
   | { kind: 'ToolCallApprovalRequested'; tool_call_id: string; tool_name?: string; args_json?: string; preview: ApprovalPreview }
-  | { kind: 'ToolCallCompleted'; tool_call_id: string; result_summary: string }
+  | {
+      kind: 'ToolCallCompleted';
+      tool_call_id: string;
+      result_summary: string;
+      /**
+       * F-447: structured carry-through from the Rust wire `result` object.
+       * `result_summary` is retained for existing consumers (truncated JSON
+       * blob); the fields below are what the expanded card body reads so it
+       * doesn't have to re-parse the summary.
+       */
+      result_ok?: boolean;
+      result_preview?: string;
+      /**
+       * F-447: preserved for parity with the wire shape. The store routes
+       * `result.ok === false` through the `ToolCallFailed` code path so the
+       * expanded card can render the error verbatim instead of a truncated
+       * JSON blob.
+       */
+      result_error?: string;
+      /**
+       * F-447: authoritative duration from the daemon's `tool_call_completed`
+       * wire event. Phase 2 recomputed duration as `Date.now() - started_at`,
+       * which drifts whenever the daemon and client clocks disagree or the
+       * completion arrives out-of-order. Prefer the wire value when present.
+       */
+      duration_ms?: number;
+    }
   | { kind: 'ToolCallFailed'; tool_call_id: string; error: string }
   // F-144 / F-145: branch-tree mutations. `BranchSelected` flips the active
   // variant for a given branch point; `BranchDeleted` tombstones a variant.
@@ -109,6 +135,9 @@ export type ChatTurn =
       started_at: number;
       duration_ms?: number;
       result_summary?: string;
+      /** F-447: structured pieces of the completed-call `result` object. */
+      result_ok?: boolean;
+      result_preview?: string;
       error?: string;
       /** Populated when status is 'awaiting-approval'. */
       preview?: ApprovalPreview;
@@ -512,9 +541,25 @@ export function pushEvent(sessionId: SessionId, event: SessionEvent): void {
           );
           if (idx >= 0) {
             const turn = state.turns[idx] as Extract<ChatTurn, { type: 'tool_placeholder' }>;
-            turn.status = 'completed';
+            // F-447: prefer the wire-reported `result.ok === false` as the
+            // errored signal so the status glyph reflects the daemon's own
+            // verdict rather than assuming any completion is a success.
+            turn.status = event.result_ok === false ? 'errored' : 'completed';
             turn.result_summary = event.result_summary;
-            turn.duration_ms = Date.now() - turn.started_at;
+            if (event.result_ok !== undefined) turn.result_ok = event.result_ok;
+            if (event.result_preview !== undefined) {
+              turn.result_preview = event.result_preview;
+            }
+            // F-447: a completed-but-failed call (ok=false) carries the
+            // error string; route it into `turn.error` so the collapsed
+            // row's ✗ glyph has message text to pair with.
+            if (event.result_ok === false && event.result_error !== undefined) {
+              turn.error = event.result_error;
+            }
+            // F-447: prefer the wire value; fall back to local elapsed time
+            // when the daemon didn't carry a duration (older wire shapes or
+            // orphaned completions in tests).
+            turn.duration_ms = event.duration_ms ?? (Date.now() - turn.started_at);
           }
         }),
       );

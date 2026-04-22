@@ -88,11 +88,31 @@ export function fromRustEvent(rustEvent: unknown): SessionEvent | null {
       warnDrop('tool_call_completed', 'id missing or not a string');
       return null;
     }
-    return {
+    const result = ev['result'];
+    // F-447: the Rust wire `result` is `{ ok: bool, preview?: string, error?: string }`.
+    // Phase 2 collapsed result into a single `result_summary` stringified blob;
+    // Phase 3 needs the structured pieces for the expanded body's "preview",
+    // status glyph, and duration readout. Keep `result_summary` for backwards
+    // compatibility with existing consumers — the store carries both.
+    const out: SessionEvent = {
       kind: 'ToolCallCompleted',
       tool_call_id: id,
-      result_summary: JSON.stringify(ev['result'] ?? null).slice(0, 200),
+      result_summary: JSON.stringify(result ?? null).slice(0, 200),
     };
+    if (isObjectWith(result, 'ok') && typeof result.ok === 'boolean') {
+      out.result_ok = result.ok;
+    }
+    if (isObjectWith(result, 'preview') && isString(result.preview)) {
+      out.result_preview = result.preview;
+    }
+    if (isObjectWith(result, 'error') && isString(result.error)) {
+      out.result_error = result.error;
+    }
+    const durationMs = ev['duration_ms'];
+    if (typeof durationMs === 'number' && Number.isFinite(durationMs)) {
+      out.duration_ms = durationMs;
+    }
+    return out;
   }
 
   if (type === 'tool_call_approval_requested') {
