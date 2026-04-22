@@ -1,4 +1,7 @@
-use forge_agents::{load_agents, load_agents_md, load_workspace_agents, AgentDef, AgentLoader};
+use forge_agents::{
+    load_agents, load_agents_md, load_workspace_agents, AgentDef, AgentLoader, Error,
+    AGENTS_MD_SIZE_CAP,
+};
 use std::fs;
 use tempfile::tempdir;
 
@@ -134,6 +137,43 @@ fn returns_none_when_agents_md_missing() {
     let agents_md = load_agents_md(workspace.path()).unwrap();
 
     assert!(agents_md.is_none());
+}
+
+/// Regression test for F-352: a file exceeding the cap must be rejected with
+/// `AgentsMdTooLarge` rather than read into memory.
+#[test]
+fn rejects_agents_md_exceeding_size_cap() {
+    let workspace = tempdir().unwrap();
+    // Write a file that is one byte larger than the cap.
+    let oversized: Vec<u8> = vec![b'x'; (AGENTS_MD_SIZE_CAP + 1) as usize];
+    fs::write(workspace.path().join("AGENTS.md"), &oversized).unwrap();
+
+    let result = load_agents_md(workspace.path());
+
+    assert!(result.is_err(), "expected Err for oversized AGENTS.md");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, Error::AgentsMdTooLarge { .. }),
+        "expected AgentsMdTooLarge, got: {err}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("exceeds the"),
+        "error message should describe the cap: {msg}"
+    );
+}
+
+/// A file at exactly the cap boundary must be accepted.
+#[test]
+fn accepts_agents_md_at_size_cap() {
+    let workspace = tempdir().unwrap();
+    let at_cap: Vec<u8> = vec![b'x'; AGENTS_MD_SIZE_CAP as usize];
+    fs::write(workspace.path().join("AGENTS.md"), &at_cap).unwrap();
+
+    let result = load_agents_md(workspace.path());
+
+    assert!(result.is_ok(), "file exactly at cap should be accepted");
+    assert!(result.unwrap().is_some());
 }
 
 #[test]

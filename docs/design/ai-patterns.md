@@ -48,6 +48,17 @@ The agent monitor shows a list of all agents with a progress bar (3px height, `i
 
 MCP servers in the panel show a 7px status dot with a glow shadow when connected: `box-shadow: 0 0 6px rgba(61,220,132,0.5)`. This glow is the only glow used in the UI — it specifically communicates live network connectivity, which is a meaningfully different state than simple "active".
 
+### AGENTS.md injection
+
+When a workspace contains `AGENTS.md`, its contents are prepended to every agent's system prompt for that session. This lets repository authors supply agent-level instructions (coding style, project context, constraints) that apply automatically.
+
+**Security posture.** `AGENTS.md` is user-controlled content from a potentially untrusted source. The backend enforces two hard guards:
+
+- **Size cap (256 KiB).** Files larger than `AGENTS_MD_SIZE_CAP` (256 KiB) are refused with `Error::AgentsMdTooLarge` and treated as absent. The session continues normally; a `warn!` is emitted in the daemon log.
+- **Injection warning.** Every time `AGENTS.md` is successfully injected, the daemon logs a `warn!` naming the file path. This makes injection visible in traces and audit logs.
+
+**What is deferred.** Trust-on-first-use (hash-on-first-use accept/reject dialog, per-workspace trust registry) is not yet implemented. Until it is, users opening repositories from untrusted sources should review `AGENTS.md` manually before starting a session. A follow-up issue (linked from F-352) tracks the full trust-on-first-use gate.
+
 ### Interaction states
 
 Every component that fetches, renders, or mutates data resolves into one of four states. Use the shapes below — do not invent alternatives. New components that omit a state must justify the omission in review.

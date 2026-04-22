@@ -18,6 +18,20 @@ pub enum Error {
             location = source_hint(path))]
     IsolationViolation { name: String, path: Option<PathBuf> },
 
+    /// `AGENTS.md` exceeds the maximum permitted size. The file is not
+    /// injected into the system prompt. Callers should log a warning and
+    /// treat the file as absent rather than failing the session.
+    ///
+    /// The cap exists to prevent unbounded token consumption and to limit the
+    /// blast radius of a hostile or accidentally large `AGENTS.md` in an
+    /// untrusted repository.
+    #[error("AGENTS.md at {path} is {size} bytes, which exceeds the {limit}-byte cap; injection skipped")]
+    AgentsMdTooLarge {
+        path: PathBuf,
+        size: u64,
+        limit: u64,
+    },
+
     /// Parsing / IO / other non-isolation failures.
     #[error(transparent)]
     Other(#[from] anyhow::Error),

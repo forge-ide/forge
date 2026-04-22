@@ -15,6 +15,14 @@ mod orchestrator;
 
 use std::{fs, path::Path};
 
+/// Maximum byte size permitted for `AGENTS.md` injection.
+///
+/// Files larger than this cap are refused with [`Error::AgentsMdTooLarge`] rather
+/// than read in full. 256 KiB is large enough for any reasonable workspace
+/// instruction file while preventing unbounded token consumption from a
+/// hostile or accidentally oversized file.
+pub const AGENTS_MD_SIZE_CAP: u64 = 256 * 1024; // 256 KiB
+
 pub use def::{AgentDef, Isolation};
 pub use error::{Error, Result};
 pub use orchestrator::{
@@ -53,13 +61,26 @@ pub fn load_agents(workspace_root: &Path, user_home: &Path) -> anyhow::Result<Ve
 }
 
 /// Read `<workspace_root>/AGENTS.md` if present, returning `Ok(None)` when the file is absent.
-pub fn load_agents_md(workspace_root: &Path) -> anyhow::Result<Option<String>> {
+///
+/// Returns [`Error::AgentsMdTooLarge`] if the file exceeds [`AGENTS_MD_SIZE_CAP`] bytes.
+/// Callers should treat that error as "absent" (log a warning, skip injection) rather than
+/// failing the session.
+pub fn load_agents_md(workspace_root: &Path) -> Result<Option<String>> {
     let path = workspace_root.join("AGENTS.md");
-    if path.exists() {
-        Ok(Some(fs::read_to_string(path)?))
-    } else {
-        Ok(None)
+    if !path.exists() {
+        return Ok(None);
     }
+    let metadata = fs::metadata(&path).map_err(anyhow::Error::from)?;
+    let size = metadata.len();
+    if size > AGENTS_MD_SIZE_CAP {
+        return Err(Error::AgentsMdTooLarge {
+            path,
+            size,
+            limit: AGENTS_MD_SIZE_CAP,
+        });
+    }
+    let content = fs::read_to_string(&path).map_err(anyhow::Error::from)?;
+    Ok(Some(content))
 }
 
 /// Bundle of merged agent definitions plus the optional workspace-level `AGENTS.md` preamble.
