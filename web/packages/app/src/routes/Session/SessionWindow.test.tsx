@@ -544,8 +544,14 @@ describe('SessionWindow', () => {
     expect(store.__openFileCalls).toContain('/ws/README.md');
     // F-150: chat pane stays — the split mounts editor beside it.
     expect(queryByTestId('chat-pane')).not.toBeNull();
-    const breadcrumb = await findByTestId('editor-pane-breadcrumb');
-    expect(breadcrumb.textContent).toContain('README.md');
+    // F-394: breadcrumb leaf is the PaneHeader subject; prefix lands in
+    // the detail/cost slot. Scope the lookup to the editor section —
+    // multiple pane-headers render in parallel (chat + editor).
+    const editorSection = editor;
+    const subject = editorSection.querySelector(
+      '[data-testid="pane-header-subject"]',
+    );
+    expect(subject?.textContent).toBe('README.md');
     // Tree is now a v-split with one editor leaf (F-150 DoD: split-when-none).
     const rootTree = store.layouts.named[store.layouts.active]?.tree;
     expect(rootTree?.kind).toBe('split');
@@ -629,7 +635,10 @@ describe('SessionWindow', () => {
     // Both panes render in parallel before the close.
     await findByTestId('chat-pane');
 
-    const close = await findByRole('button', { name: /close editor pane/i });
+    // F-394: EditorPane uses the PaneHeader primitive; close aria-label is
+    // "Close pane". The chat leaf's close button says "Close session window",
+    // so the `/close pane/i` regex uniquely matches the editor leaf.
+    const close = await findByRole('button', { name: /close pane/i });
     close.click();
 
     // Editor leaf removed; chat leaf promoted to the whole grid.
@@ -737,12 +746,16 @@ describe('SessionWindow', () => {
     };
 
     try {
-      // EditorPane's own header is where onHeaderPointerDown is wired —
-      // that's the drag source for the editor leaf. Fire pointerdown on
-      // it, then move + up over the chat leaf's left edge to dock the
-      // editor on the far left.
-      const editorHeader = document.querySelector(
-        '.editor-pane__header',
+      // EditorPane's PaneHeader (F-394) is the drag source for the editor
+      // leaf — it forwards `onHeaderPointerDown` to `onHeaderPointerDown`
+      // on the primitive's <header>. Fire pointerdown on the PaneHeader
+      // inside the editor section, then move + up over the chat leaf's
+      // left edge to dock the editor on the far left.
+      const editorSection = document.querySelector(
+        '[data-testid="editor-pane"]',
+      ) as HTMLElement | null;
+      const editorHeader = editorSection?.querySelector(
+        '.pane-header',
       ) as HTMLElement | null;
       expect(editorHeader).not.toBeNull();
       const pd = new MouseEvent('pointerdown', {
