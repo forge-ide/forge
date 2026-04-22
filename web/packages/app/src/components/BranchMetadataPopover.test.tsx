@@ -151,4 +151,54 @@ describe('BranchMetadataPopover', () => {
     fireEvent.keyDown(getByTestId('branch-metadata-popover'), { key: 'Escape' });
     expect(onDismiss).toHaveBeenCalledTimes(1);
   });
+
+  // F-402: downgrade from role=dialog to role=menu — this surface is not
+  // modal, it is a non-modal list with its own dismissal affordances.
+  it('uses role="menu" (not role="dialog") — content is not truly modal', () => {
+    const { getByTestId } = render(() => (
+      <BranchMetadataPopover
+        variants={rows}
+        activeVariantId="var-1"
+        onSelect={() => {}}
+        onDelete={() => {}}
+        onExportAll={() => {}}
+        onDismiss={() => {}}
+      />
+    ));
+    const popover = getByTestId('branch-metadata-popover');
+    expect(popover.getAttribute('role')).toBe('menu');
+  });
+
+  it('outside-click fires onDismiss', () => {
+    const onDismiss = vi.fn();
+    render(() => (
+      <BranchMetadataPopover
+        variants={rows}
+        activeVariantId="var-1"
+        onSelect={() => {}}
+        onDelete={() => {}}
+        onExportAll={() => {}}
+        onDismiss={onDismiss}
+      />
+    ));
+    // Click somewhere that is not inside the popover — the document body.
+    fireEvent.mouseDown(document.body);
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it('inside-click does NOT fire onDismiss', () => {
+    const onDismiss = vi.fn();
+    const { getByTestId } = render(() => (
+      <BranchMetadataPopover
+        variants={rows}
+        activeVariantId="var-1"
+        onSelect={() => {}}
+        onDelete={() => {}}
+        onExportAll={() => {}}
+        onDismiss={onDismiss}
+      />
+    ));
+    fireEvent.mouseDown(getByTestId('branch-popover-row-1'));
+    expect(onDismiss).not.toHaveBeenCalled();
+  });
 });

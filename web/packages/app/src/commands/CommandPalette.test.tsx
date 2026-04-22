@@ -168,6 +168,53 @@ describe('CommandPalette entries + selection (F-157)', () => {
   });
 });
 
+// F-402: dialog contract — aria-modal, focus trap on Tab, focus restore on
+// close.
+describe('CommandPalette — a11y dialog contract (F-402)', () => {
+  it('declares aria-modal="true" when open', async () => {
+    const { findByTestId } = render(() => <CommandPalette />);
+    openWithCtrlK();
+    const root = await findByTestId('command-palette');
+    expect(root.getAttribute('aria-modal')).toBe('true');
+  });
+
+  it('Tab at the last focusable cycles to the first (traps focus)', async () => {
+    registerCommand({ id: 'a', title: 'Alpha', run: vi.fn() });
+    const { findByTestId } = render(() => <CommandPalette />);
+    openWithCtrlK();
+    const input = (await findByTestId('command-palette-input')) as HTMLInputElement;
+    // Only the input is focusable inside the dialog (list items are clickable
+    // but not tab-stops). So Tab from the input should wrap back to itself;
+    // we assert focus stays inside the dialog rather than escaping to the
+    // trigger element.
+    input.focus();
+    expect(document.activeElement).toBe(input);
+    const root = await findByTestId('command-palette');
+    const ev = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    input.dispatchEvent(ev);
+    expect(root.contains(document.activeElement)).toBe(true);
+  });
+
+  it('restores focus to the previously-focused element on close', async () => {
+    // Mount a trigger button and focus it; open palette; close; assert the
+    // trigger regains focus.
+    const trigger = document.createElement('button');
+    trigger.textContent = 'open palette';
+    document.body.appendChild(trigger);
+    trigger.focus();
+    expect(document.activeElement).toBe(trigger);
+
+    const { findByTestId, queryByTestId } = render(() => <CommandPalette />);
+    openWithCtrlK();
+    const input = (await findByTestId('command-palette-input')) as HTMLInputElement;
+    // Sanity — focus moved into the palette.
+    expect(input).toBe(document.activeElement);
+    fireEvent.keyDown(input, { key: 'Escape' });
+    expect(queryByTestId('command-palette')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // F-153 bonus — the "Open Agent Monitor" builtin navigates to `/agents`.
 // ---------------------------------------------------------------------------

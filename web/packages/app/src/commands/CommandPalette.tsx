@@ -20,6 +20,7 @@ import {
   type Component,
 } from 'solid-js';
 import { filterCommandsByQuery, type Command } from './registry';
+import { useFocusTrap } from '../lib/useFocusTrap';
 import './CommandPalette.css';
 
 interface ShortcutMatch {
@@ -63,8 +64,8 @@ export const CommandPalette: Component = () => {
     setQuery('');
     setActiveIndex(0);
     setOpen(true);
-    // Focus the input on next tick so it's ready for typing.
-    queueMicrotask(() => inputRef?.focus());
+    // Focus of the input is now driven by useFocusTrap on the dialog body's
+    // mount — no queueMicrotask shim needed.
   };
 
   const closePalette = (): void => {
@@ -146,17 +147,24 @@ export const CommandPalette: Component = () => {
     closePalette();
   };
 
-  return (
-    <Show when={open()}>
+  // F-402: the dialog body is a separate component so its mount/unmount
+  // lifecycle drives useFocusTrap — focus trap activates on open, focus
+  // restore runs on close.
+  const Body: Component = () => {
+    let dialogRef: HTMLDivElement | undefined;
+    useFocusTrap(() => dialogRef, { initialFocus: () => inputRef });
+    return (
       <div
         class="command-palette__backdrop"
         data-testid="command-palette-backdrop"
         onClick={onBackdropClick}
       >
         <div
+          ref={dialogRef}
           class="command-palette"
           data-testid="command-palette"
           role="dialog"
+          aria-modal="true"
           aria-label="Command palette"
           onClick={(e) => e.stopPropagation()}
         >
@@ -202,6 +210,12 @@ export const CommandPalette: Component = () => {
           </ul>
         </div>
       </div>
+    );
+  };
+
+  return (
+    <Show when={open()}>
+      <Body />
     </Show>
   );
 };

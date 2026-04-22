@@ -25,6 +25,7 @@ import {
 } from 'solid-js';
 import { useParams, useSearchParams } from '@solidjs/router';
 import { invoke } from '../lib/tauri';
+import { useFocusTrap } from '../lib/useFocusTrap';
 import type { BgAgentSummary } from '@forge/ipc';
 import { onSessionEvent, type SessionEventPayload } from '../ipc/session';
 import './AgentMonitor.css';
@@ -624,39 +625,49 @@ export const StepDrawer: Component<{
     }
   });
 
+  // F-402: extract the dialog body so its mount/unmount drives useFocusTrap —
+  // focus lands inside the drawer on open, Tab traps within, focus restores
+  // to the previously-focused element on close.
+  const Body: Component<{ step: AgentStep }> = (p) => {
+    let dialogRef: HTMLDivElement | undefined;
+    useFocusTrap(() => dialogRef);
+    return (
+      <div
+        ref={dialogRef}
+        class="agent-monitor__drawer"
+        role="dialog"
+        aria-label="Step detail"
+        aria-modal="true"
+      >
+        <header class="agent-monitor__drawer-head">
+          <h3>{p.step.title}</h3>
+          <button
+            type="button"
+            class="agent-monitor__drawer-close"
+            aria-label="Close step detail"
+            onClick={props.onClose}
+          >
+            ×
+          </button>
+        </header>
+        <dl class="agent-monitor__def">
+          <dt>kind</dt>
+          <dd>{p.step.kind}</dd>
+          <dt>status</dt>
+          <dd>{p.step.status}</dd>
+          <dt>started</dt>
+          <dd>{p.step.startedAt}</dd>
+        </dl>
+        <Show when={p.step.preview}>
+          <pre class="agent-monitor__drawer-preview">{p.step.preview}</pre>
+        </Show>
+      </div>
+    );
+  };
+
   return (
     <Show when={props.step}>
-      {(step) => (
-        <div
-          class="agent-monitor__drawer"
-          role="dialog"
-          aria-label="Step detail"
-          aria-modal="true"
-        >
-          <header class="agent-monitor__drawer-head">
-            <h3>{step().title}</h3>
-            <button
-              type="button"
-              class="agent-monitor__drawer-close"
-              aria-label="Close step detail"
-              onClick={props.onClose}
-            >
-              ×
-            </button>
-          </header>
-          <dl class="agent-monitor__def">
-            <dt>kind</dt>
-            <dd>{step().kind}</dd>
-            <dt>status</dt>
-            <dd>{step().status}</dd>
-            <dt>started</dt>
-            <dd>{step().startedAt}</dd>
-          </dl>
-          <Show when={step().preview}>
-            <pre class="agent-monitor__drawer-preview">{step().preview}</pre>
-          </Show>
-        </div>
-      )}
+      {(step) => <Body step={step()} />}
     </Show>
   );
 };

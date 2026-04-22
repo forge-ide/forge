@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { cleanup, render, fireEvent, waitFor } from '@solidjs/testing-library';
+import { createSignal } from 'solid-js';
 
 const { listenMock } = vi.hoisted(() => ({
   listenMock: vi.fn(),
@@ -625,6 +626,49 @@ describe('<StepDrawer>', () => {
     ));
     fireEvent.click(getByLabelText(/Close step detail/i));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  // F-402: dialog contract — focus lands in the drawer on open, Tab wraps
+  // within, focus restores to the previously-focused element on close.
+  it('moves focus into the drawer on open', async () => {
+    const { findByLabelText } = render(() => (
+      <StepDrawer step={step()} onClose={() => {}} />
+    ));
+    const closeBtn = await findByLabelText(/Close step detail/i);
+    expect(document.activeElement).toBe(closeBtn);
+  });
+
+  it('traps Tab inside the drawer — Tab from last focusable cycles to first', async () => {
+    const { findByRole, findByLabelText } = render(() => (
+      <StepDrawer step={step()} onClose={() => {}} />
+    ));
+    const dialog = await findByRole('dialog');
+    const closeBtn = await findByLabelText(/Close step detail/i);
+    // Only the close button is focusable in the drawer, so Tab from it
+    // should cycle back to itself. Assert focus is still inside the drawer.
+    closeBtn.focus();
+    const ev = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    closeBtn.dispatchEvent(ev);
+    expect(dialog.contains(document.activeElement)).toBe(true);
+  });
+
+  it('restores focus to the prior active element when the drawer closes', async () => {
+    const trigger = document.createElement('button');
+    trigger.textContent = 'open step';
+    document.body.appendChild(trigger);
+    trigger.focus();
+    expect(document.activeElement).toBe(trigger);
+
+    const [currentStep, setCurrentStep] = createSignal<AgentStep | null>(step());
+    const { queryByRole } = render(() => (
+      <StepDrawer step={currentStep()} onClose={() => setCurrentStep(null)} />
+    ));
+    await waitFor(() => expect(queryByRole('dialog')).not.toBeNull());
+    // Close by flipping the prop to null — simulates the real dismissal path.
+    setCurrentStep(null);
+    await waitFor(() => expect(queryByRole('dialog')).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+    trigger.remove();
   });
 });
 
