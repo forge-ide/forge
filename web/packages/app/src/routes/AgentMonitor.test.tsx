@@ -898,3 +898,106 @@ describe('AgentMonitor — instance query-param pre-selection (F-153)', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// F-401: four-state async-coverage for the bg-agent list column.
+//
+// Previously the route swallowed `list_background_agents` rejections and
+// returned `[]`, so a backend error was indistinguishable from "zero agents".
+// The list column must now expose loading, error, empty, and ready as
+// distinct rendered states — per `component-principles.md`'s async-coverage
+// rule and `agent-monitor.md §9.4`.
+// ---------------------------------------------------------------------------
+describe('AgentMonitor — list column async states (F-401)', () => {
+  function renderAt(path: string) {
+    listenMock.mockResolvedValue(() => {});
+    const history = createMemoryHistory();
+    history.set({ value: path });
+    return render(() => (
+      <MemoryRouter history={history}>
+        <Route path="/agents/:id" component={AgentMonitor} />
+      </MemoryRouter>
+    ));
+  }
+
+  afterEach(() => {
+    setInvokeForTesting(null);
+    listenMock.mockReset();
+  });
+
+  it('renders the mono-noun+state loading line while list_background_agents is in-flight', async () => {
+    // Never-resolving promise so the resource stays in its loading branch.
+    setInvokeForTesting(
+      (async (cmd: string) => {
+        if (cmd === 'list_background_agents') {
+          return new Promise(() => {});
+        }
+        return undefined;
+      }) as never,
+    );
+    const { findByText } = renderAt('/agents/sess-a');
+    // Noun + state per voice-terminology.md §8 — matches ProviderPanel's
+    // `ollama · probing` exemplar. Guard against verb-state regression.
+    const loading = await findByText('agents · probing');
+    expect(loading).toBeTruthy();
+  });
+
+  it('renders the error block with verbatim detail when list_background_agents rejects', async () => {
+    setInvokeForTesting(
+      (async (cmd: string) => {
+        if (cmd === 'list_background_agents') {
+          throw new Error('authz denied: agent-monitor');
+        }
+        return undefined;
+      }) as never,
+    );
+    const { findByText, queryByText } = renderAt('/agents/sess-a');
+    // Noun-state heading, matching PROVIDER UNAVAILABLE exemplar.
+    expect(await findByText('AGENT LIST UNAVAILABLE')).toBeTruthy();
+    // Verbatim technical detail — String(new Error('x')) is "Error: x".
+    expect(await findByText(/Error: authz denied: agent-monitor/)).toBeTruthy();
+    // Error state must be distinct from empty — the comment-syntax empty
+    // placeholder must NOT render when the fetch rejected.
+    expect(queryByText('// no agents')).toBeNull();
+  });
+
+  it('renders // no agents when list_background_agents resolves with an empty list', async () => {
+    setInvokeForTesting(
+      (async (cmd: string) => {
+        if (cmd === 'list_background_agents') return [];
+        return undefined;
+      }) as never,
+    );
+    const { findByText, queryByText } = renderAt('/agents/sess-a');
+    expect(await findByText('// no agents')).toBeTruthy();
+    // Ready-but-empty must NOT render the error UI.
+    expect(queryByText('AGENT LIST UNAVAILABLE')).toBeNull();
+  });
+
+  it('retry button on the error state re-invokes list_background_agents and recovers', async () => {
+    let calls = 0;
+    setInvokeForTesting(
+      (async (cmd: string) => {
+        if (cmd === 'list_background_agents') {
+          calls += 1;
+          if (calls === 1) throw new Error('transient');
+          return [{ id: 'aaaa1111', agent_name: 'writer', state: 'Running' }];
+        }
+        return undefined;
+      }) as never,
+    );
+    const { findByRole, findByText, container } = renderAt('/agents/sess-a');
+    // Error state lands first.
+    expect(await findByText('AGENT LIST UNAVAILABLE')).toBeTruthy();
+    const retry = await findByRole('button', { name: /^retry$/i });
+    fireEvent.click(retry);
+    // Recovery: error clears, row list renders.
+    await waitFor(() => {
+      expect(calls).toBe(2);
+    });
+    await waitFor(() => {
+      const rows = container.querySelectorAll('.agent-monitor__row');
+      expect(rows.length).toBe(1);
+    });
+  });
+});

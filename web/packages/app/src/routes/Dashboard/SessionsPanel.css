@@ -75,6 +75,69 @@
   margin: var(--sp-6) 0;
 }
 
+/* F-401: loading + error branches for the session list. Mono-noun+state
+ * loading line and `SESSIONS UNAVAILABLE` block mirror ProviderPanel's
+ * four-state coverage exemplar. */
+.sessions__loading {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  margin: var(--sp-6) 0;
+}
+
+.sessions__list-error {
+  margin: var(--sp-4) 0;
+}
+
+.sessions__list-error-body {
+  border: 1px solid var(--color-error-border);
+  background: var(--color-error-bg);
+  padding: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.sessions__list-error-title {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--color-error);
+  margin: 0;
+}
+
+.sessions__list-error-detail {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-primary);
+  margin: 0;
+  word-break: break-word;
+}
+
+.sessions__retry {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--color-error-border);
+  color: var(--color-error);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  padding: var(--sp-1) var(--sp-3);
+  cursor: pointer;
+  align-self: flex-start;
+}
+
+.sessions__retry:hover {
+  background: var(--color-error-bg);
+}
+
+.sessions__retry:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
+}
+
 /* F-079: inline error surface for failed open_session invokes. */
 .sessions__error {
   font-family: var(--font-mono);

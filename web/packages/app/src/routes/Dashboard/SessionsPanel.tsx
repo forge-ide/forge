@@ -18,13 +18,15 @@ export interface SessionSummary {
 
 type Tab = 'active' | 'archived';
 
+// F-401: surface backend failure as a distinct resource state. Previously
+// this swallowed all `session_list` rejections and returned `[]`, which
+// collapsed "backend failed" into "zero sessions" and violated
+// `component-principles.md`'s four-state coverage rule. Now the rejection
+// propagates to the SolidJS resource's `error` field, and the panel
+// renders a `SESSIONS UNAVAILABLE <detail>` block per `dashboard.md D.5`.
 async function fetchSessions(): Promise<SessionSummary[]> {
-  try {
-    const result = await invoke<SessionSummary[]>('session_list');
-    return Array.isArray(result) ? result : [];
-  } catch {
-    return [];
-  }
+  const result = await invoke<SessionSummary[]>('session_list');
+  return Array.isArray(result) ? result : [];
 }
 
 function partition(sessions: SessionSummary[]): Record<Tab, SessionSummary[]> {
@@ -44,14 +46,27 @@ function count(n: number): string {
  * card clicks dispatch `open_session` to reopen the Session window.
  */
 export const SessionsPanel: Component = () => {
-  const [sessions] = createResource(fetchSessions, { initialValue: [] });
+  // F-401: no `initialValue` here so the resource reports `loading` while the
+  // first fetch is in flight; otherwise loading collapses into the ready-empty
+  // branch and the four-state coverage regresses.
+  const [sessions, { refetch }] = createResource(fetchSessions);
   const [tab, setTab] = createSignal<Tab>('active');
   // F-079: inline error surface when `open_session` rejects (IPC auth fail,
   // missing window, validation error, etc.). Previously a fire-and-forget
   // `void invoke(...)` swallowed all rejections silently.
   const [openError, setOpenError] = createSignal<string | null>(null);
-  const groups = () => partition(sessions() ?? []);
+  // F-401: reading `sessions()` while the resource is in its `errored` state
+  // re-throws in the reactive scope. Gate on the resource's state so the
+  // fetch rejection stays observable via the error block without crashing
+  // the panel.
+  const rows = () => (sessions.state === 'ready' ? sessions() ?? [] : []);
+  const groups = () => partition(rows());
   const current = () => groups()[tab()];
+  const listErrorDetail = () => {
+    const err = sessions.error;
+    if (!err) return null;
+    return err instanceof Error ? `Error: ${err.message}` : String(err);
+  };
 
   const handleOpen = (id: string) => {
     setOpenError(null);
@@ -85,30 +100,70 @@ export const SessionsPanel: Component = () => {
           </p>
         )}
       </Show>
-      <Show
-        when={current().length > 0}
-        fallback={
-          <p
-            class="sessions__empty"
-            id={panelId()}
-            role="tabpanel"
-            aria-labelledby={tabId(tab())}
-          >
-            {tab() === 'active' ? '// no active sessions' : '// archive is empty'}
-          </p>
-        }
-      >
-        <div
-          ref={setGridRef}
-          class="sessions__grid"
+      {/* F-401: loading / error branches before the ready tabpanel so the
+          Dashboard panel renders four distinct async states per
+          `dashboard.md D.5`. Loading shows the mono-noun+state line;
+          error shows the `SESSIONS UNAVAILABLE` block with verbatim
+          detail and a RETRY action. Ready delegates to the existing
+          empty-or-grid split. */}
+      <Show when={sessions.loading}>
+        <p
+          class="sessions__loading"
           id={panelId()}
           role="tabpanel"
           aria-labelledby={tabId(tab())}
         >
-          <For each={current()}>
-            {(session) => <SessionCard session={session} onOpen={handleOpen} />}
-          </For>
-        </div>
+          sessions · probing
+        </p>
+      </Show>
+      <Show when={listErrorDetail()}>
+        {(detail) => (
+          <div
+            class="sessions__list-error"
+            id={panelId()}
+            role="tabpanel"
+            aria-labelledby={tabId(tab())}
+          >
+            <div class="sessions__list-error-body" role="alert">
+              <p class="sessions__list-error-title">SESSIONS UNAVAILABLE</p>
+              <p class="sessions__list-error-detail">{detail()}</p>
+              <button
+                type="button"
+                class="sessions__retry"
+                onClick={() => void refetch()}
+              >
+                RETRY
+              </button>
+            </div>
+          </div>
+        )}
+      </Show>
+      <Show when={sessions.state === 'ready'}>
+        <Show
+          when={current().length > 0}
+          fallback={
+            <p
+              class="sessions__empty"
+              id={panelId()}
+              role="tabpanel"
+              aria-labelledby={tabId(tab())}
+            >
+              {tab() === 'active' ? '// no active sessions' : '// archive is empty'}
+            </p>
+          }
+        >
+          <div
+            ref={setGridRef}
+            class="sessions__grid"
+            id={panelId()}
+            role="tabpanel"
+            aria-labelledby={tabId(tab())}
+          >
+            <For each={current()}>
+              {(session) => <SessionCard session={session} onOpen={handleOpen} />}
+            </For>
+          </div>
+        </Show>
       </Show>
     </section>
   );

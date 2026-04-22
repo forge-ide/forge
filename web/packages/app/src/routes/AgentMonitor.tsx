@@ -357,14 +357,41 @@ function toBgRow(s: BgAgentSummary): AgentRow {
 // Left column — agent list
 // ---------------------------------------------------------------------------
 
+/**
+ * F-401: four-state async coverage for the agent list column.
+ *
+ * `status` drives the list column's sole render branch per
+ * `agent-monitor.md §9.4` — loading / error / empty / ready must each be
+ * visually distinct. Collapsing "backend rejected" into "zero agents" was
+ * the precise regression F-401 flagged.
+ *
+ * - `loading` — `list_background_agents` is in flight. Renders `agents · probing`
+ *   (noun + state per `voice-terminology.md` §8).
+ * - `error`   — the resource rejected. Renders the `AGENT LIST UNAVAILABLE`
+ *   block with the verbatim error detail and a RETRY action.
+ * - `empty`   — the resource resolved with zero rows. Renders `// no agents`.
+ * - `ready`   — the row list (already filtered + sorted by the caller).
+ *
+ * The loading / error / empty branches also carry the tabpanel wiring from
+ * F-416 so the filter tabs' `aria-controls` always resolves to a
+ * `role="tabpanel"` element regardless of which branch renders.
+ */
+export type AgentListStatus =
+  | { kind: 'loading' }
+  | { kind: 'error'; detail: string; onRetry: () => void }
+  | { kind: 'ready' };
+
 export const AgentList: Component<{
   rows: AgentRow[];
   filter: AgentFilter;
   onFilter: (f: AgentFilter) => void;
   selectedId: string | null;
   onSelect: (id: string) => void;
+  /** Optional — when omitted the list behaves as pre-F-401: ready / empty. */
+  status?: AgentListStatus;
 }> = (props) => {
   const visible = createMemo(() => sortAgents(filterAgents(props.rows, props.filter)));
+  const status = (): AgentListStatus => props.status ?? { kind: 'ready' };
 
   // F-416: tabs ↔ tabpanel association (WAI-ARIA APG tabs pattern). A
   // single tabpanel hosts the row list; its aria-labelledby always points
@@ -393,35 +420,72 @@ export const AgentList: Component<{
           )}
         </For>
       </div>
-      <Show
-        when={visible().length > 0}
-        fallback={
-          <p
-            class="agent-monitor__empty"
-            id={rowsPanelId}
-            role="tabpanel"
-            aria-labelledby={filterTabId(props.filter)}
-          >
-            // no agents
-          </p>
-        }
-      >
-        <ul
-          class="agent-monitor__rows"
+      <Show when={status().kind === 'loading'}>
+        <p
+          class="agent-monitor__loading"
           id={rowsPanelId}
           role="tabpanel"
           aria-labelledby={filterTabId(props.filter)}
         >
-          <For each={visible()}>
-            {(row) => (
-              <AgentListRow
-                row={row}
-                active={props.selectedId === row.id}
-                onSelect={props.onSelect}
-              />
-            )}
-          </For>
-        </ul>
+          agents · probing
+        </p>
+      </Show>
+      <Show when={status().kind === 'error'}>
+        {(() => {
+          const err = status() as Extract<AgentListStatus, { kind: 'error' }>;
+          return (
+            <div
+              class="agent-monitor__error"
+              id={rowsPanelId}
+              role="tabpanel"
+              aria-labelledby={filterTabId(props.filter)}
+            >
+              <div class="agent-monitor__error-body" role="alert">
+                <p class="agent-monitor__error-title">AGENT LIST UNAVAILABLE</p>
+                <p class="agent-monitor__error-detail">{err.detail}</p>
+                <button
+                  type="button"
+                  class="agent-monitor__retry"
+                  onClick={() => err.onRetry()}
+                >
+                  RETRY
+                </button>
+              </div>
+            </div>
+          );
+        })()}
+      </Show>
+      <Show when={status().kind === 'ready'}>
+        <Show
+          when={visible().length > 0}
+          fallback={
+            <p
+              class="agent-monitor__empty"
+              id={rowsPanelId}
+              role="tabpanel"
+              aria-labelledby={filterTabId(props.filter)}
+            >
+              // no agents
+            </p>
+          }
+        >
+          <ul
+            class="agent-monitor__rows"
+            id={rowsPanelId}
+            role="tabpanel"
+            aria-labelledby={filterTabId(props.filter)}
+          >
+            <For each={visible()}>
+              {(row) => (
+                <AgentListRow
+                  row={row}
+                  active={props.selectedId === row.id}
+                  onSelect={props.onSelect}
+                />
+              )}
+            </For>
+          </ul>
+        </Show>
       </Show>
     </aside>
   );
@@ -717,16 +781,18 @@ export const StepDrawer: Component<{
 // Route shell — assembles columns + data sources
 // ---------------------------------------------------------------------------
 
+// F-401: surface backend failure as a distinct resource state. Previously
+// this swallowed all `list_background_agents` rejections and returned `[]`,
+// which collapsed "backend failed" into "zero agents" and violated
+// `component-principles.md`'s four-state coverage rule. Now the rejection
+// propagates to the SolidJS resource's `error` field, and the list column
+// renders `AGENT LIST UNAVAILABLE <detail>` per `agent-monitor.md §9.4`.
 async function fetchBgAgents(sessionId: string | null): Promise<BgAgentSummary[]> {
   if (!sessionId) return [];
-  try {
-    const result = await invoke<BgAgentSummary[]>('list_background_agents', {
-      sessionId,
-    });
-    return Array.isArray(result) ? result : [];
-  } catch {
-    return [];
-  }
+  const result = await invoke<BgAgentSummary[]>('list_background_agents', {
+    sessionId,
+  });
+  return Array.isArray(result) ? result : [];
 }
 
 /**
@@ -808,10 +874,11 @@ export const AgentMonitor: Component = () => {
   const [selectedId, setSelectedId] = createSignal<string | null>(null);
   const [openStep, setOpenStep] = createSignal<AgentStep | null>(null);
 
-  // Background agents — refetched when the session id changes.
-  const [bgAgents, { refetch }] = createResource(sessionId, fetchBgAgents, {
-    initialValue: [],
-  });
+  // Background agents — refetched when the session id changes. F-401: no
+  // `initialValue` here so the resource reports `loading` while the first
+  // fetch is in flight; otherwise loading collapses into the ready-empty
+  // branch and the four-state coverage regresses.
+  const [bgAgents, { refetch }] = createResource(sessionId, fetchBgAgents);
 
   // Live rows observed via session:event — session-root and sub-agents. The
   // helper upserts a session row the first time `StepStarted.instance_id`
@@ -825,10 +892,32 @@ export const AgentMonitor: Component = () => {
     Record<string, ResourceSnapshot>
   >({});
 
-  const rows = createMemo<AgentRow[]>(() => [
-    ...bgAgents().map(toBgRow),
-    ...subAgents(),
-  ]);
+  const rows = createMemo<AgentRow[]>(() => {
+    // F-401: reading `bgAgents()` while the resource is in its `errored`
+    // state re-throws in the reactive scope. Gate on the resource's state
+    // so a rejected fetch stays observable via `listStatus` without
+    // crashing the route; sub-agents from session events still render.
+    const fetched = bgAgents.state === 'ready' ? bgAgents() ?? [] : [];
+    return [...fetched.map(toBgRow), ...subAgents()];
+  });
+
+  // F-401: discriminated async state for the list column. Loading only shows
+  // until the resource has a first outcome; error wins over empty so a
+  // rejected fetch never renders as "zero agents". Session-event-driven
+  // sub-agents still render when they arrive in the error branch — those
+  // rows live in `subAgents()` independent of the bg-agent fetch.
+  const listStatus = createMemo<AgentListStatus>(() => {
+    if (bgAgents.loading) return { kind: 'loading' };
+    const err = bgAgents.error;
+    if (err) {
+      return {
+        kind: 'error',
+        detail: err instanceof Error ? `Error: ${err.message}` : String(err),
+        onRetry: () => void refetch(),
+      };
+    }
+    return { kind: 'ready' };
+  });
 
   onMount(async () => {
     // Subscribe to session events to update sub-agents + step timelines.
@@ -918,6 +1007,7 @@ export const AgentMonitor: Component = () => {
         onFilter={setFilter}
         selectedId={selectedId()}
         onSelect={setSelectedId}
+        status={listStatus()}
       />
       <AgentTrace
         agent={selected()}
