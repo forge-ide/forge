@@ -57,6 +57,7 @@ ignore = [
     # Forge code — see S3 rationale in the F-070 PR body).
     { id = "RUSTSEC-2024-0429", reason = "glib VariantStrIter unsoundness; transitive via Tauri 2 webkit chain, not reachable from Forge code paths [expires 2026-10-19]" },
     { id = "RUSTSEC-2026-0097", reason = "rand thread_rng unsound when combined with a custom log::Logger calling rand::rng(); Forge does not install such a logger [expires 2026-10-19]" },
+    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki CRL parsing panic; Forge does not parse CRLs — reqwest TLS validation uses server-cert OCSP, not client-supplied CRL distribution points [expires 2026-10-19]" },
 ]
 
 [licenses]
