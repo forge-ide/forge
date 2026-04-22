@@ -267,6 +267,19 @@ impl McpManager {
     /// entries; [`McpManager::start`] is the explicit trigger. This
     /// matches `forge-lsp` / `forge-providers` where instantiation is
     /// cheap and connect-on-use is the norm.
+    ///
+    /// # Examples
+    ///
+    /// Construct a manager from an empty config (no servers) — the common
+    /// shape on first boot before the user has authored any `.mcp.json`:
+    ///
+    /// ```
+    /// use std::collections::BTreeMap;
+    /// use forge_mcp::McpManager;
+    ///
+    /// let mgr = McpManager::new(BTreeMap::new());
+    /// assert!(futures::executor::block_on(mgr.list()).is_empty());
+    /// ```
     pub fn new(config: BTreeMap<String, McpServerSpec>) -> Self {
         Self::with_tuning(config, LifecycleTuning::default())
     }
@@ -346,6 +359,27 @@ impl McpManager {
     /// and restarts on failure.
     ///
     /// Idempotent: starting an already-running server is a no-op.
+    ///
+    /// # Examples
+    ///
+    /// Build a manager from a single stdio spec and drive its lifecycle:
+    ///
+    /// ```no_run
+    /// use std::collections::BTreeMap;
+    /// use forge_mcp::{McpManager, McpServerSpec, ServerKind};
+    ///
+    /// # async fn example() -> anyhow::Result<()> {
+    /// let spec = McpServerSpec {
+    ///     kind: ServerKind::Stdio {
+    ///         command: "mcp-server-demo".into(),
+    ///         args: vec![],
+    ///         env: BTreeMap::new(),
+    ///     },
+    /// };
+    /// let mgr = McpManager::new(BTreeMap::from([("demo".into(), spec)]));
+    /// mgr.start("demo").await?;
+    /// # Ok(()) }
+    /// ```
     pub async fn start(&self, name: &str) -> Result<()> {
         // Scope the map lock tightly so we don't hold it across the
         // `tokio::spawn` — spawn is non-blocking but keeping the lock
