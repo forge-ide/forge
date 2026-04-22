@@ -1,17 +1,20 @@
 //! Stdio JSON-RPC transport for a single MCP server subprocess.
 //!
 //! The wire format is line-delimited JSON-RPC 2.0: each frame is a UTF-8
-//! JSON value terminated by `\n`. Partial reads are absorbed by
-//! [`tokio::io::AsyncBufReadExt::lines`]; lines that fail to parse as JSON
-//! are logged at WARN and dropped — they don't tear the connection down.
-//! When the child process exits (or its stdout EOFs), the receiver yields
-//! exactly one terminal [`StdioEvent::Exit`] before closing.
+//! JSON value terminated by `\n`. Partial reads are absorbed through a
+//! bounded reader capped at [`MAX_STDIO_FRAME_BYTES`]; lines that fail to
+//! parse as JSON are logged at WARN and dropped — they don't tear the
+//! connection down. Lines that exceed the cap are discarded in-flight and
+//! surface as [`StdioEvent::Malformed`] so subscribers can observe the
+//! misbehavior without the reader buffering the payload (F-347). When the
+//! child process exits (or its stdout EOFs), the receiver yields exactly
+//! one terminal [`StdioEvent::Exit`] before closing.
 
 use std::process::{ExitStatus, Stdio as StdStdio};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
@@ -20,10 +23,10 @@ use crate::{McpServerSpec, ServerKind};
 
 /// Events emitted on [`Stdio::recv`].
 ///
-/// Consumers receive any number of [`StdioEvent::Message`] values followed
-/// by exactly one terminal [`StdioEvent::Exit`] once the child reaps, at
-/// which point the sender is dropped and subsequent calls to
-/// [`Stdio::recv`] return `None`.
+/// Consumers receive any number of [`StdioEvent::Message`] and
+/// [`StdioEvent::Malformed`] values followed by exactly one terminal
+/// [`StdioEvent::Exit`] once the child reaps, at which point the sender is
+/// dropped and subsequent calls to [`Stdio::recv`] return `None`.
 #[derive(Debug)]
 pub enum StdioEvent {
     /// A successfully parsed JSON-RPC 2.0 message from the server's stdout.
@@ -31,6 +34,17 @@ pub enum StdioEvent {
     /// Responses, notifications, and server→client requests all surface
     /// here; dispatch is the manager's job, not the transport's.
     Message(serde_json::Value),
+    /// A stdout line exceeded [`MAX_STDIO_FRAME_BYTES`] and was discarded
+    /// in-flight. F-347: closes the DoS surface a compromised / buggy /
+    /// hostile MCP server exposes by writing an unbounded single line.
+    /// The reader keeps running after emitting this event, so a
+    /// well-formed frame following the over-cap one still reaches the
+    /// event channel.
+    Malformed {
+        /// How many bytes were buffered before the reader hit the ceiling
+        /// and started discarding. Always `>=` [`MAX_STDIO_FRAME_BYTES`].
+        bytes_discarded: usize,
+    },
     /// The child process exited. Always the last event before channel close.
     Exit(ExitStatus),
 }
@@ -38,6 +52,16 @@ pub enum StdioEvent {
 /// Channel depth for outbound [`StdioEvent`]s. Generous enough that a brief
 /// scheduling delay in the consumer doesn't back-pressure the reader task.
 const EVENT_CHANNEL_CAPACITY: usize = 128;
+
+/// Maximum bytes the stdout reader will buffer for a single JSON-RPC frame
+/// before discarding. Closes F-347: `tokio::io::AsyncBufReadExt::lines`
+/// reads until `\n` with no length cap, which lets a compromised / buggy /
+/// hostile MCP server DoS the host via a single enormous line. 4 MiB is
+/// large enough for realistic MCP payloads (tool-list responses,
+/// base64-encoded resource reads) and small enough to keep the worst-case
+/// resident set of a misbehaving child bounded. Mirrors F-351's
+/// `MAX_LSP_LINE_BYTES` policy for the LSP stdio transport.
+pub const MAX_STDIO_FRAME_BYTES: usize = 4 * 1024 * 1024;
 
 /// Variables forwarded from the parent process into every stdio MCP child.
 ///
@@ -172,14 +196,34 @@ impl Stdio {
 
         // Stderr drain: prevents the child's stderr pipe from filling up
         // and blocking its writes. Log at DEBUG — stderr is free-form.
+        // Reads are capped at `MAX_STDIO_FRAME_BYTES` (F-347); an over-cap
+        // line is discarded and logged at WARN. Stderr is not part of the
+        // event contract, so over-cap lines do not surface as
+        // `StdioEvent::Malformed`.
         let stderr_task = tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
+            let mut reader = BufReader::new(stderr);
             loop {
-                match lines.next_line().await {
-                    Ok(Some(line)) => {
-                        tracing::debug!(target: "forge_mcp::transport::stdio", stderr = %line);
+                match read_line_bounded(&mut reader, MAX_STDIO_FRAME_BYTES).await {
+                    Ok(BoundedLine::Line(bytes)) => {
+                        if bytes.is_empty() {
+                            break;
+                        }
+                        let text = String::from_utf8_lossy(&bytes);
+                        let line = text.trim_end_matches('\n').trim_end_matches('\r');
+                        tracing::debug!(
+                            target: "forge_mcp::transport::stdio",
+                            stderr = %line,
+                        );
                     }
-                    Ok(None) => break,
+                    Ok(BoundedLine::Overflow { bytes_discarded }) => {
+                        tracing::warn!(
+                            target: "forge_mcp::transport::stdio",
+                            stream = "stderr",
+                            bytes_discarded = bytes_discarded,
+                            cap = MAX_STDIO_FRAME_BYTES,
+                            "dropping over-cap stderr line",
+                        );
+                    }
                     Err(err) => {
                         tracing::debug!(
                             target: "forge_mcp::transport::stdio",
@@ -193,18 +237,26 @@ impl Stdio {
         });
 
         // Reader: owns stdout + child, so it can wait() after EOF and emit
-        // the terminal Exit event without racing the consumer.
+        // the terminal Exit event without racing the consumer. Reads are
+        // capped at `MAX_STDIO_FRAME_BYTES` (F-347); over-cap frames are
+        // discarded and surface as `StdioEvent::Malformed`. The reader
+        // keeps running so a well-formed frame following an over-cap line
+        // still reaches the event channel.
         let reader_tx = tx.clone();
         let reader_task = tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
+            let mut reader = BufReader::new(stdout);
             loop {
-                match lines.next_line().await {
-                    Ok(Some(line)) => {
+                match read_line_bounded(&mut reader, MAX_STDIO_FRAME_BYTES).await {
+                    Ok(BoundedLine::Line(bytes)) => {
+                        if bytes.is_empty() {
+                            break; // EOF: child closed stdout.
+                        }
+                        let trimmed = trim_trailing_newline(&bytes);
                         // Tolerate blank lines (some servers pad frames).
-                        if line.trim().is_empty() {
+                        if trimmed.iter().all(|b| b.is_ascii_whitespace()) {
                             continue;
                         }
-                        match serde_json::from_str::<serde_json::Value>(&line) {
+                        match serde_json::from_slice::<serde_json::Value>(trimmed) {
                             Ok(value) => {
                                 if reader_tx.send(StdioEvent::Message(value)).await.is_err() {
                                     // Consumer dropped; no need to keep reading.
@@ -214,16 +266,32 @@ impl Stdio {
                             Err(err) => {
                                 // DoD: malformed frames are logged + skipped,
                                 // never fatal.
+                                let as_str = String::from_utf8_lossy(trimmed);
                                 tracing::warn!(
                                     target: "forge_mcp::transport::stdio",
                                     error = %err,
-                                    line = %super::truncate(&line, 512),
+                                    line = %super::truncate(&as_str, 512),
                                     "dropping malformed JSON-RPC frame",
                                 );
                             }
                         }
                     }
-                    Ok(None) => break, // EOF: child closed stdout.
+                    Ok(BoundedLine::Overflow { bytes_discarded }) => {
+                        tracing::warn!(
+                            target: "forge_mcp::transport::stdio",
+                            stream = "stdout",
+                            bytes_discarded = bytes_discarded,
+                            cap = MAX_STDIO_FRAME_BYTES,
+                            "dropping over-cap stdout line",
+                        );
+                        if reader_tx
+                            .send(StdioEvent::Malformed { bytes_discarded })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                     Err(err) => {
                         tracing::warn!(
                             target: "forge_mcp::transport::stdio",
@@ -294,6 +362,90 @@ impl Stdio {
     }
 }
 
+/// Outcome of a single [`read_line_bounded`] call.
+enum BoundedLine {
+    /// A full line was read within the byte ceiling. Carries the raw bytes
+    /// up to and including any trailing `\n`. An empty `Vec` indicates EOF
+    /// on the stream.
+    Line(Vec<u8>),
+    /// The line exceeded the ceiling. All bytes through the terminating
+    /// `\n` (or EOF) have been consumed and discarded; `bytes_discarded`
+    /// reports the total dropped, always `>=` the cap.
+    Overflow { bytes_discarded: usize },
+}
+
+/// Read bytes up to and including the next `\n` from `reader`, but never
+/// buffer more than `cap` bytes in memory. Closes F-347: a compromised /
+/// buggy / hostile MCP server writing a single enormous line cannot DoS
+/// the host. Mirrors F-351's `read_line_bounded` for the LSP transport.
+///
+/// Behavior:
+/// - Within the cap → returns [`BoundedLine::Line`] with the bytes read
+///   (possibly ending in `\n`; may be empty at EOF).
+/// - Over the cap → continues reading-and-discarding via the reader's
+///   internal read-ahead buffer until the next `\n` (or EOF) so the
+///   reader resyncs on the stream without ever holding more than the
+///   reader's own read-ahead (8 KiB default for tokio's `BufReader`),
+///   then returns [`BoundedLine::Overflow`] with the total discarded
+///   count (always `>= cap`).
+/// - Pure I/O error → surfaces as `Err`.
+async fn read_line_bounded<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    cap: usize,
+) -> std::io::Result<BoundedLine> {
+    // Accumulate up to `cap+1` bytes: any overshoot proves the line
+    // exceeded the ceiling without a newline. `Take` enforces the ceiling
+    // at the reader layer so the `Vec` never grows past `cap+1`.
+    let mut buf: Vec<u8> = Vec::new();
+    let mut limited = (&mut *reader).take(cap as u64 + 1);
+    let _ = limited.read_until(b'\n', &mut buf).await?;
+    if buf.is_empty() {
+        return Ok(BoundedLine::Line(Vec::new()));
+    }
+    let hit_newline = buf.last() == Some(&b'\n');
+    if hit_newline || buf.len() <= cap {
+        return Ok(BoundedLine::Line(buf));
+    }
+
+    // Over the cap and no newline yet — drain the remainder of the line
+    // from the underlying reader via the `BufRead` fill/consume pair so
+    // no intermediate buffer grows beyond the reader's own read-ahead.
+    let mut bytes_discarded = buf.len();
+    buf.clear();
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            // EOF mid-line — still an overflow, the line never terminated.
+            return Ok(BoundedLine::Overflow { bytes_discarded });
+        }
+        match chunk.iter().position(|&b| b == b'\n') {
+            Some(idx) => {
+                bytes_discarded = bytes_discarded.saturating_add(idx + 1);
+                reader.consume(idx + 1);
+                return Ok(BoundedLine::Overflow { bytes_discarded });
+            }
+            None => {
+                let n = chunk.len();
+                bytes_discarded = bytes_discarded.saturating_add(n);
+                reader.consume(n);
+            }
+        }
+    }
+}
+
+/// Strip at most one trailing `\n` (and a preceding `\r`) from `bytes`.
+/// Matches `BufReader::lines` semantics for downstream JSON parsing.
+fn trim_trailing_newline(bytes: &[u8]) -> &[u8] {
+    let mut end = bytes.len();
+    if end > 0 && bytes[end - 1] == b'\n' {
+        end -= 1;
+        if end > 0 && bytes[end - 1] == b'\r' {
+            end -= 1;
+        }
+    }
+    &bytes[..end]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,6 +492,9 @@ mod tests {
         match ev {
             StdioEvent::Exit(status) => assert!(status.success()),
             StdioEvent::Message(v) => panic!("expected Exit, got Message({v})"),
+            StdioEvent::Malformed { bytes_discarded } => {
+                panic!("expected Exit, got Malformed({bytes_discarded})")
+            }
         }
         // After Exit the sender drops; next recv returns None.
         let after = t.recv().await;
@@ -364,6 +519,9 @@ mod tests {
         match first {
             StdioEvent::Message(v) => assert_eq!(v, serde_json::json!({"ok": true})),
             StdioEvent::Exit(_) => panic!("expected Message before Exit"),
+            StdioEvent::Malformed { bytes_discarded } => {
+                panic!("expected Message, got Malformed({bytes_discarded})")
+            }
         }
         // Then Exit.
         let next = tokio::time::timeout(std::time::Duration::from_secs(5), t.recv())
@@ -373,6 +531,9 @@ mod tests {
         match next {
             StdioEvent::Exit(status) => assert!(status.success()),
             StdioEvent::Message(v) => panic!("expected Exit, got Message({v})"),
+            StdioEvent::Malformed { bytes_discarded } => {
+                panic!("expected Exit, got Malformed({bytes_discarded})")
+            }
         }
     }
 
@@ -491,6 +652,69 @@ mod tests {
         assert!(
             status.success(),
             "spec-declared env did not reach child; shell exited {status:?}",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // F-347: stdio reader must enforce a documented max-line ceiling. A
+    // compromised / buggy / hostile MCP server that writes a single enormous
+    // line (no newline) must not drive `forge-mcp` into unbounded memory use.
+    // Over-cap events surface as `StdioEvent::Malformed` and the reader
+    // keeps running for subsequent frames.
+    // -----------------------------------------------------------------------
+
+    /// DoD regression: a child that writes 16 MiB of no-newline bytes must
+    /// not grow the reader's buffer past the cap. The reader must surface
+    /// one `Malformed` event and keep running so a valid frame following
+    /// the over-cap bytes still reaches the event channel. Matches the
+    /// issue's "fed 16 MiB of no-boundary bytes, assert bounded memory +
+    /// named error" requirement.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stdout_sixteen_mib_no_newline_is_bounded() {
+        // 16 MiB of `x`, no newline, then a valid JSON frame on its own
+        // line. `head -c` bounds argv memory; `tr` converts null bytes to
+        // printable ASCII. Total child-side memory cost is tiny regardless
+        // of the byte count — the hostile producer is a pipe, not argv.
+        let script = r#"
+            head -c 16777216 /dev/zero | tr '\0' 'x'
+            printf '\n{"ok":true}\n'
+        "#;
+
+        let mut t = Stdio::connect(&stdio_spec("/bin/sh", &["-c", script]))
+            .await
+            .expect("spawn sh 16MiB");
+
+        let mut saw_malformed = false;
+        let mut saw_valid_message = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        while tokio::time::Instant::now() < deadline {
+            let ev = tokio::time::timeout(std::time::Duration::from_secs(5), t.recv()).await;
+            match ev {
+                Ok(Some(StdioEvent::Malformed { bytes_discarded })) => {
+                    assert!(
+                        bytes_discarded >= MAX_STDIO_FRAME_BYTES,
+                        "bytes_discarded must be >= cap: {bytes_discarded}",
+                    );
+                    saw_malformed = true;
+                }
+                Ok(Some(StdioEvent::Message(v))) => {
+                    assert_eq!(
+                        v,
+                        serde_json::json!({"ok": true}),
+                        "reader must deliver the valid frame after the over-cap line",
+                    );
+                    saw_valid_message = true;
+                }
+                Ok(Some(StdioEvent::Exit(_))) | Ok(None) | Err(_) => break,
+            }
+        }
+        assert!(
+            saw_malformed,
+            "over-cap stdout line must surface StdioEvent::Malformed",
+        );
+        assert!(
+            saw_valid_message,
+            "reader must survive the over-cap line and deliver the next valid JSON frame",
         );
     }
 }

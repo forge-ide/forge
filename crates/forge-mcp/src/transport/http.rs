@@ -57,6 +57,17 @@ const CONSECUTIVE_RECONNECT_FAILURE_THRESHOLD: usize = 3;
 /// the two transports back-pressure consumers identically.
 const EVENT_CHANNEL_CAPACITY: usize = 128;
 
+/// Maximum bytes the SSE reader will buffer across network chunks waiting
+/// for the next event boundary (`\n\n` or `\r\n\r\n`). Closes F-347: the
+/// prior reader accumulated chunks into `buf: Vec<u8>` with no cap, so a
+/// hostile or MITM'd `text/event-stream` response that never emits a
+/// boundary grew the buffer without bound until OOM. 4 MiB mirrors the
+/// stdio transport's `MAX_STDIO_FRAME_BYTES` — large enough for realistic
+/// MCP notifications and small enough to keep the worst-case resident set
+/// bounded. Over-cap accumulators surface as [`HttpEvent::Malformed`] and
+/// force a backoff + reconnect via the sse-reader-loop's error path.
+pub const MAX_SSE_FRAME_BYTES: usize = 4 * 1024 * 1024;
+
 /// Events emitted on [`Http::recv`].
 ///
 /// Terminal-event parity with stdio (F-361): after a sustained run of
@@ -74,6 +85,18 @@ pub enum HttpEvent {
     /// A JSON-RPC message: either a response to a prior POST or an SSE
     /// notification. Dispatch is the manager's job.
     Message(serde_json::Value),
+    /// The SSE reader accumulated more than [`MAX_SSE_FRAME_BYTES`]
+    /// without observing an event boundary and discarded the in-flight
+    /// buffer. F-347: closes the DoS surface a hostile or MITM'd
+    /// `text/event-stream` exposes by streaming `data:` bytes that never
+    /// terminate with `\n\n`. The reader forces a backoff + reconnect
+    /// after emitting this event so a misbehaving session does not burn
+    /// the sustained-failure budget on a single bad frame.
+    Malformed {
+        /// How many bytes had been accumulated before the reader hit the
+        /// ceiling and discarded. Always `>=` [`MAX_SSE_FRAME_BYTES`].
+        bytes_discarded: usize,
+    },
     /// The SSE reader exhausted its sustained-failure budget (see
     /// `CONSECUTIVE_RECONNECT_FAILURE_THRESHOLD`) and has exited. The
     /// string is a short human-readable reason suitable for surfacing
@@ -387,6 +410,31 @@ async fn open_and_read_sse(
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.with_context(|| format!("reading SSE chunk from {log_url}"))?;
         buf.extend_from_slice(&chunk);
+
+        // F-347: guard the accumulator against an unbounded-frame DoS.
+        // A hostile (or MITM'd plain-`http://`) server that streams
+        // `data: ` bytes without ever emitting an event boundary grew
+        // `buf` until OOM in the pre-fix reader. Emit a `Malformed`
+        // event, clear the buffer, and bail to the reconnect loop so
+        // the transport resyncs on a fresh session instead of burning
+        // the sustained-failure budget on a single bad frame.
+        if buf.len() > MAX_SSE_FRAME_BYTES && find_event_boundary(&buf).is_none() {
+            let bytes_discarded = buf.len();
+            tracing::warn!(
+                target: "forge_mcp::transport::http",
+                url = %log_url,
+                bytes_discarded = bytes_discarded,
+                cap = MAX_SSE_FRAME_BYTES,
+                "SSE frame exceeded cap without event boundary; dropping buffer and reconnecting",
+            );
+            buf.clear();
+            // Best-effort — if the consumer already dropped we just fall
+            // through to the Err, which exits the reconnect loop normally.
+            let _ = tx.send(HttpEvent::Malformed { bytes_discarded }).await;
+            return Err(anyhow!(
+                "sse frame exceeded {MAX_SSE_FRAME_BYTES} bytes without boundary"
+            ));
+        }
 
         while let Some(end) = find_event_boundary(&buf) {
             let raw_event = buf.drain(..end.frame_end).collect::<Vec<u8>>();
