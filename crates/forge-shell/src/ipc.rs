@@ -308,7 +308,7 @@ impl<R: Runtime> EventSink for AppHandleSink<R> {
         // redirect delivery.
         let target = EventTarget::webview_window(format!("session-{}", self.session_id));
         if let Err(e) = self.app.emit_to(target, "session:event", payload) {
-            eprintln!("session:event emit failed: {e}");
+            tracing::warn!(error = %e, "session:event emit failed");
         }
     }
 }
@@ -1138,7 +1138,7 @@ fn spawn_event_forwarder<R: Runtime>(
                     };
                     let target = EventTarget::webview_window(&owner_label);
                     if let Err(e) = app.emit_to(target, TERMINAL_BYTES_EVENT, payload) {
-                        eprintln!("terminal:bytes emit failed: {e}");
+                        tracing::warn!(error = %e, "terminal:bytes emit failed");
                     }
                 }
                 TerminalEvent::Exit(status) => {
@@ -1149,7 +1149,7 @@ fn spawn_event_forwarder<R: Runtime>(
                     };
                     let target = EventTarget::webview_window(&owner_label);
                     if let Err(e) = app.emit_to(target, TERMINAL_EXIT_EVENT, payload) {
-                        eprintln!("terminal:exit emit failed: {e}");
+                        tracing::warn!(error = %e, "terminal:exit emit failed");
                     }
                 }
             }
@@ -1884,7 +1884,7 @@ fn spawn_lsp_forwarder<R: Runtime>(
                 };
                 let target = EventTarget::webview_window(&owner_label);
                 if let Err(e) = app.emit_to(target, LSP_MESSAGE_EVENT, payload) {
-                    eprintln!("lsp_message emit failed: {e}");
+                    tracing::warn!(error = %e, "lsp_message emit failed");
                 }
             }
             // `Exited` / `GaveUp` events are observable only server-side
