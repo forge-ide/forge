@@ -408,16 +408,25 @@ impl Server {
         // Hand the live stdin pipe to the transport so `lsp_send` can write.
         self.transport.install(stdin).await;
 
-        // Drain stderr at DEBUG — stderr on LSP is free-form logs.
+        // Drain stderr at DEBUG — stderr on LSP is free-form logs. Each
+        // line carries `server_id` (the program path) so a field engineer
+        // can disambiguate output when multiple servers run concurrently
+        // (F-386).
+        let stderr_server_id = self.program.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(target: "forge_lsp::server", stderr = %line);
+                tracing::debug!(
+                    target: "forge_lsp::server",
+                    server_id = %stderr_server_id.display(),
+                    stderr = %line,
+                );
             }
         });
 
         // Stdout → `ServerEvent::Message`.
         let tx = self.event_tx.clone();
+        let reader_server_id = self.program.clone();
         let reader_task = tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             loop {
@@ -435,6 +444,7 @@ impl Server {
                             Err(err) => {
                                 tracing::warn!(
                                     target: "forge_lsp::server",
+                                    server_id = %reader_server_id.display(),
                                     error = %err,
                                     "dropping malformed stdout frame",
                                 );
@@ -760,6 +770,183 @@ mod tests {
             exit_code,
             Some(0),
             "child saw parent's CANARY env — env_clear() is missing or bypassed"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // F-386: every tracing call in server.rs must carry a `server_id` field
+    // so a field engineer can disambiguate logs when two LSP servers are
+    // running concurrently. The identifier is the program path — the only
+    // always-available handle on `Server` and the one the issue itself
+    // names as sufficient.
+    // -----------------------------------------------------------------------
+
+    use std::io;
+    use std::sync::{Mutex as StdMutex, Once, OnceLock};
+
+    /// Shared capture buffer the global tracing subscriber writes into. A
+    /// single global subscriber (installed under a `Once`) avoids the
+    /// "set-global-default can only run once" constraint while a `StdMutex`
+    /// around a `TEST_LOCK` keeps the two server_id tests from interleaving
+    /// into the same buffer.
+    fn capture_buf() -> &'static StdMutex<Vec<u8>> {
+        static BUF: OnceLock<StdMutex<Vec<u8>>> = OnceLock::new();
+        BUF.get_or_init(|| StdMutex::new(Vec::new()))
+    }
+
+    /// Serializes the two log-capture tests so they don't share the global
+    /// buffer concurrently. Tests in this file that don't read the buffer
+    /// are unaffected.
+    fn capture_test_lock() -> &'static StdMutex<()> {
+        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| StdMutex::new(()))
+    }
+
+    /// `MakeWriter` adapter that appends into `capture_buf`.
+    struct CaptureWriter;
+    impl io::Write for CaptureWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            capture_buf().lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = CaptureWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            CaptureWriter
+        }
+    }
+
+    fn install_capture_subscriber() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_ansi(false)
+                .with_writer(CaptureWriter)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("install capture subscriber");
+        });
+    }
+
+    fn drain_capture() -> String {
+        let mut buf = capture_buf().lock().unwrap();
+        let out = String::from_utf8(buf.clone()).expect("utf-8 logs");
+        buf.clear();
+        out
+    }
+
+    /// stderr-drain debug line must carry `server_id`. Spawn a child that
+    /// writes to stderr and exits; the drain task logs at DEBUG.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    // `_guard` intentionally serializes capture-reading tests across awaits;
+    // the whole purpose of the lock is to hold it for the test duration.
+    #[allow(clippy::await_holding_lock)]
+    async fn stderr_drain_log_carries_server_id_field() {
+        let _guard = capture_test_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        install_capture_subscriber();
+        let _ = drain_capture();
+
+        let policy = BackoffPolicy {
+            max_attempts: 1,
+            window: Duration::from_secs(600),
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+        };
+        let program = PathBuf::from("/bin/sh");
+        let mut server = Server::with_policy_and_clock(
+            program.clone(),
+            vec![
+                "-c".to_string(),
+                "echo forge-lsp-stderr-canary >&2".to_string(),
+            ],
+            policy,
+            Arc::new(SystemClock),
+        );
+        let mut rx = server.take_events().expect("event rx");
+        let sup = tokio::spawn(async move { server.start().await });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+                Ok(Some(ServerEvent::GaveUp { .. })) | Ok(None) | Err(_) => break,
+                _ => continue,
+            }
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(2), sup).await;
+
+        let logs = drain_capture();
+        assert!(
+            logs.contains("forge-lsp-stderr-canary"),
+            "expected the drained stderr line to reach the debug log, got:\n{logs}"
+        );
+        assert!(
+            logs.contains("server_id"),
+            "stderr-drain log must carry a structured server_id field, got:\n{logs}"
+        );
+        // The field value is the program path; presence of the path string
+        // proves the field is bound to the right identifier, not a bare name.
+        assert!(
+            logs.contains(program.display().to_string().as_str()),
+            "server_id field must carry the program path value, got:\n{logs}"
+        );
+    }
+
+    /// malformed-frame warn must carry `server_id`. Spawn a child that
+    /// writes a non-JSON line to stdout; the reader task falls into the
+    /// `warn!` branch.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)]
+    async fn malformed_frame_warn_carries_server_id_field() {
+        let _guard = capture_test_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        install_capture_subscriber();
+        let _ = drain_capture();
+
+        let policy = BackoffPolicy {
+            max_attempts: 1,
+            window: Duration::from_secs(600),
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+        };
+        let program = PathBuf::from("/bin/sh");
+        let mut server = Server::with_policy_and_clock(
+            program.clone(),
+            vec!["-c".to_string(), "echo not-a-json-frame".to_string()],
+            policy,
+            Arc::new(SystemClock),
+        );
+        let mut rx = server.take_events().expect("event rx");
+        let sup = tokio::spawn(async move { server.start().await });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+                Ok(Some(ServerEvent::GaveUp { .. })) | Ok(None) | Err(_) => break,
+                _ => continue,
+            }
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(2), sup).await;
+
+        let logs = drain_capture();
+        assert!(
+            logs.contains("dropping malformed stdout frame"),
+            "expected the malformed-frame warn to fire, got:\n{logs}"
+        );
+        assert!(
+            logs.contains("server_id"),
+            "malformed-frame warn must carry a structured server_id field, got:\n{logs}"
+        );
+        assert!(
+            logs.contains(program.display().to_string().as_str()),
+            "server_id field must carry the program path value, got:\n{logs}"
         );
     }
 }
