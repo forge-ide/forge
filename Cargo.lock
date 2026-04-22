@@ -1429,16 +1429,13 @@ name = "forge-ipc"
 version = "0.2.0"
 dependencies = [
  "anyhow",
- "bytes",
  "chrono",
  "criterion",
  "forge-core",
  "forge-mcp",
- "futures",
  "serde",
  "serde_json",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]

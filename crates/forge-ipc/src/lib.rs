@@ -1,20 +1,23 @@
 use anyhow::bail;
-use bytes::Bytes;
 pub use forge_core::RerunVariant;
 // F-155: the MCP state + response shapes flow verbatim over UDS, so
 // re-export here alongside `RerunVariant` for callers that prefer a single
 // IPC import path.
 pub use forge_core::{McpStateEvent, ServerState};
 pub use forge_mcp::McpServerInfo;
-use futures::{SinkExt, StreamExt};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::UnixStream;
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 pub const PROTO_VERSION: u32 = 1;
 pub const SCHEMA_VERSION: u32 = 1;
+
+/// Hard cap on a single IPC frame body, enforced on both the write side
+/// (pre-send in [`write_frame`]) and the read side (pre-allocation in
+/// [`read_frame`], before the body buffer is sized). 4 MiB is generous
+/// for every `IpcMessage` variant the session emits today while still
+/// capping the blast radius of a malicious peer claiming a huge
+/// length prefix.
 const MAX_FRAME_SIZE: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -271,38 +274,10 @@ pub async fn read_frame_with_deadline<R: AsyncRead + Unpin>(
     }
 }
 
-pub struct FramedStream {
-    inner: Framed<UnixStream, LengthDelimitedCodec>,
-}
-
-impl FramedStream {
-    pub fn new(stream: UnixStream) -> Self {
-        let codec = LengthDelimitedCodec::builder()
-            .max_frame_length(MAX_FRAME_SIZE)
-            .new_codec();
-        Self {
-            inner: Framed::new(stream, codec),
-        }
-    }
-
-    pub async fn send<T: Serialize>(&mut self, msg: &T) -> anyhow::Result<()> {
-        let bytes = Bytes::from(serde_json::to_vec(msg)?);
-        self.inner.send(bytes).await?;
-        Ok(())
-    }
-
-    pub async fn recv<T: DeserializeOwned>(&mut self) -> anyhow::Result<Option<T>> {
-        match self.inner.next().await {
-            Some(Ok(bytes)) => Ok(Some(serde_json::from_slice(&bytes)?)),
-            Some(Err(e)) => Err(e.into()),
-            None => Ok(None),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::UnixStream;
 
     fn hello_msg() -> IpcMessage {
         IpcMessage::Hello(Hello {
@@ -326,14 +301,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn framed_stream_round_trips_hello() {
-        let (a, b) = UnixStream::pair().unwrap();
-        let mut sender = FramedStream::new(a);
-        let mut receiver = FramedStream::new(b);
+    async fn round_trips_hello_over_unix_stream() {
+        let (mut a, mut b) = UnixStream::pair().unwrap();
 
         let sent = hello_msg();
-        sender.send(&sent).await.unwrap();
-        let got: IpcMessage = receiver.recv().await.unwrap().unwrap();
+        write_frame(&mut a, &sent).await.unwrap();
+        let got = read_frame(&mut b).await.unwrap();
 
         let sent_json = serde_json::to_string(&sent).unwrap();
         let got_json = serde_json::to_string(&got).unwrap();
@@ -341,14 +314,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn framed_stream_round_trips_hello_ack() {
-        let (a, b) = UnixStream::pair().unwrap();
-        let mut sender = FramedStream::new(a);
-        let mut receiver = FramedStream::new(b);
+    async fn round_trips_hello_ack_over_unix_stream() {
+        let (mut a, mut b) = UnixStream::pair().unwrap();
 
         let sent = hello_ack_msg();
-        sender.send(&sent).await.unwrap();
-        let got: IpcMessage = receiver.recv().await.unwrap().unwrap();
+        write_frame(&mut a, &sent).await.unwrap();
+        let got = read_frame(&mut b).await.unwrap();
 
         let sent_json = serde_json::to_string(&sent).unwrap();
         let got_json = serde_json::to_string(&got).unwrap();
