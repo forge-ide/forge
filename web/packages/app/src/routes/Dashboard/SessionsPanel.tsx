@@ -1,5 +1,6 @@
 import { createResource, createSignal, For, Show, type Component } from 'solid-js';
 import { invoke } from '../../lib/tauri';
+import { useRovingTabindex } from '../../lib/useRovingTabindex';
 import './SessionsPanel.css';
 
 export type SessionWireState = 'active' | 'archived' | 'stopped';
@@ -60,6 +61,17 @@ export const SessionsPanel: Component = () => {
     });
   };
 
+  // F-416: roving tabindex on the session grid. The hook keeps exactly one
+  // card as the tab stop and handles ArrowRight/Left/Up/Down/Home/End so
+  // the grid is a single Tab stop with internal arrow navigation per
+  // WAI-ARIA APG grid pattern. The ref is a signal so the hook's effect
+  // re-attaches whenever <Show> toggles between grid and fallback.
+  const [gridRef, setGridRef] = createSignal<HTMLDivElement | undefined>();
+  useRovingTabindex(gridRef, '.session-card');
+
+  const panelId = () => `sessions-panel-${tab()}`;
+  const tabId = (t: Tab) => `sessions-tab-${t}`;
+
   return (
     <section class="sessions" aria-label="Sessions">
       <div role="tablist" class="sessions__tabs">
@@ -76,12 +88,23 @@ export const SessionsPanel: Component = () => {
       <Show
         when={current().length > 0}
         fallback={
-          <p class="sessions__empty">
+          <p
+            class="sessions__empty"
+            id={panelId()}
+            role="tabpanel"
+            aria-labelledby={tabId(tab())}
+          >
             {tab() === 'active' ? '// no active sessions' : '// archive is empty'}
           </p>
         }
       >
-        <div class="sessions__grid">
+        <div
+          ref={setGridRef}
+          class="sessions__grid"
+          id={panelId()}
+          role="tabpanel"
+          aria-labelledby={tabId(tab())}
+        >
           <For each={current()}>
             {(session) => <SessionCard session={session} onOpen={handleOpen} />}
           </For>
@@ -104,6 +127,8 @@ const TabButton: Component<TabButtonProps> = (props) => {
     <button
       type="button"
       role="tab"
+      id={`sessions-tab-${props.tab}`}
+      aria-controls={`sessions-panel-${props.tab}`}
       class="sessions__tab"
       classList={{ 'sessions__tab--active': selected() }}
       aria-selected={selected()}

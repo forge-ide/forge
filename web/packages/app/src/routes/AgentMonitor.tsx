@@ -364,6 +364,13 @@ export const AgentList: Component<{
 }> = (props) => {
   const visible = createMemo(() => sortAgents(filterAgents(props.rows, props.filter)));
 
+  // F-416: tabs ↔ tabpanel association (WAI-ARIA APG tabs pattern). A
+  // single tabpanel hosts the row list; its aria-labelledby always points
+  // at the currently-selected filter tab so assistive tech can announce
+  // the panel's context when filter selection changes.
+  const filterTabId = (f: AgentFilter) => `agent-filter-tab-${f}`;
+  const rowsPanelId = 'agent-filter-rows-panel';
+
   return (
     <aside class="agent-monitor__list" aria-label="Agents">
       <div role="tablist" class="agent-monitor__filters">
@@ -372,6 +379,8 @@ export const AgentList: Component<{
             <button
               type="button"
               role="tab"
+              id={filterTabId(f)}
+              aria-controls={rowsPanelId}
               aria-selected={props.filter === f}
               class="agent-monitor__filter"
               classList={{ 'agent-monitor__filter--active': props.filter === f }}
@@ -384,9 +393,23 @@ export const AgentList: Component<{
       </div>
       <Show
         when={visible().length > 0}
-        fallback={<p class="agent-monitor__empty">// no agents</p>}
+        fallback={
+          <p
+            class="agent-monitor__empty"
+            id={rowsPanelId}
+            role="tabpanel"
+            aria-labelledby={filterTabId(props.filter)}
+          >
+            // no agents
+          </p>
+        }
       >
-        <ul class="agent-monitor__rows">
+        <ul
+          class="agent-monitor__rows"
+          id={rowsPanelId}
+          role="tabpanel"
+          aria-labelledby={filterTabId(props.filter)}
+        >
           <For each={visible()}>
             {(row) => (
               <AgentListRow
