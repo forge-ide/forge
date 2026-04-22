@@ -57,15 +57,36 @@ struct Frontmatter {
 }
 
 pub(crate) fn parse_agent_file(path: &Path) -> Result<AgentDef> {
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))
-        .map_err(Error::from)?;
+    let raw = match fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
+    {
+        Ok(raw) => raw,
+        Err(err) => {
+            tracing::warn!(
+                target: "forge_agents::def",
+                path = %path.display(),
+                error = %err,
+                "failed to read agent file",
+            );
+            return Err(Error::from(err));
+        }
+    };
 
     let matter = Matter::<YAML>::new();
-    let parsed: ParsedEntity<Frontmatter> = matter
+    let parsed: ParsedEntity<Frontmatter> = match matter
         .parse(&raw)
         .with_context(|| format!("parsing frontmatter in {}", path.display()))
-        .map_err(Error::from)?;
+    {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            tracing::warn!(
+                target: "forge_agents::def",
+                path = %path.display(),
+                error = %err,
+                "failed to parse YAML frontmatter",
+            );
+            return Err(Error::from(err));
+        }
+    };
 
     let stem = path
         .file_stem()
@@ -78,18 +99,30 @@ pub(crate) fn parse_agent_file(path: &Path) -> Result<AgentDef> {
             let name = fm.name.unwrap_or_else(|| stem.clone());
             let isolation = match fm.isolation.as_deref() {
                 Some("trusted") => {
+                    tracing::warn!(
+                        target: "forge_agents::def",
+                        path = %path.display(),
+                        agent_name = %name,
+                        "rejected agent: isolation=trusted not allowed for user-defined agents",
+                    );
                     return Err(Error::IsolationViolation {
                         name,
                         path: Some(path.to_path_buf()),
-                    })
+                    });
                 }
                 Some("container") => Isolation::Container,
                 Some("process") | None => Isolation::Process,
                 Some(other) => {
+                    tracing::warn!(
+                        target: "forge_agents::def",
+                        path = %path.display(),
+                        isolation = %other,
+                        "unknown isolation level in agent frontmatter",
+                    );
                     return Err(Error::Other(anyhow::anyhow!(
                         "unknown isolation level '{other}' in {}",
                         path.display()
-                    )))
+                    )));
                 }
             };
             Ok(AgentDef {

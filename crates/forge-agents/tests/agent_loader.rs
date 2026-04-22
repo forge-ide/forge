@@ -2,6 +2,8 @@ use forge_agents::{load_agents, load_agents_md, load_workspace_agents, AgentDef,
 use std::fs;
 use tempfile::tempdir;
 
+mod common;
+
 fn write_agent(dir: &std::path::Path, filename: &str, content: &str) {
     fs::create_dir_all(dir).unwrap();
     fs::write(dir.join(filename), content).unwrap();
@@ -174,6 +176,39 @@ fn rejects_isolation_trusted_for_user_home_agents() {
     assert!(
         msg.contains("trusted"),
         "error should mention trusted: {msg}"
+    );
+}
+
+// ---- Tracing emission tests (F-373) --------------------------------------
+
+#[test]
+fn parse_error_emits_warn() {
+    let _guard = common::capture_test_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    common::install_capture_subscriber();
+    let _ = common::drain_capture();
+
+    let workspace = tempdir().unwrap();
+    let agents_dir = workspace.path().join(".agents");
+    // Unknown isolation value is the simplest deterministic parse-error path.
+    write_agent(
+        &agents_dir,
+        "broken.md",
+        "---\nname: broken\nisolation: bogus\n---\n\nbody",
+    );
+
+    let result = load_workspace_agents(workspace.path());
+    assert!(result.is_err(), "bogus isolation should fail parsing");
+
+    let logs = common::drain_capture();
+    assert!(
+        logs.contains("WARN") && logs.contains("forge_agents::def"),
+        "parse error should log WARN under forge_agents::def, got: {logs}"
+    );
+    assert!(
+        logs.contains("broken.md"),
+        "parse-error log should include the offending path; got: {logs}"
     );
 }
 

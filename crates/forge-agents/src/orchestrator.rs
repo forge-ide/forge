@@ -197,6 +197,11 @@ impl Orchestrator {
     /// for programmatically-constructed defs that bypass the parser.
     pub async fn spawn(&self, def: AgentDef, ctx: SpawnContext) -> Result<AgentInstance> {
         if ctx.scope == AgentScope::User && def.isolation == Isolation::Trusted {
+            tracing::warn!(
+                target: "forge_agents::orchestrator",
+                agent_name = %def.name,
+                "rejected spawn: isolation=trusted not allowed under user scope",
+            );
             return Err(Error::IsolationViolation {
                 name: def.name,
                 path: None,
@@ -228,6 +233,13 @@ impl Orchestrator {
             at: now,
         });
 
+        tracing::info!(
+            target: "forge_agents::orchestrator",
+            agent_id = %instance.id,
+            agent_name = %instance.def.name,
+            "spawned",
+        );
+
         Ok(instance)
     }
 
@@ -245,6 +257,11 @@ impl Orchestrator {
                     id: id.clone(),
                     at: now,
                 });
+                tracing::debug!(
+                    target: "forge_agents::orchestrator",
+                    agent_id = %id,
+                    "stopped",
+                );
             }
         }
         Ok(())
@@ -261,6 +278,12 @@ impl Orchestrator {
                     reason: reason.clone(),
                 };
                 let now = Utc::now();
+                tracing::debug!(
+                    target: "forge_agents::orchestrator",
+                    agent_id = %id,
+                    reason = %reason,
+                    "failed",
+                );
                 let _ = self.tx.send(AgentEvent::Failed {
                     id: id.clone(),
                     reason,
@@ -274,6 +297,12 @@ impl Orchestrator {
     /// Emit a `StepStarted` event against an instance. Does not mutate
     /// `InstanceState` — steps are transitions, not states.
     pub async fn record_step_started(&self, id: &AgentInstanceId, step: String) -> Result<()> {
+        tracing::trace!(
+            target: "forge_agents::orchestrator",
+            agent_id = %id,
+            step = %step,
+            "step started",
+        );
         let _ = self.tx.send(AgentEvent::StepStarted {
             id: id.clone(),
             step,
@@ -284,6 +313,12 @@ impl Orchestrator {
 
     /// Emit a `StepFinished` event against an instance.
     pub async fn record_step_finished(&self, id: &AgentInstanceId, step: String) -> Result<()> {
+        tracing::trace!(
+            target: "forge_agents::orchestrator",
+            agent_id = %id,
+            step = %step,
+            "step finished",
+        );
         let _ = self.tx.send(AgentEvent::StepFinished {
             id: id.clone(),
             step,

@@ -12,6 +12,8 @@ use forge_agents::{
 };
 use futures::StreamExt;
 
+mod common;
+
 fn process_def(name: &str) -> AgentDef {
     AgentDef {
         name: name.to_string(),
@@ -247,4 +249,165 @@ async fn scope_marker_is_independent_of_parse_time_check() {
         )
         .await;
     assert!(matches!(result, Err(Error::IsolationViolation { .. })));
+}
+
+// ---- Tracing emission tests (F-373) --------------------------------------
+//
+// The orchestrator shipped without any `tracing::` calls; these tests pin
+// every lifecycle transition to a concrete emission site + target + field
+// set so future refactors can't silently drop observability again.
+
+// Capture-subscriber tests read a shared global buffer; a test-level mutex
+// prevents two tests from interleaving log output into one another's drain.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn spawn_emits_info_with_agent_id_and_name() {
+    let _guard = common::capture_test_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    common::install_capture_subscriber();
+    let _ = common::drain_capture();
+
+    let orch = Orchestrator::new();
+    let inst = orch
+        .spawn(process_def("tracer"), SpawnContext::user())
+        .await
+        .unwrap();
+
+    let logs = common::drain_capture();
+    assert!(
+        logs.contains("forge_agents::orchestrator"),
+        "spawn should log under forge_agents::orchestrator target, got: {logs}"
+    );
+    assert!(
+        logs.contains(&format!("agent_id={}", inst.id)),
+        "spawn log should carry agent_id={}; got: {logs}",
+        inst.id
+    );
+    assert!(
+        logs.contains("agent_name=\"tracer\"") || logs.contains("agent_name=tracer"),
+        "spawn log should carry agent_name=tracer; got: {logs}"
+    );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn spawn_isolation_violation_emits_warn() {
+    let _guard = common::capture_test_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    common::install_capture_subscriber();
+    let _ = common::drain_capture();
+
+    let orch = Orchestrator::new();
+    let _ = orch
+        .spawn(trusted_def("evil"), SpawnContext::user())
+        .await
+        .expect_err("trusted under user scope must be rejected");
+
+    let logs = common::drain_capture();
+    assert!(
+        logs.contains("WARN") && logs.contains("forge_agents::orchestrator"),
+        "isolation rejection should log WARN under forge_agents::orchestrator, got: {logs}"
+    );
+    assert!(
+        logs.contains("agent_name=\"evil\"") || logs.contains("agent_name=evil"),
+        "isolation-rejection log should carry agent_name=evil; got: {logs}"
+    );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn stop_emits_debug_with_agent_id() {
+    let _guard = common::capture_test_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    common::install_capture_subscriber();
+
+    let orch = Orchestrator::new();
+    let inst = orch
+        .spawn(process_def("stopper"), SpawnContext::user())
+        .await
+        .unwrap();
+    // Drain spawn output so the assertions below inspect only the stop event.
+    let _ = common::drain_capture();
+
+    orch.stop(&inst.id).await.unwrap();
+
+    let logs = common::drain_capture();
+    assert!(
+        logs.contains("DEBUG") && logs.contains("forge_agents::orchestrator"),
+        "stop should log DEBUG under forge_agents::orchestrator, got: {logs}"
+    );
+    assert!(
+        logs.contains(&format!("agent_id={}", inst.id)),
+        "stop log should carry agent_id={}; got: {logs}",
+        inst.id
+    );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn fail_emits_debug_with_reason() {
+    let _guard = common::capture_test_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    common::install_capture_subscriber();
+
+    let orch = Orchestrator::new();
+    let inst = orch
+        .spawn(process_def("failer"), SpawnContext::user())
+        .await
+        .unwrap();
+    let _ = common::drain_capture();
+
+    orch.fail(&inst.id, "boom".to_string()).await.unwrap();
+
+    let logs = common::drain_capture();
+    assert!(
+        logs.contains("DEBUG") && logs.contains("forge_agents::orchestrator"),
+        "fail should log DEBUG under forge_agents::orchestrator, got: {logs}"
+    );
+    assert!(
+        logs.contains(&format!("agent_id={}", inst.id)),
+        "fail log should carry agent_id={}; got: {logs}",
+        inst.id
+    );
+    assert!(
+        logs.contains("reason=\"boom\"") || logs.contains("reason=boom"),
+        "fail log should carry reason=boom; got: {logs}"
+    );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn step_events_emit_trace_with_step_label() {
+    let _guard = common::capture_test_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    common::install_capture_subscriber();
+
+    let orch = Orchestrator::new();
+    let inst = orch
+        .spawn(process_def("stepper"), SpawnContext::user())
+        .await
+        .unwrap();
+    let _ = common::drain_capture();
+
+    orch.record_step_started(&inst.id, "think".to_string())
+        .await
+        .unwrap();
+    orch.record_step_finished(&inst.id, "think".to_string())
+        .await
+        .unwrap();
+
+    let logs = common::drain_capture();
+    assert!(
+        logs.contains("TRACE") && logs.contains("forge_agents::orchestrator"),
+        "step events should log TRACE under forge_agents::orchestrator, got: {logs}"
+    );
+    assert!(
+        logs.contains("step=\"think\"") || logs.contains("step=think"),
+        "step log should carry step=think; got: {logs}"
+    );
 }
