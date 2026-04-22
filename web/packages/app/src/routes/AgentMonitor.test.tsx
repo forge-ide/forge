@@ -582,6 +582,39 @@ describe('<AgentTrace>', () => {
     ));
     expect(getByText(/select an agent/i)).toBeTruthy();
   });
+
+  // F-407: header chrome Phase-2 subset — live-chip renders alongside name+id
+  // so the user can see at a glance whether the agent is still running and
+  // roughly how far along it is. `step N of M` requires a backend total the
+  // Phase-2 wire doesn't carry, so the chip shows step N only and the spec
+  // footnote defers the full `of M` form to Phase 3.
+  it('renders a live-chip with state and step count when the agent is running', () => {
+    const steps: AgentStep[] = [
+      step({ id: 's1', status: 'done' }),
+      step({ id: 's2', status: 'running' }),
+    ];
+    const { container } = render(() => (
+      <AgentTrace agent={row({ state: 'running' })} steps={steps} onStepClick={() => {}} />
+    ));
+    const chip = container.querySelector(
+      '.agent-monitor__trace-chip',
+    ) as HTMLElement | null;
+    expect(chip).toBeTruthy();
+    expect(chip?.getAttribute('data-state')).toBe('running');
+    expect(chip?.textContent).toMatch(/running\s*·\s*step\s*2/i);
+  });
+
+  it('renders a live-chip with just the state when the agent is not running', () => {
+    const { container } = render(() => (
+      <AgentTrace agent={row({ state: 'done' })} steps={[]} onStepClick={() => {}} />
+    ));
+    const chip = container.querySelector(
+      '.agent-monitor__trace-chip',
+    ) as HTMLElement | null;
+    expect(chip).toBeTruthy();
+    expect(chip?.getAttribute('data-state')).toBe('done');
+    expect(chip?.textContent?.trim()).toBe('done');
+  });
 });
 
 // ---------------------------------------------------------------------------
