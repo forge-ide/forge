@@ -203,6 +203,13 @@ impl TransportHalf {
             },
             TransportHalf::Http(h) => match h.recv().await {
                 Some(HttpEvent::Message(v)) => TransportEvent::Message(v),
+                // F-361: transport-driven terminal event. Surfacing this
+                // as `Closed` lets the lifecycle driver treat a dead
+                // HTTP server identically to a crashed stdio child —
+                // Degraded within ms, not on the 30s health-check tick.
+                Some(HttpEvent::Closed(reason)) => {
+                    TransportEvent::Closed(format!("http transport closed: {reason}"))
+                }
                 None => TransportEvent::Closed("http channel closed".into()),
             },
         }
