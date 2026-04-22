@@ -966,14 +966,14 @@ async fn register_restart(
     true
 }
 
-/// Test-only harness for driving [`run_pump`] over an in-memory transport.
+/// Test-only harness for driving `run_pump` over an in-memory transport.
 ///
 /// F-369: the pump's pending-table routing is a critical path that the
 /// public integration tests cannot exercise under concurrency without
 /// spawning real subprocesses (SIGCHLD-reaper races force those tests
 /// into a serial lane). This module exposes just enough of the pump
-/// plumbing — the [`InProcHalf`] transport variant, [`spawn_pump`], and
-/// [`call_request`] — that an integration test can:
+/// plumbing — the `InProcHalf` transport variant, `spawn_pump`, and
+/// `call_request` — that an integration test can:
 ///
 /// 1. stand up a pump pointed at an in-memory transport,
 /// 2. issue concurrent `call()`s against it,
@@ -994,7 +994,7 @@ pub mod test_util {
 
     /// Handle to a pump spawned against an in-memory transport. Cloneable
     /// so multiple tasks can issue concurrent requests against the same
-    /// pump (the underlying [`Connection`] is held in an `Arc`).
+    /// pump (the underlying `Connection` is held in an `Arc`).
     #[derive(Clone)]
     pub struct PumpHandle {
         conn: Arc<Connection>,
