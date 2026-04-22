@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use forge_mcp::manager::LifecycleTuning;
+use forge_mcp::transport::http::MAX_SSE_FRAME_BYTES;
 use forge_mcp::transport::{Http, HttpEvent};
 use forge_mcp::{McpManager, McpServerSpec, ServerKind, ServerState};
 use wiremock::matchers::{header, method, path};
@@ -39,6 +40,9 @@ async fn recv_message(t: &mut Http) -> serde_json::Value {
     match ev {
         HttpEvent::Message(v) => v,
         HttpEvent::Closed(reason) => panic!("expected Message, got Closed({reason})"),
+        HttpEvent::Malformed { bytes_discarded } => {
+            panic!("expected Message, got Malformed({bytes_discarded})")
+        }
     }
 }
 
@@ -207,6 +211,9 @@ async fn sse_sustained_failure_surfaces_terminal_closed_event() {
         HttpEvent::Message(v) => {
             panic!("expected HttpEvent::Closed after sustained failure, got Message({v})")
         }
+        HttpEvent::Malformed { bytes_discarded } => {
+            panic!("expected HttpEvent::Closed after sustained failure, got Malformed({bytes_discarded})")
+        }
     }
 }
 
@@ -367,5 +374,89 @@ async fn sse_closed_reason_redacts_query_string_token() {
         HttpEvent::Message(v) => {
             panic!("expected HttpEvent::Closed after sustained failure, got Message({v})")
         }
+        HttpEvent::Malformed { bytes_discarded } => {
+            panic!("expected HttpEvent::Closed after sustained failure, got Malformed({bytes_discarded})")
+        }
     }
+}
+
+/// F-347 DoD regression: an SSE response that streams 16 MiB of bytes
+/// without emitting an event boundary (`\n\n` or `\r\n\r\n`) must not
+/// drive the reader's accumulator past `MAX_SSE_FRAME_BYTES`. The
+/// transport must surface `HttpEvent::Malformed { bytes_discarded >= cap }`
+/// and the sustained-failure reconnect loop bounds subsequent runs,
+/// eventually emitting `HttpEvent::Closed`.
+///
+/// Fixture: wiremock serves a single 16 MiB response body that is all
+/// `data: xxx...` with no trailing `\n\n`. Because wiremock writes the
+/// body in one shot before the connection closes, every reconnect gets
+/// the same hostile payload and trips the cap again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sse_sixteen_mib_no_boundary_surfaces_malformed() {
+    let server = MockServer::start().await;
+
+    // POST: harmless 200 so the transport can `connect` cleanly.
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .mount(&server)
+        .await;
+
+    // 16 MiB of `data: ` bytes with no event boundary. Every byte is an
+    // ASCII letter so neither `\n\n` nor `\r\n\r\n` ever appears — this
+    // is the pathological DoS shape the pre-fix reader accumulated into
+    // `buf` without bound.
+    let hostile_body: Vec<u8> = {
+        let mut v = Vec::with_capacity(16 * 1024 * 1024);
+        v.extend_from_slice(b"data: ");
+        while v.len() < 16 * 1024 * 1024 {
+            v.push(b'A');
+        }
+        v
+    };
+
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_bytes(hostile_body),
+        )
+        .mount(&server)
+        .await;
+
+    let mut t = Http::connect(&http_spec(&server.uri(), "Bearer token"))
+        .await
+        .expect("connect");
+
+    let mut saw_malformed = false;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(10), t.recv()).await {
+            Ok(Some(HttpEvent::Malformed { bytes_discarded })) => {
+                assert!(
+                    bytes_discarded >= MAX_SSE_FRAME_BYTES,
+                    "bytes_discarded must be >= cap: {bytes_discarded}",
+                );
+                saw_malformed = true;
+                break;
+            }
+            // Closed can land if the sustained-failure threshold is
+            // reached before Malformed on a slow CI runner; treat that
+            // as a failure because the DoD specifically asks for the
+            // named Malformed error shape.
+            Ok(Some(HttpEvent::Closed(reason))) => {
+                panic!("expected Malformed before Closed; got Closed({reason})")
+            }
+            Ok(Some(HttpEvent::Message(v))) => {
+                panic!("unexpected Message event in over-cap SSE fixture: {v}")
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+
+    assert!(
+        saw_malformed,
+        "over-cap SSE frame must surface HttpEvent::Malformed",
+    );
 }

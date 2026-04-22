@@ -35,6 +35,9 @@ async fn recv_message(t: &mut Stdio) -> serde_json::Value {
     match ev {
         StdioEvent::Message(v) => v,
         StdioEvent::Exit(s) => panic!("expected Message, got Exit({s:?})"),
+        StdioEvent::Malformed { bytes_discarded } => {
+            panic!("expected Message, got Malformed({bytes_discarded})")
+        }
     }
 }
 
@@ -103,6 +106,9 @@ async fn roundtrips_initialize_and_tools_list() {
     match exit {
         StdioEvent::Exit(status) => assert!(status.success(), "mock exited non-zero: {status:?}"),
         StdioEvent::Message(v) => panic!("expected Exit, got Message({v})"),
+        StdioEvent::Malformed { bytes_discarded } => {
+            panic!("expected Exit, got Malformed({bytes_discarded})")
+        }
     }
 
     // Channel closes after Exit.

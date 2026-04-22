@@ -203,27 +203,38 @@ impl TransportHalf {
     }
 
     async fn recv(&mut self) -> TransportEvent {
-        match self {
-            TransportHalf::Stdio(s) => match s.recv().await {
-                Some(StdioEvent::Message(v)) => TransportEvent::Message(v),
-                Some(StdioEvent::Exit(status)) => {
-                    TransportEvent::Closed(format!("stdio child exited: {status:?}"))
-                }
-                None => TransportEvent::Closed("stdio channel closed".into()),
-            },
-            TransportHalf::Http(h) => match h.recv().await {
-                Some(HttpEvent::Message(v)) => TransportEvent::Message(v),
-                // F-361: transport-driven terminal event. Surfacing this
-                // as `Closed` lets the lifecycle driver treat a dead
-                // HTTP server identically to a crashed stdio child —
-                // Degraded within ms, not on the 30s health-check tick.
-                Some(HttpEvent::Closed(reason)) => {
-                    TransportEvent::Closed(format!("http transport closed: {reason}"))
-                }
-                None => TransportEvent::Closed("http channel closed".into()),
-            },
-            #[cfg(any(test, feature = "test-util"))]
-            TransportHalf::InProc(p) => p.recv().await,
+        // F-347: `Malformed` is a non-terminal observability event — the
+        // transport dropped an over-cap frame and kept running. Swallow
+        // it at this layer so the pump's `TransportEvent` surface stays
+        // two-variant (Message / Closed); callers that care about the
+        // drop observe it through the tracing `warn!` the transports
+        // emit alongside the event.
+        loop {
+            match self {
+                TransportHalf::Stdio(s) => match s.recv().await {
+                    Some(StdioEvent::Message(v)) => return TransportEvent::Message(v),
+                    Some(StdioEvent::Malformed { .. }) => continue,
+                    Some(StdioEvent::Exit(status)) => {
+                        return TransportEvent::Closed(format!("stdio child exited: {status:?}"));
+                    }
+                    None => return TransportEvent::Closed("stdio channel closed".into()),
+                },
+                TransportHalf::Http(h) => match h.recv().await {
+                    Some(HttpEvent::Message(v)) => return TransportEvent::Message(v),
+                    Some(HttpEvent::Malformed { .. }) => continue,
+                    // F-361: transport-driven terminal event. Surfacing
+                    // this as `Closed` lets the lifecycle driver treat a
+                    // dead HTTP server identically to a crashed stdio
+                    // child — Degraded within ms, not on the 30s
+                    // health-check tick.
+                    Some(HttpEvent::Closed(reason)) => {
+                        return TransportEvent::Closed(format!("http transport closed: {reason}"));
+                    }
+                    None => return TransportEvent::Closed("http channel closed".into()),
+                },
+                #[cfg(any(test, feature = "test-util"))]
+                TransportHalf::InProc(p) => return p.recv().await,
+            }
         }
     }
 }
