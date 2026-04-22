@@ -34,17 +34,27 @@ pub type InitialPrompt = Arc<str>;
 /// event stream, not separate states.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstanceState {
+    /// Instance is active and has not yet reached a terminal state.
     Running,
+    /// Instance finished successfully; terminal.
     Completed,
-    Failed { reason: String },
+    /// Instance ended in error with the attached reason; terminal.
+    Failed {
+        /// Human-readable failure reason propagated from the spawner or step executor.
+        reason: String,
+    },
 }
 
 /// One live instantiation of an [`AgentDef`].
 #[derive(Debug, Clone)]
 pub struct AgentInstance {
+    /// Registry-assigned identifier unique to this instance.
     pub id: AgentInstanceId,
+    /// Parsed definition this instance was spawned from.
     pub def: AgentDef,
+    /// Current lifecycle state; advances monotonically toward a terminal variant.
     pub state: InstanceState,
+    /// Timestamp of spawn, set by the orchestrator at registration time.
     pub started_at: DateTime<Utc>,
     /// F-137 / F-134 follow-up: the seed user message this instance was
     /// spawned with. Threaded from the spawner (either `agent.spawn`'s
@@ -59,8 +69,10 @@ pub struct AgentInstance {
 /// escape hatch removed at runtime; built-in skills keep it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentScope {
+    /// User-authored agent; `Isolation::Trusted` is rejected at spawn time.
     #[default]
     User,
+    /// Forge-shipped built-in skill; retains the `Isolation::Trusted` escape hatch.
     BuiltIn,
 }
 
@@ -74,7 +86,9 @@ pub enum AgentScope {
 /// follow-up wired here as the F-137 additional mandate).
 #[derive(Debug, Clone, Default)]
 pub struct SpawnContext {
+    /// Origin policy applied to the spawn (User rejects `Isolation::Trusted`).
     pub scope: AgentScope,
+    /// Optional seed user message forwarded to the child's first turn.
     pub initial_prompt: Option<InitialPrompt>,
 }
 
@@ -88,6 +102,7 @@ impl SpawnContext {
             initial_prompt: None,
         }
     }
+    /// Built-in-scope spawn with no seed prompt; used for Forge-shipped skills.
     pub fn built_in() -> Self {
         Self {
             scope: AgentScope::BuiltIn,
@@ -110,27 +125,45 @@ impl SpawnContext {
 /// instance may emit any number of `StepStarted` / `StepFinished` pairs.
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
+    /// Instance was registered and admitted to the registry.
     Spawned {
+        /// Instance the event refers to.
         id: AgentInstanceId,
+        /// Event wall-clock timestamp.
         at: DateTime<Utc>,
     },
+    /// A named step within the instance has started executing.
     StepStarted {
+        /// Instance the event refers to.
         id: AgentInstanceId,
+        /// Step label emitted by the step executor.
         step: String,
+        /// Event wall-clock timestamp.
         at: DateTime<Utc>,
     },
+    /// A named step within the instance has finished.
     StepFinished {
+        /// Instance the event refers to.
         id: AgentInstanceId,
+        /// Step label emitted by the step executor.
         step: String,
+        /// Event wall-clock timestamp.
         at: DateTime<Utc>,
     },
+    /// Terminal: instance completed successfully.
     Completed {
+        /// Instance the event refers to.
         id: AgentInstanceId,
+        /// Event wall-clock timestamp.
         at: DateTime<Utc>,
     },
+    /// Terminal: instance ended in error with the attached reason.
     Failed {
+        /// Instance the event refers to.
         id: AgentInstanceId,
+        /// Human-readable failure reason.
         reason: String,
+        /// Event wall-clock timestamp.
         at: DateTime<Utc>,
     },
 }
@@ -148,6 +181,7 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
+    /// Build an orchestrator with an empty registry and a fresh event bus.
     pub fn new() -> Self {
         let (tx, _rx) = broadcast::channel(EVENT_BUS_CAPACITY);
         Self {
