@@ -216,28 +216,53 @@ pub enum RerunVariant { Replace, Branch, Fresh }
 
 #### Events (host → webview)
 
-Events are emitted via Tauri's `app_handle.emit_all("forge://event", payload)`. Every event has a `kind` discriminator.
+Events are emitted per-topic with per-window routing — never `emit_all`. Each emit call targets `EventTarget::webview_window(label)` so a forged payload cannot redirect delivery and siblings never see each other's traffic. The label is bound at subscription / spawn time, not re-read from the payload.
+
+| Channel | Payload type | Target label | Source |
+|---------|--------------|--------------|--------|
+| `session:event` | `SessionEventPayload` | `session-{session_id}` | `crates/forge-shell/src/ipc.rs` (`AppHandleSink::emit`) |
+| `terminal:bytes` | `TerminalBytesEvent` | owner webview label | `crates/forge-shell/src/ipc.rs` (`spawn_event_forwarder`) |
+| `terminal:exit` | `TerminalExitEvent` | owner webview label | `crates/forge-shell/src/ipc.rs` (`spawn_event_forwarder`) |
+| `lsp_message` | `LspMessageEvent` | owner webview label | `crates/forge-shell/src/ipc.rs` (`spawn_lsp_forwarder`) |
 
 ```rust
-pub enum ShellEvent {
-    SessionEvent { session: SessionId, event: SessionEvent },   // see §5
-    SessionStateChanged { session: SessionId, state: SessionState },
-    ProviderStateChanged { id: ProviderId, state: ProviderState },
-    McpStateChanged { id: McpId, state: McpState },
-    UsageTick { provider: ProviderId, delta: UsageDelta },
-    ContainerStateChanged { id: ContainerId, state: ContainerState },
-    BackgroundAgentNotification { session: SessionId, id: AgentInstanceId, kind: BgNotifyKind },
-    NotificationPosted { level: Level, title: String, body: Option<String> },
+// session:event — carries every session-scoped event the daemon emits.
+// `event` is the tagged union from `forge_core::Event` (see §5.3).
+pub struct SessionEventPayload {
+    pub session_id: String,
+    pub seq: u64,
+    pub event: forge_core::Event,
+}
+
+// terminal:bytes — raw PTY chunk for xterm.js.
+pub struct TerminalBytesEvent {
+    pub terminal_id: TerminalId,
+    pub data: Vec<u8>,
+}
+
+// terminal:exit — fired once when the child reaps.
+pub struct TerminalExitEvent {
+    pub terminal_id: TerminalId,
+    pub code: Option<i32>,
+    pub killed_by_drop: bool,
+}
+
+// lsp_message — opaque JSON-RPC frame from the language server.
+pub struct LspMessageEvent {
+    pub server: String,
+    pub message: serde_json::Value,
 }
 ```
 
-The webview subscribes with Solid's `createResource` or a dedicated subscription helper.
+`forge_core::Event` is a `#[serde(tag = "type")]` union covering session, provider, MCP, usage, and agent state. MCP state transitions ride inside it as `Event::McpState(McpStateEvent)` — F-155 retired the per-topic `mcp:state` channel, so there is no longer a top-level event for MCP state. All MCP state changes arrive on `session:event`.
+
+The webview subscribes with `listen<T>(channel, handler)` from `@tauri-apps/api/event` (typically wrapped by a helper in `web/packages/ipc`).
 
 Events are fire-and-forget; critical state is also fetchable via commands for late-join cases.
 
 ### 4.2 Boundary 2: shell ↔ session (UDS)
 
-See §5 for the full protocol. Shell maintains **one UDS connection per open session**. Events from the session are translated into `ShellEvent::SessionEvent` and forwarded to the webview.
+See §5 for the full protocol. Shell maintains **one UDS connection per open session**. Events from the session are wrapped in `SessionEventPayload` and forwarded on the `session:event` channel to that session's webview window.
 
 ### 4.3 Type generation
 
