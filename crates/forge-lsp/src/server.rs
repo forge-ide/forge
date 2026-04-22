@@ -432,6 +432,28 @@ impl Server {
     /// uniformly. Event delivery on [`Self::take_events`] continues across
     /// restarts; the receiver yields `None` after `GaveUp` because the
     /// supervisor drops the sender on return.
+    ///
+    /// # Examples
+    ///
+    /// Resolve a bundled spec through [`Bootstrap`], build a supervised
+    /// [`Server`] from the registry, and drive it in a background task
+    /// so the caller can observe lifecycle events:
+    ///
+    /// ```no_run
+    /// use forge_lsp::{Bootstrap, Server, ServerError, ServerId};
+    ///
+    /// # async fn example() -> Result<(), ServerError> {
+    /// let bootstrap = Bootstrap::new().expect("cache root resolved");
+    /// let mut server = Server::from_registry(ServerId("rust-analyzer"), &bootstrap, vec![])?;
+    /// let mut events = server.take_events().expect("event rx");
+    /// tokio::spawn(async move {
+    ///     while let Some(evt) = events.recv().await {
+    ///         tracing::info!(?evt, "lsp event");
+    ///     }
+    /// });
+    /// server.start().await
+    /// # }
+    /// ```
     pub async fn start(&self) -> Result<(), ServerError> {
         let mut attempts = 0u32;
         let mut window_start = self.clock.now();

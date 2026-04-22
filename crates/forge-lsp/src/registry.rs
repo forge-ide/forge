@@ -77,6 +77,15 @@ pub struct Registry {
 
 impl Registry {
     /// The 16 bundled servers.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use forge_lsp::Registry;
+    ///
+    /// let registry = Registry::bundled();
+    /// assert_eq!(registry.all().len(), 16);
+    /// ```
     pub fn bundled() -> Self {
         Self {
             entries: BUNDLED_SERVERS,
@@ -103,6 +112,17 @@ impl Registry {
     /// Look up a spec by Monaco language id (e.g. `"rust"`, `"typescript"`).
     /// Returns the first match; multiple servers may claim a language but
     /// the bundled set is currently one-per-language.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use forge_lsp::{Registry, ServerId};
+    ///
+    /// let registry = Registry::bundled();
+    /// let spec = registry.by_language("rust").expect("rust-analyzer registered");
+    /// assert_eq!(spec.id, ServerId("rust-analyzer"));
+    /// assert!(registry.by_language("nonexistent-lang").is_none());
+    /// ```
     pub fn by_language(&self, language_id: &str) -> Option<&'static ServerSpec> {
         self.entries.iter().find(|s| s.language_id == language_id)
     }

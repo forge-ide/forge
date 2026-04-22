@@ -1,3 +1,4 @@
+#![deny(rustdoc::broken_intra_doc_links, rustdoc::private_intra_doc_links)]
 //! `forge-agents` — agent definitions, the `.agents/*.md` loader, and the
 //! runtime orchestrator.
 //!
@@ -72,6 +73,25 @@ pub struct AgentLoader {
 
 impl AgentLoader {
     /// Load workspace + user agents and the workspace `AGENTS.md` in one pass.
+    ///
+    /// # Examples
+    ///
+    /// Point the loader at empty scratch roots — both `.agents/` dirs are
+    /// absent, so the loader returns an empty bundle rather than failing:
+    ///
+    /// ```no_run
+    /// use std::path::Path;
+    /// use forge_agents::AgentLoader;
+    ///
+    /// # fn example() -> anyhow::Result<()> {
+    /// let loader = AgentLoader::load(
+    ///     Path::new("/path/to/workspace"),
+    ///     Path::new("/path/to/home"),
+    /// )?;
+    /// assert!(loader.agents().is_empty());
+    /// assert!(loader.agents_md().is_none());
+    /// # Ok(()) }
+    /// ```
     pub fn load(workspace_root: &Path, user_home: &Path) -> anyhow::Result<Self> {
         Ok(Self {
             agents: load_agents(workspace_root, user_home)?,

@@ -1,3 +1,4 @@
+#![deny(rustdoc::broken_intra_doc_links, rustdoc::private_intra_doc_links)]
 //! MCP (Model Context Protocol) client crate.
 //!
 //! Owns the universal `.mcp.json` schema — the `mcpServers` object keyed by

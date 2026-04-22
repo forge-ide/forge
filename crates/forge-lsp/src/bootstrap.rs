@@ -213,6 +213,29 @@ impl Bootstrap {
     /// - [`BootstrapError::Download`] for transport failures.
     /// - [`BootstrapError::SandboxEscape`] for hostile ids.
     /// - [`BootstrapError::Io`] for cache write failures.
+    ///
+    /// # Examples
+    ///
+    /// Resolve the bundled registry's rust-analyzer entry against a
+    /// scratch cache root. The bundled registry ships with
+    /// [`Checksum::Pending`] pins, so `ensure` surfaces
+    /// [`BootstrapError::ChecksumPending`] — the intended safety net
+    /// that prevents an unpinned archive from ever touching disk:
+    ///
+    /// ```no_run
+    /// use forge_lsp::{Bootstrap, BootstrapError, Registry};
+    ///
+    /// # async fn example() -> Result<(), BootstrapError> {
+    /// let bootstrap = Bootstrap::new()?;
+    /// let spec = Registry::bundled()
+    ///     .by_language("rust")
+    ///     .expect("rust-analyzer registered");
+    /// match bootstrap.ensure(spec).await {
+    ///     Err(BootstrapError::ChecksumPending { .. }) => { /* expected until RE pins */ }
+    ///     other => panic!("unexpected result: {other:?}"),
+    /// }
+    /// # Ok(()) }
+    /// ```
     pub async fn ensure(&self, spec: &ServerSpec) -> Result<PathBuf, BootstrapError> {
         let expected = match &spec.checksum {
             Checksum::Sha256(h) => h.clone(),

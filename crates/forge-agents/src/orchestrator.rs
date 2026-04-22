@@ -195,6 +195,29 @@ impl Orchestrator {
     /// Rejects `isolation: trusted` under [`AgentScope::User`] with a typed
     /// [`Error::IsolationViolation`]. This re-enforces the parse-time check
     /// for programmatically-constructed defs that bypass the parser.
+    ///
+    /// # Examples
+    ///
+    /// Spawn a user-scope instance from a programmatically-built def and
+    /// observe the registered [`InstanceState::Running`]:
+    ///
+    /// ```
+    /// use forge_agents::{AgentDef, InstanceState, Isolation, Orchestrator, SpawnContext};
+    ///
+    /// # async fn example() -> forge_agents::Result<()> {
+    /// let def = AgentDef {
+    ///     name: "reviewer".into(),
+    ///     description: Some("code reviewer".into()),
+    ///     body: "You review diffs.".into(),
+    ///     allowed_paths: vec![],
+    ///     isolation: Isolation::Process,
+    /// };
+    /// let orchestrator = Orchestrator::new();
+    /// let instance = orchestrator.spawn(def, SpawnContext::user()).await?;
+    /// assert_eq!(instance.state, InstanceState::Running);
+    /// # Ok(()) }
+    /// # futures::executor::block_on(example()).unwrap();
+    /// ```
     pub async fn spawn(&self, def: AgentDef, ctx: SpawnContext) -> Result<AgentInstance> {
         if ctx.scope == AgentScope::User && def.isolation == Isolation::Trusted {
             tracing::warn!(
