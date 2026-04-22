@@ -35,10 +35,10 @@ crates/
   forge-cli         forge binary, thin clap wrapper
   forge-shell       Tauri binary, bridges Tauri commands ↔ UDS
 web/
-  apps/shell          SolidJS shell app
-  apps/monaco-host    Monaco in isolated iframe
-  packages/ipc        generated TS types + typed IPC client
-  packages/state      Solid signals as module-level stores
+  packages/app          SolidJS shell app
+  packages/monaco-host  Monaco in isolated iframe
+  packages/ipc          generated TS types + typed IPC client
+  packages/design       design tokens
 docs/               architecture, build, design, product, ui-specs
 ```
 
