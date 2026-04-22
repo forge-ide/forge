@@ -308,4 +308,64 @@ mod tests {
         let pos = handle.cursor_position().expect("query cursor");
         assert_eq!(pos, CursorPosition { col: 0, row: 1 });
     }
+
+    #[test]
+    fn scrollback_is_bounded_by_default_max() {
+        // Regression guard for F-383: drive more newlines than the scrollback
+        // cap through the VT and assert the parser never reports a buffer
+        // larger than `DEFAULT_MAX_SCROLLBACK`, nor a `total_rows` that
+        // exceeds `viewport + cap`. Catches two classes of regression:
+        //   (1) option plumbing: `max_scrollback` silently stops reaching
+        //       `TerminalOptions`, causing unbounded growth.
+        //   (2) ghostty-vt accounting: a future bump to libghostty-vt changes
+        //       the semantics of `scrollback_rows`/`total_rows` and our cap
+        //       stops being respected.
+        //
+        // Hermetic — writes the bytes directly through the driver channel;
+        // no PTY or child process.
+        const COLS: u16 = 80;
+        const VIEWPORT_ROWS: u16 = 24;
+        // Well past the cap so any unbounded growth would blow through it.
+        let lines_to_write = DEFAULT_MAX_SCROLLBACK + 2_000;
+
+        let handle = spawn_vt_driver(COLS, VIEWPORT_ROWS);
+
+        // Send in bounded chunks so a single oversized `Vec<u8>` can't
+        // stall the `VT_COMMAND_CHANNEL_BOUND`-sized command channel.
+        let chunk_lines = 500;
+        let mut remaining = lines_to_write;
+        while remaining > 0 {
+            let n = remaining.min(chunk_lines);
+            let mut buf = Vec::with_capacity(n * 3);
+            for _ in 0..n {
+                buf.extend_from_slice(b"x\r\n");
+            }
+            handle
+                .tx
+                .send(VtCommand::Bytes(buf))
+                .expect("send bytes chunk");
+            remaining -= n;
+        }
+
+        let scrollback = handle.scrollback_rows().expect("query scrollback_rows");
+        let total = handle.total_rows().expect("query total_rows");
+
+        // Primary invariant from the DoD.
+        assert!(
+            scrollback <= DEFAULT_MAX_SCROLLBACK,
+            "scrollback_rows={scrollback} exceeded cap DEFAULT_MAX_SCROLLBACK={DEFAULT_MAX_SCROLLBACK}",
+        );
+        assert!(
+            total <= DEFAULT_MAX_SCROLLBACK + VIEWPORT_ROWS as usize,
+            "total_rows={total} exceeded viewport+cap ({})",
+            DEFAULT_MAX_SCROLLBACK + VIEWPORT_ROWS as usize,
+        );
+        // Sanity: rows left the viewport, so scrollback must have grown.
+        // If this asserts `== 0` we know the byte stream was swallowed or
+        // the parser never advanced rows — a different regression mode.
+        assert!(
+            scrollback > 0,
+            "scrollback_rows=0 after writing {lines_to_write} lines — parser never scrolled",
+        );
+    }
 }
