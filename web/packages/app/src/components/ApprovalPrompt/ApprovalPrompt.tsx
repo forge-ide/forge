@@ -67,7 +67,9 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
       ? (document.activeElement as HTMLElement | null)
       : null;
 
-  // Root element of the prompt — used as the focus-trap boundary.
+  // Root element of the prompt. Used for initial-focus placement only —
+  // the prompt is an inline region (see docs/ui-specs/approval-prompt.md §10:
+  // "Never a modal.") and intentionally does NOT trap focus.
   let rootRef: HTMLDivElement | undefined;
 
   const path = () => extractPath(props.argsJson);
@@ -89,34 +91,10 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
     props.onApprove(scope, effectiveLevel, pat);
   };
 
-  // Focusable elements within the prompt root, in DOM order. Used by the
-  // focus trap to compute boundaries.
-  const focusableElements = (): HTMLElement[] => {
-    if (!rootRef) return [];
-    return Array.from(
-      rootRef.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
-      ),
-    );
-  };
-
   const handleKeyDown = (e: KeyboardEvent) => {
-    // Focus trap — keep Tab navigation within the prompt regardless of mode.
-    if (e.key === 'Tab') {
-      const focusables = focusableElements();
-      const first = focusables[0];
-      const last = focusables[focusables.length - 1];
-      if (!first || !last) return;
-      const active = document.activeElement as HTMLElement | null;
-      if (e.shiftKey && active === first) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && active === last) {
-        e.preventDefault();
-        first.focus();
-      }
-      return;
-    }
+    // Tab is intentionally NOT intercepted. The prompt is an inline region
+    // inside the tool-call card and must let focus flow out into the next
+    // element in the conversation. See docs/ui-specs/approval-prompt.md §10.
 
     // Don't intercept other shortcuts if user is editing pattern input
     if (patternMode()) {
@@ -173,8 +151,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
       ref={rootRef}
       class="approval-prompt"
       data-testid="approval-prompt"
-      role="alertdialog"
-      aria-live="assertive"
+      role="region"
       aria-labelledby={titleId()}
     >
       <h3 id={titleId()} class="approval-prompt__title">

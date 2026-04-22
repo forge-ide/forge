@@ -110,15 +110,24 @@ describe('ApprovalPrompt rendering', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Accessibility — interruptive announcement (F-088)
+// Accessibility — inline region, never a modal (F-393)
+//
+// The approval prompt lives inline inside the tool-call card's expanded body.
+// docs/ui-specs/approval-prompt.md §10 opens with a bold, unambiguous rule:
+// "Never a modal." These assertions are the contract that keeps us honest.
 // ---------------------------------------------------------------------------
 
 describe('ApprovalPrompt accessibility', () => {
-  it('marks the root with role="alertdialog" and aria-live="assertive"', () => {
+  it('marks the root with role="region" and no modal semantics', () => {
     const { getByTestId } = renderPrompt();
     const root = getByTestId('approval-prompt');
-    expect(root).toHaveAttribute('role', 'alertdialog');
-    expect(root).toHaveAttribute('aria-live', 'assertive');
+    expect(root).toHaveAttribute('role', 'region');
+    // Never-a-modal contract: no dialog/alertdialog, no aria-modal, no
+    // assertive live-region announcement. Inline regions do not interrupt.
+    expect(root).not.toHaveAttribute('role', 'alertdialog');
+    expect(root).not.toHaveAttribute('role', 'dialog');
+    expect(root).not.toHaveAttribute('aria-modal', 'true');
+    expect(root).not.toHaveAttribute('aria-live', 'assertive');
   });
 
   it('aria-labelledby resolves to a visible non-empty title', () => {
@@ -380,7 +389,7 @@ describe('Focus management — initial focus (F-089)', () => {
   });
 });
 
-describe('Focus management — focus trap (F-089)', () => {
+describe('Focus management — no focus trap, Tab escapes (F-393)', () => {
   function focusableInPrompt(root: HTMLElement): HTMLElement[] {
     return Array.from(
       root.querySelectorAll<HTMLElement>(
@@ -389,7 +398,9 @@ describe('Focus management — focus trap (F-089)', () => {
     );
   }
 
-  it('Tab from the last focusable element wraps to the first', () => {
+  it('Tab from the last focusable element does NOT wrap back into the prompt', () => {
+    // Regression guard for the former focus-trap. Inline regions must let Tab
+    // move naturally out of the card into the next element in the conversation.
     const { getByTestId } = renderPrompt();
     const root = getByTestId('approval-prompt');
     const focusables = focusableInPrompt(root);
@@ -400,10 +411,13 @@ describe('Focus management — focus trap (F-089)', () => {
     last.focus();
     expect(document.activeElement).toBe(last);
     fireEvent.keyDown(last, { key: 'Tab' });
-    expect(document.activeElement).toBe(first);
+    // The prompt must not reroute focus back to `first`. Browser default takes
+    // over — in jsdom that leaves focus where it was, which is still acceptable
+    // as long as the trap did not fire.
+    expect(document.activeElement).not.toBe(first);
   });
 
-  it('Shift+Tab from the first focusable element wraps to the last', () => {
+  it('Shift+Tab from the first focusable element does NOT wrap to the last', () => {
     const { getByTestId } = renderPrompt();
     const root = getByTestId('approval-prompt');
     const focusables = focusableInPrompt(root);
@@ -414,7 +428,35 @@ describe('Focus management — focus trap (F-089)', () => {
     first.focus();
     expect(document.activeElement).toBe(first);
     fireEvent.keyDown(first, { key: 'Tab', shiftKey: true });
-    expect(document.activeElement).toBe(last);
+    expect(document.activeElement).not.toBe(last);
+  });
+
+  it('Tab from inside the prompt lets focus reach an element after the card', () => {
+    // Simulate a sibling element living after the approval card (e.g. the next
+    // message in the conversation) and confirm it is reachable with Tab.
+    const after = document.createElement('button');
+    after.setAttribute('data-testid', 'next-in-conversation');
+    after.textContent = 'Next message';
+
+    const { getByTestId } = renderPrompt();
+    // Append the sibling *after* the prompt's container so it is the next
+    // focusable in document order.
+    document.body.appendChild(after);
+
+    const root = getByTestId('approval-prompt');
+    const focusables = focusableInPrompt(root);
+    const last = focusables[focusables.length - 1]!;
+    last.focus();
+
+    fireEvent.keyDown(last, { key: 'Tab' });
+    // The prompt must not have called preventDefault and redirected focus
+    // back to the first element in the prompt.
+    expect(document.activeElement).not.toBe(focusables[0]);
+
+    // And the element after the card must be reachable — directly focus it to
+    // assert nothing in the prompt is blocking or stealing focus back.
+    after.focus();
+    expect(document.activeElement).toBe(after);
   });
 
   it('Tab in the middle of the focusable set does not interfere', () => {
@@ -424,9 +466,6 @@ describe('Focus management — focus trap (F-089)', () => {
     expect(focusables.length).toBeGreaterThan(2);
     const middle = focusables[1]!;
     middle.focus();
-    // No preventDefault or programmatic focus when not at a boundary —
-    // we simulate the keydown but the browser's default tab order takes over.
-    // The trap handler must NOT relocate focus mid-list.
     fireEvent.keyDown(middle, { key: 'Tab' });
     expect(document.activeElement).toBe(middle);
   });
