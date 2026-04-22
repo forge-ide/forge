@@ -2898,10 +2898,10 @@ pub fn manage_context_fetch<R: Runtime>(app: &AppHandle<R>) {
 }
 
 /// Wire shape returned by `context_fetch_url`. `body` is already wrapped
-/// in the dual-LLM containment markers
-/// ([`crate::context_fetch::BEGIN_MARKER`] /
-/// [`crate::context_fetch::END_MARKER`]); callers splice it into the
-/// prompt verbatim.
+/// in a fresh per-request pair of dual-LLM containment markers
+/// (see [`crate::context_fetch::make_markers`]); callers splice it into
+/// the prompt verbatim. The per-call markers carry a 128-bit hex nonce
+/// so an attacker-controlled body cannot close the boundary mid-response.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
 pub struct FetchedUrl {

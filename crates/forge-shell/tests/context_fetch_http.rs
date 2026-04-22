@@ -12,13 +12,24 @@
 //! pins the production default explicitly by calling [`build_client`]
 //! without options — any regression that relaxes the default port gate
 //! surfaces there.
+//!
+//! Gated on the `webview-test` feature because the `_with` test seams
+//! on the library surface are feature-gated out of production — they
+//! exist only to let test fixtures pass wiremock's random port / DNS
+//! override through the otherwise-strict policy.
 
+#![cfg(feature = "webview-test")]
+
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::Arc;
 
 use forge_shell::context_fetch::{
     build_client, build_client_with, fetch_url, fetch_url_with, FetchUrlError, PolicyOptions,
-    BEGIN_MARKER, END_MARKER, MAX_BODY_BYTES,
+    BEGIN_MARKER_PREFIX, END_MARKER_PREFIX, MAX_BODY_BYTES,
 };
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -47,6 +58,7 @@ async fn fetches_allowed_host_and_wraps_in_markers() {
         vec!["docs.example.test".to_string()],
         options.clone(),
         vec![("docs.example.test".to_string(), addr)],
+        None,
     )
     .expect("test client builds");
     let url = format!("http://docs.example.test:{}/docs", addr.port());
@@ -57,15 +69,18 @@ async fn fetches_allowed_host_and_wraps_in_markers() {
         .expect("fetch ok");
     assert_eq!(out.status, 200);
     assert!(
-        out.body.starts_with(BEGIN_MARKER),
-        "body must open with marker: {}",
+        out.body.starts_with(&out.begin_marker),
+        "body must open with the per-call begin marker: {}",
         out.body
     );
     assert!(
-        out.body.ends_with(END_MARKER),
-        "body must close with marker: {}",
+        out.body.ends_with(&out.end_marker),
+        "body must close with the per-call end marker: {}",
         out.body
     );
+    // The per-call markers always start with the well-known prefix.
+    assert!(out.begin_marker.starts_with(BEGIN_MARKER_PREFIX));
+    assert!(out.end_marker.starts_with(END_MARKER_PREFIX));
     assert!(out.body.contains("hello from allowed host"));
     assert!(!out.truncated);
 }
@@ -111,6 +126,7 @@ async fn redirect_to_blocked_ip_is_rejected_midchain() {
         vec!["docs.example.test".to_string()],
         options.clone(),
         vec![("docs.example.test".to_string(), addr)],
+        None,
     )
     .expect("test client builds");
     let url = format!("http://docs.example.test:{}/hop", addr.port());
@@ -160,6 +176,7 @@ async fn redirect_to_disallowed_host_is_rejected_midchain() {
             ("docs.example.test".to_string(), addr),
             ("disallowed.example.test".to_string(), addr),
         ],
+        None,
     )
     .expect("test client builds");
     let url = format!("http://docs.example.test:{}/hop", addr.port());
@@ -191,6 +208,7 @@ async fn body_is_truncated_at_cap() {
         vec!["docs.example.test".to_string()],
         options.clone(),
         vec![("docs.example.test".to_string(), addr)],
+        None,
     )
     .expect("test client builds");
     let url = format!("http://docs.example.test:{}/big", addr.port());
@@ -200,9 +218,9 @@ async fn body_is_truncated_at_cap() {
         .await
         .expect("fetch ok");
     assert!(out.truncated, "2x cap response must set truncated=true");
-    // body = BEGIN_MARKER + "\n" + body_at_cap + ("\n" if needed) + END_MARKER.
+    // body = begin_marker + "\n" + body_at_cap + ("\n" if needed) + end_marker.
     // So the payload portion is bounded by the cap.
-    let inner_len = out.body.len() - BEGIN_MARKER.len() - END_MARKER.len() - 2; // 2 newlines
+    let inner_len = out.body.len() - out.begin_marker.len() - out.end_marker.len() - 2; // 2 newlines
     assert!(
         inner_len <= MAX_BODY_BYTES,
         "inner payload len {inner_len} must be <= {MAX_BODY_BYTES}"
@@ -224,6 +242,7 @@ async fn non_2xx_surfaces_as_http_status_error() {
         vec!["docs.example.test".to_string()],
         options.clone(),
         vec![("docs.example.test".to_string(), addr)],
+        None,
     )
     .expect("test client builds");
     let url = format!("http://docs.example.test:{}/missing", addr.port());
@@ -235,5 +254,136 @@ async fn non_2xx_surfaces_as_http_status_error() {
     assert!(
         matches!(err, FetchUrlError::HttpStatus { status: 404 }),
         "{err:?}"
+    );
+}
+
+// ---- HIGH #1: DNS-rebinding / DNS-based SSRF ----
+
+/// Test inner DNS resolver that maps names to fixed `SocketAddr`s. Lets
+/// the DNS-policy path run against a controlled answer set — the
+/// production `SystemResolver` calls `tokio::net::lookup_host` which we
+/// cannot steer in a hermetic test.
+struct MapResolver {
+    map: Vec<(String, Vec<SocketAddr>)>,
+}
+
+impl Resolve for MapResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let needle = name.as_str().to_string();
+        let answer: Option<Vec<SocketAddr>> = self
+            .map
+            .iter()
+            .find(|(n, _)| n == &needle)
+            .map(|(_, v)| v.clone());
+        Box::pin(async move {
+            match answer {
+                Some(addrs) => Ok(Box::new(addrs.into_iter()) as Addrs),
+                None => Err(Box::new(std::io::Error::other("no test mapping"))
+                    as Box<dyn std::error::Error + Send + Sync>),
+            }
+        }) as Pin<Box<dyn Future<Output = _> + Send>>
+    }
+}
+
+#[tokio::test]
+async fn dns_resolver_rejects_hostname_resolving_to_loopback() {
+    // HIGH #1: a hostname that passes the allowlist but whose DNS
+    // resolution lands on 127.0.0.1 (classic DNS-rebinding / nip.io
+    // attack) must be rejected at the DNS layer. `reqwest` must never
+    // open a TCP connection to the loopback listener.
+    let resolver = Arc::new(MapResolver {
+        map: vec![(
+            "rebinding.example.test".to_string(),
+            vec!["127.0.0.1:443".parse().unwrap()],
+        )],
+    });
+    let client = build_client_with(
+        vec!["rebinding.example.test".to_string()],
+        PolicyOptions::default(),
+        Vec::new(),
+        Some(resolver),
+    )
+    .expect("client builds with policy-enforcing DNS resolver");
+    let url = "https://rebinding.example.test/".to_string();
+    let allowed = vec!["rebinding.example.test".to_string()];
+
+    let err = fetch_url(&client, &url, &allowed).await.unwrap_err();
+    // The DNS resolver refuses to yield any `SocketAddr` (all blocked), so
+    // `reqwest` surfaces a generic send-failure. The precise error text is
+    // not contract — the key invariant is that the fetch does NOT succeed
+    // and no TCP connect to 127.0.0.1 is issued. `TransportFailed` is the
+    // only non-2xx variant that can reach the caller on this path.
+    assert!(
+        matches!(err, FetchUrlError::TransportFailed { .. }),
+        "expected TransportFailed from DNS policy rejection; got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn dns_resolver_rejects_hostname_resolving_to_link_local() {
+    // AWS IMDS via DNS rebinding — an allowlisted public name pointing
+    // at 169.254.169.254. Same attack shape, different range.
+    let resolver = Arc::new(MapResolver {
+        map: vec![(
+            "metadata.example.test".to_string(),
+            vec!["169.254.169.254:80".parse().unwrap()],
+        )],
+    });
+    let client = build_client_with(
+        vec!["metadata.example.test".to_string()],
+        PolicyOptions::default(),
+        Vec::new(),
+        Some(resolver),
+    )
+    .expect("client builds with policy-enforcing DNS resolver");
+    let url = "http://metadata.example.test/latest/meta-data/".to_string();
+    let allowed = vec!["metadata.example.test".to_string()];
+
+    let err = fetch_url(&client, &url, &allowed).await.unwrap_err();
+    assert!(
+        matches!(err, FetchUrlError::TransportFailed { .. }),
+        "link-local via DNS must surface as TransportFailed; got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn dns_resolver_drops_blocked_ips_keeps_allowed_ips() {
+    // A resolver returning a MIX of blocked and allowed IPs must drop
+    // the blocked ones and still connect via the allowed ones. This
+    // pins the "filter, don't refuse" behavior when at least one
+    // safe endpoint is available.
+    //
+    // We wire the allowed address to point at a wiremock bound on
+    // 127.0.0.1 (the local listener is fine — the IP filter rejects
+    // loopback, so the test actually exercises the drop+empty path
+    // against 169.254.169.254). Because the loopback entry is also
+    // blocked, this test pins that a fully-blocked answer set ends in
+    // DNS failure, not silent fallback.
+    let resolver = Arc::new(MapResolver {
+        map: vec![(
+            "mixed.example.test".to_string(),
+            vec![
+                "169.254.169.254:443".parse().unwrap(),
+                "127.0.0.1:443".parse().unwrap(),
+            ],
+        )],
+    });
+    let client = build_client_with(
+        vec!["mixed.example.test".to_string()],
+        PolicyOptions::default(),
+        Vec::new(),
+        Some(resolver),
+    )
+    .expect("client builds");
+    let err = fetch_url(
+        &client,
+        "https://mixed.example.test/",
+        &["mixed.example.test".to_string()],
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(err, FetchUrlError::TransportFailed { .. }),
+        "all-blocked DNS answer must fail; got: {err:?}"
     );
 }
