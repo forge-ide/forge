@@ -154,17 +154,48 @@ MCP client and server lifecycle manager.
 pub struct McpManager { /* ... */ }
 
 impl McpManager {
-    pub async fn load(scope: Scope) -> Result<Self, ForgeError>;
-    pub async fn start(&self, id: &McpId) -> Result<(), ForgeError>;
-    pub async fn stop(&self, id: &McpId) -> Result<(), ForgeError>;
-    pub async fn call(&self, id: &McpId, tool: &str, args: Value) -> Result<Value, ForgeError>;
+    // Construction is synchronous and cheap; connect-on-use. Spec map comes
+    // from `forge_mcp::config::{load_workspace, load_user, load_merged}`.
+    // Production callers use `new`; tests reach for `with_tuning` to compress
+    // the 30s health-check cadence.
+    pub fn new(config: BTreeMap<String, McpServerSpec>) -> Self;
+    pub fn with_tuning(config: BTreeMap<String, McpServerSpec>, tuning: LifecycleTuning) -> Self;
+
+    pub async fn start(&self, name: &str) -> Result<()>;
+    pub async fn stop(&self, name: &str) -> Result<()>;
+    pub async fn disable(&self, name: &str) -> Result<()>; // F-155: distinct from stop
+    pub async fn enable(&self, name: &str) -> Result<()>;  // F-155: thin wrapper over start
+    pub async fn call(&self, name: &str, tool: &str, args: serde_json::Value)
+        -> Result<serde_json::Value>;
     pub fn state_stream(&self) -> BoxStream<'static, McpStateEvent>;
-    pub fn list(&self) -> Vec<McpServerInfo>;
-    pub fn import(source: ImportSource, dest_scope: Scope) -> Result<ImportReport, ForgeError>;
+    pub async fn list(&self) -> Vec<McpServerInfo>;
 }
 
-pub enum ImportSource { VSCode, Cursor, ClaudeDesktop, Continue, Kiro, Codex }
+// Import is a free function module, not a method on McpManager. Each source
+// converts raw file contents into the universal spec map; filesystem I/O
+// stays in the caller so converters are trivially fixture-testable.
+pub enum ImportSource { VsCode, Cursor, ClaudeDesktop, Continue, Kiro, Codex }
+
+impl ImportSource {
+    pub fn convert(self, raw: &str) -> Result<BTreeMap<String, McpServerSpec>>;
+}
+
+pub fn detect_all(workspace_root: &Path, home: &Path) -> Result<DetectionReport>;
 ```
+
+**F-155: cross-crate move of state types.** `McpStateEvent` and `ServerState` live in `forge-core` (`crates/forge-core/src/mcp_state.rs`), not `forge-mcp`. The move exists so `forge_core::Event::McpState(McpStateEvent)` can carry lifecycle events across the IPC boundary without creating a `forge-core → forge-mcp` dependency cycle. `forge-mcp` re-exports both types unchanged, so existing callers that reach for `forge_mcp::ServerState` / `forge_mcp::McpStateEvent` still compile.
+
+```rust
+pub enum ServerState {
+    Starting,
+    Healthy,
+    Degraded { reason: String },
+    Failed   { reason: String },
+    Disabled { reason: String }, // F-155: explicit user toggle-off
+}
+```
+
+`Disabled` is deliberately distinct from `Failed { reason: "stopped" }`: it marks an explicit user toggle-off so `McpManager::call` can surface the canonical `"MCP server <name> is disabled"` error string, and so `toggle_mcp_server(name, true)` knows to transition back through `Starting`. Restart-history accounting is preserved across disable/enable flaps.
 
 **Transport.**
 - stdio: `tokio::process::Command` + line-delimited JSON-RPC
