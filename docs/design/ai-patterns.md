@@ -47,3 +47,12 @@ The agent monitor shows a list of all agents with a progress bar (3px height, `i
 ### MCP servers
 
 MCP servers in the panel show a 7px status dot with a glow shadow when connected: `box-shadow: 0 0 6px rgba(61,220,132,0.5)`. This glow is the only glow used in the UI — it specifically communicates live network connectivity, which is a meaningfully different state than simple "active".
+
+### Interaction states
+
+Every component that fetches, renders, or mutates data resolves into one of four states. Use the shapes below — do not invent alternatives. New components that omit a state must justify the omission in review.
+
+- **loading:** skeleton placeholder matching the final layout, or the streaming cursor (see §"Streaming state"). Never a spinner.
+- **empty:** `iron-300` copy in a noun-phrase form describing what would appear here, plus an optional primary action (see [Voice & Terminology](voice-terminology.md) §8 "Empty-state copy" for the canonical phrasing). No illustration.
+- **error:** `ember-400` border on the affected surface plus a persistent toast (see [Component Principles](component-principles.md) §"Toasts"). The toast carries the technical identifier verbatim; the border marks the scope of the failure.
+- **success:** implicit. No banner, no toast, no checkmark unless the action is dismissable (e.g. a confirmation the user must acknowledge before the surface returns to its default state).
