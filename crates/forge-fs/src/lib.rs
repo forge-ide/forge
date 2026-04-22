@@ -165,7 +165,10 @@ pub(crate) fn canonicalize_no_symlink(path: &Path) -> std::result::Result<PathBu
 /// Returns a component list equivalent to `path.components()` with `CurDir`
 /// dropped and `ParentDir` folded against the preceding `Normal` entry. Root
 /// and prefix components are preserved so absolute-vs-relative intent is kept
-/// intact; `ParentDir` past the root is left in place for the caller to decide.
+/// intact; `ParentDir` immediately above a `RootDir`/`Prefix` is dropped (you
+/// can't go above the root), so the returned vector never inflates past the
+/// canonical form and the right-aligned compare in `canonicalize_no_symlink`
+/// always runs its symlink guard.
 fn normalize_components(path: &Path) -> Vec<std::path::Component<'_>> {
     use std::path::Component;
     let mut out: Vec<Component<'_>> = Vec::new();
@@ -175,6 +178,8 @@ fn normalize_components(path: &Path) -> Vec<std::path::Component<'_>> {
             Component::ParentDir => match out.last() {
                 Some(Component::Normal(_)) => {
                     out.pop();
+                }
+                Some(Component::RootDir) | Some(Component::Prefix(_)) => { /* drop — can't go above root */
                 }
                 _ => out.push(comp),
             },

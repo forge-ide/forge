@@ -185,6 +185,54 @@ fn write_rejects_symlink_in_the_middle_pointing_outside_allowlist() {
 }
 
 #[test]
+#[cfg(unix)]
+fn rejects_symlink_when_parent_dir_walks_past_root() {
+    // F-356 review follow-up: `normalize_components` used to push `..` onto
+    // the output whenever the stack top was `RootDir`/`Prefix`, which inflated
+    // `normalized_input.len()` past `canonical_comps.len()` for any caller
+    // path with enough `..` to walk past root. The length-guard in
+    // `canonicalize_no_symlink` then silently skipped the symlink-component
+    // check. `enforce_allowed` still catches the traversal via glob match,
+    // but the defense-in-depth symlink layer was inert — this test pins it.
+    let dir = tempdir().unwrap();
+    let real_dir = dir.path().canonicalize().unwrap();
+    let real_sub = real_dir.join("real_dir");
+    std::fs::create_dir_all(real_sub.join("leaf")).unwrap();
+
+    let link = real_dir.join("link_dir");
+    std::os::unix::fs::symlink(&real_sub, &link).unwrap();
+
+    // Walk enough `..` to blow past `/` and rebuild back to the link target.
+    // With the pre-fix `normalize_components`, the trailing `..` past root
+    // survives in `normalized_input`, inflating its length and skipping the
+    // symlink-component compare. With the fix, the vectors align and the
+    // guard recognises `link_dir` vs the resolved `real_dir` as a mismatch.
+    let mut target = link.clone();
+    for _ in 0..16 {
+        target = target.join("..");
+    }
+    for comp in real_dir.components().filter_map(|c| match c {
+        std::path::Component::Normal(os) => Some(os),
+        _ => None,
+    }) {
+        target = target.join(comp);
+    }
+    target = target.join("link_dir").join("leaf").join("file.txt");
+
+    let allowed = vec![canonical_glob(dir.path())];
+
+    let err = write(
+        target.to_str().unwrap(),
+        "payload",
+        &allowed,
+        &Limits::default(),
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, FsError::SymlinkDenied { .. }), "got: {err:?}");
+}
+
+#[test]
 fn write_accepts_path_with_parent_dir_inside_allowlist() {
     // F-356: `..` in a caller path must round-trip cleanly to its canonical
     // form inside the allowlist. Before the normalization fix this still
