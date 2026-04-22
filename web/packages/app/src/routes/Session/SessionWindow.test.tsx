@@ -23,6 +23,12 @@ import {
 } from './SessionWindow';
 import { resetSessionEventStore } from '../../stores/session';
 import { resetMessagesStore } from '../../stores/messages';
+import {
+  recordProviderModel,
+  recordUsageTick,
+  resetSessionTelemetryStore,
+} from '../../stores/sessionTelemetry';
+import type { ProviderId } from '@forge/ipc';
 import { setInvokeForTesting } from '../../lib/tauri';
 import type { LayoutTree, Layouts } from '@forge/ipc';
 import {
@@ -101,6 +107,7 @@ describe('SessionWindow', () => {
     closeMock.mockReset();
     resetSessionEventStore();
     resetMessagesStore();
+    resetSessionTelemetryStore();
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === 'session_hello') return helloAck;
       // F-126: layoutStore.load() calls read_layouts on mount when no store
@@ -194,16 +201,128 @@ describe('SessionWindow', () => {
     expect(container.querySelector('[data-testid="split-pane"]')).toBeNull();
   });
 
-  it('pane header shows subject, ollama provider label, cost placeholder, close action', async () => {
+  // F-395: PaneHeader reflects live provider/model + session cost telemetry.
+  // Before any AssistantMessage or UsageTick arrives, the pill falls back to
+  // the sanctioned provider-id-only label (no "pending") and the cost meter
+  // renders an em-dash placeholder (not $0.00). Once the telemetry store
+  // records real values, both update reactively.
+
+  it('pane header: before any telemetry, cost renders em-dash placeholder and pill has no "pending"', async () => {
     const { findByTestId, findByRole } = renderAt('/session/abc123');
     const subject = await findByTestId('pane-header-subject');
-    expect(subject.textContent).toContain('abc123');
+    // Subject no longer starts with the placeholder "Session " prefix —
+    // F-395 removes the legacy `Session <id>` hardcoded label.
+    expect(subject.textContent).not.toMatch(/^Session /);
     const provider = await findByTestId('pane-header-provider');
-    expect(provider.textContent?.toLowerCase()).toContain('ollama');
+    // "pending" is not in the sanctioned state vocabulary — must not appear.
+    expect(provider.textContent?.toLowerCase()).not.toContain('pending');
     const cost = await findByTestId('pane-header-cost');
-    expect(cost.textContent).toMatch(/in\s+0.*out\s+0.*\$0/i);
+    // Documented placeholder — literal em-dash, not the fabricated $0.00.
+    expect(cost.textContent).toContain('—');
+    expect(cost.textContent).not.toContain('$0.00');
     const close = await findByRole('button', { name: /close/i });
     expect(close).toBeInTheDocument();
+  });
+
+  it('pane header reflects the telemetry store provider/model after recordProviderModel', async () => {
+    const { findByTestId } = renderAt('/session/abc123');
+    await findByTestId('pane-header-subject');
+    recordProviderModel(
+      'abc123' as never,
+      'anthropic' as ProviderId,
+      'claude-opus-4-7',
+    );
+    const provider = await findByTestId('pane-header-provider');
+    await waitFor(() =>
+      expect(provider.textContent?.toLowerCase()).toContain('anthropic'),
+    );
+    const subject = await findByTestId('pane-header-subject');
+    await waitFor(() =>
+      expect(subject.textContent).toContain('claude-opus-4-7'),
+    );
+  });
+
+  it('pane header reflects provider + cost driven end-to-end by mocked Rust-shaped IPC events (F-395 regression)', async () => {
+    const handlers: Array<(ev: { payload: unknown }) => void> = [];
+    listenMock.mockImplementation(
+      async (_name: string, handler: (ev: { payload: unknown }) => void) => {
+        handlers.push(handler);
+        return unlistenMock;
+      },
+    );
+
+    const { findByTestId } = renderAt('/session/abc123');
+    await findByTestId('pane-header-subject');
+    // Both adapter + bg-agents listeners must attach before we dispatch.
+    await waitFor(() => expect(handlers.length).toBeGreaterThanOrEqual(2));
+
+    // 1. assistant_message carries provider + model on the wire. Adapter
+    //    routes it into the sessionTelemetry store, which the PaneHeader
+    //    reads via getSessionTelemetry(sessionId).
+    for (const h of handlers) {
+      h({
+        payload: {
+          session_id: 'abc123',
+          seq: 1,
+          event: {
+            type: 'assistant_message',
+            id: 'a-1',
+            at: '2026-04-21T10:00:00Z',
+            provider: 'anthropic',
+            model: 'claude-opus-4-7',
+            text: 'hello',
+            stream_finalised: true,
+            branch_parent: null,
+            branch_variant_index: 0,
+          },
+        },
+      });
+    }
+    const provider = await findByTestId('pane-header-provider');
+    await waitFor(() =>
+      expect(provider.textContent?.toLowerCase()).toContain('anthropic'),
+    );
+
+    // 2. usage_tick on the wire must land in the cost meter. Until F-395 the
+    //    adapter dropped it (returned null) — this is the regression.
+    const cost = await findByTestId('pane-header-cost');
+    expect(cost.textContent).toContain('—');
+    for (const h of handlers) {
+      h({
+        payload: {
+          session_id: 'abc123',
+          seq: 2,
+          event: {
+            type: 'usage_tick',
+            provider: 'anthropic',
+            model: 'claude-opus-4-7',
+            tokens_in: 500,
+            tokens_out: 1500,
+            cost_usd: 0.02,
+            scope: 'SessionWide',
+          },
+        },
+      });
+    }
+    await waitFor(() => {
+      expect(cost.textContent).toMatch(/in\s+500/);
+      // 1500 abbreviates to `1.5k` per spec §PH.4.
+      expect(cost.textContent).toMatch(/out\s+1\.5k/);
+      expect(cost.textContent).toContain('$0.02');
+    });
+  });
+
+  it('pane header cost meter switches from placeholder to live values on UsageTick', async () => {
+    const { findByTestId } = renderAt('/session/abc123');
+    const cost = await findByTestId('pane-header-cost');
+    expect(cost.textContent).toContain('—');
+    recordUsageTick('abc123' as never, 1234, 5678, 0.042);
+    await waitFor(() => {
+      // Spec §PH.4: tokens abbreviated above 1000 — `1.2k`, `5.7k`.
+      expect(cost.textContent).toMatch(/in\s+1\.2k/);
+      expect(cost.textContent).toMatch(/out\s+5\.7k/);
+      expect(cost.textContent).toContain('$0.04');
+    });
   });
 
   it('close button invokes the current window close()', async () => {

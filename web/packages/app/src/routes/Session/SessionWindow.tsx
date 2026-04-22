@@ -24,7 +24,17 @@ import {
   setSessions,
 } from '../../stores/session';
 import { pushEvent } from '../../stores/messages';
+import {
+  getSessionTelemetry,
+  routeTelemetryEvent,
+} from '../../stores/sessionTelemetry';
 import { fromRustEvent } from '../../ipc/events';
+import {
+  formatChatSubject,
+  formatCostLabel,
+  formatProviderLabel,
+  resolveProviderId,
+} from './costLabel';
 import { seedPersistentApprovals } from '../../stores/approvals';
 import { seedSettings } from '../../stores/settings';
 import { PaneHeader } from './PaneHeader';
@@ -144,6 +154,12 @@ export const SessionWindow: Component = () => {
         // store's discriminated union. Non-renderable variants return null.
         const storeEvent = fromRustEvent(payload.event);
         if (storeEvent) pushEvent(payload.session_id, storeEvent);
+        // F-395: side-channel — the PaneHeader's provider pill + cost meter
+        // read from the per-session telemetry store, which is fed by the
+        // same wire events (assistant_message for provider/model, usage_tick
+        // for tokens + cost). Kept off the messages-store path so a chat
+        // log shape change can't ripple into the header.
+        routeTelemetryEvent(payload.session_id, payload.event);
       });
       if (mounted) {
         unlisten = listener;
@@ -177,13 +193,22 @@ export const SessionWindow: Component = () => {
     }
   };
 
-  const subject = () => `Session ${sessionId()}`;
-  // Phase 1 ships only the Ollama provider; once the active session carries
-  // its provider id over IPC (Phase 2), wire it through here so the pill
-  // accent follows the live provider per ai-patterns.md §7 (F-091).
-  const providerId = (): ProviderId => 'ollama' as ProviderId;
-  const providerLabel = () => 'ollama \u00b7 pending';
-  const costLabel = () => 'in 0 \u00b7 out 0 \u00b7 $0.00';
+  // F-395: PaneHeader fields derive from the per-session telemetry store,
+  // which is fed by wire events (`assistant_message` → provider/model,
+  // `usage_tick` → tokens + cost). Reading through `getSessionTelemetry`
+  // inside these accessor functions opts into Solid's fine-grained store
+  // reactivity so the header updates the moment a tick lands. Before the
+  // first assistant turn, the provider pill falls back to the `ollama`
+  // Phase-1 default per `pane-header.md §PH.3` — never the unsanctioned
+  // `pending` state suffix (`voice-terminology.md §8`). Before the first
+  // usage_tick, the cost meter renders a documented em-dash placeholder
+  // rather than the fabricated `$0.00` that triggered the F-395 report.
+  const telemetry = () => getSessionTelemetry(sessionId());
+  const subject = () => formatChatSubject(sessionId(), telemetry());
+  const providerId = (): ProviderId =>
+    resolveProviderId(telemetry()) as ProviderId;
+  const providerLabel = () => formatProviderLabel(telemetry());
+  const costLabel = () => formatCostLabel(telemetry());
 
   // F-126: activity-bar + files-sidebar chrome. `activeActivity` is `null`
   // when the sidebar is hidden (default) and an activity id when visible.
