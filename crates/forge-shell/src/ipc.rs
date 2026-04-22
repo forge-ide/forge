@@ -1977,7 +1977,7 @@ pub async fn lsp_list<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, LspState>,
 ) -> Result<Vec<LspServerInfo>, String> {
-    require_window_label_in(&webview, &[], true)?;
+    require_window_label_in(&webview, &[], true, "lsp_list")?;
     let caller_label = webview.label().to_string();
     let handles = state.list_owned_state_handles(&caller_label);
     let mut out = Vec::with_capacity(handles.len());

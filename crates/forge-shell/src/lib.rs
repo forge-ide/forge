@@ -21,7 +21,7 @@
 //! # Structured tracing (F-371)
 //!
 //! All `tracing` emissions from this crate — authz rejections in
-//! [`ipc::require_window_label`] / [`ipc::require_window_label_in`], Tauri
+//! `ipc::require_window_label` / `ipc::require_window_label_in`, Tauri
 //! emit-target failures in [`ipc`], and the terminal / LSP forwarders —
 //! use the field-name and target schema pinned in
 //! [`forge_session::log_fields`]. That module is the authoritative
