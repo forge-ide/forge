@@ -25,6 +25,39 @@ use crate::session::Session;
 use crate::tools::AgentRuntime;
 use forge_core::{ApprovalScope, MessageId};
 
+/// F-354: Maximum time the daemon will wait for a connecting peer to send
+/// the `Hello` frame and, once HelloAck is written, the `Subscribe` frame.
+/// A silent peer past this deadline is dropped so connection tasks cannot
+/// be pinned indefinitely (CWE-400 / CWE-770).
+///
+/// Override via `FORGE_IPC_HANDSHAKE_DEADLINE_MS` (tests use a small value
+/// to keep the regression suite fast).
+const HANDSHAKE_DEADLINE_DEFAULT: Duration = Duration::from_secs(10);
+
+/// F-354: Post-handshake idle timeout on the client → daemon command
+/// reader. Closes the inter-frame starvation gap: once the handshake
+/// finishes, a peer that never sends another command is dropped after
+/// this window so a stalled client cannot hold a runtime task forever.
+///
+/// Override via `FORGE_IPC_IDLE_TIMEOUT_MS`.
+const IDLE_TIMEOUT_DEFAULT: Duration = Duration::from_secs(300);
+
+fn handshake_deadline() -> Duration {
+    std::env::var("FORGE_IPC_HANDSHAKE_DEADLINE_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(HANDSHAKE_DEADLINE_DEFAULT)
+}
+
+fn idle_timeout() -> Duration {
+    std::env::var("FORGE_IPC_IDLE_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(IDLE_TIMEOUT_DEFAULT)
+}
+
 /// F-140: build the per-session `AgentRuntime` or surface a soft failure.
 ///
 /// Returns `None` when the agent-def load fails or no defs resolve; the
@@ -766,7 +799,10 @@ async fn handle_connection<P: Provider + 'static>(
     mcp: Option<Arc<forge_mcp::McpManager>>,
 ) -> Result<()> {
     // ── Handshake ──────────────────────────────────────────────────────────────
-    let msg = forge_ipc::read_frame(&mut stream).await?;
+    // F-354: both handshake reads are subject to a bounded deadline so a
+    // silent/stalled peer cannot pin a daemon task indefinitely.
+    let deadline = handshake_deadline();
+    let msg = forge_ipc::read_frame_with_deadline(&mut stream, deadline).await?;
     let IpcMessage::Hello(hello) = msg else {
         anyhow::bail!("expected Hello, got unexpected message type");
     };
@@ -784,7 +820,7 @@ async fn handle_connection<P: Provider + 'static>(
     forge_ipc::write_frame(&mut stream, &ack).await?;
 
     // ── Subscribe + history replay ─────────────────────────────────────────────
-    let msg = forge_ipc::read_frame(&mut stream).await?;
+    let msg = forge_ipc::read_frame_with_deadline(&mut stream, deadline).await?;
     let IpcMessage::Subscribe(sub) = msg else {
         anyhow::bail!("expected Subscribe after HelloAck");
     };
@@ -824,8 +860,13 @@ async fn handle_connection<P: Provider + 'static>(
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<IpcMessage>(32);
 
     // Spawn a task that forwards client frames onto the command channel.
+    // F-354: apply a per-frame idle timeout so a peer that completes the
+    // handshake and then stalls cannot hold the connection task forever.
+    // A timeout causes the reader task to exit; the outer `select!` loop
+    // sees `cmd_rx` close and tears the connection down.
+    let idle = idle_timeout();
     tokio::spawn(async move {
-        while let Ok(msg) = forge_ipc::read_frame(&mut reader).await {
+        while let Ok(msg) = forge_ipc::read_frame_with_deadline(&mut reader, idle).await {
             if cmd_tx.send(msg).await.is_err() {
                 break;
             }

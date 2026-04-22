@@ -8,6 +8,7 @@ pub use forge_core::{McpStateEvent, ServerState};
 pub use forge_mcp::McpServerInfo;
 use futures::{SinkExt, StreamExt};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
@@ -251,6 +252,25 @@ pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Result<
     Ok(msg)
 }
 
+/// F-354: read a frame subject to `deadline`. Prevents a silent or
+/// stalled peer from hanging the caller forever — without this, a local
+/// same-uid attacker could open a UDS connection, send zero bytes, and
+/// tie up a daemon task until shutdown (CWE-400 / CWE-770).
+///
+/// Returns an error if `deadline` elapses before either the length
+/// prefix or the frame body is fully read. The underlying reader is
+/// left in an indeterminate state; callers should drop the connection
+/// on error rather than retrying.
+pub async fn read_frame_with_deadline<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    deadline: Duration,
+) -> anyhow::Result<IpcMessage> {
+    match tokio::time::timeout(deadline, read_frame(reader)).await {
+        Ok(inner) => inner,
+        Err(_) => bail!("ipc read timed out after {:?}", deadline),
+    }
+}
+
 pub struct FramedStream {
     inner: Framed<UnixStream, LengthDelimitedCodec>,
 }
@@ -333,5 +353,41 @@ mod tests {
         let sent_json = serde_json::to_string(&sent).unwrap();
         let got_json = serde_json::to_string(&got).unwrap();
         assert_eq!(sent_json, got_json);
+    }
+
+    /// F-354: a silent peer must not stall `read_frame_with_deadline` past
+    /// the supplied deadline. Without the deadline wrapper, `read_u32`
+    /// blocks forever.
+    #[tokio::test]
+    async fn read_frame_with_deadline_fires_on_silent_peer() {
+        let (a, _b) = UnixStream::pair().unwrap();
+        let mut reader = a;
+
+        let started = std::time::Instant::now();
+        let result = read_frame_with_deadline(&mut reader, Duration::from_millis(100)).await;
+        let elapsed = started.elapsed();
+
+        assert!(result.is_err(), "expected deadline error, got {:?}", result);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "deadline did not fire promptly: {:?}",
+            elapsed
+        );
+    }
+
+    /// F-354: the deadline wrapper must succeed when the peer writes a
+    /// frame within the deadline.
+    #[tokio::test]
+    async fn read_frame_with_deadline_succeeds_before_deadline() {
+        let (mut a, mut b) = UnixStream::pair().unwrap();
+        let sent = hello_msg();
+        tokio::spawn(async move {
+            write_frame(&mut a, &sent).await.unwrap();
+        });
+
+        let got = read_frame_with_deadline(&mut b, Duration::from_secs(5))
+            .await
+            .expect("frame should arrive before deadline");
+        matches!(got, IpcMessage::Hello(_));
     }
 }
