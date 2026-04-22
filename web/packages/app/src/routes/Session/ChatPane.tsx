@@ -26,6 +26,9 @@ import {
   type VariantRow,
 } from '../../components/BranchMetadataPopover';
 import type { ApprovalLevel, ApprovalScope, SessionId } from '@forge/ipc';
+// `SessionId` is retained solely for `reportInvokeError`'s internal signature;
+// components in this file no longer accept a `sessionId` prop — they read
+// from the `activeSessionId` signal per the frontend-state decision doc.
 import {
   getApprovalWhitelist,
   addWhitelistEntry,
@@ -360,7 +363,6 @@ const BranchedAssistantTurn: Component<{
    * inactive variants from other branch points into the exported JSON.
    */
   visibleTurns: ChatTurn[];
-  sessionId: SessionId;
 }> = (props) => {
   const [popoverOpen, setPopoverOpen] = createSignal(false);
 
@@ -380,21 +382,25 @@ const BranchedAssistantTurn: Component<{
   const dispatchSelect = (messageId: string): void => {
     // Spec §15.3: switching variants dispatches `select_branch` with the
     // variant's index. Find that index from the group.
+    const sid = activeSessionId();
+    if (sid === null) return;
     const idx = props.group.variantIds.indexOf(messageId);
     if (idx < 0) return;
     invoke('select_branch', {
-      sessionId: props.sessionId,
+      sessionId: sid,
       parentId: rootId(),
       variantIndex: idx,
-    }).catch((err) => reportInvokeError(props.sessionId, 'select_branch', err));
+    }).catch((err) => reportInvokeError(sid, 'select_branch', err));
   };
 
   const dispatchDelete = (variantIndex: number): void => {
+    const sid = activeSessionId();
+    if (sid === null) return;
     invoke('delete_branch', {
-      sessionId: props.sessionId,
+      sessionId: sid,
       parentId: rootId(),
       variantIndex,
-    }).catch((err) => reportInvokeError(props.sessionId, 'delete_branch', err));
+    }).catch((err) => reportInvokeError(sid, 'delete_branch', err));
     setPopoverOpen(false);
   };
 
@@ -412,6 +418,7 @@ const BranchedAssistantTurn: Component<{
    * tool-call trees and deep provider metadata are out of scope for v1.
    */
   const handleExportAll = async (): Promise<void> => {
+    const sid = activeSessionId();
     const payload = props.visibleTurns
       .map((t) => {
         if (t.type === 'user') {
@@ -439,7 +446,14 @@ const BranchedAssistantTurn: Component<{
         await navigator.clipboard.writeText(json);
       }
     } catch (err) {
-      reportInvokeError(props.sessionId, 'clipboard.writeText', err);
+      // The clipboard path is session-scoped only for error reporting; if
+      // the signal is cleared (e.g. unmount race) we fall back to logging
+      // rather than invent a SessionId.
+      if (sid !== null) {
+        reportInvokeError(sid, 'clipboard.writeText', err);
+      } else {
+        console.error('clipboard.writeText failed', err);
+      }
     }
     setPopoverOpen(false);
   };
@@ -1092,18 +1106,14 @@ export const ChatPane: Component<ChatPaneProps> = (props) => {
                 const rootId = turn.branch_parent ?? turn.message_id;
                 const group = state().branchGroups[rootId];
                 if (group && liveVariantCount(group) > 1) {
-                  const id = sessionId();
-                  if (id !== null) {
-                    return (
-                      <BranchedAssistantTurn
-                        turn={turn}
-                        group={group}
-                        turns={state().turns}
-                        visibleTurns={visibleTurns()}
-                        sessionId={id}
-                      />
-                    );
-                  }
+                  return (
+                    <BranchedAssistantTurn
+                      turn={turn}
+                      group={group}
+                      turns={state().turns}
+                      visibleTurns={visibleTurns()}
+                    />
+                  );
                 }
                 return <AssistantBubble turn={turn} />;
               }

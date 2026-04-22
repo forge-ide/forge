@@ -15,10 +15,11 @@
 //     exercised in the Rust integration test; here we just confirm the
 //     component renders whatever the tree call returns).
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@solidjs/testing-library';
 import type { SessionId, TreeNodeDto } from '@forge/ipc';
 import { FilesSidebar } from './FilesSidebar';
+import { setActiveSessionId } from '../stores/session';
 
 const SID = 'session-sidebar-test' as SessionId;
 const WS = '/workspace/demo';
@@ -67,14 +68,23 @@ function treeWithoutIgnored(): TreeNodeDto {
   );
 }
 
-afterEach(() => cleanup());
+// F-385: FilesSidebar reads the session id from the global `activeSessionId`
+// signal. Tests mount outside of SessionWindow, so we seed the signal
+// directly before each mount and clear it in afterEach.
+beforeEach(() => {
+  setActiveSessionId(SID);
+});
+
+afterEach(() => {
+  setActiveSessionId(null);
+  cleanup();
+});
 
 describe('FilesSidebar render', () => {
   it('renders EXPLORER header and the root children on mount', async () => {
     const loadTree = vi.fn().mockResolvedValue(demoTree());
     const { findByText, getByText } = render(() => (
       <FilesSidebar
-        sessionId={SID}
         workspaceRoot={WS}
         onOpen={vi.fn()}
         loadTree={loadTree}
@@ -90,7 +100,6 @@ describe('FilesSidebar render', () => {
     const loadTree = vi.fn().mockResolvedValue(demoTree());
     const { findByText, queryByText } = render(() => (
       <FilesSidebar
-        sessionId={SID}
         workspaceRoot={WS}
         onOpen={vi.fn()}
         loadTree={loadTree}
@@ -110,7 +119,6 @@ describe('FilesSidebar render', () => {
     const onOpen = vi.fn();
     const { findByText } = render(() => (
       <FilesSidebar
-        sessionId={SID}
         workspaceRoot={WS}
         onOpen={onOpen}
         loadTree={loadTree}
@@ -125,7 +133,6 @@ describe('FilesSidebar render', () => {
     const loadTree = vi.fn().mockResolvedValue(treeWithoutIgnored());
     const { findByText, queryByText } = render(() => (
       <FilesSidebar
-        sessionId={SID}
         workspaceRoot={WS}
         onOpen={vi.fn()}
         loadTree={loadTree}
@@ -142,7 +149,6 @@ describe('FilesSidebar render', () => {
       .mockRejectedValue(new Error('tauri invoke unavailable (command=tree)'));
     const { findByTestId } = render(() => (
       <FilesSidebar
-        sessionId={SID}
         workspaceRoot={WS}
         onOpen={vi.fn()}
         loadTree={loadTree}
@@ -158,7 +164,6 @@ describe('FilesSidebar context menu', () => {
     const loadTree = vi.fn().mockResolvedValue(demoTree());
     const { findByText, findByTestId } = render(() => (
       <FilesSidebar
-        sessionId={SID}
         workspaceRoot={WS}
         onOpen={vi.fn()}
         loadTree={loadTree}
@@ -178,7 +183,6 @@ describe('FilesSidebar context menu', () => {
     const onOpen = vi.fn();
     const { findByText, findByTestId } = render(() => (
       <FilesSidebar
-        sessionId={SID}
         workspaceRoot={WS}
         onOpen={onOpen}
         loadTree={loadTree}
@@ -195,7 +199,6 @@ describe('FilesSidebar context menu', () => {
     const renamePath = vi.fn().mockResolvedValue(undefined);
     const { findByText, findByTestId } = render(() => (
       <FilesSidebar
-        sessionId={SID}
         workspaceRoot={WS}
         onOpen={vi.fn()}
         loadTree={loadTree}
@@ -223,7 +226,6 @@ describe('FilesSidebar context menu', () => {
     const renamePath = vi.fn().mockResolvedValue(undefined);
     const { findByText, findByTestId } = render(() => (
       <FilesSidebar
-        sessionId={SID}
         workspaceRoot={WS}
         onOpen={vi.fn()}
         loadTree={loadTree}
@@ -242,7 +244,6 @@ describe('FilesSidebar context menu', () => {
     const deletePath = vi.fn().mockResolvedValue(undefined);
     const { findByText, findByTestId } = render(() => (
       <FilesSidebar
-        sessionId={SID}
         workspaceRoot={WS}
         onOpen={vi.fn()}
         loadTree={loadTree}
@@ -264,7 +265,6 @@ describe('FilesSidebar context menu', () => {
     const deletePath = vi.fn().mockResolvedValue(undefined);
     const { findByText, findByTestId } = render(() => (
       <FilesSidebar
-        sessionId={SID}
         workspaceRoot={WS}
         onOpen={vi.fn()}
         loadTree={loadTree}
@@ -278,6 +278,35 @@ describe('FilesSidebar context menu', () => {
     expect(deletePath).not.toHaveBeenCalled();
   });
 
+  // F-385: single source of truth for sessionId. Panes read it from the
+  // global `activeSessionId` signal; no `sessionId` prop is accepted. The
+  // test flips the signal mid-render and asserts the next refresh uses the
+  // new id — proving the component reads the signal live, not a prop
+  // captured at mount.
+  it('uses the live activeSessionId signal when calling loadTree (no sessionId prop)', async () => {
+    const loadTree = vi.fn().mockResolvedValue(demoTree());
+    const { findByText } = render(() => (
+      <FilesSidebar
+        workspaceRoot={WS}
+        onOpen={vi.fn()}
+        loadTree={loadTree}
+      />
+    ));
+    await findByText('README.md');
+    expect(loadTree).toHaveBeenCalledWith(SID, WS);
+    // Flip the signal and trigger a refresh via the header button; the next
+    // load call must carry the new session id.
+    const nextSid = 'session-sidebar-next' as SessionId;
+    setActiveSessionId(nextSid);
+    const refreshBtn = document.querySelector(
+      '.files-sidebar__refresh',
+    ) as HTMLButtonElement | null;
+    expect(refreshBtn).not.toBeNull();
+    loadTree.mockClear();
+    refreshBtn!.click();
+    await waitFor(() => expect(loadTree).toHaveBeenCalledWith(nextSid, WS));
+  });
+
   // F-411 (V8): context-menu items are buttons executing an action on the
   // selected tree row — per voice-terminology.md §8, they carry verb(+noun)
   // labels in display caps as literal text so screen readers announce them
@@ -286,7 +315,6 @@ describe('FilesSidebar context menu', () => {
     const loadTree = vi.fn().mockResolvedValue(demoTree());
     const { findByText, findByTestId } = render(() => (
       <FilesSidebar
-        sessionId={SID}
         workspaceRoot={WS}
         onOpen={vi.fn()}
         loadTree={loadTree}

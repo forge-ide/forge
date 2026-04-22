@@ -17,6 +17,7 @@ import {
   breadcrumbFromPath,
   trimmedBreadcrumb,
 } from './EditorPane';
+import { setActiveSessionId } from '../stores/session';
 
 const SID = 'session-editor-test' as SessionId;
 const FILE = '/workspace/demo/src/main.ts';
@@ -51,7 +52,6 @@ describe('EditorPane render', () => {
   it('renders EDITOR type label, breadcrumb leaf, and close button', () => {
     const { getByTestId, getByText, getByRole } = render(() => (
       <EditorPane
-        sessionId={SID}
         path={FILE}
         src="about:blank"
         readFile={vi.fn().mockResolvedValue({
@@ -73,7 +73,6 @@ describe('EditorPane render', () => {
   it('does not render the dirty dot initially', () => {
     const { queryByTestId } = render(() => (
       <EditorPane
-        sessionId={SID}
         path={FILE}
         src="about:blank"
         readFile={vi.fn().mockResolvedValue({
@@ -101,7 +100,6 @@ describe('open-on-ready flow', () => {
     const posted: unknown[] = [];
     const { getByTestId } = render(() => (
       <EditorPane
-        sessionId={SID}
         path={FILE}
         src="about:blank"
         readFile={readFile}
@@ -131,7 +129,6 @@ describe('open-on-ready flow', () => {
     const readFile = vi.fn().mockRejectedValue(new Error('path denied'));
     const { getByTestId, queryByTestId } = render(() => (
       <EditorPane
-        sessionId={SID}
         path={FILE}
         src="about:blank"
         readFile={readFile}
@@ -163,7 +160,6 @@ describe('dirty state + save flow', () => {
     });
     const rendered = render(() => (
       <EditorPane
-        sessionId={SID}
         path={FILE}
         src="about:blank"
         readFile={readFile}
@@ -285,6 +281,66 @@ describe('dirty state + save flow', () => {
   });
 });
 
+// F-385: single source of truth for sessionId. EditorPane reads the id
+// from the global `activeSessionId` signal; no `sessionId` prop is accepted.
+// Proven by asserting readFile / writeFile are called with the signal's
+// value, not a value plumbed through props.
+describe('EditorPane — sessionId sourced from activeSessionId signal (F-385)', () => {
+  it('readFile is called with the signal value (no sessionId prop)', async () => {
+    const readFile = vi.fn().mockResolvedValue({
+      path: FILE,
+      content: 'x',
+      bytes: 1,
+      sha256: 'sha',
+    });
+    const posted: unknown[] = [];
+    const { getByTestId } = render(() => (
+      <EditorPane
+        path={FILE}
+        src="about:blank"
+        readFile={readFile}
+        writeFile={vi.fn().mockResolvedValue(undefined)}
+        postToIframe={(m) => posted.push(m)}
+        onClose={vi.fn()}
+      />
+    ));
+    const iframe = getByTestId('editor-pane-iframe') as HTMLIFrameElement;
+    fireFromIframe(iframe, { kind: 'ready' });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(readFile).toHaveBeenCalledWith(SID, FILE);
+  });
+
+  it('writeFile is called with the signal value on save', async () => {
+    const readFile = vi.fn().mockResolvedValue({
+      path: FILE,
+      content: 'v1',
+      bytes: 2,
+      sha256: 'sha',
+    });
+    const writeFile = vi.fn().mockResolvedValue(undefined);
+    const posted: unknown[] = [];
+    const { getByTestId } = render(() => (
+      <EditorPane
+        path={FILE}
+        src="about:blank"
+        readFile={readFile}
+        writeFile={writeFile}
+        postToIframe={(m) => posted.push(m)}
+        onClose={vi.fn()}
+      />
+    ));
+    const iframe = getByTestId('editor-pane-iframe') as HTMLIFrameElement;
+    fireFromIframe(iframe, { kind: 'ready' });
+    await Promise.resolve();
+    await Promise.resolve();
+    fireFromIframe(iframe, { kind: 'save', uri: `file://${FILE}`, value: 'v2' });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(writeFile).toHaveBeenCalledWith(SID, FILE, 'v2');
+  });
+});
+
 describe('message origin isolation', () => {
   it('ignores messages from windows other than the hosted iframe', async () => {
     const readFile = vi.fn().mockResolvedValue({
@@ -296,7 +352,6 @@ describe('message origin isolation', () => {
     const posted: unknown[] = [];
     render(() => (
       <EditorPane
-        sessionId={SID}
         path={FILE}
         src="about:blank"
         readFile={readFile}
@@ -333,7 +388,6 @@ describe('message origin isolation', () => {
     const posted: unknown[] = [];
     const { getByTestId } = render(() => (
       <EditorPane
-        sessionId={SID}
         path={FILE}
         src="about:blank"
         expectedIframeOrigin="https://editor.forge.local"
@@ -368,7 +422,6 @@ describe('message origin isolation', () => {
     const posted: unknown[] = [];
     const { getByTestId } = render(() => (
       <EditorPane
-        sessionId={SID}
         path={FILE}
         src="about:blank"
         expectedIframeOrigin="https://editor.forge.local"
@@ -406,7 +459,6 @@ describe('message origin isolation', () => {
     });
     const { unmount } = render(() => (
       <EditorPane
-        sessionId={SID}
         path={FILE}
         src="about:blank"
         expectedIframeOrigin="https://editor.forge.local"
@@ -437,11 +489,15 @@ describe('message origin isolation', () => {
   });
 });
 
-afterEach(() => {
-  // Nothing global to reset — the pane uses injected helpers and attaches
-  // its own window listener, which is cleaned up onCleanup.
+beforeEach(() => {
+  // F-385: EditorPane reads the session id from the global `activeSessionId`
+  // signal. Tests mount outside of SessionWindow, so we seed the signal
+  // directly before each mount and clear it in afterEach.
+  setActiveSessionId(SID);
 });
 
-beforeEach(() => {
-  // Reset has no cross-test state today; future-proof.
+afterEach(() => {
+  setActiveSessionId(null);
+  // The pane uses injected helpers and attaches its own window listener,
+  // which is cleaned up onCleanup.
 });

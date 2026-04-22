@@ -25,11 +25,11 @@ import {
   onCleanup,
   onMount,
 } from 'solid-js';
-import type { SessionId } from '@forge/ipc';
 import {
   readFile as defaultReadFile,
   writeFile as defaultWriteFile,
 } from '../ipc/fs';
+import { activeSessionId } from '../stores/session';
 import './EditorPane.css';
 
 /** Default URL the iframe loads. Relative so it resolves under both the
@@ -56,7 +56,6 @@ type IframeMessage =
   | { kind: 'client.notification'; payload: unknown };
 
 export interface EditorPaneProps {
-  sessionId: SessionId;
   /** Absolute path of the file to edit. Required — the pane is one-file-per-
    *  instance today; the tab bar (F-126) will mount multiple EditorPanes. */
   path: string;
@@ -184,8 +183,10 @@ export const EditorPane: Component<EditorPaneProps> = (props) => {
   };
 
   const sendOpen = async (): Promise<void> => {
+    const sid = activeSessionId();
+    if (sid === null) return;
     try {
-      const file = await readFile(props.sessionId, props.path);
+      const file = await readFile(sid, props.path);
       lastSavedValue = file.content;
       currentValue = file.content;
       setIsDirty(false);
@@ -202,8 +203,10 @@ export const EditorPane: Component<EditorPaneProps> = (props) => {
   };
 
   const persist = async (value: string): Promise<void> => {
+    const sid = activeSessionId();
+    if (sid === null) return;
     try {
-      await writeFile(props.sessionId, props.path, value);
+      await writeFile(sid, props.path, value);
       lastSavedValue = value;
       currentValue = value;
       setIsDirty(false);
