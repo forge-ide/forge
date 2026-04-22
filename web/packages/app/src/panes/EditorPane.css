@@ -58,7 +58,10 @@
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--color-accent-warn, var(--color-text-primary));
+  /* F-417: no fallback — the warn token is first-class in tokens.css.
+   * A fallback here previously masked drift with a near-white text color
+   * that defeated the dirty-dot signal against --color-surface-1. */
+  background: var(--color-accent-warn);
   margin-left: var(--sp-1);
   flex: 0 0 auto;
 }

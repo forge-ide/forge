@@ -33,6 +33,11 @@
   --color-error:     #ff4a12;
   --color-info:      #7aaaff;
 
+  /* Accent aliases — stable names for warn/danger signals used across panes.
+   * `--color-accent-warn` pins dirty/unsaved-buffer indicators to ember-100
+   * so the signal stays visually distinctive on `--color-surface-1`. */
+  --color-accent-warn: var(--color-ember-100);
+
   /* Semantic backgrounds */
   --color-success-bg: rgba(61,220,132,0.07);
   --color-warning-bg: rgba(255,170,51,0.07);
