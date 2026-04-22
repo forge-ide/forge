@@ -4,8 +4,8 @@ MCP (Model Context Protocol) client and server lifecycle manager. Phase 2 (F-127
 
 ## Role in the workspace
 
-- Depended on by: nothing yet; will be consumed by `forge-session`'s tool dispatcher when MCP support ships.
-- Depends on: `serde`, `serde_json`, `anyhow`, `dirs`, `tokio`, `tracing`.
+- Depended on by: `forge-session`, `forge-shell`, and `forge-ipc` (which re-exports [`McpServerInfo`] for IPC wire types).
+- Depends on: `forge-core` (re-exported `McpStateEvent` / `ServerState`), `serde`, `serde_json`, `anyhow`, `dirs`, `tokio`, `tracing`.
 
 ## Key types / entry points
 
@@ -20,7 +20,12 @@ MCP (Model Context Protocol) client and server lifecycle manager. Phase 2 (F-127
 
 The `mcpServers` schema is the universal proposal (MCP repo discussion #2218). Transport is discriminated by an explicit `"type"` field (`"stdio"` / `"http"`) when present, otherwise inferred from the presence of `command` (stdio) or `url` (http). Unknown fields are rejected.
 
-The remaining planned API (`McpManager`, `Scope`, `ImportSource`, `McpStateEvent`, HTTP transport) lands in F-129 / F-130.
+The lifecycle manager landed in F-130 and has been hardened through F-155:
+
+- `McpManager` — owns per-server state, restart budgets, and the tool-call path.
+- `McpServerInfo` — snapshot shape consumed by `forge-ipc` and the webview.
+- `LifecycleTuning`, `HEALTH_CHECK_INTERVAL`, `MAX_RESTARTS_PER_WINDOW`, `REQUEST_TIMEOUT`, `RESTART_BACKOFF_LADDER`, `RESTART_WINDOW` — tunables for the restart ladder and health loop.
+- `McpStateEvent` / `ServerState` — re-exported from `forge-core` so existing callers keep resolving at `forge_mcp::*`; the types live upstream to break a dependency cycle with `forge-core::Event`.
 
 ## Security: stdio child environment is deny-by-default
 

@@ -25,7 +25,7 @@ Runtime:
 - `Orchestrator::stop(id)` / `Orchestrator::fail(id, reason)` — terminate an instance, emit the terminal `Completed` / `Failed` event.
 - `Orchestrator::record_step_started(id, step)` / `Orchestrator::record_step_finished(id, step)` — emit step transitions; `InstanceState` is not mutated (steps are events, not states).
 - `Orchestrator::state_stream()` — `BroadcastStream<AgentEvent>` subscribers consume to follow per-instance progress.
-- `AgentInstance { id, def, state, started_at }` — one live instantiation.
+- `AgentInstance { id, def, state, started_at, initial_prompt }` — one live instantiation; `initial_prompt: Option<InitialPrompt>` carries the seed user message threaded from the spawner (F-134 / F-137) for the future step executor to replay as the child's first user turn.
 - `AgentEvent::{Spawned, StepStarted, StepFinished, Completed, Failed}` — per-instance lifecycle vocabulary.
 - `SpawnContext::user()` / `SpawnContext::built_in()` — origin marker that governs the trusted-isolation escape hatch.
 

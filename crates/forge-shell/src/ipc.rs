@@ -555,9 +555,11 @@ impl LspBootstrapState {
 //
 // Both writes go through `ApprovalConfig` + the atomic-write helper in
 // `forge-core::approvals`, so partial writes cannot produce a corrupted TOML
-// file. Neither command is authz-gated to a specific session window: approval
-// config is a user-level artifact, not per-session. The `session-*` capability
-// glob still bounds who can invoke it at all.
+// file. All three commands are authz-gated to the dashboard window only via
+// `require_window_label_in(&webview, &["dashboard"], true)` — approval config
+// is a user-level artifact, not per-session, so session windows have no
+// business editing it. The `session-*` capability glob still bounds who can
+// invoke at the Tauri-capability layer before the runtime label check runs.
 // ---------------------------------------------------------------------------
 
 /// Wire shape returned by `get_persistent_approvals`. Frontend stores it in
