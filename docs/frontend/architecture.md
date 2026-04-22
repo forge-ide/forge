@@ -64,8 +64,11 @@ export const [usageReport, setUsageReport] = createSignal<UsageReport | null>(nu
 Components subscribe by calling the signal as a function (Solid idiom): `{sessions[id].messages.map(m => ...)}`.
 
 ### 9.3 Monaco hosting
+
+> **Authoritative protocol reference:** [`web/packages/monaco-host/README.md`](../../web/packages/monaco-host/README.md). This section summarizes the hosting model; the full `kind`-tagged postMessage contract and LSP lifecycle live with the package so they stay in lockstep with `src/protocol.ts`. Do not duplicate the message tables here.
+
 - Monaco runs in `<iframe src="/monaco-host.html">` inside the session pane. The iframe is renderer-only; it never talks to Tauri directly
-- Communicates with the Solid app via `window.postMessage` using a typed protocol (mirrors IPC types). See [`web/packages/monaco-host/README.md`](../../web/packages/monaco-host/README.md) for the full `kind`-tagged message table
+- Communicates with the Solid app via `window.postMessage` using a typed protocol (mirrors IPC types) — see the monaco-host README for the message table
 - `monaco-languageclient` runs inside the iframe but the **parent webview owns the LSP bridge**. The iframe emits outbound LSP frames as `client.message` / `client.notification` postMessage envelopes; the parent relays them to `forge-lsp` via the `lsp_send` Tauri command and pipes inbound frames back as `client.message` (bound to the owner webview via the `lsp_message` event — F-062 discipline). Lifecycle is driven from the parent through `lsp_start` / `lsp_stop` in `crates/forge-shell/src/ipc.rs` (F-123; PR #286)
 - Reasons: Monaco's AMD loader, web workers, and global scope assumptions don't play well with modern bundlers, and keeping it isolated makes the editor replaceable later. Sandbox-wise, routing LSP through the parent keeps Tauri capabilities off the iframe origin so server output can never touch the filesystem
 - **Considered alternatives.** Spawning language servers directly from the iframe (as an earlier draft of this section described) would save one hop of latency, but it requires exposing Tauri process-spawn capability inside the iframe sandbox. That violates the isolation rationale above, so the parent-relay model won

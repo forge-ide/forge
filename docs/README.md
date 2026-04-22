@@ -46,6 +46,8 @@ Navigation hub for all Forge documentation. One topic per file; use the table be
 | [architecture.md](frontend/architecture.md) | Solid signals, state model, Monaco iframe hosting, streaming |
 | [generation-pipelines.md](frontend/generation-pipelines.md) | Design token drift check and ts-rs Rust to TypeScript IPC type generation, both CI-enforced |
 
+> Monaco hosting's authoritative postMessage protocol and LSP lifecycle live in [`web/packages/monaco-host/README.md`](../web/packages/monaco-host/README.md), co-located with `src/protocol.ts`. `frontend/architecture.md §9.3` summarizes and cross-refs it.
+
 ## design/
 
 | File | Description |
