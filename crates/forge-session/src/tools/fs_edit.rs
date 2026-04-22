@@ -27,9 +27,8 @@ impl Tool for FsEditTool {
         // the literal request; `invoke` performs the required-arg check (F-074).
         let path = get_optional_str(args, "path").unwrap_or("");
         let patch = get_optional_str(args, "patch").unwrap_or("");
-        let fs_preview = forge_fs::edit_preview(path, patch);
         ApprovalPreview {
-            description: fs_preview.description,
+            description: forge_fs::edit_preview(path, patch),
         }
     }
 

@@ -27,9 +27,8 @@ impl Tool for FsWriteTool {
         // the literal request; `invoke` performs the required-arg check (F-074).
         let path = get_optional_str(args, "path").unwrap_or("");
         let content = get_optional_str(args, "content").unwrap_or("");
-        let fs_preview = forge_fs::write_preview(path, content);
         ApprovalPreview {
-            description: fs_preview.description,
+            description: forge_fs::write_preview(path, content),
         }
     }
 

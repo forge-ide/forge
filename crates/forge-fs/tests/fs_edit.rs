@@ -121,21 +121,12 @@ fn edit_preview_returns_unified_diff_description() {
     f.write_all(b"alpha\nbeta\ngamma\n").unwrap();
     let patch = unified_diff("alpha\nbeta\ngamma\n", "alpha\nBETA\ngamma\n");
 
-    let preview = edit_preview(target.to_str().unwrap(), &patch);
+    let preview: String = edit_preview(target.to_str().unwrap(), &patch);
 
+    assert!(preview.contains("src.txt"), "missing path: {preview}");
     assert!(
-        preview.description.contains("src.txt"),
-        "description missing path: {}",
-        preview.description
+        preview.contains("-beta"),
+        "expected removed line: {preview}"
     );
-    assert!(
-        preview.description.contains("-beta"),
-        "expected removed line: {}",
-        preview.description
-    );
-    assert!(
-        preview.description.contains("+BETA"),
-        "expected added line: {}",
-        preview.description
-    );
+    assert!(preview.contains("+BETA"), "expected added line: {preview}");
 }
