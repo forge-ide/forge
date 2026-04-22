@@ -5,10 +5,11 @@
 // `window.postMessage`, mirroring the protocol documented in
 // `web/packages/monaco-host/src/protocol.ts`.
 //
-// Header (breadcrumb, dirty-dot, CLOSE button) follows
-// `docs/ui-specs/pane-header.md` §PH.1–PH.6 adapted for the EDITOR pane
-// type label. The spec's narrow-width / overflow-menu slots are placeholders
-// for now — this PR is focused on the IPC bridge + dirty-state signal.
+// F-394: chrome (type label, subject, dirty badge, close button) is driven
+// through the shared `PaneHeader` primitive (`pane-header.md` §PH.1–PH.6
+// + trailing-slot section). The dirty dot rides the primitive's `trailing`
+// slot; the inline header block that previously duplicated the primitive's
+// markup is gone.
 //
 // The component is intentionally test-friendly: every side-channel (iframe
 // URL, postMessage dispatch, IPC invoke) is injectable through
@@ -30,6 +31,7 @@ import {
   writeFile as defaultWriteFile,
 } from '../ipc/fs';
 import { activeSessionId } from '../stores/session';
+import { PaneHeader } from '../routes/Session/PaneHeader';
 import './EditorPane.css';
 
 /** Default URL the iframe loads. Relative so it resolves under both the
@@ -284,8 +286,7 @@ export const EditorPane: Component<EditorPaneProps> = (props) => {
     postToIframe({ kind: 'close', uri: currentUri() });
   });
 
-  const { prefix, leaf } = trimmedBreadcrumb(props.path);
-  const breadcrumbTitle = (): string => props.path;
+  const breadcrumb = createMemo(() => trimmedBreadcrumb(props.path));
 
   return (
     <section
@@ -293,37 +294,25 @@ export const EditorPane: Component<EditorPaneProps> = (props) => {
       data-testid="editor-pane"
       onKeyDown={handleKeyDown}
     >
-      <header
-        class="editor-pane__header"
-        role="banner"
-        onPointerDown={props.onHeaderPointerDown}
-      >
-        <span class="editor-pane__type-label">EDITOR</span>
-        <span
-          class="editor-pane__breadcrumb"
-          data-testid="editor-pane-breadcrumb"
-          title={breadcrumbTitle()}
-        >
-          {prefix && <span class="editor-pane__breadcrumb-prefix">{prefix}/</span>}
-          <span class="editor-pane__breadcrumb-leaf">{leaf}</span>
-          {isDirty() && (
+      <PaneHeader
+        typeLabel="EDITOR"
+        subject={breadcrumb().leaf}
+        costLabel={breadcrumb().prefix || undefined}
+        closeLabel="CLOSE PANE"
+        closeAriaLabel="Close pane"
+        onHeaderPointerDown={props.onHeaderPointerDown}
+        onClose={props.onClose}
+        trailing={
+          isDirty() ? (
             <span
               class="editor-pane__dirty-dot"
               data-testid="editor-pane-dirty"
               aria-label="unsaved changes"
               role="status"
             />
-          )}
-        </span>
-        <button
-          type="button"
-          class="editor-pane__close"
-          aria-label="Close editor pane"
-          onClick={props.onClose}
-        >
-          CLOSE PANE
-        </button>
-      </header>
+          ) : undefined
+        }
+      />
       {errorMessage() !== null && (
         <div
           class="editor-pane__error"

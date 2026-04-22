@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render } from '@solidjs/testing-library';
+import { fireEvent, render } from '@solidjs/testing-library';
 import type { ProviderId } from '@forge/ipc';
 import { PaneHeader } from './PaneHeader';
 
@@ -175,5 +175,90 @@ describe('PaneHeader compactness (F-119)', () => {
       expect(getByRole('button', { name: 'Close session window' })).not.toBeNull();
       unmount();
     }
+  });
+});
+
+// F-394: the pane-header <header> is sub-structural (nested inside a pane
+// <section>). ARIA treats a sub-structural <header> as a generic landmark
+// only when it's a top-level descendant of <body>; inside a <section> it
+// becomes a `banner` landmark only if explicitly tagged with role="banner".
+// Previously both PaneHeader and EditorPane stamped role="banner" on their
+// header, producing multiple banner landmarks per document. Drop it here
+// so only the actual top-level banner (if any) counts.
+describe('PaneHeader landmark (F-394)', () => {
+  it('does not set role="banner" on the <header>', () => {
+    const { getByTestId } = render(() => (
+      <PaneHeader subject="example" onClose={vi.fn()} />
+    ));
+    const header = getByTestId('pane-header-subject').parentElement;
+    expect(header?.tagName.toLowerCase()).toBe('header');
+    expect(header?.getAttribute('role')).not.toBe('banner');
+  });
+});
+
+// F-394: PaneHeader needs a slot for pane-specific badges (e.g. the editor's
+// dirty-dot indicator) so consumers stop re-implementing the header markup.
+// The slot sits between the subject and the cost meter, caller-owned JSX,
+// removed from the tree at `icon-only` alongside the other badges.
+describe('PaneHeader trailing slot (F-394)', () => {
+  it('renders arbitrary trailing JSX after the subject', () => {
+    const { getByTestId } = render(() => (
+      <PaneHeader
+        subject="file.ts"
+        trailing={<span data-testid="ph-trailing-node">!</span>}
+        onClose={vi.fn()}
+      />
+    ));
+    const trailing = getByTestId('ph-trailing-node');
+    expect(trailing).toBeInTheDocument();
+    // Placement: trailing must sit after the subject in document order so
+    // screen-reader traversal reads subject → badge.
+    const subject = getByTestId('pane-header-subject');
+    expect(subject.compareDocumentPosition(trailing) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
+  });
+
+  it('omits the trailing slot from the tree at `icon-only`', () => {
+    const { queryByTestId } = render(() => (
+      <PaneHeader
+        subject="file.ts"
+        compactness="icon-only"
+        trailing={<span data-testid="ph-trailing-node">!</span>}
+        onClose={vi.fn()}
+      />
+    ));
+    // At icon-only, provider + cost disappear; the trailing badge is
+    // non-essential chrome with the same disposition.
+    expect(queryByTestId('ph-trailing-node')).toBeNull();
+  });
+
+  it('renders no trailing wrapper when `trailing` is undefined', () => {
+    // Default call shape must produce no extra DOM — consumers that don't
+    // pass a trailing node see the same layout they had before.
+    const { container } = render(() => (
+      <PaneHeader subject="file.ts" onClose={vi.fn()} />
+    ));
+    expect(
+      container.querySelector('[data-testid="pane-header-trailing"]'),
+    ).toBeNull();
+  });
+});
+
+// F-394: EditorPane needs to thread the F-150 drag-to-dock pointerdown into
+// the header element. Accepting the handler on the primitive avoids wrapping
+// the header in an extra <div> at every consumer site.
+describe('PaneHeader onHeaderPointerDown (F-394)', () => {
+  it('forwards pointerdown on the <header> to the supplied handler', () => {
+    const onHeaderPointerDown = vi.fn();
+    const { getByTestId } = render(() => (
+      <PaneHeader
+        subject="file.ts"
+        onHeaderPointerDown={onHeaderPointerDown}
+        onClose={vi.fn()}
+      />
+    ));
+    const header = getByTestId('pane-header-subject').parentElement!;
+    fireEvent.pointerDown(header);
+    expect(onHeaderPointerDown).toHaveBeenCalledTimes(1);
   });
 });

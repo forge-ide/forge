@@ -49,8 +49,8 @@ describe('breadcrumb helpers', () => {
 });
 
 describe('EditorPane render', () => {
-  it('renders EDITOR type label, breadcrumb leaf, and close button', () => {
-    const { getByTestId, getByText, getByRole } = render(() => (
+  it('renders EDITOR type label, subject leaf, and close button via PaneHeader', () => {
+    const { getByTestId, getByRole } = render(() => (
       <EditorPane
         path={FILE}
         src="about:blank"
@@ -64,10 +64,13 @@ describe('EditorPane render', () => {
         onClose={vi.fn()}
       />
     ));
-    expect(getByText('EDITOR')).toBeInTheDocument();
-    expect(getByText('main.ts')).toBeInTheDocument();
+    // F-394: chrome comes from PaneHeader, not an inline header block.
+    expect(getByTestId('pane-header-type-label').textContent).toBe('EDITOR');
+    expect(getByTestId('pane-header-subject').textContent).toBe('main.ts');
     expect(getByTestId('editor-pane-iframe')).toBeInTheDocument();
-    expect(getByRole('button', { name: /close editor pane/i })).toBeInTheDocument();
+    // EditorPane uses "Close pane" aria-label (matches the primitive's
+    // closeAriaLabel contract).
+    expect(getByRole('button', { name: /close pane/i })).toBeInTheDocument();
   });
 
   it('does not render the dirty dot initially', () => {
@@ -486,6 +489,87 @@ describe('message origin isolation', () => {
     for (const [, targetOrigin] of calls) {
       expect(targetOrigin).not.toBe('*');
     }
+  });
+});
+
+// F-394: EditorPane uses the PaneHeader primitive — no inline header markup.
+// The dirty-dot ships through the PaneHeader `trailing` slot. The sub-
+// structural <header> no longer stamps `role="banner"`.
+describe('EditorPane PaneHeader adoption (F-394)', () => {
+  it('routes the dirty indicator through the PaneHeader trailing slot', async () => {
+    const readFile = vi.fn().mockResolvedValue({
+      path: FILE,
+      content: 'v1',
+      bytes: 2,
+      sha256: 'sha',
+    });
+    const writeFile = vi.fn().mockResolvedValue(undefined);
+    const posted: unknown[] = [];
+    const { getByTestId } = render(() => (
+      <EditorPane
+        path={FILE}
+        src="about:blank"
+        readFile={readFile}
+        writeFile={writeFile}
+        postToIframe={(m) => posted.push(m)}
+        onClose={vi.fn()}
+      />
+    ));
+    const iframe = getByTestId('editor-pane-iframe') as HTMLIFrameElement;
+    fireFromIframe(iframe, { kind: 'ready' });
+    await Promise.resolve();
+    await Promise.resolve();
+    fireFromIframe(iframe, {
+      kind: 'change',
+      uri: `file://${FILE}`,
+      value: 'v2',
+    });
+    const dirty = getByTestId('editor-pane-dirty');
+    // Dirty dot lives inside the primitive — not under `.editor-pane__header`.
+    expect(dirty.closest('.pane-header')).not.toBeNull();
+    expect(dirty.closest('.editor-pane__header')).toBeNull();
+  });
+
+  it('emits no role="banner" landmark from the editor pane', () => {
+    const readFile = vi.fn().mockResolvedValue({
+      path: FILE,
+      content: '',
+      bytes: 0,
+      sha256: '',
+    });
+    const { container } = render(() => (
+      <EditorPane
+        path={FILE}
+        src="about:blank"
+        readFile={readFile}
+        writeFile={vi.fn().mockResolvedValue(undefined)}
+        onClose={vi.fn()}
+      />
+    ));
+    expect(container.querySelectorAll('[role="banner"]').length).toBe(0);
+  });
+
+  it('forwards onHeaderPointerDown through the PaneHeader for drag-to-dock', () => {
+    const readFile = vi.fn().mockResolvedValue({
+      path: FILE,
+      content: '',
+      bytes: 0,
+      sha256: '',
+    });
+    const onHeaderPointerDown = vi.fn();
+    const { getByTestId } = render(() => (
+      <EditorPane
+        path={FILE}
+        src="about:blank"
+        readFile={readFile}
+        writeFile={vi.fn().mockResolvedValue(undefined)}
+        onHeaderPointerDown={onHeaderPointerDown}
+        onClose={vi.fn()}
+      />
+    ));
+    const header = getByTestId('pane-header-subject').parentElement!;
+    fireEvent.pointerDown(header);
+    expect(onHeaderPointerDown).toHaveBeenCalledTimes(1);
   });
 });
 

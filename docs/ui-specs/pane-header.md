@@ -67,6 +67,20 @@ Behavior: clicking invokes the parent's `onClose` callback. For chat panes in th
 
 Accessibility: the rendered text is the convention; `aria-label="Close session window"` carries the screen-reader copy and stays in plain sentence case.
 
+### PH.6a Trailing slot (badges)
+
+An optional per-pane badge slot sits between the subject and the cost meter. Pane types plug it with pane-specific state indicators — today the editor's dirty-dot (6px circle, `--color-accent-warn`) for unsaved buffers; terminals and the chat pane leave it empty.
+
+- **Placement.** Between subject and the `margin-left: auto` cost meter. Document order is `type → subject → trailing → provider → cost → close`, so screen readers traverse pane identity before pane state.
+- **Contents.** Caller-supplied JSX. The primitive does not style the badge itself — pane consumers own the visual so each pane's state language (dirty, error, muted, etc.) stays pane-scoped.
+- **Narrow-width collapse.** The slot is non-essential chrome: removed from the tree entirely at `icon-only` (<240px) alongside the provider pill and cost meter. It remains at `compact` so the dirty-dot stays visible when only the label collapses.
+- **Accessibility.** Badges with meaning carry their own accessible name (`aria-label="unsaved changes"` on the dirty-dot). The trailing `<span>` wrapper has no role so the badge's own semantics surface directly.
+- **Not.** Not a drop target for arbitrary actions — action buttons belong in the overflow `⋯` menu (§PH.5). Not a chat-only surface — any pane type can pass a badge.
+
+### PH.6b Landmark role
+
+The pane header's `<header>` element is **sub-structural** (nested inside the pane's `<section>`) and therefore must not carry `role="banner"`. ARIA reserves the banner landmark for the single top-level page banner; a per-pane banner creates duplicate landmarks that confuse AT users. Consumers that need a drag handle on the header pass `onHeaderPointerDown`; the primitive forwards it to the `<header>` element so consumers don't wrap the primitive in an extra `<div>`.
+
 ### PH.7 Cross-spec references
 
 - `layout-panes.md §3.3` — defines the 28px slot; this spec details the contents.

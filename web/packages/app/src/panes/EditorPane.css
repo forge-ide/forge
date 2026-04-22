@@ -1,7 +1,7 @@
-/* F-122: EditorPane styles. The header mirrors `docs/ui-specs/pane-header.md`
- * §PH.1 but with the EDITOR type label + file-path breadcrumb (PH.2 subject
- * slot adapted) + dirty-dot (PH-derived — not in the spec verbatim; see PR
- * body for the F-122 spec-gap note). */
+/* F-122 / F-394: EditorPane styles. Header chrome is owned by the shared
+ * `PaneHeader` primitive (`pane-header.md`); only the pane-specific surfaces
+ * — the dirty-dot badge rendered in the primitive's `trailing` slot, the
+ * inline error banner, and the iframe host — live here. */
 
 .editor-pane {
   display: flex;
@@ -12,48 +12,6 @@
   background: var(--color-surface-1);
 }
 
-.editor-pane__header {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  height: 28px;
-  padding: 0 var(--sp-4);
-  background: var(--color-surface-2);
-  border-bottom: 1px solid var(--color-border-1);
-  font-family: var(--font-body);
-  flex: 0 0 auto;
-}
-
-.editor-pane__type-label {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--color-text-tertiary);
-}
-
-.editor-pane__breadcrumb {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-1);
-  font-size: 13px;
-  color: var(--color-text-primary);
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.editor-pane__breadcrumb-prefix {
-  color: var(--color-text-tertiary);
-  font-family: var(--font-mono);
-  font-size: 11px;
-}
-
-.editor-pane__breadcrumb-leaf {
-  color: var(--color-text-primary);
-}
-
 .editor-pane__dirty-dot {
   width: 6px;
   height: 6px;
@@ -62,28 +20,8 @@
    * A fallback here previously masked drift with a near-white text color
    * that defeated the dirty-dot signal against --color-surface-1. */
   background: var(--color-accent-warn);
-  margin-left: var(--sp-1);
   flex: 0 0 auto;
-}
-
-.editor-pane__close {
-  margin-left: auto;
-  background: transparent;
-  border: 1px solid transparent;
-  padding: 0 var(--sp-2);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  transition: color var(--ease), border-color var(--ease);
-}
-
-.editor-pane__close:hover {
-  color: var(--color-text-primary);
-  border-color: var(--color-border-2);
-  border-radius: var(--r-sm);
+  display: inline-block;
 }
 
 .editor-pane__error {

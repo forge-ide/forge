@@ -33,6 +33,21 @@ const TYPE_ICON: Record<PaneHeaderType, string> = {
 export interface PaneHeaderProps {
   subject: string;
   /**
+   * F-394 trailing slot. Caller-owned JSX rendered between the subject and
+   * the cost-meter slot — the natural home for pane-specific badges like
+   * EditorPane's dirty indicator. Non-essential chrome: removed from the
+   * tree at `icon-only` alongside the provider pill and cost meter so
+   * screen readers don't announce vestigial content.
+   */
+  trailing?: JSX.Element | undefined;
+  /**
+   * F-394 drag-source handler. Forwarded as `onPointerDown` on the
+   * `<header>`. Consumers threaded through F-118's drag-to-dock gesture
+   * (e.g. `dockApi.startDrag(leafId)`) pass it here; the header is the
+   * only non-content surface on a pane and the canonical drag handle.
+   */
+  onHeaderPointerDown?: ((e: PointerEvent) => void) | undefined;
+  /**
    * Active provider id (F-091). Drives the pill accent color via the
    * `--pane-header-provider-accent` custom property; the display text remains
    * the caller-supplied `providerLabel`.
@@ -47,7 +62,7 @@ export interface PaneHeaderProps {
    * pane types pass a short status string (e.g. a terminal's `cwd`) or
    * `undefined` to suppress the slot entirely.
    */
-  costLabel?: string;
+  costLabel?: string | undefined;
   /**
    * Close-button label copy (`pane-header.md §PH.6`). Chat panes use
    * `CLOSE SESSION`; terminal/editor panes pass `CLOSE PANE`/`CLOSE TAB`.
@@ -90,6 +105,12 @@ export interface PaneHeaderProps {
  * cost meter are removed from the tree entirely at `icon-only` (<240px) —
  * removed rather than hidden so screen readers don't announce vestigial
  * content. The close button stays at every compactness level per §PH.6.
+ *
+ * F-394: exposes a `trailing` slot for pane-specific badges (e.g. the
+ * editor's dirty-dot) and forwards `onHeaderPointerDown` so consumers keep
+ * a single header surface rather than wrapping the primitive. The sub-
+ * structural `<header>` no longer claims `role="banner"` — ARIA reserves
+ * the banner landmark for the one top-level banner per document.
  */
 export const PaneHeader: Component<PaneHeaderProps> = (props) => {
   // Inline custom property keeps `.pane-header__provider` rule generic; the
@@ -105,7 +126,11 @@ export const PaneHeader: Component<PaneHeaderProps> = (props) => {
   const isIconLabel = (): boolean => compactness() !== 'full';
   const showBadges = (): boolean => compactness() !== 'icon-only';
   return (
-    <header class="pane-header" role="banner" data-compactness={compactness()}>
+    <header
+      class="pane-header"
+      data-compactness={compactness()}
+      onPointerDown={props.onHeaderPointerDown}
+    >
       <span
         class="pane-header__type-label"
         data-testid="pane-header-type-label"
@@ -117,6 +142,11 @@ export const PaneHeader: Component<PaneHeaderProps> = (props) => {
       <span class="pane-header__subject" data-testid="pane-header-subject">
         {props.subject}
       </span>
+      <Show when={showBadges() && props.trailing !== undefined}>
+        <span class="pane-header__trailing" data-testid="pane-header-trailing">
+          {props.trailing}
+        </span>
+      </Show>
       <Show
         when={
           showBadges() &&
