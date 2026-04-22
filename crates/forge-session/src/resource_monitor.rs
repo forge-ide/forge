@@ -136,7 +136,30 @@ impl ResourceMonitor {
     /// identified by `id`. Idempotent on `id` — a repeated `track` with
     /// the same id replaces the previous task (used when a restarted
     /// instance reuses its id).
+    ///
+    /// # Daemon-PID guard (F-370)
+    ///
+    /// If `pid` equals the daemon's own PID this call is a deliberate
+    /// no-op: it registers no task, emits no `ResourceSample`, and leaves
+    /// the id **un-tracked**. The `Event::ResourceSample` wire shape is
+    /// per-instance, but the daemon-wide numbers would be shifted by
+    /// unrelated cross-agent work — rendered in the AgentMonitor pills
+    /// as if they were per-instance, the values mislead the user. Until
+    /// a real per-child PID is available (e.g. a future step executor
+    /// that forks a provider sidecar), skipping emission lets the UI
+    /// fall back to the `—` placeholder the pre-F-152 stub already
+    /// rendered. Callers with a real child PID get full sampling.
     pub async fn track(&self, id: AgentInstanceId, pid: u32) {
+        if pid == std::process::id() {
+            // Drop any stale task already registered under this id so a
+            // previous real-PID track doesn't keep sampling after a
+            // "downgrade" to the daemon PID.
+            let mut tasks = self.tasks.lock().await;
+            if let Some(prev) = tasks.remove(&id) {
+                prev.abort();
+            }
+            return;
+        }
         let mut tasks = self.tasks.lock().await;
         if let Some(prev) = tasks.remove(&id) {
             prev.abort();
@@ -1031,6 +1054,62 @@ mod tests {
             mon.tracked_count().await,
             1,
             "re-tracking the same id must replace, not duplicate"
+        );
+    }
+
+    #[tokio::test]
+    async fn track_is_a_noop_when_pid_equals_daemon_pid() {
+        // F-370: sampling the daemon's own PID yields session-wide numbers
+        // shifted by unrelated cross-agent work, rendered by the UI as if
+        // they were per-instance. Until a real per-child PID is available
+        // (e.g. a future step executor that forks a provider sidecar),
+        // `track(id, daemon_pid)` is a deliberate no-op — it registers no
+        // task and emits no `ResourceSample`, so the AgentMonitor pills
+        // stay at the `—` placeholder rather than streaming misleading
+        // values.
+        let fake = Arc::new(FakeSampler::new(sample(0.1 * TICK_SCALE, 4096, 7)));
+        let mon = ResourceMonitor::new(Arc::clone(&fake) as Arc<dyn Sampler>, TEST_TICK);
+        let mut rx = mon.events();
+        let id = inst();
+
+        mon.track(id.clone(), std::process::id()).await;
+
+        assert_eq!(
+            mon.tracked_count().await,
+            0,
+            "tracking the daemon PID must not register a task"
+        );
+
+        // Wait well past a tick to be certain no sample emits.
+        let waited = tokio::time::timeout(TEST_TICK * 5, rx.recv()).await;
+        assert!(
+            waited.is_err(),
+            "no ResourceSample should fire for a daemon-PID track, got {waited:?}"
+        );
+        assert_eq!(
+            fake.calls(),
+            0,
+            "sampler must never be invoked for the daemon PID"
+        );
+    }
+
+    #[tokio::test]
+    async fn track_with_real_pid_after_daemon_pid_still_works() {
+        // Regression guard: the daemon-PID no-op must not poison the
+        // monitor for subsequent real-PID calls on the same id.
+        let fake = Arc::new(FakeSampler::new(sample(0.1 * TICK_SCALE, 4096, 7)));
+        let mon = ResourceMonitor::new(Arc::clone(&fake) as Arc<dyn Sampler>, TEST_TICK);
+        let mut rx = mon.events();
+        let id = inst();
+
+        mon.track(id.clone(), std::process::id()).await;
+        mon.track(id.clone(), std::process::id().wrapping_add(1))
+            .await;
+
+        let ev = recv_one(&mut rx).await;
+        assert!(
+            matches!(ev, Event::ResourceSample { instance_id, .. } if instance_id == id),
+            "a subsequent real-PID track must start emitting samples"
         );
     }
 

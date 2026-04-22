@@ -652,9 +652,16 @@ async fn stop_background_agent_transitions_instance_to_terminal_and_stops_sampli
         .unwrap()
         .to_string();
 
-    // Wait until the monitor has actually begun tracking — `start` registers
-    // on the tracking set synchronously but the monitor hand-off runs on a
-    // spawned task, so we observe it eventually.
+    // F-370: `start` itself does not register a sampler task — the
+    // daemon-PID guard in `ResourceMonitor::track` prevents misleading
+    // per-instance pills while no real child PID exists. Stand in for
+    // the future step executor by handing the monitor a non-daemon PID
+    // directly so the `untrack(id) on terminal` invariant still has a
+    // live task to abort.
+    let instance_id_parsed = forge_core::AgentInstanceId::from_string(instance_id.clone());
+    monitor
+        .track(instance_id_parsed, std::process::id().wrapping_add(1))
+        .await;
     let deadline = Instant::now() + Duration::from_secs(2);
     while monitor.tracked_count().await == 0 && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -662,7 +669,7 @@ async fn stop_background_agent_transitions_instance_to_terminal_and_stops_sampli
     assert_eq!(
         monitor.tracked_count().await,
         1,
-        "monitor must track the instance while it is running"
+        "monitor must track the instance once a real PID is supplied"
     );
 
     invoke(
