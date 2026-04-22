@@ -518,6 +518,58 @@ describe('fromRustEvent — sub_agent_spawned (F-136)', () => {
       fromRustEvent({ type: 'sub_agent_spawned', parent: 'p', child: 'c' }),
     ).toBeNull();
   });
+
+  // F-448 Phase 3: optional header-chip wire fields.
+  it('forwards optional model + tool_count when the Rust event carries them', () => {
+    const rust = {
+      type: 'sub_agent_spawned',
+      parent: 'p',
+      child: 'c',
+      from_msg: 'm',
+      model: 'sonnet-4.5',
+      tool_count: 4,
+    };
+    expect(fromRustEvent(rust)).toEqual({
+      kind: 'SubAgentSpawned',
+      parent_instance_id: 'p',
+      child_instance_id: 'c',
+      from_msg: 'm',
+      model: 'sonnet-4.5',
+      tool_count: 4,
+    });
+  });
+
+  it('omits model when payload carries a non-string model', () => {
+    const rust = {
+      type: 'sub_agent_spawned',
+      parent: 'p',
+      child: 'c',
+      from_msg: 'm',
+      model: 123,
+    };
+    expect(fromRustEvent(rust)).toEqual({
+      kind: 'SubAgentSpawned',
+      parent_instance_id: 'p',
+      child_instance_id: 'c',
+      from_msg: 'm',
+    });
+  });
+
+  it('omits tool_count when payload carries a non-number tool_count', () => {
+    const rust = {
+      type: 'sub_agent_spawned',
+      parent: 'p',
+      child: 'c',
+      from_msg: 'm',
+      tool_count: 'four',
+    };
+    expect(fromRustEvent(rust)).toEqual({
+      kind: 'SubAgentSpawned',
+      parent_instance_id: 'p',
+      child_instance_id: 'c',
+      from_msg: 'm',
+    });
+  });
 });
 
 describe('fromRustEvent — background_agent_completed (F-136)', () => {

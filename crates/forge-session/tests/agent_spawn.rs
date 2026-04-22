@@ -113,6 +113,7 @@ async fn parent_process_spawning_container_child_does_not_escalate_or_demote_pri
             parent,
             child,
             from_msg: _,
+            ..
         } = event
         {
             assert_eq!(

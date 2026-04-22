@@ -63,8 +63,11 @@
   flex: 0 0 auto;
 }
 
-.sub-agent-banner__state-chip {
-  margin-left: auto;
+/*
+ * F-448 Phase 3 — generic header chip (model + tool_count). Shares the
+ * visual language with the state chip but no semantic data-state.
+ */
+.sub-agent-banner__chip {
   padding: 0 var(--sp-2);
   border-radius: var(--r-sm);
   border: 1px solid var(--color-border-1);
@@ -74,6 +77,43 @@
   letter-spacing: 0.04em;
   text-transform: uppercase;
   flex: 0 0 auto;
+}
+
+/*
+ * F-448 Phase 3 — state chip is now the first right-pushed element via its
+ * wrapper slot, which owns `margin-left: auto` so both the model/tool chips
+ * and the state chip+popover cluster align cleanly on the right.
+ */
+.sub-agent-banner__state-chip-slot {
+  position: relative;
+  margin-left: auto;
+  flex: 0 0 auto;
+  display: inline-flex;
+}
+
+.sub-agent-banner__state-chip {
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--color-border-1);
+  background: var(--color-surface-3);
+  color: var(--color-text-secondary);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  flex: 0 0 auto;
+  /* F-448: button reset — keeps the span-era visuals while exposing
+     keyboard activation + stopPropagation click behavior. */
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.sub-agent-banner__state-chip:hover {
+  border-color: var(--color-ember-400);
+}
+
+.sub-agent-banner__state-chip:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
 }
 
 /*

@@ -176,6 +176,12 @@ export function fromRustEvent(rustEvent: unknown): SessionEvent | null {
       return null;
     }
     const agentName = ev['agent_name'];
+    // F-448 Phase 3: optional header-chip fields. Non-string model / non-
+    // number tool_count is a daemon wire skew — drop the field silently
+    // (the banner hides absent chips cleanly) rather than failing the whole
+    // event and losing the spawn itself.
+    const model = ev['model'];
+    const toolCount = ev['tool_count'];
     const out: SessionEvent = {
       kind: 'SubAgentSpawned',
       parent_instance_id: parent,
@@ -183,6 +189,10 @@ export function fromRustEvent(rustEvent: unknown): SessionEvent | null {
       from_msg: fromMsg,
     };
     if (isString(agentName)) out.agent_name = agentName;
+    if (isString(model)) out.model = model;
+    if (typeof toolCount === 'number' && Number.isFinite(toolCount)) {
+      out.tool_count = toolCount;
+    }
     return out;
   }
 

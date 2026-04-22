@@ -1,19 +1,21 @@
 import { type Component, createSignal, For, Show } from 'solid-js';
 import type { ChatTurn, SubAgentStatus } from '../stores/messages';
+import { SubAgentDetailsPopover } from './SubAgentDetailsPopover';
 import './SubAgentBanner.css';
 
 // ---------------------------------------------------------------------------
 // SubAgentBanner — inline representation of a spawned sub-agent in the
-// parent's ChatPane (F-136). Matches `docs/ui-specs/sub-agent-banner.md` §6
-// Phase-2 anatomy: 2px ember left-border accent, header row
-// (`↳ spawned · <name>  delegated at HH:MM  [state]  [chevron]`), click
-// header to toggle collapse. Double-click navigates to the Agent Monitor
-// (F-140) with the child instance pre-selected — the route 404s until F-140
-// lands.
+// parent's ChatPane (F-136 + F-448). Matches `docs/ui-specs/sub-agent-banner.md`
+// §6. Header row: `↳ spawned · <name>  delegated at HH:MM  [model]  [N tools]
+// [state]  [chevron]`. Click header to toggle collapse. Double-click navigates
+// to the Agent Monitor (F-140) with the child instance pre-selected — the
+// route 404s until F-140 lands.
 //
-// Phase-3 deferred (per spec §6): model + tool-count chips require wire
-// fields (`model`, `tool_count`) the orchestrator does not forward today;
-// the state chip becomes an interactive popover trigger at the same time.
+// Phase-3 additions (F-448):
+//   * Optional `model` + `tool_count` chips between timestamp and state chip,
+//     hidden individually when the field is undefined.
+//   * State chip is a `<button>` that toggles the status details popover;
+//     its click stopPropagation()s so the header collapse is not toggled.
 //
 // Backend gap (flagged in the PR body): today no step events ride the
 // child's `instance_id` so live step streaming is wired through props but
@@ -67,6 +69,7 @@ function statusLabel(status: SubAgentStatus): string {
 export const SubAgentBanner: Component<SubAgentBannerProps> = (props) => {
   // Spec §6 "Collapsed state" — default collapsed; user expands to inspect.
   const [expanded, setExpanded] = createSignal(false);
+  const [popoverOpen, setPopoverOpen] = createSignal(false);
 
   const depth = (): number => props.depth ?? 0;
   const beyondMaxDepth = (): boolean => depth() >= MAX_INLINE_DEPTH;
@@ -98,6 +101,17 @@ export const SubAgentBanner: Component<SubAgentBannerProps> = (props) => {
     }
     // Pre-step-executor phase — nothing to summarise yet.
     return 'waiting for first step';
+  };
+
+  const toolChipLabel = (n: number): string => `${n} ${n === 1 ? 'tool' : 'tools'}`;
+
+  // F-448: clicking the state chip opens the popover without toggling the
+  // header's expand/collapse. stopPropagation is required because the chip
+  // is a descendant of the header, whose own click handler would otherwise
+  // fire.
+  const onStateChipClick = (e: MouseEvent): void => {
+    e.stopPropagation();
+    setPopoverOpen((v) => !v);
   };
 
   return (
@@ -133,12 +147,47 @@ export const SubAgentBanner: Component<SubAgentBannerProps> = (props) => {
         >
           delegated at {formatStartedAt(props.turn.started_at)}
         </span>
-        <span
-          class="sub-agent-banner__state-chip"
-          data-testid={`sub-agent-banner-state-${props.turn.child_instance_id}`}
-          data-state={props.turn.status}
-        >
-          {statusLabel(props.turn.status)}
+        <Show when={props.turn.model}>
+          <span
+            class="sub-agent-banner__chip sub-agent-banner__model"
+            data-testid={`sub-agent-banner-model-${props.turn.child_instance_id}`}
+          >
+            {props.turn.model}
+          </span>
+        </Show>
+        <Show when={props.turn.tool_count !== undefined}>
+          <span
+            class="sub-agent-banner__chip sub-agent-banner__tools"
+            data-testid={`sub-agent-banner-tools-${props.turn.child_instance_id}`}
+          >
+            {toolChipLabel(props.turn.tool_count!)}
+          </span>
+        </Show>
+        <span class="sub-agent-banner__state-chip-slot">
+          <button
+            type="button"
+            class="sub-agent-banner__state-chip"
+            data-testid={`sub-agent-banner-state-${props.turn.child_instance_id}`}
+            data-state={props.turn.status}
+            aria-haspopup="menu"
+            aria-expanded={popoverOpen() ? 'true' : 'false'}
+            onClick={onStateChipClick}
+          >
+            {statusLabel(props.turn.status)}
+          </button>
+          <Show when={popoverOpen()}>
+            <SubAgentDetailsPopover
+              childInstanceId={props.turn.child_instance_id}
+              status={props.turn.status}
+              startedAt={props.turn.started_at}
+              lastStepSummary={props.turn.last_step_summary}
+              onOpenInMonitor={() => {
+                setPopoverOpen(false);
+                openInMonitor();
+              }}
+              onDismiss={() => setPopoverOpen(false)}
+            />
+          </Show>
         </span>
         <span
           class="sub-agent-banner__chevron"

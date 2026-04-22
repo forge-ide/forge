@@ -479,17 +479,46 @@ fn tool_call_approved_auto_wire_shape() {
 #[test]
 fn sub_agent_spawned_wire_shape() {
     // F-137: sub-agent spawn edge drawn in the AgentMonitor graph.
+    // F-448 Phase 3: adds optional `model` + `tool_count` — absent here so
+    // the wire shape is byte-identical to the Phase-2 emission. A separate
+    // assertion below pins the `Some(_)` path.
     assert_wire_eq(
         Event::SubAgentSpawned {
             parent: instance_id("inst-parent"),
             child: instance_id("inst-child"),
             from_msg: msg_id("mid-spawn"),
+            model: None,
+            tool_count: None,
         },
         json!({
             "type": "sub_agent_spawned",
             "parent": "inst-parent",
             "child": "inst-child",
             "from_msg": "mid-spawn",
+        }),
+    );
+}
+
+#[test]
+fn sub_agent_spawned_wire_shape_carries_model_and_tool_count() {
+    // F-448 Phase 3: when the orchestrator knows the child's model / tool
+    // surface at spawn time, the two optional header-chip fields serialize
+    // on the wire. The Phase-2 triple (parent/child/from_msg) is unchanged.
+    assert_wire_eq(
+        Event::SubAgentSpawned {
+            parent: instance_id("inst-parent"),
+            child: instance_id("inst-child"),
+            from_msg: msg_id("mid-spawn"),
+            model: Some("sonnet-4.5".to_string()),
+            tool_count: Some(4),
+        },
+        json!({
+            "type": "sub_agent_spawned",
+            "parent": "inst-parent",
+            "child": "inst-child",
+            "from_msg": "mid-spawn",
+            "model": "sonnet-4.5",
+            "tool_count": 4,
         }),
     );
 }

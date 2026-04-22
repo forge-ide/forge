@@ -56,6 +56,12 @@ export type SessionEvent =
       child_instance_id: string;
       from_msg: string;
       agent_name?: string;
+      // F-448 Phase 3: header chips. Optional because the orchestrator does
+      // not always know the child's model / tool surface at spawn time —
+      // omission is the norm today, and the banner hides each chip cleanly
+      // when the corresponding field is undefined.
+      model?: string;
+      tool_count?: number;
     }
   // F-136: sub-agent background lifecycle reached a terminal state. Flips any
   // banner whose child id matches from `running` → `done`. Emitted by
@@ -123,6 +129,10 @@ export type ChatTurn =
       last_step_summary?: string;
       /** Count of steps seen so far — reserved for future step-routing work. */
       step_count?: number;
+      /** F-448 Phase 3: child agent's active model label (e.g. "sonnet-4.5"). */
+      model?: string;
+      /** F-448 Phase 3: number of tools exposed to the child agent. */
+      tool_count?: number;
     }
   | { type: 'error'; message: string };
 
@@ -564,6 +574,12 @@ export function pushEvent(sessionId: SessionId, event: SessionEvent): void {
           };
           if (event.agent_name !== undefined) {
             banner.agent_name = event.agent_name;
+          }
+          if (event.model !== undefined) {
+            banner.model = event.model;
+          }
+          if (event.tool_count !== undefined) {
+            banner.tool_count = event.tool_count;
           }
           state.turns.push(banner);
         }),
