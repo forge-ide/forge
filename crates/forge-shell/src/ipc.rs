@@ -37,6 +37,7 @@ use forge_lsp::{
 use forge_term::{ShellSpec, TerminalEvent, TerminalSession, TerminalSize};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, EventTarget, Manager, Runtime, State, Webview};
+use tracing;
 use ts_rs::TS;
 
 use crate::bridge::{EventSink, SessionBridge, SessionConnections, SessionEventPayload};
@@ -47,10 +48,17 @@ use crate::bridge::{EventSink, SessionBridge, SessionConnections, SessionEventPa
 /// wire shape — never a panic.
 pub(crate) const LABEL_MISMATCH_ERROR: &str = "forbidden: window label mismatch";
 
-fn authz_check(label: &str, expected: &str, _command: &'static str) -> Result<(), String> {
+fn authz_check(label: &str, expected: &str, command: &'static str) -> Result<(), String> {
     if label == expected {
         Ok(())
     } else {
+        tracing::warn!(
+            target: "forge_shell::ipc::authz",
+            actual = label,
+            expected = expected,
+            command = command,
+            "window label mismatch"
+        );
         Err(LABEL_MISMATCH_ERROR.to_string())
     }
 }
@@ -59,7 +67,7 @@ fn authz_check_in(
     label: &str,
     exact: &[&str],
     allow_session_prefix: bool,
-    _command: &'static str,
+    command: &'static str,
 ) -> Result<(), String> {
     if exact.contains(&label) {
         return Ok(());
@@ -67,7 +75,31 @@ fn authz_check_in(
     if allow_session_prefix && label.starts_with("session-") {
         return Ok(());
     }
+    tracing::warn!(
+        target: "forge_shell::ipc::authz",
+        actual = label,
+        allowed = ?exact,
+        command = command,
+        "window label mismatch"
+    );
     Err(LABEL_MISMATCH_ERROR.to_string())
+}
+
+pub fn require_window_label_for_test(
+    actual: &str,
+    expected: &str,
+    command: &'static str,
+) -> Result<(), String> {
+    authz_check(actual, expected, command)
+}
+
+pub fn require_window_label_in_for_test(
+    actual: &str,
+    exact: &[&str],
+    allow_session_prefix: bool,
+    command: &'static str,
+) -> Result<(), String> {
+    authz_check_in(actual, exact, allow_session_prefix, command)
 }
 
 /// F-068 / L4 (T7): per-field byte caps on untyped-string inputs to session
