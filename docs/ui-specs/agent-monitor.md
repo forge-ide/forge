@@ -31,9 +31,11 @@ running · 3m · $0.09              sonnet-4.5        ← meta row
 
 ### 9.2 Trace (middle)
 
-**Header.** Agent name big, id small, live chip (`running · step 6 of 11`), `Pause` / `Kill` buttons, `Promote to pane` button (for background agents).
+**Header (Phase 2).** Agent name big, id small, live state chip (`running · step N` when running; otherwise the bare state). The chip uses an ember accent while running and the neutral surface chip for `queued` / `done` / `error`.
 
-**Toolbar.** Shows elapsed, token in/out, cost, model, tools-used, spawned-by relationship — all in Fira Code 10px separated by `·`.
+**Header (Phase 3 — deferred to [F-449](https://github.com/forge-ide/forge/issues/504)).** Expand the live chip to `running · step N of M` once the backend broadcasts a total-step count, and add the `Pause` / `Kill` buttons plus a `Promote to pane` button for background agents. Phase-2 surfaces `Stop agent` via the Inspector only (§9.3).
+
+**Toolbar (Phase 3 — deferred to [F-449](https://github.com/forge-ide/forge/issues/504)).** Elapsed, token in/out, cost, model, tools-used, spawned-by relationship — all in Fira Code 10px separated by `·`. Blocked on backend plumbing for cost/token/tool-use aggregation.
 
 **Timeline.** Vertical list of steps. Each step:
 - 16px filled dot, colored by state (done/ok, run/warn, queued/text-tertiary, err/error)
@@ -61,7 +63,9 @@ Five sections:
 2. **Allowed tools.** Pills, each with click-to-view policy.
 3. **Allowed paths.** Pills with mono text; glob patterns rendered verbatim.
 4. **Resource usage.** cpu, rss, fd open, net connections — live, 1Hz update.
-5. **Actions.** `Pause agent`, `Interrupt + refine` (opens a refine composer in context), `Export transcript` (JSONL), `Promote to pane` (background only).
+5. **Actions (Phase 2).** Single `Stop agent` action — wires through the `stop_background_agent` Tauri command onto `Orchestrator::stop(id)`.
+
+**Actions (Phase 3 — deferred to [F-449](https://github.com/forge-ide/forge/issues/504)).** `Pause agent`, `Interrupt + refine` (opens a refine composer in context), `Export transcript` (JSONL), `Promote to pane` (background only). Blocked on backend primitives for pause, refine, transcript export, and pane promotion.
 
 **Doesn't do.**
 - Does not let you edit agent definitions inline (opens the source file instead)

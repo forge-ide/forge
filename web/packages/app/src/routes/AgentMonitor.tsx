@@ -490,6 +490,22 @@ export const AgentTrace: Component<{
             <header class="agent-monitor__trace-head">
               <h2 class="agent-monitor__trace-name">{agent().name}</h2>
               <span class="agent-monitor__trace-id">{agent().id}</span>
+              {/* F-407: Phase-2 live-chip — name + id + state chip is the
+                  subset of the §9.2 trace header we can render without the
+                  backend-plumbed toolbar (elapsed / tokens / cost / tools /
+                  spawned-by). Running agents show `running · step N` where
+                  N is the observed step count; `step N of M` returns once
+                  the backend ships a total. See F-449 for the Phase-3
+                  follow-up that restores the full chrome. */}
+              <span
+                class="agent-monitor__trace-chip"
+                data-state={agent().state}
+                aria-label={`agent state ${agent().state}`}
+              >
+                {agent().state === 'running'
+                  ? `running · step ${props.steps.length}`
+                  : agent().state}
+              </span>
             </header>
             <Show
               when={props.steps.length > 0}
