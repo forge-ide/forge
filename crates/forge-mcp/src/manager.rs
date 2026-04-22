@@ -180,9 +180,15 @@ enum Command {
 
 /// Transport half used by the pump. Owned by the pump task — never
 /// shared. The enum shape keeps dispatch monomorphic.
+///
+/// The `InProc` variant exists so the pump's pending-table routing
+/// (see `run_pump`) can be exercised under concurrency without
+/// spawning a real subprocess or HTTP server. See [`test_util`] for
+/// the public surface.
 enum TransportHalf {
     Stdio(Stdio),
     Http(Http),
+    InProc(InProcHalf),
 }
 
 impl TransportHalf {
@@ -190,6 +196,7 @@ impl TransportHalf {
         match self {
             TransportHalf::Stdio(s) => s.send(value).await,
             TransportHalf::Http(h) => h.send(value).await,
+            TransportHalf::InProc(p) => p.send(value).await,
         }
     }
 
@@ -213,6 +220,33 @@ impl TransportHalf {
                 }
                 None => TransportEvent::Closed("http channel closed".into()),
             },
+            TransportHalf::InProc(p) => p.recv().await,
+        }
+    }
+}
+
+/// Test-only transport that ferries JSON frames between the pump and a
+/// mock "server" side via two mpsc channels. Owned exclusively by the
+/// pump task after construction, mirroring the real transports.
+struct InProcHalf {
+    /// Pump → server direction: the pump writes outbound frames here.
+    outbound: mpsc::Sender<serde_json::Value>,
+    /// Server → pump direction: the pump reads inbound frames here.
+    inbound: mpsc::Receiver<serde_json::Value>,
+}
+
+impl InProcHalf {
+    async fn send(&mut self, value: serde_json::Value) -> Result<()> {
+        self.outbound
+            .send(value)
+            .await
+            .map_err(|_| anyhow!("in-proc transport: server side dropped"))
+    }
+
+    async fn recv(&mut self) -> TransportEvent {
+        match self.inbound.recv().await {
+            Some(v) => TransportEvent::Message(v),
+            None => TransportEvent::Closed("in-proc inbound channel closed".into()),
         }
     }
 }
@@ -925,6 +959,101 @@ async fn register_restart(
     }
     dq.push_back(now);
     true
+}
+
+/// Test-only harness for driving [`run_pump`] over an in-memory transport.
+///
+/// F-369: the pump's pending-table routing is a critical path that the
+/// public integration tests cannot exercise under concurrency without
+/// spawning real subprocesses (SIGCHLD-reaper races force those tests
+/// into a serial lane). This module exposes just enough of the pump
+/// plumbing — the [`InProcHalf`] transport variant, [`spawn_pump`], and
+/// [`call_request`] — that an integration test can:
+///
+/// 1. stand up a pump pointed at an in-memory transport,
+/// 2. issue concurrent `call()`s against it,
+/// 3. inject synthetic responses in arbitrary order from the "server"
+///    side and assert each caller observes its own response.
+///
+/// Marked `#[doc(hidden)]` — this is not stable surface; callers should
+/// not depend on it outside of `forge-mcp`'s own tests.
+#[doc(hidden)]
+pub mod test_util {
+    use super::*;
+
+    /// Handle to a pump spawned against an in-memory transport. Cloneable
+    /// so multiple tasks can issue concurrent requests against the same
+    /// pump (the underlying [`Connection`] is held in an `Arc`).
+    #[derive(Clone)]
+    pub struct PumpHandle {
+        conn: Arc<Connection>,
+    }
+
+    impl PumpHandle {
+        /// Issue a JSON-RPC request through the pump and await its
+        /// response. Thin wrapper around the same [`call_request`] used
+        /// by `McpManager::call`.
+        pub async fn call_raw(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> anyhow::Result<serde_json::Value> {
+            call_request(&self.conn, method, params).await
+        }
+    }
+
+    /// Mock "server" side of an in-memory transport. Receives the frames
+    /// the pump sends and posts responses back.
+    pub struct InProcServer {
+        /// Frames the pump wrote (client → server direction).
+        client_to_server: mpsc::Receiver<serde_json::Value>,
+        /// Frames the server is posting back (server → client direction).
+        server_to_client: mpsc::Sender<serde_json::Value>,
+    }
+
+    impl InProcServer {
+        /// Pull the next outbound frame the pump sent. `None` when the
+        /// pump task has exited and dropped its transport half.
+        pub async fn recv_from_client(&mut self) -> Option<serde_json::Value> {
+            self.client_to_server.recv().await
+        }
+
+        /// Post a response frame back toward the pump.
+        pub async fn send_to_client(&mut self, value: serde_json::Value) {
+            // Tests build these frames themselves; if the pump has gone
+            // away it just means the test is about to observe the
+            // transport as closed, which is fine — swallow the error.
+            let _ = self.server_to_client.send(value).await;
+        }
+    }
+
+    /// Spawn a pump task wired to an in-memory transport. Returns the
+    /// caller-facing [`PumpHandle`] and the mock [`InProcServer`] half
+    /// the test drives.
+    pub fn spawn_pump_in_proc(server_name: &str) -> (PumpHandle, InProcServer) {
+        // Match the real transports' channel depth so bursts don't
+        // immediately back-pressure the pump.
+        let (client_to_server_tx, client_to_server_rx) = mpsc::channel(128);
+        let (server_to_client_tx, server_to_client_rx) = mpsc::channel(128);
+
+        let transport = TransportHalf::InProc(InProcHalf {
+            outbound: client_to_server_tx,
+            inbound: server_to_client_rx,
+        });
+
+        let (conn, _exit_rx) =
+            spawn_pump(transport, server_name).expect("spawn_pump for in-proc transport");
+
+        (
+            PumpHandle {
+                conn: Arc::new(conn),
+            },
+            InProcServer {
+                client_to_server: client_to_server_rx,
+                server_to_client: server_to_client_tx,
+            },
+        )
+    }
 }
 
 #[cfg(test)]
