@@ -323,7 +323,6 @@ export const SessionWindow: Component = () => {
     return (
       <LeafHost
         leaf={leaf}
-        sessionId={sessionId()}
         subject={subject()}
         providerId={providerId()}
         providerLabel={providerLabel()}
@@ -344,7 +343,6 @@ export const SessionWindow: Component = () => {
         />
         <Show when={activeActivity() === 'files' && activeWorkspaceRoot() !== null}>
           <FilesSidebar
-            sessionId={sessionId()}
             workspaceRoot={activeWorkspaceRoot() as string}
             onOpen={onFileOpen}
           />
@@ -364,7 +362,7 @@ export const SessionWindow: Component = () => {
       {/* F-138: status bar lives at the bottom of the session chrome.
           Subscribes to `session:event` for background-agent lifecycle
           events and surfaces the running count + Promote/Stop popover. */}
-      <StatusBar sessionId={sessionId()} />
+      <StatusBar />
     </main>
   );
 };
@@ -377,7 +375,6 @@ export const SessionWindow: Component = () => {
  */
 interface LeafHostProps {
   leaf: LayoutLeaf;
-  sessionId: SessionId;
   subject: string;
   providerId: ProviderId;
   providerLabel: string;
@@ -447,7 +444,6 @@ const LeafHost: Component<LeafHostProps> = (props) => {
         </Show>
         <Show when={props.leaf.pane_type === 'editor' && props.activeFile !== null}>
           <EditorPane
-            sessionId={props.sessionId}
             path={props.activeFile as string}
             onClose={props.onCloseLeaf}
             onHeaderPointerDown={props.onPointerDownHeader}

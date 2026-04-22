@@ -26,7 +26,7 @@ import {
   onMount,
 } from 'solid-js';
 import { useNavigate } from '@solidjs/router';
-import type { BgAgentSummary, SessionId } from '@forge/ipc';
+import type { BgAgentSummary } from '@forge/ipc';
 import {
   isPermissionGranted as pluginIsPermissionGranted,
   requestPermission as pluginRequestPermission,
@@ -39,6 +39,7 @@ import {
   stopBackgroundAgent as defaultStopBackgroundAgent,
   type SessionEventPayload,
 } from '../ipc/session';
+import { activeSessionId } from '../stores/session';
 import { settings } from '../stores/settings';
 import { pushToast } from '../components/toast';
 import './StatusBar.css';
@@ -97,7 +98,6 @@ const defaultSubscribe: BgAgentsSubscribe = (handler) =>
 export type StatusBarNavigate = (to: string) => void;
 
 export interface StatusBarProps {
-  sessionId: SessionId;
   /** Initial snapshot provider. Defaults to the real Tauri command. */
   listBackgroundAgents?: typeof defaultListBackgroundAgents;
   /** Promote IPC wrapper. */
@@ -224,7 +224,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
   };
 
   const handlePayload = (payload: SessionEventPayload): void => {
-    if (payload.session_id !== props.sessionId) return;
+    if (payload.session_id !== activeSessionId()) return;
     const ev = classifyEvent(payload.event);
     if (ev === null) return;
     if (ev.type === 'background_agent_started') {
@@ -264,8 +264,10 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
       }
     })();
     void (async () => {
+      const id = activeSessionId();
+      if (id === null) return;
       try {
-        const snapshot = await listBg()(props.sessionId);
+        const snapshot = await listBg()(id);
         if (mounted && Array.isArray(snapshot)) {
           const runningRows = snapshot.filter((r) => r.state === 'Running');
           setRunning(runningRows);
@@ -294,7 +296,9 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
   // running" rather than inspect a specific agent.
   const onBadgeDoubleClick = (e: MouseEvent): void => {
     e.preventDefault();
-    navigate(`/agents/${props.sessionId}`);
+    const id = activeSessionId();
+    if (id === null) return;
+    navigate(`/agents/${id}`);
   };
 
   // F-153: popover-row double-click / right-click is the primary "open this
@@ -304,16 +308,22 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
   // popover.
   const onRowDoubleClick = (instanceId: string) => (e: MouseEvent): void => {
     e.preventDefault();
-    navigate(`/agents/${props.sessionId}?instance=${instanceId}`);
+    const sid = activeSessionId();
+    if (sid === null) return;
+    navigate(`/agents/${sid}?instance=${instanceId}`);
   };
   const onRowContextMenu = (instanceId: string) => (e: MouseEvent): void => {
     e.preventDefault();
-    navigate(`/agents/${props.sessionId}?instance=${instanceId}`);
+    const sid = activeSessionId();
+    if (sid === null) return;
+    navigate(`/agents/${sid}?instance=${instanceId}`);
   };
 
   const onPromote = async (id: string): Promise<void> => {
+    const sid = activeSessionId();
+    if (sid === null) return;
     try {
-      await promoteBg()(props.sessionId, id);
+      await promoteBg()(sid, id);
       setRunning((prev) => prev.filter((r) => r.id !== id));
     } catch (err) {
       console.error('promote_background_agent failed', err);
@@ -321,8 +331,10 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
   };
 
   const onStop = async (id: string): Promise<void> => {
+    const sid = activeSessionId();
+    if (sid === null) return;
     try {
-      await stopBg()(props.sessionId, id);
+      await stopBg()(sid, id);
       // Don't pre-remove: the completion event will clear the row and fire
       // the notification on the same path as any other terminal transition.
     } catch (err) {

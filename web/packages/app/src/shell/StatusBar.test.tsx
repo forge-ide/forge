@@ -30,6 +30,7 @@ import type {
   NotificationAdapter,
 } from './StatusBar';
 import type { SessionEventPayload } from '../ipc/session';
+import { setActiveSessionId } from '../stores/session';
 import { resetSettingsStore, seedSettings } from '../stores/settings';
 
 const SID = 'test-session-1' as SessionId;
@@ -126,10 +127,17 @@ function fakeNotifier(): NotificationAdapter & {
 }
 
 beforeEach(() => {
+  // F-385: StatusBar reads the session id from the global `activeSessionId`
+  // signal. Tests mount outside of SessionWindow, so we seed the signal
+  // directly before each mount and clear it in afterEach.
+  setActiveSessionId(SID);
   resetSettingsStore();
 });
 
-afterEach(() => cleanup());
+afterEach(() => {
+  setActiveSessionId(null);
+  cleanup();
+});
 
 describe('StatusBar — badge visibility + count', () => {
   it('hides the badge when there are zero running agents', async () => {
@@ -137,7 +145,6 @@ describe('StatusBar — badge visibility + count', () => {
     const list = vi.fn().mockResolvedValue([]);
     const { queryByTestId } = render(() => (
       <StatusBar
-        sessionId={SID}
         listBackgroundAgents={list}
         subscribe={bus.subscribe}
       />
@@ -155,7 +162,6 @@ describe('StatusBar — badge visibility + count', () => {
       .mockResolvedValue([running('a1'), running('a2', 'reviewer')]);
     const { findByTestId } = render(() => (
       <StatusBar
-        sessionId={SID}
         listBackgroundAgents={list}
         subscribe={bus.subscribe}
       />
@@ -169,7 +175,6 @@ describe('StatusBar — badge visibility + count', () => {
     const list = vi.fn().mockResolvedValue([running('a1')]);
     const { findByTestId, queryByTestId } = render(() => (
       <StatusBar
-        sessionId={SID}
         listBackgroundAgents={list}
         subscribe={bus.subscribe}
       />
@@ -213,7 +218,6 @@ describe('StatusBar — badge visibility + count', () => {
     const list = vi.fn().mockResolvedValue([running('a1')]);
     const { findByTestId } = render(() => (
       <StatusBar
-        sessionId={SID}
         listBackgroundAgents={list}
         subscribe={bus.subscribe}
       />
@@ -241,7 +245,6 @@ describe('StatusBar — popover interaction', () => {
       .mockResolvedValue([running('a1', 'writer'), running('a2', 'reviewer')]);
     const { findByTestId, queryByTestId } = render(() => (
       <StatusBar
-        sessionId={SID}
         listBackgroundAgents={list}
         subscribe={bus.subscribe}
       />
@@ -262,7 +265,6 @@ describe('StatusBar — popover interaction', () => {
     const stop = vi.fn().mockResolvedValue(undefined);
     const { findByTestId } = render(() => (
       <StatusBar
-        sessionId={SID}
         listBackgroundAgents={list}
         subscribe={bus.subscribe}
         promoteBackgroundAgent={promote}
@@ -284,7 +286,6 @@ describe('StatusBar — popover interaction', () => {
     const stop = vi.fn().mockResolvedValue(undefined);
     const { findByTestId } = render(() => (
       <StatusBar
-        sessionId={SID}
         listBackgroundAgents={list}
         subscribe={bus.subscribe}
         promoteBackgroundAgent={promote}
@@ -307,7 +308,6 @@ describe('StatusBar — popover interaction', () => {
     const list = vi.fn().mockResolvedValue([running('a1', 'writer')]);
     const { findByTestId } = render(() => (
       <StatusBar
-        sessionId={SID}
         listBackgroundAgents={list}
         subscribe={bus.subscribe}
       />
@@ -337,7 +337,6 @@ describe('StatusBar — notification modes', () => {
     const list = vi.fn().mockResolvedValue([running('a1', 'writer')]);
     const result = render(() => (
       <StatusBar
-        sessionId={SID}
         listBackgroundAgents={list}
         subscribe={bus.subscribe}
         notificationAdapter={opts.notifier}
@@ -424,13 +423,56 @@ describe('StatusBar — notification modes', () => {
   });
 });
 
+// F-385: single source of truth for sessionId. The StatusBar reads the id
+// from the global `activeSessionId` signal; no `sessionId` prop is accepted.
+// Proven by asserting (a) the initial `list` call carries the signal's
+// value, and (b) an event payload whose `session_id` matches the signal is
+// processed while a payload for a foreign id is ignored — the routing
+// decision is signal-sourced.
+describe('StatusBar — sessionId sourced from activeSessionId signal (F-385)', () => {
+  it('initial list_background_agents call uses the signal value', async () => {
+    const bus = fakeBus();
+    const list = vi.fn().mockResolvedValue([]);
+    render(() => (
+      <StatusBar listBackgroundAgents={list} subscribe={bus.subscribe} />
+    ));
+    await waitFor(() => expect(list).toHaveBeenCalledWith(SID));
+  });
+
+  it('event routing keys off the signal, not a prop', async () => {
+    const bus = fakeBus();
+    const list = vi.fn().mockResolvedValue([]);
+    const { findByTestId, queryByTestId } = render(() => (
+      <StatusBar listBackgroundAgents={list} subscribe={bus.subscribe} />
+    ));
+    await waitFor(() => expect(list).toHaveBeenCalled());
+
+    // A started event for a DIFFERENT session id must be ignored.
+    bus.emit({
+      session_id: 'other-session',
+      seq: 1,
+      event: { type: 'background_agent_started', id: 'x', agent: 'w', at: 'now' },
+    });
+    await Promise.resolve();
+    expect(queryByTestId('bg-agents-badge')).toBeNull();
+
+    // A started event for the signal's session id must land.
+    bus.emit({
+      session_id: SID,
+      seq: 2,
+      event: { type: 'background_agent_started', id: 'y', agent: 'w', at: 'now' },
+    });
+    const badge = await findByTestId('bg-agents-badge');
+    expect(badge).toHaveTextContent('1 bg');
+  });
+});
+
 describe('StatusBar — cleanup', () => {
   it('unsubscribes from the event bus on unmount', async () => {
     const bus = fakeBus();
     const list = vi.fn().mockResolvedValue([]);
     const { unmount } = render(() => (
       <StatusBar
-        sessionId={SID}
         listBackgroundAgents={list}
         subscribe={bus.subscribe}
       />
@@ -470,7 +512,6 @@ describe('StatusBar — AgentMonitor entry points (F-153)', () => {
     const navigate = vi.fn();
     const { findByTestId } = render(() => (
       <StatusBar
-        sessionId={SID}
         listBackgroundAgents={list}
         subscribe={bus.subscribe}
         navigate={navigate}
@@ -491,7 +532,6 @@ describe('StatusBar — AgentMonitor entry points (F-153)', () => {
     const navigate = vi.fn();
     const { findByTestId } = render(() => (
       <StatusBar
-        sessionId={SID}
         listBackgroundAgents={list}
         subscribe={bus.subscribe}
         navigate={navigate}
@@ -513,7 +553,6 @@ describe('StatusBar — AgentMonitor entry points (F-153)', () => {
     const navigate = vi.fn();
     const { findByTestId } = render(() => (
       <StatusBar
-        sessionId={SID}
         listBackgroundAgents={list}
         subscribe={bus.subscribe}
         navigate={navigate}
@@ -537,7 +576,6 @@ describe('StatusBar — AgentMonitor entry points (F-153)', () => {
     const navigate = vi.fn();
     const { findByTestId } = render(() => (
       <StatusBar
-        sessionId={SID}
         listBackgroundAgents={list}
         subscribe={bus.subscribe}
         navigate={navigate}
@@ -569,7 +607,6 @@ describe('StatusBar — AgentMonitor entry points (F-153)', () => {
           path="/"
           component={() => (
             <StatusBar
-              sessionId={SID}
               listBackgroundAgents={list}
               subscribe={bus.subscribe}
             />
@@ -595,7 +632,6 @@ describe('StatusBar — AgentMonitor entry points (F-153)', () => {
           path="/"
           component={() => (
             <StatusBar
-              sessionId={SID}
               listBackgroundAgents={list}
               subscribe={bus.subscribe}
             />

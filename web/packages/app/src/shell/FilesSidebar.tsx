@@ -27,16 +27,16 @@ import {
   onCleanup,
   onMount,
 } from 'solid-js';
-import type { SessionId, TreeNodeDto } from '@forge/ipc';
+import type { TreeNodeDto } from '@forge/ipc';
 import {
   tree as defaultTree,
   renamePath as defaultRenamePath,
   deletePath as defaultDeletePath,
 } from '../ipc/fs';
+import { activeSessionId } from '../stores/session';
 import './FilesSidebar.css';
 
 export interface FilesSidebarProps {
-  sessionId: SessionId;
   /** Absolute workspace root; passed as the `tree(root)` argument. */
   workspaceRoot: string;
   /** Called when the user activates a file (double-click or context-menu
@@ -75,8 +75,10 @@ export const FilesSidebar: Component<FilesSidebarProps> = (props) => {
   const [menu, setMenu] = createSignal<ContextMenuTarget | null>(null);
 
   const refresh = async (): Promise<void> => {
+    const sid = activeSessionId();
+    if (sid === null) return;
     try {
-      const next = await load()(props.sessionId, props.workspaceRoot);
+      const next = await load()(sid, props.workspaceRoot);
       setRootNode(next);
       // Auto-expand the root so the first level of children is visible.
       const rootPath = next.path;
@@ -97,7 +99,7 @@ export const FilesSidebar: Component<FilesSidebarProps> = (props) => {
 
   createEffect(
     on(
-      () => [props.sessionId, props.workspaceRoot] as const,
+      () => [activeSessionId(), props.workspaceRoot] as const,
       () => {
         void refresh();
       },
@@ -154,12 +156,14 @@ export const FilesSidebar: Component<FilesSidebarProps> = (props) => {
     const target = menu();
     dismissMenu();
     if (!target) return;
+    const sid = activeSessionId();
+    if (sid === null) return;
     const fresh = askRename()(target.name);
     if (fresh === null || fresh === '' || fresh === target.name) return;
     const parent = target.path.slice(0, target.path.lastIndexOf('/'));
     const nextPath = `${parent}/${fresh}`;
     try {
-      await rename()(props.sessionId, target.path, nextPath);
+      await rename()(sid, target.path, nextPath);
       await refresh();
     } catch (err) {
       setError(errorToString(err));
@@ -170,9 +174,11 @@ export const FilesSidebar: Component<FilesSidebarProps> = (props) => {
     const target = menu();
     dismissMenu();
     if (!target) return;
+    const sid = activeSessionId();
+    if (sid === null) return;
     if (!askDelete()(target.name)) return;
     try {
-      await remove()(props.sessionId, target.path);
+      await remove()(sid, target.path);
       await refresh();
     } catch (err) {
       setError(errorToString(err));
