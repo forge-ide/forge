@@ -22,11 +22,27 @@
 //! unit tests and the `tests/` integration suite.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
 use crate::registry::{Checksum, Registry, ServerSpec};
+
+/// Default cap on a single archive download. Chosen to bracket the
+/// largest realistic language-server tarball (rust-analyzer ~40 MiB,
+/// clangd ~100 MiB) while still refusing gigabyte-class payloads.
+pub const DEFAULT_MAX_BODY_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Default per-request deadline. Covers slow mirrors but shuts down
+/// slow-loris streams well inside the LSP start-up budget.
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Default connect deadline. Short enough to fail fast on dead mirrors.
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Default redirect-chain depth. Matches `curl`'s default maximum.
+pub const DEFAULT_MAX_REDIRECTS: usize = 5;
 
 /// Errors returned by [`Bootstrap::ensure`].
 #[derive(Debug, thiserror::Error)]
@@ -79,6 +95,57 @@ pub enum BootstrapError {
     /// pass an explicit `cache_root` to [`Bootstrap::new_in`].
     #[error("could not resolve a cache directory (HOME unset?)")]
     NoCacheDir,
+    /// Downloaded body exceeded the configured ceiling before completing.
+    /// The partial bytes are discarded; nothing is written to disk.
+    #[error("download body for {server} exceeded {limit}-byte ceiling")]
+    OversizeBody {
+        /// The server's id.
+        server: String,
+        /// The configured byte ceiling.
+        limit: u64,
+    },
+}
+
+/// Error returned by [`HttpDownloader::fetch`] when the streamed body
+/// exceeds [`HttpClientOptions::max_body_bytes`]. Surfaced through the
+/// [`Downloader`] trait as a boxed `std::error::Error`; [`Bootstrap::ensure`]
+/// downcasts it into [`BootstrapError::OversizeBody`] for callers.
+#[derive(Debug, thiserror::Error)]
+#[error("download body exceeded {limit}-byte ceiling")]
+pub struct OversizeBody {
+    /// The configured byte ceiling.
+    pub limit: u64,
+}
+
+/// Tunable knobs for the production [`HttpDownloader`]. Defaults match
+/// [`DEFAULT_REQUEST_TIMEOUT`], [`DEFAULT_CONNECT_TIMEOUT`],
+/// [`DEFAULT_MAX_REDIRECTS`], HTTPS-only=true, and
+/// [`DEFAULT_MAX_BODY_BYTES`]. Tests override HTTPS-only and the body cap
+/// to exercise the hardening against a plain-HTTP wiremock fixture.
+#[derive(Debug, Clone)]
+pub struct HttpClientOptions {
+    /// Full request deadline — covers headers + body.
+    pub request_timeout: Duration,
+    /// TCP-connect deadline.
+    pub connect_timeout: Duration,
+    /// Maximum redirect hops before the policy refuses.
+    pub max_redirects: usize,
+    /// Reject any URL whose scheme is not `https` (initial or via redirect).
+    pub https_only: bool,
+    /// Maximum body size in bytes before [`OversizeBody`] is returned.
+    pub max_body_bytes: u64,
+}
+
+impl Default for HttpClientOptions {
+    fn default() -> Self {
+        Self {
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            max_redirects: DEFAULT_MAX_REDIRECTS,
+            https_only: true,
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+        }
+    }
 }
 
 /// Network seam. Tests inject a stub impl with in-memory fixtures;
@@ -90,19 +157,42 @@ pub trait Downloader: Send + Sync {
     async fn fetch(&self, url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>;
 }
 
-/// Production [`Downloader`] backed by `reqwest`.
+/// Production [`Downloader`] backed by `reqwest`. Configured for DoS-
+/// and scheme-confusion-resistant fetches: 60 s request timeout, 10 s
+/// connect timeout, redirect chains capped at 5 hops, HTTPS-only by
+/// default, and a 256 MiB body ceiling enforced while streaming.
 pub struct HttpDownloader {
     client: reqwest::Client,
+    max_body_bytes: u64,
 }
 
 impl HttpDownloader {
-    /// New downloader with default timeouts.
+    /// Downloader with production defaults: 60 s request timeout, 10 s
+    /// connect timeout, up to 5 redirect hops, HTTPS-only, 256 MiB body
+    /// ceiling. See [`HttpClientOptions`] for the full knob set.
     pub fn new() -> Self {
+        Self::with_options(HttpClientOptions::default())
+    }
+
+    /// Downloader built from an explicit [`HttpClientOptions`]. Primarily
+    /// for tests that need to exercise the hardening against a plain-HTTP
+    /// wiremock fixture (HTTPS-only off, smaller caps).
+    pub fn with_options(opts: HttpClientOptions) -> Self {
+        // `Client::builder()` only fails under pathological TLS/ALPN
+        // misconfiguration. Panicking here surfaces that loudly instead
+        // of silently downgrading to a no-timeout, redirect-following,
+        // non-HTTPS-only client and burying the hardening finding.
+        let client = reqwest::Client::builder()
+            .user_agent(concat!("forge-lsp/", env!("CARGO_PKG_VERSION")))
+            .timeout(opts.request_timeout)
+            .connect_timeout(opts.connect_timeout)
+            .redirect(reqwest::redirect::Policy::limited(opts.max_redirects))
+            .https_only(opts.https_only)
+            .build()
+            .expect("reqwest client build failed; hardening cannot be bypassed");
         Self {
-            client: reqwest::Client::builder()
-                .user_agent(concat!("forge-lsp/", env!("CARGO_PKG_VERSION")))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
+            client,
+            max_body_bytes: opts.max_body_bytes,
         }
     }
 }
@@ -116,13 +206,31 @@ impl Default for HttpDownloader {
 #[async_trait]
 impl Downloader for HttpDownloader {
     async fn fetch(&self, url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-        let resp = self.client.get(url).send().await?;
+        let mut resp = self.client.get(url).send().await?;
         let status = resp.status();
         if !status.is_success() {
             return Err(format!("HTTP {status}").into());
         }
-        let bytes = resp.bytes().await?;
-        Ok(bytes.to_vec())
+        // Short-circuit on an honest `Content-Length` that already
+        // overshoots the cap; skips buffering large responses we know
+        // we'll reject anyway.
+        if let Some(declared) = resp.content_length() {
+            if declared > self.max_body_bytes {
+                return Err(Box::new(OversizeBody {
+                    limit: self.max_body_bytes,
+                }));
+            }
+        }
+        let mut acc: Vec<u8> = Vec::new();
+        while let Some(chunk) = resp.chunk().await? {
+            if (acc.len() as u64).saturating_add(chunk.len() as u64) > self.max_body_bytes {
+                return Err(Box::new(OversizeBody {
+                    limit: self.max_body_bytes,
+                }));
+            }
+            acc.extend_from_slice(&chunk);
+        }
+        Ok(acc)
     }
 }
 
@@ -260,9 +368,22 @@ impl Bootstrap {
             .downloader
             .fetch(spec.download_url)
             .await
-            .map_err(|source| BootstrapError::Download {
-                server: spec.id.to_string(),
-                source,
+            .map_err(|source| {
+                // Rewrap a typed oversize error into the structured
+                // `BootstrapError::OversizeBody` variant so callers can
+                // surface a specific message instead of an opaque
+                // `Download` source.
+                if let Some(over) = source.downcast_ref::<OversizeBody>() {
+                    let limit = over.limit;
+                    return BootstrapError::OversizeBody {
+                        server: spec.id.to_string(),
+                        limit,
+                    };
+                }
+                BootstrapError::Download {
+                    server: spec.id.to_string(),
+                    source,
+                }
             })?;
 
         let actual = hex::encode(Sha256::digest(&bytes));

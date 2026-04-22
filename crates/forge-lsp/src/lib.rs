@@ -36,7 +36,9 @@ pub mod bootstrap;
 pub mod registry;
 pub mod server;
 
-pub use bootstrap::{Bootstrap, BootstrapError, Downloader, HttpDownloader};
+pub use bootstrap::{
+    Bootstrap, BootstrapError, Downloader, HttpClientOptions, HttpDownloader, OversizeBody,
+};
 pub use registry::{Checksum, Registry, ServerId, ServerSpec};
 
 pub use server::{
