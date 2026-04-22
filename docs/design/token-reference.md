@@ -47,8 +47,12 @@ These tokens should be defined at `:root` and used throughout. Never use raw val
 
   /* Accent aliases — stable names for warn/danger signals used across panes.
    * `--color-accent-warn` pins dirty/unsaved-buffer indicators to ember-100
-   * so the signal stays visually distinctive on `--color-surface-1`. */
+   * so the signal stays visually distinctive on `--color-surface-1`.
+   * `--color-accent-danger` aliases --color-error so error copy on elevated
+   * surfaces (e.g. `.editor-pane__error` on `--color-surface-3`) reads as the
+   * error accent rather than collapsing to text-primary via a var() fallback. */
   --color-accent-warn: var(--color-ember-100);
+  --color-accent-danger: var(--color-error);
 
   /* Semantic backgrounds */
   --color-success-bg: rgba(61,220,132,0.07);

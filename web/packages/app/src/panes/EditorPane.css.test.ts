@@ -11,6 +11,13 @@ import { resolve } from 'node:path';
 // tokens.css + token-reference.md; the fallback is removed so the dot
 // always paints the ember accent.
 //
+// F-417-followup: the same camouflage shape was live on `.editor-pane__error`
+// via `color: var(--color-accent-danger, var(--color-text-primary))` with
+// `--color-accent-danger` undefined — error text resolved to near-white on
+// `--color-surface-3`. `--color-accent-danger` is now a first-class alias
+// for `--color-error` in tokens.css + token-reference.md; the fallback is
+// removed so error copy always paints the error accent.
+//
 // Source-string assertions mirror the F-090 / F-084 pattern
 // (ProviderPanel.css.test.ts) — JSDOM cannot reliably resolve var()
 // chains at the source level.
@@ -55,5 +62,22 @@ describe('EditorPane dirty-dot — F-417 fallback no longer defeats the signal',
 
   it('docs/design/token-reference.md declares --color-accent-warn alongside tokens.css', () => {
     expect(tokenRef).toMatch(/--color-accent-warn:\s*var\(--color-ember-100\);/);
+  });
+});
+
+describe('EditorPane error — F-417-followup fallback no longer defeats the signal', () => {
+  it('.editor-pane__error uses --color-accent-danger with no text-primary fallback', () => {
+    const body = ruleBody('.editor-pane__error');
+    const normalised = body.replace(/\s+/g, ' ');
+    expect(normalised).toContain('color: var(--color-accent-danger);');
+    expect(normalised).not.toMatch(/var\(--color-accent-danger,\s*var\(--color-text-primary\)\)/);
+  });
+
+  it('tokens.css defines --color-accent-danger as a --color-error alias', () => {
+    expect(tokensCss).toMatch(/--color-accent-danger:\s*var\(--color-error\);/);
+  });
+
+  it('docs/design/token-reference.md declares --color-accent-danger alongside tokens.css', () => {
+    expect(tokenRef).toMatch(/--color-accent-danger:\s*var\(--color-error\);/);
   });
 });

@@ -89,7 +89,7 @@
 .editor-pane__error {
   padding: var(--sp-2) var(--sp-4);
   background: var(--color-surface-3);
-  color: var(--color-accent-danger, var(--color-text-primary));
+  color: var(--color-accent-danger);
   border-bottom: 1px solid var(--color-border-1);
   font-family: var(--font-mono);
   font-size: 11px;
