@@ -32,12 +32,62 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::{mpsc, Mutex};
+use ts_rs::TS;
 
 use crate::bootstrap::{Bootstrap, BootstrapError};
 use crate::registry::ServerId;
+
+/// Current lifecycle state of one supervised LSP server, as observed by
+/// [`Server::state`] and reported by [`Server::info`].
+///
+/// Mirrors the vocabulary of `forge_core::ServerState` so the UI can render
+/// an LSP-status pill the same way it already renders the MCP one — F-374
+/// named the state-surface asymmetry as the problem, so parity is the goal.
+/// The two enums stay separate because the LSP axis has no equivalent of
+/// MCP's `Healthy` / `Degraded` health-check distinction: a language server
+/// is either up (`Running`) or the supervisor is in a restart loop
+/// (`Failed { reason }`) or out of budget (`GaveUp`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum LspState {
+    /// Supervisor has not yet spawned the child for the current attempt.
+    /// This is the initial state before [`Server::start`] runs.
+    Starting,
+    /// Child process is alive and the transport is installed. Sends via
+    /// [`MessageTransport::send`] reach the child's stdin.
+    Running,
+    /// The most recent spawn attempt failed or the child reaped; the
+    /// supervisor will retry after backoff unless the budget is exhausted.
+    /// `reason` carries the last-observed failure description.
+    Failed {
+        /// Human-readable description of the most recent attempt failure.
+        reason: String,
+    },
+    /// Terminal: the supervisor exhausted [`BackoffPolicy::max_attempts`]
+    /// within [`BackoffPolicy::window`] and will not restart until the
+    /// caller issues a fresh [`Server::start`].
+    GaveUp,
+}
+
+/// Opaque snapshot returned by [`Server::info`] and by the shell's
+/// `lsp_list` IPC command. Mirrors `forge_mcp::McpServerInfo`'s
+/// `{ name, state, tools }` shape on the LSP axis — without `tools`,
+/// which has no LSP analogue (the webview talks LSP directly).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct LspServerInfo {
+    /// Server identifier — matches the `ServerId` the caller used at
+    /// [`Server::from_registry`]. On the IPC boundary this is the same
+    /// string the webview passed as `LspStartArgs.server`.
+    pub id: String,
+    /// Current lifecycle state.
+    pub state: LspState,
+}
 
 /// Variables forwarded from the parent process into every spawned LSP
 /// child. Mirrors the F-345 stdio-MCP allow-list.
@@ -206,6 +256,10 @@ impl Default for BackoffPolicy {
 
 /// A supervised stdio language server.
 pub struct Server {
+    /// Stable identifier for this server. Set from [`ServerId`] when
+    /// [`Server::from_registry`] is used; falls back to the program file
+    /// name for the raw `new` constructor.
+    id: String,
     program: PathBuf,
     args: Vec<String>,
     policy: BackoffPolicy,
@@ -213,6 +267,10 @@ pub struct Server {
     transport: Arc<StdioTransport>,
     event_tx: mpsc::Sender<ServerEvent>,
     event_rx: Option<mpsc::Receiver<ServerEvent>>,
+    /// Current lifecycle state. Updated by the supervisor loop as spawn
+    /// attempts succeed or fail; readable out-of-band via
+    /// [`Server::state`] and [`Server::state_handle`].
+    state: Arc<Mutex<LspState>>,
 }
 
 impl Server {
@@ -248,7 +306,8 @@ impl Server {
         // A hostile `binary_name` (e.g. `"../../../bin/sh"`) would otherwise
         // escape because `server_dir` only validates the parent.
         bootstrap.enforce_in_sandbox(&program, spec.id.0)?;
-        Ok(Self::with_policy_and_clock(
+        Ok(Self::with_id_policy_and_clock(
+            spec.id.0.to_string(),
             program,
             extra_args,
             BackoffPolicy::default(),
@@ -288,8 +347,29 @@ impl Server {
         policy: BackoffPolicy,
         clock: Arc<dyn Clock>,
     ) -> Self {
+        // Derive a best-effort id from the binary name. `from_registry`
+        // overrides this with the canonical `ServerId`.
+        let id = program
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("lsp")
+            .to_string();
+        Self::with_id_policy_and_clock(id, program, args, policy, clock)
+    }
+
+    /// Like [`Server::with_policy_and_clock`] but with an explicit stable id.
+    /// Hidden from rustdoc — production callers use [`Server::from_registry`].
+    #[doc(hidden)]
+    pub fn with_id_policy_and_clock(
+        id: String,
+        program: PathBuf,
+        args: Vec<String>,
+        policy: BackoffPolicy,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(128);
         Self {
+            id,
             program,
             args,
             policy,
@@ -297,7 +377,39 @@ impl Server {
             transport: Arc::new(StdioTransport::new_empty()),
             event_tx: tx,
             event_rx: Some(rx),
+            state: Arc::new(Mutex::new(LspState::Starting)),
         }
+    }
+
+    /// Stable identifier for this server (registry `ServerId` when built
+    /// via [`Server::from_registry`], else the program file name).
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Current lifecycle state snapshot. Safe to call concurrently with
+    /// [`Server::start`].
+    pub async fn state(&self) -> LspState {
+        self.state.lock().await.clone()
+    }
+
+    /// Snapshot the server's current state into an [`LspServerInfo`].
+    /// Mirrors `forge_mcp::McpManager::list` at the single-server scope
+    /// — the shell's `lsp_list` IPC fans this across every live entry.
+    pub async fn info(&self) -> LspServerInfo {
+        LspServerInfo {
+            id: self.id.clone(),
+            state: self.state().await,
+        }
+    }
+
+    /// Shared state handle. Hidden from rustdoc — the shell uses this to
+    /// snapshot `lsp_list` without holding the `Server` itself across the
+    /// supervisor task boundary. External callers should go through
+    /// [`Server::state`] / [`Server::info`].
+    #[doc(hidden)]
+    pub fn state_handle(&self) -> Arc<Mutex<LspState>> {
+        self.state.clone()
     }
 
     /// Take ownership of the event receiver. Only the first caller gets it.
@@ -324,6 +436,11 @@ impl Server {
         let mut attempts = 0u32;
         let mut window_start = self.clock.now();
 
+        // Fresh `start()` resets the lifecycle state. This lets callers
+        // re-use a `Server` after a prior `GaveUp` without observing a
+        // stale terminal state on the first pre-spawn tick.
+        *self.state.lock().await = LspState::Starting;
+
         loop {
             // Roll window when exceeded: attempts outside a 10-min window
             // don't count against the budget.
@@ -336,10 +453,21 @@ impl Server {
             // here as a single "attempt consumed" event — tests can drive
             // either shape against the same budget. `code` is `None` for
             // spawn errors (no child existed) and for signal-killed exits.
-            let code = self.spawn_once().await.unwrap_or_default();
+            // `spawn_once` itself flips state → `Running` on successful
+            // spawn; after it returns we flip to `Failed` (transient) or
+            // `GaveUp` (terminal) below.
+            let spawn_result = self.spawn_once().await;
+            let code = spawn_result.as_ref().ok().copied().flatten();
 
             attempts = attempts.saturating_add(1);
             let remaining = self.policy.max_attempts.saturating_sub(attempts);
+
+            let failure_reason = match &spawn_result {
+                Ok(None) => "child exited (signal)".to_string(),
+                Ok(Some(c)) => format!("child exited with code {c}"),
+                Err(e) => format!("spawn error: {e}"),
+            };
+
             let _ = self
                 .event_tx
                 .send(ServerEvent::Exited {
@@ -349,6 +477,7 @@ impl Server {
                 .await;
 
             if attempts >= self.policy.max_attempts {
+                *self.state.lock().await = LspState::GaveUp;
                 let _ = self
                     .event_tx
                     .send(ServerEvent::GaveUp {
@@ -359,8 +488,16 @@ impl Server {
                 return Ok(());
             }
 
+            // Park the server in `Failed { reason }` while the backoff
+            // sleep runs; the next loop iteration flips it back to
+            // `Starting` → `Running` via `spawn_once`.
+            *self.state.lock().await = LspState::Failed {
+                reason: failure_reason,
+            };
+
             let delay = backoff_delay(&self.policy, attempts);
             self.clock.sleep(delay).await;
+            *self.state.lock().await = LspState::Starting;
         }
     }
 
@@ -407,6 +544,11 @@ impl Server {
 
         // Hand the live stdin pipe to the transport so `lsp_send` can write.
         self.transport.install(stdin).await;
+
+        // Child is up and the transport is wired — flip to `Running`.
+        // Observed via `Server::state` / `Server::info`; the `LspState`
+        // transition is the current-state surface F-374 adds.
+        *self.state.lock().await = LspState::Running;
 
         // Drain stderr at DEBUG — stderr on LSP is free-form logs. Each
         // line carries `server_id` (the program path) so a field engineer
@@ -551,6 +693,121 @@ mod tests {
         assert_eq!(backoff_delay(&p, 3), Duration::from_millis(400));
         // Cap kicks in before the raw exponent would overflow the ceiling.
         assert_eq!(backoff_delay(&p, 10), Duration::from_secs(1));
+    }
+
+    // -----------------------------------------------------------------------
+    // F-374: current-state surface parity with forge-mcp. The supervisor
+    // must expose an `LspState` enum, a `Server::state` accessor, and an
+    // `LspServerInfo` snapshot that `lsp_list` fans across live entries.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn state_starts_as_starting_before_spawn() {
+        // Pre-`start()` the lifecycle is `Starting`. Mirrors MCP's seeded
+        // `Starting` in `McpManager::new`.
+        let s = Server::new(PathBuf::from("/nonexistent/binary"), Vec::new());
+        assert_eq!(s.state().await, LspState::Starting);
+    }
+
+    #[tokio::test]
+    async fn info_returns_id_and_state_snapshot() {
+        // `Server::info` is the single-server shape the shell's `lsp_list`
+        // IPC fans across every entry — id + state, nothing else.
+        let s = Server::new(PathBuf::from("/opt/bin/lsp-fake"), Vec::new());
+        let info = s.info().await;
+        assert_eq!(info.id, "lsp-fake");
+        assert_eq!(info.state, LspState::Starting);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn state_transitions_to_gave_up_when_budget_exhausted() {
+        // DoD: terminal `GaveUp` state mirrors MCP's cap on restart
+        // attempts. Drive a non-existent binary so every attempt fails
+        // immediately; after the budget `state()` must report `GaveUp`.
+        let policy = BackoffPolicy {
+            max_attempts: 2,
+            window: Duration::from_secs(600),
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+        };
+        let server = Arc::new(Server::with_policy_and_clock(
+            PathBuf::from("/nonexistent/forge-lsp/binary"),
+            Vec::new(),
+            policy,
+            Arc::new(SystemClock),
+        ));
+        let sup_server = server.clone();
+        let sup = tokio::spawn(async move { sup_server.start().await });
+
+        // Wait for the supervisor to return (it returns after `GaveUp`).
+        let _ = tokio::time::timeout(Duration::from_secs(5), sup)
+            .await
+            .expect("supervisor must return after GaveUp");
+        assert_eq!(server.state().await, LspState::GaveUp);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn state_reaches_running_after_successful_spawn() {
+        // A long-lived child (`sleep 30`) keeps the supervisor inside
+        // `spawn_once`, so a short time after `start()` the state must
+        // have flipped to `Running`.
+        let policy = BackoffPolicy {
+            max_attempts: 1,
+            window: Duration::from_secs(600),
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+        };
+        let server = Arc::new(Server::with_policy_and_clock(
+            PathBuf::from("/bin/sleep"),
+            vec!["30".to_string()],
+            policy,
+            Arc::new(SystemClock),
+        ));
+        let sup_server = server.clone();
+        let sup = tokio::spawn(async move { sup_server.start().await });
+
+        // Poll for `Running` up to 3s — the spawn is near-instant, but
+        // the state flip happens inside the supervisor's async task so
+        // we cannot assume it's observable synchronously.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let mut saw_running = false;
+        while tokio::time::Instant::now() < deadline {
+            if server.state().await == LspState::Running {
+                saw_running = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        sup.abort();
+        assert!(
+            saw_running,
+            "state must reach Running after a successful spawn"
+        );
+    }
+
+    #[tokio::test]
+    async fn lsp_state_serde_shape_matches_server_state() {
+        // The wire shape has to match `forge_core::ServerState` so the UI
+        // renders the LSP pill the same way it renders the MCP one. The
+        // internal tag is `state`, variants are snake_case, carrier field
+        // is `reason`.
+        let json = serde_json::to_value(LspState::Starting).unwrap();
+        assert_eq!(json, serde_json::json!({ "state": "starting" }));
+
+        let json = serde_json::to_value(LspState::Running).unwrap();
+        assert_eq!(json, serde_json::json!({ "state": "running" }));
+
+        let json = serde_json::to_value(LspState::Failed {
+            reason: "boom".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "state": "failed", "reason": "boom" })
+        );
+
+        let json = serde_json::to_value(LspState::GaveUp).unwrap();
+        assert_eq!(json, serde_json::json!({ "state": "gave_up" }));
     }
 
     #[tokio::test]

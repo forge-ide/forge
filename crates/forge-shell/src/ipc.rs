@@ -31,7 +31,8 @@ use forge_core::approvals::{
 use forge_core::{ApprovalLevel, ApprovalScope, RerunVariant, TerminalId};
 use forge_ipc::HelloAck;
 use forge_lsp::{
-    Bootstrap as LspBootstrap, MessageTransport, Server as LspServer, ServerEvent as LspServerEvent,
+    Bootstrap as LspBootstrap, LspServerInfo, LspState as LspLifecycleState, MessageTransport,
+    Server as LspServer, ServerEvent as LspServerEvent,
 };
 use forge_term::{ShellSpec, TerminalEvent, TerminalSession, TerminalSize};
 use serde::{Deserialize, Serialize};
@@ -430,6 +431,7 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         lsp_start,
         lsp_stop,
         lsp_send,
+        lsp_list,
         // F-137: background-agent lifecycle.
         start_background_agent,
         promote_background_agent,
@@ -1616,6 +1618,10 @@ pub(crate) struct LspEntry {
     pub(crate) supervisor: tauri::async_runtime::JoinHandle<()>,
     /// Event forwarder task. Aborting stops message delivery to the webview.
     pub(crate) forwarder: tauri::async_runtime::JoinHandle<()>,
+    /// F-374: shared handle on the supervisor's current lifecycle state.
+    /// Read by `lsp_list` to build an [`LspServerInfo`] snapshot without
+    /// holding the supervised `Server` itself across the task boundary.
+    pub(crate) state_handle: Arc<tokio::sync::Mutex<LspLifecycleState>>,
 }
 
 /// Tauri-managed registry of live LSP servers. Scoped per app (one instance
@@ -1660,6 +1666,22 @@ impl LspState {
             return Err(LABEL_MISMATCH_ERROR.to_string());
         }
         Ok(entry.transport.clone())
+    }
+
+    /// F-374: collect a snapshot of every live LSP entry's (id, state) pair
+    /// for `lsp_list`. Filters by `caller_label` so one session cannot
+    /// introspect another session's servers — mirrors the authz on
+    /// `lsp_send` / `lsp_stop`.
+    fn list_owned_state_handles(
+        &self,
+        caller_label: &str,
+    ) -> Vec<(String, Arc<tokio::sync::Mutex<LspLifecycleState>>)> {
+        let guard = self.entries.lock().expect("lsp state poisoned");
+        guard
+            .iter()
+            .filter(|(_, entry)| entry.owner_label == caller_label)
+            .map(|(id, entry)| (id.clone(), entry.state_handle.clone()))
+            .collect()
     }
 }
 
@@ -1749,6 +1771,9 @@ pub async fn lsp_start<R: Runtime>(
     let rx = supervisor
         .take_events()
         .ok_or_else(|| "lsp_start: event channel already taken".to_string())?;
+    // F-374: grab a handle on the supervisor's lifecycle state before the
+    // `Server` moves into the spawned task, so `lsp_list` can snapshot it.
+    let state_handle = supervisor.state_handle();
 
     // Register before starting so `lsp_send` can observe the transport
     // immediately. The supervisor races spawn with the first send; the
@@ -1769,6 +1794,7 @@ pub async fn lsp_start<R: Runtime>(
             owner_label,
             supervisor: supervisor_handle,
             forwarder,
+            state_handle,
         },
     )?;
 
@@ -1817,6 +1843,34 @@ pub async fn lsp_send<R: Runtime>(
     let caller_label = webview.label().to_string();
     let transport = state.owned_transport(&server, &caller_label)?;
     transport.send(message).await.map_err(|e| e.to_string())
+}
+
+/// F-374: return an [`LspServerInfo`] snapshot for every live LSP server
+/// owned by the calling webview. Closes the asymmetry with `list_mcp_servers`
+/// so the Editor pane can render an LSP-status pill from a single `invoke`
+/// instead of reconstructing state from `lsp_message` history.
+///
+/// Authz mirrors `lsp_send` / `lsp_stop`: only the session webview that
+/// called `lsp_start` sees its own servers. A cross-session caller gets an
+/// empty list, not a label-mismatch error — `list` on an empty owned set is
+/// a legitimate "I have no servers" shape and should not read as forbidden.
+#[tauri::command]
+pub async fn lsp_list<R: Runtime>(
+    webview: Webview<R>,
+    state: State<'_, LspState>,
+) -> Result<Vec<LspServerInfo>, String> {
+    require_window_label_in(&webview, &[], true)?;
+    let caller_label = webview.label().to_string();
+    let handles = state.list_owned_state_handles(&caller_label);
+    let mut out = Vec::with_capacity(handles.len());
+    for (id, handle) in handles {
+        let state_snapshot = handle.lock().await.clone();
+        out.push(LspServerInfo {
+            id,
+            state: state_snapshot,
+        });
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------

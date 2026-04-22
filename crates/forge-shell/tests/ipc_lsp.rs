@@ -523,3 +523,141 @@ fn oversize_message_is_rejected_at_command_layer() {
     )
     .expect("stop");
 }
+
+// ---------------------------------------------------------------------------
+// F-374: current-state surface — `lsp_list` IPC
+//
+// Parity with `list_mcp_servers`. A session webview can introspect its own
+// live LSP servers in one `invoke` instead of reconstructing state from
+// `lsp_message` history. Authz mirrors `lsp_send`: a caller only sees the
+// servers its own window label owns.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lsp_list_returns_empty_before_any_lsp_start() {
+    // No servers started yet — the command must return an empty array, not
+    // a label-mismatch error. The UI relies on "empty list" being a
+    // legitimate shape so it can render the no-servers state.
+    let app = make_app_with_bootstrap(&["rust-analyzer"]);
+    let window = make_window(&app.app, "session-lsp-empty");
+
+    let resp = invoke(&window, "lsp_list", serde_json::json!({})).expect("list");
+    let body: Value = resp.deserialize().expect("deserialize body");
+    assert_eq!(
+        body,
+        serde_json::json!([]),
+        "lsp_list must return an empty array when no servers started: got {body}"
+    );
+}
+
+#[test]
+fn lsp_list_reflects_started_servers_with_id_and_state() {
+    // After `lsp_start` the server appears in the snapshot with its id.
+    // The state is non-deterministic vs. wall-clock (`Starting` → `Running`
+    // as the child spawns), so assert on `id` exactly and on `state.state`
+    // being one of the valid variants. The MCP equivalent
+    // (`list_mcp_servers`) has the same contract.
+    let app = make_app_with_bootstrap(&["list-srv"]);
+    let window = make_window(&app.app, "session-lsp-listed");
+
+    invoke(
+        &window,
+        "lsp_start",
+        serde_json::json!({
+            "args": {
+                "server": "list-srv",
+                "args": [],
+            }
+        }),
+    )
+    .expect("lsp_start");
+
+    // Poll: the state handle is shared with the supervisor task, which
+    // flips to `Running` asynchronously. A quick retry loop covers both
+    // pre-spawn (`starting`) and post-spawn (`running`) observations.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut saw_expected = false;
+    while Instant::now() < deadline {
+        let resp = invoke(&window, "lsp_list", serde_json::json!({})).expect("list");
+        let body: Value = resp.deserialize().expect("deserialize body");
+        let arr = body.as_array().expect("array");
+        if arr.len() == 1
+            && arr[0].get("id").and_then(|v| v.as_str()) == Some("list-srv")
+            && matches!(
+                arr[0]
+                    .get("state")
+                    .and_then(|s| s.get("state"))
+                    .and_then(|v| v.as_str()),
+                Some("starting" | "running")
+            )
+        {
+            saw_expected = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        saw_expected,
+        "lsp_list must surface the started server with a valid id+state"
+    );
+
+    invoke(
+        &window,
+        "lsp_stop",
+        serde_json::json!({"server": "list-srv"}),
+    )
+    .expect("stop");
+}
+
+#[test]
+fn lsp_list_is_scoped_to_caller_label() {
+    // Alice starts a server; Bob's `lsp_list` must not see alice's server.
+    // This is the same per-owner shape that `lsp_send` / `lsp_stop`
+    // enforce, so one session cannot introspect another session's LSP
+    // fleet without a label match.
+    let app = make_app_with_bootstrap(&["alice-list-srv"]);
+    let alice = make_window(&app.app, "session-alice-list");
+    let bob = make_window(&app.app, "session-bob-list");
+
+    invoke(
+        &alice,
+        "lsp_start",
+        serde_json::json!({
+            "args": {
+                "server": "alice-list-srv",
+                "args": [],
+            }
+        }),
+    )
+    .expect("alice start");
+
+    let resp = invoke(&bob, "lsp_list", serde_json::json!({})).expect("bob list");
+    let body: Value = resp.deserialize().expect("deserialize body");
+    assert_eq!(
+        body,
+        serde_json::json!([]),
+        "bob must not see alice's server in his lsp_list"
+    );
+
+    invoke(
+        &alice,
+        "lsp_stop",
+        serde_json::json!({"server": "alice-list-srv"}),
+    )
+    .expect("owner stop");
+}
+
+#[test]
+fn lsp_list_rejects_dashboard_window() {
+    // Dashboard is not a session; `lsp_list` must refuse it with the
+    // standard label-mismatch error. Mirrors the authz on
+    // `lsp_start` / `lsp_stop` / `lsp_send`.
+    let app = make_app_with_bootstrap(&["rust-analyzer"]);
+    let window = make_window(&app.app, "dashboard");
+    let err = invoke(&window, "lsp_list", serde_json::json!({}))
+        .expect_err("dashboard must not call lsp_list");
+    assert!(
+        err.contains(LABEL_MISMATCH),
+        "expected label-mismatch error, got: {err}"
+    );
+}
