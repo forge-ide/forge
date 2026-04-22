@@ -41,6 +41,12 @@ async fn main() -> Result<()> {
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .map(|p| std::path::absolute(&p).unwrap_or(p));
+    // F-371: daemon startup banners stay on stderr rather than going through
+    // `tracing::info!`. The `forged` binary intentionally installs no
+    // subscriber (emission-only crate per the scope contract), so the only
+    // way these lines reach an operator today is direct stderr. The
+    // `eprintln_audit` integration test excludes `main.rs` for this reason;
+    // see the comment on `is_bin_main` there.
     eprintln!("forged: listening on {}", socket_path.display());
 
     // F-049: persistent-mode forged owns the pid-file lifecycle. Created
@@ -98,6 +104,9 @@ async fn main() -> Result<()> {
                 let url = forge_providers::ollama::validate_base_url(raw.as_deref(), allow_remote)?;
                 // Loudly surface the resolved URL so env-var redirection is
                 // visible in logs. Remote-opt-in is called out explicitly.
+                // F-371: `forged` installs no tracing subscriber (scope
+                // contract: emission-only), so these operator banners go
+                // directly to stderr. `eprintln_audit` exempts main.rs.
                 if allow_remote
                     && !matches!(
                         url.host_str(),
@@ -105,12 +114,12 @@ async fn main() -> Result<()> {
                     )
                 {
                     eprintln!(
-                        "forged: WARN ollama base_url = {} (remote endpoint enabled via {}=1)",
+                        "WARN ollama base_url targets a remote endpoint (allow-remote opt-in) base_url={} env_var={}",
                         url,
-                        forge_providers::ollama::ALLOW_REMOTE_ENV
+                        forge_providers::ollama::ALLOW_REMOTE_ENV,
                     );
                 } else {
-                    eprintln!("forged: ollama base_url = {}", url);
+                    eprintln!("ollama base_url {}", url);
                 }
                 let provider = Arc::new(OllamaProvider::new(url.as_str(), model));
                 serve_with_session(

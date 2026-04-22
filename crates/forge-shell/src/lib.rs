@@ -17,6 +17,16 @@
 //! `window_manager` is gated behind the `webview` feature (on by default) so
 //! that `window_spec` can be unit-tested on hosts without WebKitGTK via
 //! `cargo test -p forge-shell --no-default-features`.
+//!
+//! # Structured tracing (F-371)
+//!
+//! All `tracing` emissions from this crate — authz rejections in
+//! `ipc::require_window_label` / `ipc::require_window_label_in`, Tauri
+//! emit-target failures in [`ipc`], and the terminal / LSP forwarders —
+//! use the field-name and target schema pinned in
+//! [`forge_session::log_fields`]. That module is the authoritative
+//! reference for operators writing log filters; do not introduce new
+//! ad-hoc field names at emission sites.
 
 pub mod bridge;
 pub mod dashboard;

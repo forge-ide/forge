@@ -2,6 +2,7 @@ pub mod archive;
 pub mod bg_agents;
 pub mod byte_budget;
 pub mod error;
+pub mod log_fields;
 pub mod orchestrator;
 pub mod pid_file;
 pub mod provider_spec;

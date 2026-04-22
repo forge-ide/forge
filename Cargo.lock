@@ -1531,6 +1531,8 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "windows-sys 0.61.2",
 ]
 
@@ -1561,6 +1563,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 0.8.23",
+ "tracing",
+ "tracing-subscriber",
  "ts-rs",
  "wiremock",
 ]

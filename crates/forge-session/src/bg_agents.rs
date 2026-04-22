@@ -201,12 +201,26 @@ impl BackgroundAgentRegistry {
         agent_name: &str,
         prompt: InitialPrompt,
     ) -> Result<AgentInstanceId, BgAgentError> {
-        let def = self
+        let def = match self
             .agent_defs
             .iter()
             .find(|d| d.name == agent_name)
             .cloned()
-            .ok_or_else(|| BgAgentError::UnknownAgent(agent_name.to_string()))?;
+        {
+            Some(d) => d,
+            None => {
+                // F-371: every Err branch emits a structured warning with the
+                // `agent_name` field so operators can trace a misdirected
+                // `start_background_agent` call back to the offending UI
+                // without having to correlate stderr lines by timestamp.
+                tracing::warn!(
+                    target: "forge_session::bg_agents",
+                    agent_name = %agent_name,
+                    "rejected start: unknown agent",
+                );
+                return Err(BgAgentError::UnknownAgent(agent_name.to_string()));
+            }
+        };
 
         // Subscribe BEFORE spawn. `Orchestrator::state_stream` is a bounded
         // broadcast — a late subscriber (e.g. `spawn → tokio::spawn(listener)`)
@@ -218,10 +232,35 @@ impl BackgroundAgentRegistry {
             scope: AgentScope::User,
             initial_prompt: Some(prompt),
         };
-        let instance: AgentInstance = self.orchestrator.spawn(def, ctx).await?;
+        let instance: AgentInstance = match self.orchestrator.spawn(def, ctx).await {
+            Ok(inst) => inst,
+            Err(e) => {
+                // F-371: orchestrator-side spawn rejection (e.g. isolation
+                // violation) ends the background-agent lifecycle before it
+                // starts. Emit so operators see both the user's `start`
+                // attempt and the orchestrator's refusal in one log.
+                tracing::warn!(
+                    target: "forge_session::bg_agents",
+                    agent_name = %agent_name,
+                    error = %e,
+                    "rejected start: orchestrator spawn failed",
+                );
+                return Err(BgAgentError::Spawn(e));
+            }
+        };
         let id = instance.id.clone();
 
         self.tracked.lock().await.insert(id.clone());
+
+        // F-371: lifecycle transition — `start` succeeded. Mirrors the
+        // `forge_agents::orchestrator` "spawned" info log so a downstream
+        // filter on `instance_id` correlates both sides of the wiring.
+        tracing::info!(
+            target: "forge_session::bg_agents",
+            instance_id = %id,
+            agent_name = %instance.def.name,
+            "started",
+        );
 
         // F-152: start per-instance resource sampling. No per-agent
         // sidecar process exists yet, so we sample the daemon's own PID
@@ -258,27 +297,57 @@ impl BackgroundAgentRegistry {
                     // silently dropping the row.
                     Err(_) => return,
                 };
-                let (terminal_id, is_terminal) = match &event {
-                    forge_agents::AgentEvent::Completed { id, .. } => (id.clone(), true),
-                    forge_agents::AgentEvent::Failed { id, .. } => (id.clone(), true),
+                let (terminal_id, is_failed) = match &event {
+                    forge_agents::AgentEvent::Completed { id, .. } => (id.clone(), false),
+                    forge_agents::AgentEvent::Failed { id, reason, .. } => {
+                        if *id == target_id {
+                            // F-371: failure log carries the reason so an
+                            // operator doesn't need to cross-reference the
+                            // orchestrator's own event stream to find it.
+                            tracing::warn!(
+                                target: "forge_session::bg_agents",
+                                instance_id = %id,
+                                reason = %reason,
+                                "failed",
+                            );
+                        }
+                        (id.clone(), true)
+                    }
                     _ => continue,
                 };
                 if terminal_id != target_id {
                     continue;
                 }
-                if is_terminal {
-                    tracked.lock().await.remove(&target_id);
-                    // F-152: stop sampling for the terminated instance so
-                    // the UI pills clear back to `—` (no further
-                    // `ResourceSample` events reach the webview for this
-                    // id).
-                    monitor.untrack(&target_id).await;
-                    let _ = events.send(Event::BackgroundAgentCompleted {
-                        id: target_id.clone(),
-                        at: Utc::now(),
-                    });
-                    return;
+                // F-152: stop sampling for the terminated instance so
+                // the UI pills clear back to `—` (no further
+                // `ResourceSample` events reach the webview for this
+                // id).
+                tracked.lock().await.remove(&target_id);
+                monitor.untrack(&target_id).await;
+                if !is_failed {
+                    // F-371: `Completed` path gets its own info log. Failed
+                    // already logged above with the reason attached.
+                    tracing::info!(
+                        target: "forge_session::bg_agents",
+                        instance_id = %target_id,
+                        "completed",
+                    );
                 }
+                if let Err(e) = events.send(Event::BackgroundAgentCompleted {
+                    id: target_id.clone(),
+                    at: Utc::now(),
+                }) {
+                    // F-371: broadcast-send errors only happen when the
+                    // session has dropped every subscriber. Log at warn so
+                    // a teardown race is observable without panicking.
+                    tracing::warn!(
+                        target: "forge_session::bg_agents",
+                        instance_id = %target_id,
+                        error = %e,
+                        "completion emit failed: no subscribers",
+                    );
+                }
+                return;
             }
         });
 

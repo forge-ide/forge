@@ -358,7 +358,7 @@ mod session_id_validation_tests {
 pub async fn session_list<R: tauri::Runtime>(
     webview: tauri::Webview<R>,
 ) -> Result<Vec<SessionSummary>, String> {
-    crate::ipc::require_window_label(&webview, "dashboard")?;
+    crate::ipc::require_window_label(&webview, "dashboard", "session_list")?;
     collect_sessions(&default_workspaces_toml(), &UdsPinger)
         .await
         .map_err(|e| e.to_string())
@@ -378,7 +378,7 @@ pub async fn open_session<R: tauri::Runtime>(
     webview: tauri::Webview<R>,
     id: String,
 ) -> Result<(), String> {
-    crate::ipc::require_window_label(&webview, "dashboard")?;
+    crate::ipc::require_window_label(&webview, "dashboard", "open_session")?;
     if !is_valid_session_id(&id) {
         return Err(INVALID_SESSION_ID_ERROR.to_string());
     }
