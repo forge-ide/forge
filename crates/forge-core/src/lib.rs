@@ -1,4 +1,5 @@
 pub mod approvals;
+pub mod config_file;
 mod error;
 mod event;
 mod event_log;
