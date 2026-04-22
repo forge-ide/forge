@@ -468,3 +468,47 @@ fn session_approve_tool_accepts_valid_scope_variants() {
         );
     }
 }
+
+// F-391: `session_cancel` is the Tauri command wired to the Composer's Stop
+// button and Esc handler. The daemon-side cancel transport is a separate
+// follow-up — this task establishes the command surface and its window-
+// ownership check so the frontend has a stable target to invoke.
+
+#[test]
+fn session_cancel_is_registered_and_succeeds_for_the_owning_window() {
+    let app = make_app();
+    app.manage(BridgeState::new(SessionConnections::new()));
+    let window = make_session_window(&app, "cancel-ok");
+
+    let res = tauri::test::get_ipc_response(
+        &window,
+        tauri::webview::InvokeRequest {
+            cmd: "session_cancel".into(),
+            callback: tauri::ipc::CallbackFn(0),
+            error: tauri::ipc::CallbackFn(1),
+            url: "http://tauri.localhost".parse().unwrap(),
+            body: tauri::ipc::InvokeBody::Json(serde_json::json!({ "sessionId": "cancel-ok" })),
+            headers: Default::default(),
+            invoke_key: INVOKE_KEY.to_string(),
+        },
+    );
+    res.expect("session_cancel must succeed for the matching window label");
+}
+
+#[test]
+fn session_cancel_rejects_cross_window_callers() {
+    let app = make_app();
+    app.manage(BridgeState::new(SessionConnections::new()));
+    // Window labelled for *another* session — the authz check must block it.
+    let window = make_session_window(&app, "owned-by-a");
+
+    let err = invoke_err(
+        &window,
+        "session_cancel",
+        serde_json::json!({ "sessionId": "victim-b" }),
+    );
+    assert!(
+        err.contains("window label mismatch"),
+        "cross-window session_cancel must be rejected, got: {err}"
+    );
+}

@@ -289,6 +289,23 @@ pub async fn session_send_message<R: Runtime>(
         .map_err(|e| e.to_string())
 }
 
+/// F-391: cancel the in-flight turn for this session.
+///
+/// Fired by the Composer's Stop button and Esc handler. The authz check is
+/// the primary contract today: only the session's own window may cancel it.
+/// A server-side transport for the actual cancel is a separate follow-up
+/// (no `IpcMessage::CancelTurn` exists yet); the frontend optimistically
+/// clears its streaming lock so the composer becomes interactive regardless.
+#[tauri::command]
+pub async fn session_cancel<R: Runtime>(
+    session_id: String,
+    webview: Webview<R>,
+    _state: State<'_, BridgeState>,
+) -> Result<(), String> {
+    require_window_label(&webview, &format!("session-{session_id}"))?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn session_approve_tool<R: Runtime>(
     session_id: String,
@@ -389,6 +406,8 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         session_hello,
         session_subscribe,
         session_send_message,
+        // F-391: Composer Stop / Esc cancel target.
+        session_cancel,
         session_approve_tool,
         session_reject_tool,
         rerun_message,
