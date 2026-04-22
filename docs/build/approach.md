@@ -58,14 +58,11 @@ forge/
 ├── web/                    # webview frontend (pnpm workspace)
 │   ├── package.json
 │   ├── pnpm-workspace.yaml
-│   ├── apps/
-│   │   ├── shell/          # Tauri webview app (Solid SPA)
-│   │   └── monaco-host/    # isolated iframe hosting Monaco
 │   └── packages/
+│       ├── app/            # SolidJS shell app (Tauri webview)
+│       ├── monaco-host/    # isolated iframe hosting Monaco
 │       ├── design/         # CSS tokens from DESIGN.md
-│       ├── ui/             # Solid components (per SPECS.md)
-│       ├── ipc/            # generated TS types from forge-ipc
-│       └── state/          # Solid signal-based stores
+│       └── ipc/            # generated TS types + typed IPC client
 │
 ├── docs/
 │   └── architecture/       # ADRs
@@ -85,4 +82,4 @@ forge/
 - Cargo workspace gives us one build graph, one lockfile, easy cross-crate refactoring.
 - `forge-shell` (GUI) and `forge-cli` (CLI) are thin binaries on top of `forge-core` — no duplication, no "GUI-only logic."
 - The webview sits in `web/` so frontend engineers don't need a Rust toolchain to iterate on UI (though the full dev loop does).
-- Monaco lives in an **iframe** (`monaco-host`) rather than directly in the shell app — this keeps Monaco's window globals, web workers, and language-service assumptions from leaking into our Solid tree.
+- Monaco lives in an **iframe** (`packages/monaco-host`) rather than directly in `packages/app` — this keeps Monaco's window globals, web workers, and language-service assumptions from leaking into our Solid tree.
