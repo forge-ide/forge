@@ -75,7 +75,7 @@ pub enum HttpEvent {
     /// notification. Dispatch is the manager's job.
     Message(serde_json::Value),
     /// The SSE reader exhausted its sustained-failure budget (see
-    /// [`CONSECUTIVE_RECONNECT_FAILURE_THRESHOLD`]) and has exited. The
+    /// `CONSECUTIVE_RECONNECT_FAILURE_THRESHOLD`) and has exited. The
     /// string is a short human-readable reason suitable for surfacing
     /// as the manager's `Degraded { reason }`.
     Closed(String),
@@ -253,7 +253,7 @@ fn build_header_map(raw: &BTreeMap<String, String>) -> Result<HeaderMap> {
 /// The loop exits when either:
 /// * the consumer drops [`Http`] (clean teardown), or
 /// * consecutive reconnect failures reach
-///   [`CONSECUTIVE_RECONNECT_FAILURE_THRESHOLD`] — in which case we emit
+///   `CONSECUTIVE_RECONNECT_FAILURE_THRESHOLD` — in which case we emit
 ///   a terminal [`HttpEvent::Closed`] before returning so the manager
 ///   (F-130) can flip the server to `Degraded` without waiting for the
 ///   30s health-check tick (F-361).
