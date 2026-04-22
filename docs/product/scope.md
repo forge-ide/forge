@@ -30,7 +30,6 @@ Most of what was flagged here in earlier drafts has been resolved. What remains:
 
 1. **Auto-compact thresholds (90% / 98%).** Guesses. Real thresholds need telemetry to calibrate once users run long sessions.
 2. **Cross-workspace usage aggregation strategy.** Deferred to phase 3 — pick between per-session scan, per-workspace aggregate, or monthly global aggregate when we have volume signal.
-3. **Branched message tree UI details.** SPECS.md has the mini-spec; the rendering particulars (how to visualize branch points, how navigation works, how branches coexist in the event log without breaking replay) need implementation refinement.
-4. **agentskills.io v1.0 spec stability.** The open standard is pre-v1 (v1.0 targeting H2 2026). If it shifts materially before Forge ships, we adjust. Flagged in IMPLEMENTATION.md risks.
+3. **agentskills.io v1.0 spec stability.** The open standard is pre-v1 (v1.0 targeting H2 2026). If it shifts materially before Forge ships, we adjust. Flagged in IMPLEMENTATION.md risks.
 
 Other former opens (terminal choice, OCI runtime, transcript versioning, snapshot cadence, prices data, skill distribution) are now resolved in this document or IMPLEMENTATION.md.

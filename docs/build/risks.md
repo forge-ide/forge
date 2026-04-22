@@ -34,5 +34,4 @@
 
 - **Q1.** Cross-workspace usage aggregation strategy (phase 3 decision)
 - **Q2.** Auto-compact thresholds (90%/98% are guesses, tune with telemetry)
-- **Q3.** Branched message tree implementation details (SPECS.md §15 gives shape; actual rendering needs prototype work)
-- **Q4.** Memory storage format — plain markdown is simple but lacks structure. Consider `memory/<agent>.yaml` later if agents need tagged/dated entries.
+- **Q3.** Memory storage format — plain markdown is simple but lacks structure. Consider `memory/<agent>.yaml` later if agents need tagged/dated entries.
