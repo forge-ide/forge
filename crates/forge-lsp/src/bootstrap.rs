@@ -17,10 +17,9 @@
 //! bootstrap returns [`BootstrapError::ChecksumPending`] so callers learn
 //! fast and release engineering can pin hashes safely.
 //!
-//! **Network seam.** The [`Downloader`] trait lets tests inject a
-//! wiremock-served URL (or an in-memory fixture) without touching the
-//! network — see `bootstrap.rs`'s unit tests and the `tests/` integration
-//! suite.
+//! **Network seam.** The [`Downloader`] trait lets tests inject an
+//! in-memory fixture without touching the network — see `bootstrap.rs`'s
+//! unit tests and the `tests/` integration suite.
 
 use std::path::{Path, PathBuf};
 
@@ -82,7 +81,7 @@ pub enum BootstrapError {
     NoCacheDir,
 }
 
-/// Network seam. Tests inject a wiremock-served URL with a stub impl;
+/// Network seam. Tests inject a stub impl with in-memory fixtures;
 /// production uses [`HttpDownloader`] backed by reqwest.
 #[async_trait]
 pub trait Downloader: Send + Sync {
