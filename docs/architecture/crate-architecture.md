@@ -139,6 +139,8 @@ pub trait Provider: Send + Sync {
 
 MCP client and server lifecycle manager.
 
+> See [ADR-002: MCP Integration — Scope and Manager Consolidation](./ADR-002-mcp-integration-scope-and-manager-consolidation.md) for the rationale behind the lifecycle-types-in-`forge-core` placement, the single-manager-per-daemon decision, and the `ServerState::Disabled` variant.
+
 **Responsibilities.**
 - Parse `.mcp.json` (workspace) and `~/.mcp.json` (user) using the universal `mcpServers` schema
 - Import conversion for other tool formats (`forge mcp import --from ...`)
@@ -236,6 +238,8 @@ When an agent requests `agent.spawn(name, message)`, the orchestrator:
 ### 3.5 `forge-session`
 
 The session process binary — `forged` — the heart of Forge.
+
+> See [ADR-003: Sandbox Resource Enforcement — cgroup v2 / rlimit Hybrid](./ADR-003-sandbox-resource-enforcement-cgroup-v2-rlimit-hybrid.md) for the rationale behind the per-sandbox cgroup v2 leaf, pre_exec enrollment, and rlimit backstop fallback used by `crates/forge-session/src/sandbox.rs`.
 
 **Entrypoint.**
 ```rust
