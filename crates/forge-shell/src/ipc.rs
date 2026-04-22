@@ -540,6 +540,7 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         lsp_start,
         lsp_stop,
         lsp_send,
+        lsp_list,
         // F-137: background-agent lifecycle.
         start_background_agent,
         promote_background_agent,
@@ -1863,6 +1864,31 @@ impl LspState {
         }
         Ok(entry.transport.clone())
     }
+
+    fn list_by_owner(&self, caller_label: &str) -> Vec<LspListEntry> {
+        let guard = self.entries.lock().expect("lsp state poisoned");
+        guard
+            .iter()
+            .filter(|(_, e)| e.owner_label == caller_label)
+            .map(|(id, _)| LspListEntry {
+                id: id.clone(),
+                state: LspStateInfo {
+                    state: "running".to_string(),
+                },
+            })
+            .collect()
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct LspListEntry {
+    pub id: String,
+    pub state: LspStateInfo,
+}
+
+#[derive(serde::Serialize)]
+pub struct LspStateInfo {
+    pub state: String,
 }
 
 /// Forward every `ServerEvent::Message` from the supervisor to the owning
@@ -2019,6 +2045,19 @@ pub async fn lsp_send<R: Runtime>(
     let caller_label = webview.label().to_string();
     let transport = state.owned_transport(&server, &caller_label)?;
     transport.send(message).await.map_err(|e| e.to_string())
+}
+
+/// F-374: returns the live LSP servers owned by the calling session window.
+/// Authz mirrors `lsp_send`: dashboard and non-session labels are rejected;
+/// each session sees only the servers it started.
+#[tauri::command]
+pub async fn lsp_list<R: Runtime>(
+    webview: Webview<R>,
+    state: State<'_, LspState>,
+) -> Result<Vec<LspListEntry>, String> {
+    require_window_label_in(&webview, &[], true, "lsp_list")?;
+    let caller_label = webview.label().to_string();
+    Ok(state.list_by_owner(&caller_label))
 }
 
 // ---------------------------------------------------------------------------
