@@ -18,11 +18,11 @@ import {
   For,
   on,
   onCleanup,
-  onMount,
   Show,
   type Component,
   type JSX,
 } from 'solid-js';
+import { createMountedSubscription } from '../ipc/useEventListener';
 import { useParams, useSearchParams } from '@solidjs/router';
 import { invoke } from '../lib/tauri';
 import { useFocusTrap } from '../lib/useFocusTrap';
@@ -919,11 +919,7 @@ export const AgentMonitor: Component = () => {
     return { kind: 'ready' };
   });
 
-  onMount(async () => {
-    // Subscribe to session events to update sub-agents + step timelines.
-    const unlisten = await onSessionEvent((payload) => applyEvent(payload));
-    onCleanup(() => unlisten());
-  });
+  createMountedSubscription(() => onSessionEvent((payload) => applyEvent(payload)));
 
   function applyEvent(payload: SessionEventPayload) {
     const ev = payload.event as Record<string, unknown> | null;

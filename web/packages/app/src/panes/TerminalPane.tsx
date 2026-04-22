@@ -96,6 +96,7 @@ export const TerminalPane: Component<TerminalPaneProps> = (props) => {
   let unlistenBytes: UnlistenFn | null = null;
   let unlistenExit: UnlistenFn | null = null;
   let resizeObserver: ResizeObserver | null = null;
+  let termMounted = true;
   // Tracks whether spawn succeeded so cleanup doesn't attempt to kill a
   // terminal that was never registered on the Rust side.
   let spawnCompleted = false;
@@ -152,7 +153,7 @@ export const TerminalPane: Component<TerminalPaneProps> = (props) => {
     void (async () => {
       // Subscribe before spawning so we cannot miss bytes emitted between
       // spawn return and subscription set-up.
-      unlistenBytes = await listen<TerminalBytesEvent>(
+      const bytesOff = await listen<TerminalBytesEvent>(
         TERMINAL_BYTES_EVENT,
         (event) => {
           if (event.payload.terminal_id !== id) return;
@@ -160,7 +161,10 @@ export const TerminalPane: Component<TerminalPaneProps> = (props) => {
           term.write(new Uint8Array(event.payload.data));
         },
       );
-      unlistenExit = await listen<TerminalExitEvent>(
+      if (!termMounted) { bytesOff(); return; }
+      unlistenBytes = bytesOff;
+
+      const exitOff = await listen<TerminalExitEvent>(
         TERMINAL_EXIT_EVENT,
         (event) => {
           if (event.payload.terminal_id !== id) return;
@@ -183,6 +187,8 @@ export const TerminalPane: Component<TerminalPaneProps> = (props) => {
           spawnCompleted = false;
         },
       );
+      if (!termMounted) { exitOff(); return; }
+      unlistenExit = exitOff;
 
       const args: TerminalSpawnArgs = {
         terminal_id: id,
@@ -235,6 +241,7 @@ export const TerminalPane: Component<TerminalPaneProps> = (props) => {
   });
 
   onCleanup(() => {
+    termMounted = false;
     tearingDown = true;
     const id = terminalId();
     if (resizeObserver) {
