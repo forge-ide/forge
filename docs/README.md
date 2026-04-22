@@ -73,7 +73,7 @@ Navigation hub for all Forge documentation. One topic per file; use the table be
 | [agent-monitor.md](ui-specs/agent-monitor.md) | Three-column: agent list, trace timeline, inspector panel |
 | [approval-prompt.md](ui-specs/approval-prompt.md) | Inline four-scope whitelisting, keyboard shortcuts, preview by tool type |
 | [streaming-states.md](ui-specs/streaming-states.md) | Streaming cursor, pulse ring, transitions, and complete motion reference |
-| [session-roster.md](ui-specs/session-roster.md) | Scope-aware asset display and the repeatable asset card |
+| [session-roster.md](ui-specs/session-roster.md) | *(deferred post-Phase-2)* Scope-aware asset display and the repeatable asset card — no component exists yet |
 | [branching.md](ui-specs/branching.md) | Message tree data model, variant rendering, conversation flow |
 
 ## build/

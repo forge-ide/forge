@@ -1,5 +1,7 @@
 # Session Roster & Asset Card
 
+> **Status: DEFERRED post-Phase-2.** No component exists; no sidebar hosts this in the current session shell. The Phase 2 session shell is ActivityBar + FilesSidebar (file tree only) — there is no sidebar surface for a roster. Parked until Phase 3+ when asset loading becomes user-visible. Retained as forward-looking reference; do not cite as a paired spec.
+
 > Extracted from SPECS.md §12-13 — scope-aware asset display and the repeatable asset card for skills, MCP servers, and agents
 
 ---
