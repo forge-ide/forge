@@ -15,7 +15,16 @@
 //!
 //! **Checksum policy.** [`Checksum::Pending`] entries never download: the
 //! bootstrap returns [`BootstrapError::ChecksumPending`] so callers learn
-//! fast and release engineering can pin hashes safely.
+//! fast and release engineering can pin hashes safely. Cache hits also
+//! re-verify the on-disk bytes against the pinned sha256 (F-355) — any
+//! drift between the first verified write and the next `ensure` call
+//! surfaces as [`BootstrapError::ChecksumMismatch`] instead of silently
+//! handing the tampered path back to the caller.
+//!
+//! **Filesystem perms.** On unix the cache root and per-server dirs are
+//! created and tightened to mode `0o700` so another user on a shared host
+//! cannot list or mutate the signed archive. On non-unix the NTFS ACL
+//! model handles confidentiality; this module is a no-op there.
 //!
 //! **Network seam.** The [`Downloader`] trait lets tests inject an
 //! in-memory fixture without touching the network — see `bootstrap.rs`'s
@@ -203,9 +212,13 @@ impl Bootstrap {
     }
 
     /// Ensure `spec` is present in the cache. On a cache hit — the archive
-    /// file exists — returns the archive path without network I/O. On a
-    /// miss, fetches the archive, verifies its sha256, writes the bytes to
-    /// `<server_dir>/archive.bin`, and returns its path.
+    /// file exists — re-hashes the cached bytes and compares against the
+    /// pinned sha256 before returning the path (F-355 closes the
+    /// verify-time/use-time TOCTOU); a drifted file surfaces as
+    /// [`BootstrapError::ChecksumMismatch`] without falling back to the
+    /// network. On a miss, fetches the archive, verifies its sha256,
+    /// writes the bytes to `<server_dir>/archive.bin` under a `0o700` dir
+    /// on unix, and returns its path.
     ///
     /// Errors:
     /// - [`BootstrapError::ChecksumPending`] for unpinned specs.
@@ -250,9 +263,29 @@ impl Bootstrap {
         let archive_path = server_dir.join("archive.bin");
 
         if archive_path.exists() {
-            // Cache hit — caller can trust the pin was verified on the
-            // original install. Skipping HTTP here keeps `ensure` idempotent
-            // and offline-friendly.
+            // Cache hit — re-verify the bytes against the pin before handing
+            // the path back. This closes the verify-time/use-time TOCTOU
+            // window (F-355): any process with write access to the cache
+            // file can swap in arbitrary bytes between the first verified
+            // write and the next `ensure` call. Re-hashing costs one file
+            // read + one sha256 per call, but `ensure` fires at most once
+            // per server spawn, so the cost is bounded. The original bytes
+            // are still served from disk — no network I/O on a hit.
+            let cached =
+                tokio::fs::read(&archive_path)
+                    .await
+                    .map_err(|source| BootstrapError::Io {
+                        server: spec.id.to_string(),
+                        source,
+                    })?;
+            let cached_hash = hex::encode(Sha256::digest(&cached));
+            if !cached_hash.eq_ignore_ascii_case(&expected) {
+                return Err(BootstrapError::ChecksumMismatch {
+                    server: spec.id.to_string(),
+                    expected,
+                    actual: cached_hash,
+                });
+            }
             return Ok(archive_path);
         }
 
@@ -274,14 +307,21 @@ impl Bootstrap {
             });
         }
 
-        // Create parent, then write the archive. Everything stays inside
-        // `server_dir` which is already sandbox-checked above.
-        tokio::fs::create_dir_all(&server_dir)
+        // Create the cache dirs with 0o700 on unix so another user on a
+        // shared host cannot list or mutate the signed archive. Relying on
+        // the platform default leaves the dir 0o755 on most Linux. On
+        // non-unix the NTFS ACL model applies and we skip the explicit chmod.
+        create_dir_all_0700(&server_dir)
             .await
             .map_err(|source| BootstrapError::Io {
                 server: spec.id.to_string(),
                 source,
             })?;
+        // Belt-and-braces: tighten perms on both the cache root and the
+        // server dir even if they already existed (e.g. from an older
+        // install before F-355). No-op on non-unix.
+        tighten_dir_perms_0700(&self.cache_root).await;
+        tighten_dir_perms_0700(&server_dir).await;
         tokio::fs::write(&archive_path, &bytes)
             .await
             .map_err(|source| BootstrapError::Io {
@@ -290,6 +330,46 @@ impl Bootstrap {
             })?;
 
         Ok(archive_path)
+    }
+}
+
+/// Create `path` and its missing ancestors with mode `0o700` on unix.
+/// On non-unix this is equivalent to [`tokio::fs::create_dir_all`] — the
+/// NTFS permission model handles confidentiality via ACLs, not mode bits.
+async fn create_dir_all_0700(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&path)
+        })
+        .await
+        .map_err(std::io::Error::other)?
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::fs::create_dir_all(path).await
+    }
+}
+
+/// Best-effort: chmod `path` to `0o700` on unix. Used to tighten perms on a
+/// pre-existing cache dir without failing the bootstrap if we somehow lack
+/// ownership (e.g. a shared fixture in CI); the worst case is that the dir
+/// stays at its existing wider mode, which we log-worthy but not fatal.
+/// No-op on non-unix.
+async fn tighten_dir_perms_0700(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).await;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
     }
 }
 
@@ -452,6 +532,77 @@ mod tests {
         b.ensure(&spec).await.expect("first");
         b.ensure(&spec).await.expect("second");
         assert_eq!(calls.load(Ordering::SeqCst), 1, "cache hit must skip fetch");
+    }
+
+    #[tokio::test]
+    async fn ensure_rejects_tampered_cache_hit() {
+        // DoD (F-355): cache-hit must re-verify the archive's sha256. Any
+        // process with write access to the cache file can swap in arbitrary
+        // bytes between the first verified write and the next `ensure`
+        // call — a classic verify-time/use-time TOCTOU. Guard: re-hash on
+        // hit and return `ChecksumMismatch` when the bytes have drifted.
+        let tmp = tempfile::tempdir().unwrap();
+        let bytes = b"trusted bytes".to_vec();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let downloader = Box::new(StubDownloader {
+            bytes: bytes.clone(),
+            calls: Arc::clone(&calls),
+        });
+        let b = Bootstrap::new_in(tmp.path().to_path_buf(), downloader);
+        let spec = spec_with(Checksum::Sha256(sha256_hex(&bytes)));
+
+        let archive = b.ensure(&spec).await.expect("first ensure seeds cache");
+        // Simulate an attacker (or a backup restore, or a synced-drive
+        // collision) overwriting the cached archive with different bytes.
+        tokio::fs::write(&archive, b"tampered payload")
+            .await
+            .unwrap();
+
+        let err = b
+            .ensure(&spec)
+            .await
+            .expect_err("tampered cache hit must surface ChecksumMismatch");
+        assert!(
+            matches!(err, BootstrapError::ChecksumMismatch { .. }),
+            "expected ChecksumMismatch on tampered cache hit, got {err:?}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "re-verify must happen on the cached bytes, not by re-fetching"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ensure_tightens_cache_dir_perms_to_0700() {
+        // DoD (F-355): the LSP cache dir holds signed archives that the
+        // language server later execs. Other users on a shared host must
+        // not be able to list or mutate those bytes. Pin cache_root and
+        // the per-server dir to 0o700 explicitly rather than inheriting
+        // the platform default (which is 0o755 on most Linux).
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bytes = b"perms-check".to_vec();
+        let downloader = Box::new(StubDownloader {
+            bytes: bytes.clone(),
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let cache_root = tmp.path().join("forge-lsp-cache");
+        let b = Bootstrap::new_in(cache_root.clone(), downloader);
+        let spec = spec_with(Checksum::Sha256(sha256_hex(&bytes)));
+
+        b.ensure(&spec).await.expect("first ensure creates cache");
+
+        let server_dir = cache_root.join(spec.id.0);
+        for dir in [cache_root.as_path(), server_dir.as_path()] {
+            let mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o700,
+                "{dir:?} must be 0o700 to keep cached archives per-user; got 0o{mode:o}"
+            );
+        }
     }
 
     #[tokio::test]
