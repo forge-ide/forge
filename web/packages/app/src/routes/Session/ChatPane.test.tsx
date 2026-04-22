@@ -90,6 +90,39 @@ describe('ChatPane rendering', () => {
     expect(queryByTestId('streaming-cursor')).not.toBeInTheDocument();
   });
 
+  // F-405: assistive tech suppresses partial announcements when the
+  // in-progress message carries aria-busy="true". The attribute must be
+  // present only while the turn is streaming, then drop when it finalises.
+  it('sets aria-busy="true" on a streaming assistant bubble', () => {
+    pushEvent(SID, { kind: 'AssistantDelta', delta: 'Typing...', message_id: 'a-busy-1' });
+    const { getByTestId } = render(() => <ChatPane />);
+    const cursor = getByTestId('streaming-cursor');
+    const bubble = cursor.closest('article');
+    expect(bubble).not.toBeNull();
+    expect(bubble).toHaveAttribute('aria-busy', 'true');
+  });
+
+  it('does not set aria-busy on a finalised assistant bubble', () => {
+    pushEvent(SID, { kind: 'AssistantMessage', text: 'Done streaming', message_id: 'a-busy-2' });
+    const { getByText } = render(() => <ChatPane />);
+    const bubble = getByText('Done streaming').closest('article');
+    expect(bubble).not.toBeNull();
+    expect(bubble).not.toHaveAttribute('aria-busy');
+  });
+
+  it('aria-busy cycles on the same turn: present while streaming, gone once finalised', () => {
+    pushEvent(SID, { kind: 'AssistantDelta', delta: 'Hello', message_id: 'a-busy-3' });
+    const { container } = render(() => <ChatPane />);
+    const streamingBubble = container.querySelector('article.turn--assistant');
+    expect(streamingBubble).not.toBeNull();
+    expect(streamingBubble).toHaveAttribute('aria-busy', 'true');
+
+    pushEvent(SID, { kind: 'AssistantMessage', text: 'Hello world', message_id: 'a-busy-3' });
+    const finalisedBubble = container.querySelector('article.turn--assistant');
+    expect(finalisedBubble).not.toBeNull();
+    expect(finalisedBubble).not.toHaveAttribute('aria-busy');
+  });
+
   it('renders a tool call card', () => {
     pushEvent(SID, {
       kind: 'ToolCallStarted',

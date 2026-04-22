@@ -325,7 +325,10 @@ const UserBubble: Component<{ turn: Extract<ChatTurn, { type: 'user' }> }> = (pr
 const AssistantBubble: Component<{ turn: Extract<ChatTurn, { type: 'assistant' }> }> = (
   props,
 ) => (
-  <article class="turn turn--assistant">
+  // F-405: aria-busy="true" while the turn is still streaming lets AT
+  // suppress partial announcements from the ancestor aria-live region,
+  // then drops once isStreaming flips so the final text announces cleanly.
+  <article class="turn turn--assistant" aria-busy={props.turn.isStreaming ? 'true' : undefined}>
     <header class="turn__author">● assistant</header>
     <p class="turn__body">
       {props.turn.text}
