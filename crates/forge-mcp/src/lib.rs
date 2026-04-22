@@ -79,39 +79,65 @@ impl TryFrom<RawServer> for McpServerSpec {
     type Error = anyhow::Error;
 
     fn try_from(raw: RawServer) -> Result<Self> {
-        let resolved = resolve_transport(raw.kind.as_deref(), &raw)?;
-
-        let kind = match resolved {
-            Transport::Stdio => {
-                if raw.url.is_some() || !raw.headers.is_empty() {
-                    return Err(anyhow!("stdio MCP server must not set `url` or `headers`"));
-                }
-                let command = raw
-                    .command
-                    .ok_or_else(|| anyhow!("stdio MCP server missing `command`"))?;
-                ServerKind::Stdio {
-                    command,
-                    args: raw.args,
-                    env: raw.env,
-                }
-            }
-            Transport::Http => {
-                if raw.command.is_some() || !raw.args.is_empty() || !raw.env.is_empty() {
-                    return Err(anyhow!(
-                        "http MCP server must not set `command`, `args`, or `env`"
-                    ));
-                }
-                let url = raw
-                    .url
-                    .ok_or_else(|| anyhow!("http MCP server missing `url`"))?;
-                ServerKind::Http {
-                    url,
-                    headers: raw.headers,
-                }
-            }
-        };
-
+        let kind = build_server_kind(
+            raw.kind.as_deref(),
+            raw.command,
+            raw.args,
+            raw.env,
+            raw.url,
+            raw.headers,
+            StrictFields::Reject,
+        )?;
         Ok(McpServerSpec { kind })
+    }
+}
+
+/// How [`build_server_kind`] treats fields that don't belong to the resolved
+/// transport. `Reject` fails the parse (universal schema loader). `Drop`
+/// silently discards them (import-source converters, which routinely carry
+/// tool-specific extras on the opposite transport's keys).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StrictFields {
+    Reject,
+    Drop,
+}
+
+/// Shared transport-resolution path for both the universal-schema loader and
+/// the source-format importers. Resolves the transport from an explicit
+/// `"type"` hint or, absent a hint, from which of `command` / `url` is set,
+/// then extracts the matching [`ServerKind`] variant. `strict` controls
+/// whether fields that belong to the other transport are rejected or
+/// dropped.
+pub(crate) fn build_server_kind(
+    type_hint: Option<&str>,
+    command: Option<String>,
+    args: Vec<String>,
+    env: BTreeMap<String, String>,
+    url: Option<String>,
+    headers: BTreeMap<String, String>,
+    strict: StrictFields,
+) -> Result<ServerKind> {
+    let transport = resolve_transport(type_hint, command.is_some(), url.is_some())?;
+
+    match transport {
+        Transport::Stdio => {
+            if strict == StrictFields::Reject && (url.is_some() || !headers.is_empty()) {
+                return Err(anyhow!("stdio MCP server must not set `url` or `headers`"));
+            }
+            let command = command.ok_or_else(|| anyhow!("stdio MCP server missing `command`"))?;
+            Ok(ServerKind::Stdio { command, args, env })
+        }
+        Transport::Http => {
+            if strict == StrictFields::Reject
+                && (command.is_some() || !args.is_empty() || !env.is_empty())
+            {
+                return Err(anyhow!(
+                    "http MCP server must not set `command`, `args`, or `env`"
+                ));
+            }
+            let url = url.ok_or_else(|| anyhow!("http MCP server missing `url`"))?;
+            Ok(ServerKind::Http { url, headers })
+        }
     }
 }
 
@@ -120,14 +146,18 @@ enum Transport {
     Http,
 }
 
-fn resolve_transport(declared: Option<&str>, raw: &RawServer) -> Result<Transport> {
+fn resolve_transport(
+    declared: Option<&str>,
+    has_command: bool,
+    has_url: bool,
+) -> Result<Transport> {
     match declared {
         Some("stdio") => Ok(Transport::Stdio),
         Some("http") => Ok(Transport::Http),
         Some(other) => Err(anyhow!(
             "unknown MCP server type {other:?}; expected \"stdio\" or \"http\""
         )),
-        None => match (raw.command.is_some(), raw.url.is_some()) {
+        None => match (has_command, has_url) {
             (true, false) => Ok(Transport::Stdio),
             (false, true) => Ok(Transport::Http),
             (true, true) => Err(anyhow!(
@@ -479,6 +509,69 @@ mod tests {
         write(&tmp.path().join(".mcp.json"), &rendered);
         let parsed = config::load_workspace(tmp.path()).unwrap();
         assert_eq!(parsed, servers);
+    }
+
+    #[test]
+    fn build_server_kind_infers_stdio_from_command() {
+        let kind = build_server_kind(
+            None,
+            Some("npx".into()),
+            vec!["-y".into()],
+            BTreeMap::new(),
+            None,
+            BTreeMap::new(),
+            StrictFields::Reject,
+        )
+        .unwrap();
+        assert!(matches!(kind, ServerKind::Stdio { .. }));
+    }
+
+    #[test]
+    fn build_server_kind_strict_rejects_cross_transport_fields() {
+        let err = build_server_kind(
+            Some("stdio"),
+            Some("npx".into()),
+            vec![],
+            BTreeMap::new(),
+            Some("https://x".into()),
+            BTreeMap::new(),
+            StrictFields::Reject,
+        )
+        .expect_err("stdio + url must reject under Reject");
+        assert!(format!("{err:#}").contains("stdio"));
+    }
+
+    #[test]
+    fn build_server_kind_lenient_drops_cross_transport_fields() {
+        let kind = build_server_kind(
+            Some("stdio"),
+            Some("npx".into()),
+            vec![],
+            BTreeMap::new(),
+            Some("https://x".into()),
+            BTreeMap::new(),
+            StrictFields::Drop,
+        )
+        .expect("lenient must accept and drop extras");
+        match kind {
+            ServerKind::Stdio { command, .. } => assert_eq!(command, "npx"),
+            other => panic!("expected Stdio, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_server_kind_rejects_ambiguous_transport() {
+        let err = build_server_kind(
+            None,
+            Some("npx".into()),
+            vec![],
+            BTreeMap::new(),
+            Some("https://x".into()),
+            BTreeMap::new(),
+            StrictFields::Drop,
+        )
+        .expect_err("both set with no hint must reject");
+        assert!(format!("{err:#}").contains("both"));
     }
 
     #[test]
