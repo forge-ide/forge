@@ -21,6 +21,7 @@ It is not: Casual, vague, simplified, apologetic, or verbose.
 - Button labels: verb + noun in display caps. `CONNECT PROVIDER` not `Connect to your AI provider`.
 - Section labels: noun only in mono uppercase. `PROVIDERS` not `Your AI Providers`.
 - Toast titles: state + subject. `AI backend connected` not `Successfully connected to your AI backend`.
+- Empty-state copy: noun phrase describing what would be here, plus an optional verb-noun CTA. `No agents running` or `No agents running · start agent`, never `There are no agents currently running`. See [AI Patterns](ai-patterns.md) §"Interaction states" for the surrounding treatment.
 
 ### Terminology
 
