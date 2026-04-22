@@ -2,21 +2,25 @@
 
 /**
  * Wire-format arguments for `lsp_start`.
+ *
+ * F-353: the binary path is no longer part of the wire format. The webview
+ * names a server by id; the shell resolves the binary through the bundled
+ * [`forge_lsp::Registry`] plus [`forge_lsp::Bootstrap`]'s cache-root
+ * sandbox. A compromised or buggy webview that forwarded an
+ * attacker-controlled path used to land as `Command::new(path).spawn()`;
+ * that surface is closed.
  */
 export type LspStartArgs = { 
 /**
  * Server identifier (matches `forge_lsp::ServerId` entries in the
- * bundled registry). Used as the routing key on `lsp_message` events.
+ * bundled registry). Used as the routing key on `lsp_message` events
+ * and as the registry lookup key for the binary path — the webview
+ * never names a filesystem path directly.
  */
 server: string, 
 /**
- * Absolute path to the server binary. Callers resolve this via
- * `forge-lsp::Bootstrap::ensure` before invoking; the command does not
- * download. Keeps the download path out of the Tauri trust boundary.
- */
-binary_path: string, 
-/**
- * Optional argv after the binary path. Bounded via the server-id cap
- * since each arg is expected to be short; oversize argv is a misuse.
+ * Optional extra argv appended to the spec's declared args. Bounded
+ * via the server-id cap since each arg is expected to be short;
+ * oversize argv is a misuse.
  */
 args: Array<string>, };

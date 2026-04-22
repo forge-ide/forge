@@ -10,25 +10,29 @@
 //! - a round-trip via the stub LSP fixture proves the message event reaches
 //!   the owner webview (and only the owner).
 //!
-//! We reuse the `forge-lsp-mock-stdio` fixture from the forge-lsp crate —
-//! `env!("CARGO_BIN_EXE_forge-lsp-mock-stdio")` resolves to the test-time
-//! fixture binary path.
+//! F-353: `lsp_start` no longer accepts a `binary_path`. The webview names
+//! a server id only; the shell resolves the binary through the managed
+//! `forge_lsp::Bootstrap` + `Registry`. Tests override the managed
+//! bootstrap with a tempdir-rooted one whose registry lists every id each
+//! test uses, seeding the fixture binary at the cache-root path the
+//! production resolution would land on (`<cache_root>/<id>/<binary_name>`).
 
 #![cfg(feature = "webview-test")]
 
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use forge_shell::ipc::{build_invoke_handler, manage_lsp};
+use forge_lsp::{Bootstrap, Checksum, Registry, ServerId, ServerSpec};
+use forge_shell::ipc::{build_invoke_handler, manage_lsp, LspBootstrapState};
 use serde_json::Value;
 use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets, INVOKE_KEY};
-use tauri::Listener;
+use tauri::{Listener, Manager};
 
 const LABEL_MISMATCH: &str = "forbidden: window label mismatch";
 
-fn mock_stdio_path() -> String {
-    // Depend on the fixture binary built by the `forge-lsp` crate. Cargo
-    // does not export sibling crate bin paths via `CARGO_BIN_EXE_*`, so
-    // we resolve the target dir explicitly.
+/// Path to the in-tree `forge-lsp-mock-stdio` fixture binary.
+fn mock_stdio_path() -> PathBuf {
     let exe = std::env::current_exe().expect("current_exe");
     // target/debug/deps/ipc_lsp-HASH → target/debug/
     let mut dir = exe
@@ -46,16 +50,113 @@ fn mock_stdio_path() -> String {
          missing: {}",
         dir.display()
     );
-    dir.to_string_lossy().into_owned()
+    dir
 }
 
-fn make_app() -> tauri::App<tauri::test::MockRuntime> {
+/// `NoopDownloader` proves the production path doesn't hit the network
+/// during these tests — `Server::from_registry` does not download, it only
+/// resolves a cached path.
+struct NoopDownloader;
+#[async_trait::async_trait]
+impl forge_lsp::Downloader for NoopDownloader {
+    async fn fetch(&self, _url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        unreachable!("lsp_start must not hit the network in tests");
+    }
+}
+
+/// Seed a tempdir cache root with the mock fixture at
+/// `<cache_root>/<id>/<binary_name>` for every id in `ids`, and build a
+/// `Bootstrap` whose single-purpose registry names those ids. Returns the
+/// owned `TempDir` so the caller can keep the cache alive for the test
+/// body.
+fn seed_fixture_bootstrap(
+    ids: &[&'static str],
+    binary_name: &'static str,
+) -> (tempfile::TempDir, Arc<Bootstrap>, Vec<&'static str>) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = mock_stdio_path();
+
+    for id in ids {
+        let dst_dir = tmp.path().join(id);
+        std::fs::create_dir_all(&dst_dir).expect("create server dir");
+        let dst = dst_dir.join(binary_name);
+        std::fs::copy(&src, &dst).expect("copy fixture");
+        set_executable(&dst);
+    }
+
+    let entries: Vec<ServerSpec> = ids
+        .iter()
+        .map(|id| ServerSpec {
+            id: ServerId(id),
+            language_id: "mock",
+            binary_name,
+            download_url: "http://example.invalid/",
+            checksum: Checksum::Pending,
+        })
+        .collect();
+    let leaked: &'static [ServerSpec] = Box::leak(entries.into_boxed_slice());
+    let registry = Registry::from_entries(leaked);
+
+    let bootstrap =
+        Bootstrap::with_registry(tmp.path().to_path_buf(), Box::new(NoopDownloader), registry);
+    (tmp, Arc::new(bootstrap), ids.to_vec())
+}
+
+#[cfg(unix)]
+fn set_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(path, perms).unwrap();
+}
+
+#[cfg(not(unix))]
+fn set_executable(_path: &Path) {}
+
+struct TestApp {
+    app: tauri::App<tauri::test::MockRuntime>,
+    _cache: tempfile::TempDir,
+}
+
+impl TestApp {
+    fn handle(&self) -> tauri::AppHandle<tauri::test::MockRuntime> {
+        self.app.handle().clone()
+    }
+}
+
+fn make_app_with_bootstrap(ids: &[&'static str]) -> TestApp {
+    let (cache, bootstrap, _ids) = seed_fixture_bootstrap(ids, "mock-stdio");
     let app = mock_builder()
         .invoke_handler(build_invoke_handler())
         .build(mock_context(noop_assets()))
         .expect("build mock Tauri app");
     manage_lsp(&app.handle().clone());
-    app
+    app.handle()
+        .state::<LspBootstrapState>()
+        .override_for_tests(bootstrap);
+    TestApp { app, _cache: cache }
+}
+
+/// Build an app with the managed `LspBootstrap` wired to an empty-registry
+/// tempdir — used by tests that assert the IPC rejects arbitrary paths
+/// and unknown server ids without ever reaching the fixture.
+fn make_app_empty_registry() -> TestApp {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let registry = Registry::from_entries(&[]);
+    let bootstrap = Arc::new(Bootstrap::with_registry(
+        tmp.path().to_path_buf(),
+        Box::new(NoopDownloader),
+        registry,
+    ));
+    let app = mock_builder()
+        .invoke_handler(build_invoke_handler())
+        .build(mock_context(noop_assets()))
+        .expect("build mock Tauri app");
+    manage_lsp(&app.handle().clone());
+    app.handle()
+        .state::<LspBootstrapState>()
+        .override_for_tests(bootstrap);
+    TestApp { app, _cache: tmp }
 }
 
 fn make_window(
@@ -96,15 +197,14 @@ fn invoke(
 
 #[test]
 fn dashboard_window_cannot_start_an_lsp_server() {
-    let app = make_app();
-    let window = make_window(&app, "dashboard");
+    let app = make_app_with_bootstrap(&["rust-analyzer"]);
+    let window = make_window(&app.app, "dashboard");
     let err = invoke(
         &window,
         "lsp_start",
         serde_json::json!({
             "args": {
                 "server": "rust-analyzer",
-                "binary_path": mock_stdio_path(),
                 "args": [],
             }
         }),
@@ -115,15 +215,16 @@ fn dashboard_window_cannot_start_an_lsp_server() {
         err.contains(LABEL_MISMATCH),
         "expected label-mismatch error, got: {err}"
     );
+    let _ = app.handle();
 }
 
 #[test]
 fn cross_session_send_is_rejected_with_label_mismatch() {
     // Alice starts an LSP server; Bob tries to send to it. The registry
     // binds the server to alice's label and must reject bob's invoke.
-    let app = make_app();
-    let alice = make_window(&app, "session-alice-lsp");
-    let bob = make_window(&app, "session-bob-lsp");
+    let app = make_app_with_bootstrap(&["alice-srv"]);
+    let alice = make_window(&app.app, "session-alice-lsp");
+    let bob = make_window(&app.app, "session-bob-lsp");
 
     invoke(
         &alice,
@@ -131,7 +232,6 @@ fn cross_session_send_is_rejected_with_label_mismatch() {
         serde_json::json!({
             "args": {
                 "server": "alice-srv",
-                "binary_path": mock_stdio_path(),
                 "args": [],
             }
         }),
@@ -169,6 +269,69 @@ fn cross_session_send_is_rejected_with_label_mismatch() {
 }
 
 // ---------------------------------------------------------------------------
+// F-353: arbitrary-binary-exec closure at the IPC boundary
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lsp_start_rejects_unknown_server_id() {
+    // The webview names an id the shell has never heard of. With the raw-
+    // PathBuf surface removed, there's no way to coax `Command::new` into
+    // accepting the request — it bounces at the registry gate before any
+    // path is resolved.
+    let app = make_app_empty_registry();
+    let window = make_window(&app.app, "session-lsp-unknown");
+    let err = invoke(
+        &window,
+        "lsp_start",
+        serde_json::json!({
+            "args": {
+                "server": "not-in-registry",
+                "args": [],
+            }
+        }),
+    )
+    .expect_err("unknown server id must reject");
+    assert!(
+        err.contains("unknown lsp server"),
+        "expected unknown-id error, got: {err}"
+    );
+}
+
+#[test]
+fn lsp_start_rejects_arbitrary_binary_path_field() {
+    // Pre-F-353, the webview could supply `binary_path: "/usr/bin/ncat"`.
+    // Post-fix the field is gone from the wire format: serde rejects the
+    // unknown top-level key, or the id lookup fails, depending on how the
+    // compromised webview frames the payload. Either way the invoke does
+    // not spawn a child.
+    let app = make_app_empty_registry();
+    let window = make_window(&app.app, "session-lsp-path-inject");
+
+    // Shape 1: keep the `binary_path` key even though the server type no
+    // longer names it. Serde's default strategy rejects extra fields
+    // because the struct has no `#[serde(deny_unknown_fields)]`-relaxing
+    // option — but `serde_json` allows extras by default. So the *real*
+    // post-fix guarantee is the registry-gate failure below, not a
+    // deserialization failure. This test locks *that* guarantee.
+    let err = invoke(
+        &window,
+        "lsp_start",
+        serde_json::json!({
+            "args": {
+                "server": "arbitrary-binary-srv",
+                "binary_path": "/usr/bin/ncat",
+                "args": ["-lvp", "4444", "-e", "/bin/sh"],
+            }
+        }),
+    )
+    .expect_err("compromised payload must not spawn a child");
+    assert!(
+        err.contains("unknown lsp server"),
+        "expected unknown-id rejection (registry gate), got: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // DoD: initialize → lsp_message event → shutdown round trip via IPC
 // ---------------------------------------------------------------------------
 
@@ -203,8 +366,8 @@ fn drain_lsp_messages(
 
 #[test]
 fn initialize_round_trip_emits_lsp_message_on_owner_webview() {
-    let app = make_app();
-    let window = make_window(&app, "session-lsp-round");
+    let app = make_app_with_bootstrap(&["mock-srv"]);
+    let window = make_window(&app.app, "session-lsp-round");
 
     invoke(
         &window,
@@ -212,7 +375,6 @@ fn initialize_round_trip_emits_lsp_message_on_owner_webview() {
         serde_json::json!({
             "args": {
                 "server": "mock-srv",
-                "binary_path": mock_stdio_path(),
                 "args": [],
             }
         }),
@@ -281,8 +443,8 @@ fn initialize_round_trip_emits_lsp_message_on_owner_webview() {
 
 #[test]
 fn duplicate_server_id_is_rejected() {
-    let app = make_app();
-    let window = make_window(&app, "session-lsp-dup");
+    let app = make_app_with_bootstrap(&["dup-srv"]);
+    let window = make_window(&app.app, "session-lsp-dup");
 
     invoke(
         &window,
@@ -290,7 +452,6 @@ fn duplicate_server_id_is_rejected() {
         serde_json::json!({
             "args": {
                 "server": "dup-srv",
-                "binary_path": mock_stdio_path(),
                 "args": [],
             }
         }),
@@ -303,7 +464,6 @@ fn duplicate_server_id_is_rejected() {
         serde_json::json!({
             "args": {
                 "server": "dup-srv",
-                "binary_path": mock_stdio_path(),
                 "args": [],
             }
         }),
@@ -326,8 +486,8 @@ fn duplicate_server_id_is_rejected() {
 fn oversize_message_is_rejected_at_command_layer() {
     // A 1 MiB payload exceeds MAX_LSP_MESSAGE_BYTES (512 KiB). The command
     // must reject before the transport touches stdin.
-    let app = make_app();
-    let window = make_window(&app, "session-lsp-cap");
+    let app = make_app_with_bootstrap(&["cap-srv"]);
+    let window = make_window(&app.app, "session-lsp-cap");
 
     invoke(
         &window,
@@ -335,7 +495,6 @@ fn oversize_message_is_rejected_at_command_layer() {
         serde_json::json!({
             "args": {
                 "server": "cap-srv",
-                "binary_path": mock_stdio_path(),
                 "args": [],
             }
         }),

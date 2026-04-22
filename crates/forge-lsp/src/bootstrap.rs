@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
-use crate::registry::{Checksum, ServerSpec};
+use crate::registry::{Checksum, Registry, ServerSpec};
 
 /// Errors returned by [`Bootstrap::ensure`].
 #[derive(Debug, thiserror::Error)]
@@ -131,23 +131,48 @@ impl Downloader for HttpDownloader {
 pub struct Bootstrap {
     cache_root: PathBuf,
     downloader: Box<dyn Downloader>,
+    registry: Registry,
 }
 
 impl Bootstrap {
     /// Bootstrap rooted at the platform default (`~/.cache/forge/lsp/`),
-    /// with an [`HttpDownloader`]. Errors if no cache dir can be resolved.
+    /// with an [`HttpDownloader`] and the bundled [`Registry`]. Errors if
+    /// no cache dir can be resolved.
     pub fn new() -> Result<Self, BootstrapError> {
         let root = default_cache_root().ok_or(BootstrapError::NoCacheDir)?;
         Ok(Self::new_in(root, Box::new(HttpDownloader::new())))
     }
 
-    /// Bootstrap rooted at `cache_root`, using the injected `downloader`.
-    /// Every on-disk side-effect stays under `cache_root`.
+    /// Bootstrap rooted at `cache_root`, using the injected `downloader`
+    /// and the bundled [`Registry`]. Every on-disk side-effect stays under
+    /// `cache_root`.
     pub fn new_in(cache_root: PathBuf, downloader: Box<dyn Downloader>) -> Self {
+        Self::with_registry(cache_root, downloader, Registry::bundled())
+    }
+
+    /// Bootstrap with an explicit [`Registry`]. Hidden from rustdoc —
+    /// production callers should stick to [`Bootstrap::new`] /
+    /// [`Bootstrap::new_in`] so the bundled registry is the only surface
+    /// `Server::from_registry` resolves against. Integration tests use this
+    /// to inject a single-spec registry pointing at the in-tree stub LSP
+    /// fixture.
+    #[doc(hidden)]
+    pub fn with_registry(
+        cache_root: PathBuf,
+        downloader: Box<dyn Downloader>,
+        registry: Registry,
+    ) -> Self {
         Self {
             cache_root,
             downloader,
+            registry,
         }
+    }
+
+    /// The [`Registry`] this bootstrap resolves against. See
+    /// [`crate::Server::from_registry`].
+    pub fn registry(&self) -> &Registry {
+        &self.registry
     }
 
     /// Resolve the absolute cache directory for `spec`, asserting it stays
@@ -157,6 +182,25 @@ impl Bootstrap {
         let candidate = self.cache_root.join(spec.id.0);
         enforce_in_sandbox(&self.cache_root, &candidate, spec.id.0)?;
         Ok(candidate)
+    }
+
+    /// Absolute cache root passed at construction. Used by
+    /// [`crate::Server::from_registry`] to bind the spawn path to the
+    /// sandbox.
+    pub fn cache_root(&self) -> &Path {
+        &self.cache_root
+    }
+
+    /// Assert `candidate` resolves under the cache root. Returns
+    /// [`BootstrapError::SandboxEscape`] otherwise. Public so other modules
+    /// (notably [`crate::Server::from_registry`]) can reuse the same
+    /// lexical-prefix check the download path uses.
+    pub fn enforce_in_sandbox(
+        &self,
+        candidate: &Path,
+        server_id: &str,
+    ) -> Result<(), BootstrapError> {
+        enforce_in_sandbox(&self.cache_root, candidate, server_id)
     }
 
     /// Ensure `spec` is present in the cache. On a cache hit — the archive
