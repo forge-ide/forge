@@ -110,12 +110,11 @@ fn write_preview_does_not_leak_existing_file_contents() {
     let mut f = std::fs::File::create(&target).unwrap();
     f.write_all(secret.as_bytes()).unwrap();
 
-    let preview = write_preview(target.to_str().unwrap(), "replacement\n");
+    let preview: String = write_preview(target.to_str().unwrap(), "replacement\n");
 
     assert!(
-        !preview.description.contains(secret),
-        "preview description leaked existing file contents: {}",
-        preview.description
+        !preview.contains(secret),
+        "preview leaked existing file contents: {preview}"
     );
 }
 
@@ -125,23 +124,15 @@ fn write_preview_describes_path_byte_count_and_proposed_content() {
     let target = dir.path().join("new.txt");
     let content = "line1\nline2\n";
 
-    let preview = write_preview(target.to_str().unwrap(), content);
+    let preview: String = write_preview(target.to_str().unwrap(), content);
 
+    assert!(preview.contains("new.txt"), "missing path: {preview}");
     assert!(
-        preview.description.contains("new.txt"),
-        "description missing path: {}",
-        preview.description
+        preview.contains(&format!("({} bytes)", content.len())),
+        "missing byte count: {preview}"
     );
     assert!(
-        preview
-            .description
-            .contains(&format!("({} bytes)", content.len())),
-        "description missing byte count: {}",
-        preview.description
-    );
-    assert!(
-        preview.description.contains(content),
-        "description missing proposed content: {}",
-        preview.description
+        preview.contains(content),
+        "missing proposed content: {preview}"
     );
 }

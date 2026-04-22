@@ -37,13 +37,6 @@ pub enum FsError {
     },
 }
 
-/// Minimal approval preview payload for mutation ops. Renderable by the UI
-/// layer (F-027) without depending on this crate.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ApprovalPreview {
-    pub description: String,
-}
-
 /// Atomically write `content` to `path` after validating the path and
 /// rejecting payloads larger than `limits.max_write_bytes`.
 ///
@@ -333,8 +326,9 @@ pub fn edit(
     write(canonical_str, &updated, allowed_paths, limits)
 }
 
-/// `ApprovalPreview` for a prospective write. Returns a content-only preview
-/// of the proposed new bytes — does **not** read the existing file.
+/// Approval-preview description for a prospective write. Returns a
+/// content-only preview of the proposed new bytes — does **not** read the
+/// existing file.
 ///
 /// Reading the target file here would run before `allowed_paths` enforcement
 /// (which happens in [`write()`]) and leak attacker-chosen file contents into
@@ -342,18 +336,21 @@ pub fn edit(
 /// is already supplied by the caller, so echoing it back does not expand the
 /// trust surface. If a before/after diff is needed for UX, compute it via an
 /// explicit `fs.read` call that goes through the same approval gate.
-pub fn write_preview(path: &str, content: &str) -> ApprovalPreview {
-    ApprovalPreview {
-        description: format!("Write file {path} ({} bytes)\n{content}", content.len()),
-    }
+///
+/// The returned `String` is meant to populate
+/// `forge_core::ApprovalPreview::description` at the session layer. This crate
+/// deliberately does not depend on forge-core — keeping the preview as a bare
+/// string avoids the duplicate-type footgun F-382 retired.
+pub fn write_preview(path: &str, content: &str) -> String {
+    format!("Write file {path} ({} bytes)\n{content}", content.len())
 }
 
-/// `ApprovalPreview` for a prospective edit. The patch itself is the unified
-/// diff; we just echo it back with a header.
-pub fn edit_preview(path: &str, patch: &str) -> ApprovalPreview {
-    ApprovalPreview {
-        description: format!("Edit file {path}\n{patch}"),
-    }
+/// Approval-preview description for a prospective edit. The patch itself is
+/// the unified diff; we just echo it back with a header. See
+/// [`write_preview`] for why this returns `String` rather than a dedicated
+/// preview type.
+pub fn edit_preview(path: &str, patch: &str) -> String {
+    format!("Edit file {path}\n{patch}")
 }
 
 /// Minimal unified-diff applier. Supports standard `@@ -a,b +c,d @@` hunks
