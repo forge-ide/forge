@@ -57,13 +57,14 @@ The Dashboard renders three children in order: `<h1>` title, `<ProviderPanel/>`,
 
 ### D.5 States
 
-The Dashboard itself has no global loading or error state — it always renders the title and both panels. The panels each handle their own state:
+The Dashboard itself has no global loading or error state — it always renders the title and both panels. The panels each handle their own state per `component-principles.md`'s four-state rule (loading / error / empty / ready):
 
-- **Provider panel — loading:** placeholder line `PROBING` while `provider_status` resolves.
+- **Provider panel — loading:** placeholder line `ollama · probing` (noun + state per `voice-terminology.md` §8) while `provider_status` resolves.
 - **Provider panel — unreachable:** error line + remediation hint + `START OLLAMA` CTA.
+- **Sessions panel — loading:** placeholder line `sessions · probing` while `session_list` resolves.
 - **Sessions panel — empty (active tab):** `// no active sessions`.
 - **Sessions panel — empty (archived tab):** `// archive is empty`.
-- **Sessions panel — fetch failure:** treated as empty (the resource swallows errors and yields `[]`).
+- **Sessions panel — fetch failure:** visible error block with heading `SESSIONS UNAVAILABLE`, the verbatim error detail (preserved exactly per `voice-terminology.md` §8 "show technical identifiers verbatim"), and a `RETRY` button that re-invokes `session_list`. The error state is distinct from empty — the `session_list` rejection must not collapse to `// no active sessions`.
 
 ### D.6 Cross-spec references
 

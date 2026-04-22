@@ -67,6 +67,15 @@ Five sections:
 
 **Actions (Phase 3 — deferred to [F-449](https://github.com/forge-ide/forge/issues/504)).** `Pause agent`, `Interrupt + refine` (opens a refine composer in context), `Export transcript` (JSONL), `Promote to pane` (background only). Blocked on backend primitives for pause, refine, transcript export, and pane promotion.
 
+### 9.4 States
+
+The agent list (§9.1) renders all four `component-principles.md` states distinctly — a `list_background_agents` rejection must never collapse into the empty placeholder:
+
+- **Loading:** placeholder line `agents · probing` (noun + state per `voice-terminology.md` §8) while `list_background_agents` resolves.
+- **Error:** visible block inside the list column with heading `AGENT LIST UNAVAILABLE`, the verbatim error detail (preserved exactly per `voice-terminology.md` §8 "show technical identifiers verbatim"), and a `RETRY` button that re-invokes `list_background_agents`.
+- **Empty:** `// no agents` mono-comment placeholder once the fetch succeeds with zero rows.
+- **Ready:** the filtered + sorted row list from §9.1.
+
 **Doesn't do.**
 - Does not let you edit agent definitions inline (opens the source file instead)
 - Does not surface prompts verbatim — use `Export transcript` for the full record
