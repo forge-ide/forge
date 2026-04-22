@@ -158,6 +158,13 @@ export interface ContextPickerProps {
 const POPUP_MAX_HEIGHT = 360;
 const POPUP_MIN_WIDTH = 360;
 
+// Stable id prefix for option rows. The combobox root's
+// `aria-activedescendant` points at `<prefix>-<index>` so assistive tech can
+// announce the active option while DOM focus stays in the composer textarea
+// (WAI-ARIA combobox pattern). See F-403.
+const RESULT_ID_PREFIX = 'context-picker-result';
+const resultId = (index: number): string => `${RESULT_ID_PREFIX}-${index}`;
+
 export const ContextPicker: Component<ContextPickerProps> = (props) => {
   const [activeCategoryIndex, setActiveCategoryIndex] = createSignal(0);
   const [activeItemIndex, setActiveItemIndex] = createSignal(0);
@@ -256,6 +263,15 @@ export const ContextPicker: Component<ContextPickerProps> = (props) => {
     }
   });
 
+  // Resolve the active option's DOM id for `aria-activedescendant`. Returns
+  // `undefined` when the active category has no items — SR should not be
+  // pointed at a non-existent node, and Solid drops `undefined` attributes.
+  const activeDescendantId = (): string | undefined => {
+    const items = activeItems();
+    if (items.length === 0) return undefined;
+    return resultId(activeItemIndex());
+  };
+
   return (
     <div
       class="context-picker"
@@ -268,6 +284,7 @@ export const ContextPicker: Component<ContextPickerProps> = (props) => {
       role="combobox"
       aria-expanded="true"
       aria-haspopup="listbox"
+      aria-activedescendant={activeDescendantId()}
       ref={rootRef}
       style={{
         'min-width': `${POPUP_MIN_WIDTH}px`,
@@ -337,6 +354,7 @@ export const ContextPicker: Component<ContextPickerProps> = (props) => {
           <For each={activeItems()}>
             {(item, i) => (
               <div
+                id={resultId(i())}
                 class="context-picker__result"
                 classList={{
                   'context-picker__result--active':

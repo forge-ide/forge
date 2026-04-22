@@ -337,6 +337,184 @@ describe('ContextPicker chip insertion flow (F-141)', () => {
   });
 });
 
+describe('ContextPicker combobox aria-activedescendant (F-403)', () => {
+  // WAI-ARIA combobox pattern: focus stays in the composer textarea, so the
+  // combobox root must carry `aria-activedescendant` pointing at the id of the
+  // currently-active option. Assistive tech reads the announcement from that
+  // referenced element. Option rows need stable ids for that reference to
+  // resolve.
+  const anchor = { top: 100, bottom: 160, left: 0, right: 360 };
+
+  it('assigns stable ids to each option row', () => {
+    const items: PickerResult[] = [
+      { category: 'file', label: 'a.ts', value: 'a.ts' },
+      { category: 'file', label: 'b.ts', value: 'b.ts' },
+      { category: 'file', label: 'c.ts', value: 'c.ts' },
+    ];
+    const { getByTestId } = render(() => (
+      <ContextPicker
+        query=""
+        anchorRect={anchor}
+        items={{ file: items }}
+        onPick={() => {}}
+        onDismiss={() => {}}
+      />
+    ));
+    expect(getByTestId('context-picker-result-0').id).toBe(
+      'context-picker-result-0',
+    );
+    expect(getByTestId('context-picker-result-1').id).toBe(
+      'context-picker-result-1',
+    );
+    expect(getByTestId('context-picker-result-2').id).toBe(
+      'context-picker-result-2',
+    );
+  });
+
+  it('points aria-activedescendant at the active option on initial render', () => {
+    const items: PickerResult[] = [
+      { category: 'file', label: 'a.ts', value: 'a.ts' },
+      { category: 'file', label: 'b.ts', value: 'b.ts' },
+    ];
+    const { getByTestId } = render(() => (
+      <ContextPicker
+        query=""
+        anchorRect={anchor}
+        items={{ file: items }}
+        onPick={() => {}}
+        onDismiss={() => {}}
+      />
+    ));
+    const root = getByTestId('context-picker');
+    expect(root.getAttribute('aria-activedescendant')).toBe(
+      'context-picker-result-0',
+    );
+  });
+
+  it('updates aria-activedescendant when ArrowDown moves the active row', () => {
+    const items: PickerResult[] = [
+      { category: 'file', label: 'a.ts', value: 'a.ts' },
+      { category: 'file', label: 'b.ts', value: 'b.ts' },
+      { category: 'file', label: 'c.ts', value: 'c.ts' },
+    ];
+    const { getByTestId } = render(() => (
+      <ContextPicker
+        query=""
+        anchorRect={anchor}
+        items={{ file: items }}
+        onPick={() => {}}
+        onDismiss={() => {}}
+      />
+    ));
+    const root = getByTestId('context-picker');
+    fireEvent.keyDown(window, { key: 'ArrowDown' });
+    expect(root.getAttribute('aria-activedescendant')).toBe(
+      'context-picker-result-1',
+    );
+    fireEvent.keyDown(window, { key: 'ArrowDown' });
+    expect(root.getAttribute('aria-activedescendant')).toBe(
+      'context-picker-result-2',
+    );
+  });
+
+  it('updates aria-activedescendant when ArrowUp moves the active row', () => {
+    const items: PickerResult[] = [
+      { category: 'file', label: 'a.ts', value: 'a.ts' },
+      { category: 'file', label: 'b.ts', value: 'b.ts' },
+      { category: 'file', label: 'c.ts', value: 'c.ts' },
+    ];
+    const { getByTestId } = render(() => (
+      <ContextPicker
+        query=""
+        anchorRect={anchor}
+        items={{ file: items }}
+        onPick={() => {}}
+        onDismiss={() => {}}
+      />
+    ));
+    const root = getByTestId('context-picker');
+    // From active=0, ArrowUp wraps to the last option.
+    fireEvent.keyDown(window, { key: 'ArrowUp' });
+    expect(root.getAttribute('aria-activedescendant')).toBe(
+      'context-picker-result-2',
+    );
+  });
+
+  it('resets aria-activedescendant to the new category’s first option after Tab', () => {
+    const fileItems: PickerResult[] = [
+      { category: 'file', label: 'a.ts', value: 'a.ts' },
+      { category: 'file', label: 'b.ts', value: 'b.ts' },
+    ];
+    const dirItems: PickerResult[] = [
+      { category: 'directory', label: 'src/', value: 'src/' },
+      { category: 'directory', label: 'tests/', value: 'tests/' },
+    ];
+    const { getByTestId } = render(() => (
+      <ContextPicker
+        query=""
+        anchorRect={anchor}
+        items={{ file: fileItems, directory: dirItems }}
+        onPick={() => {}}
+        onDismiss={() => {}}
+      />
+    ));
+    const root = getByTestId('context-picker');
+    fireEvent.keyDown(window, { key: 'ArrowDown' }); // file[1]
+    expect(root.getAttribute('aria-activedescendant')).toBe(
+      'context-picker-result-1',
+    );
+    fireEvent.keyDown(window, { key: 'Tab' }); // switch to directory, cursor → 0
+    expect(root.getAttribute('aria-activedescendant')).toBe(
+      'context-picker-result-0',
+    );
+  });
+
+  it('omits aria-activedescendant when the active category has no items', () => {
+    // With no items, there is no option id to reference — the attribute must
+    // not point at a non-existent node.
+    const { getByTestId } = render(() => (
+      <ContextPicker
+        query=""
+        anchorRect={anchor}
+        onPick={() => {}}
+        onDismiss={() => {}}
+      />
+    ));
+    const root = getByTestId('context-picker');
+    expect(root.hasAttribute('aria-activedescendant')).toBe(false);
+  });
+
+  it('keyboard navigation does not move DOM focus onto the options', () => {
+    // Focus must remain wherever it was (the composer textarea in practice);
+    // the WAI-ARIA combobox pattern relies on aria-activedescendant instead of
+    // focus movement. The options themselves must never become activeElement.
+    const items: PickerResult[] = [
+      { category: 'file', label: 'a.ts', value: 'a.ts' },
+      { category: 'file', label: 'b.ts', value: 'b.ts' },
+    ];
+    const { getByTestId } = render(() => (
+      <ContextPicker
+        query=""
+        anchorRect={anchor}
+        items={{ file: items }}
+        onPick={() => {}}
+        onDismiss={() => {}}
+      />
+    ));
+    const optionBefore = document.activeElement;
+    fireEvent.keyDown(window, { key: 'ArrowDown' });
+    fireEvent.keyDown(window, { key: 'ArrowDown' });
+    // No option row should have grabbed focus.
+    expect(document.activeElement).toBe(optionBefore);
+    expect(getByTestId('context-picker-result-0')).not.toBe(
+      document.activeElement,
+    );
+    expect(getByTestId('context-picker-result-1')).not.toBe(
+      document.activeElement,
+    );
+  });
+});
+
 describe('ContextPicker placement data attribute', () => {
   it('flags placement=above when the anchor sits near the viewport bottom', () => {
     // jsdom's default innerHeight is 768. Put the anchor bottom at 700 →
