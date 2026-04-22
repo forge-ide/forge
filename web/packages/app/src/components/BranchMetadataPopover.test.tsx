@@ -152,6 +152,38 @@ describe('BranchMetadataPopover', () => {
     expect(onDismiss).toHaveBeenCalledTimes(1);
   });
 
+  // F-402-followup regression: previously the onKeyDown was bound on the
+  // popover's root div with `tabIndex={-1}` and no auto-focus-on-open, so
+  // Esc after opening the popover (with focus still on the trigger) was a
+  // no-op. Esc must fire onDismiss regardless of where focus lives.
+  it('Escape fires onDismiss even when focus is outside the popover', () => {
+    const onDismiss = vi.fn();
+    // Trigger button that opens the popover — focus stays on it.
+    const trigger = document.createElement('button');
+    trigger.textContent = 'open';
+    document.body.appendChild(trigger);
+    trigger.focus();
+
+    render(() => (
+      <BranchMetadataPopover
+        variants={rows}
+        activeVariantId="var-1"
+        onSelect={() => {}}
+        onDelete={() => {}}
+        onExportAll={() => {}}
+        onDismiss={onDismiss}
+      />
+    ));
+
+    // Focus never moved into the popover — it should not, per menu semantics.
+    expect(document.activeElement).toBe(trigger);
+
+    // Window-level Esc — this is what a real user presses after clicking the
+    // trigger. The popover must still dismiss.
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
   // F-402: downgrade from role=dialog to role=menu — this surface is not
   // modal, it is a non-modal list with its own dismissal affordances.
   it('uses role="menu" (not role="dialog") — content is not truly modal', () => {
