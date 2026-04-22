@@ -24,7 +24,6 @@ tracing = "0.1"
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "rt", "rt-multi-thread", "time", "test-util", "fs"] }
-wiremock = "0.6"
 
 # Mock stdio LSP fixture. Same pattern as forge-mcp's mock_stdio — a
 # dependency-free stdin/stdout JSON-RPC echo server the integration test
