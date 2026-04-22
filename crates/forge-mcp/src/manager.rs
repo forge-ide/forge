@@ -627,6 +627,13 @@ async fn run_lifecycle(
                 return;
             }
             Err(reason) => {
+                tracing::warn!(
+                    target: "forge_mcp::manager",
+                    server = %name,
+                    %reason,
+                    attempt,
+                    "MCP server session failed; will retry",
+                );
                 shared
                     .publish(ServerState::Degraded {
                         reason: reason.clone(),
@@ -807,7 +814,7 @@ async fn run_pump(
                         }
                     }
                     TransportEvent::Closed(reason) => {
-                        tracing::debug!(
+                        tracing::warn!(
                             target: "forge_mcp::manager",
                             server = %server_name,
                             %reason,
@@ -827,7 +834,7 @@ async fn run_pump(
                             pending.insert(id, slot);
                         }
                         if let Err(err) = transport.send(frame).await {
-                            tracing::debug!(
+                            tracing::warn!(
                                 target: "forge_mcp::manager",
                                 server = %server_name,
                                 error = %err,
@@ -838,7 +845,7 @@ async fn run_pump(
                         }
                     }
                     None => {
-                        tracing::debug!(
+                        tracing::warn!(
                             target: "forge_mcp::manager",
                             server = %server_name,
                             "pump exiting: command channel closed",
