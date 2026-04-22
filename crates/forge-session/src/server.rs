@@ -595,13 +595,21 @@ pub async fn serve_with_session<P: Provider + 'static>(
     let allowed_paths: Arc<Vec<String>> =
         Arc::new(compute_allowed_paths(workspace_path.as_deref()));
 
-    // F-135: load workspace `AGENTS.md` exactly once at session start and
-    // cache the contents for every turn on this session. Missing file is not
-    // an error; unreadable file is logged once and treated as absent so a
-    // transient filesystem problem never fails the session.
+    // F-135 / F-352: load workspace `AGENTS.md` exactly once at session start
+    // and cache the contents for every turn on this session. Missing file is
+    // not an error. Files that exceed the size cap (AgentsMdTooLarge) or are
+    // otherwise unreadable are logged as warnings and treated as absent so a
+    // bad or oversized AGENTS.md never fails the session.
     let agents_md: Option<Arc<str>> = match workspace_path.as_deref() {
         Some(ws) => match forge_agents::load_agents_md(ws) {
-            Ok(Some(content)) => Some(Arc::from(content)),
+            Ok(Some(content)) => {
+                tracing::warn!(
+                    path = %ws.join("AGENTS.md").display(),
+                    "AGENTS.md injected into session system prompt; \
+                     review the file if this workspace is not fully trusted"
+                );
+                Some(Arc::from(content))
+            }
             Ok(None) => None,
             Err(e) => {
                 tracing::warn!(
