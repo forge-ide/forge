@@ -309,6 +309,84 @@ fn write_layouts_creates_forge_dir_if_missing() {
 }
 
 #[test]
+fn write_layouts_is_atomic_via_tmp_and_rename() {
+    // F-363: `write_layouts` must mirror the `approvals::save_to_path` /
+    // `settings::save_raw_to_path` atomic pattern — write to `<path>.tmp`,
+    // then rename into place. The rename is atomic on POSIX for same-
+    // filesystem targets, so a partially-written `.tmp` never becomes the
+    // visible `layouts.json`.
+    //
+    // We observe the invariant from two angles:
+    //
+    // 1. Pre-plant a stale `layouts.json.tmp` with garbage. A correct
+    //    atomic write `rename`s its freshly-written tmp over that path, so
+    //    no `.tmp` residue remains. A direct `tokio::fs::write` on the
+    //    canonical path leaves the stale tmp untouched.
+    // 2. After the write returns, `layouts.json` must contain the new
+    //    payload regardless of the prior `.tmp` state — the stale tmp must
+    //    not leak into the visible file.
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().to_string_lossy().to_string();
+
+    let forge_dir = dir.path().join(".forge");
+    std::fs::create_dir_all(&forge_dir).unwrap();
+    let tmp_path = forge_dir.join("layouts.json.tmp");
+    std::fs::write(&tmp_path, b"{ partial-crash-residue").expect("seed stale layouts.json.tmp");
+
+    let app = make_app();
+    let window = make_session_window(&app, "atomic");
+
+    let _ = invoke_ok(&window, "write_layouts", sample_layouts_payload(&root));
+
+    let final_path = forge_dir.join("layouts.json");
+    assert!(final_path.exists(), "final layouts.json must exist");
+    assert!(
+        !tmp_path.exists(),
+        "layouts.json.tmp must be consumed by rename, not left behind"
+    );
+
+    // And the final file is the new payload, not the stale-tmp garbage.
+    let bytes = std::fs::read(&final_path).expect("read final layouts.json");
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("final layouts.json is valid JSON");
+    assert_eq!(parsed["active"], "default");
+    assert_eq!(parsed["named"]["default"]["tree"]["kind"], "split");
+}
+
+#[test]
+fn write_layouts_crash_mid_write_leaves_last_valid_on_disk() {
+    // F-363 DoD: simulate a crash mid-write by leaving a partial tmp on
+    // disk without completing the rename. The next `read_layouts` must
+    // return the last-valid payload — never a partial JSON — because the
+    // canonical `layouts.json` is only ever touched by the atomic rename.
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().to_string_lossy().to_string();
+
+    let app = make_app();
+    let window = make_session_window(&app, "crash-mid-write");
+
+    // First, a successful write establishes the last-valid canonical file.
+    let _ = invoke_ok(&window, "write_layouts", sample_layouts_payload(&root));
+
+    // Simulate a crash after a second save wrote its tmp but before it
+    // renamed: plant a corrupt `.tmp` alongside the valid canonical file.
+    let forge_dir = dir.path().join(".forge");
+    let tmp_path = forge_dir.join("layouts.json.tmp");
+    std::fs::write(&tmp_path, b"{ mid-write-crash").expect("seed crash tmp");
+
+    // Read must return the last-valid payload — not `Layouts::default()`,
+    // not the partial JSON from the tmp.
+    let out = invoke_ok(
+        &window,
+        "read_layouts",
+        serde_json::json!({ "workspaceRoot": root }),
+    );
+    assert_eq!(out["active"], "default");
+    assert_eq!(out["named"]["default"]["tree"]["kind"], "split");
+    assert_eq!(out["named"]["default"]["tree"]["a"]["pane_type"], "chat");
+}
+
+#[test]
 fn write_layouts_rejects_oversize_workspace_root() {
     // `workspace_root` reuses the same 4 KiB PATH_MAX envelope as the F-036
     // approval commands. A 5 KiB value must be rejected before the filesystem
