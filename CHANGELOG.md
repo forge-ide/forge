@@ -5,9 +5,109 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [Unreleased] — Phase 2: Full Layout + MCP
 
-<!-- nothing here yet; next milestone entries go here -->
+Second milestone. A user can arrange the shell into a full multi-pane IDE
+layout, edit code through an embedded Monaco editor backed by LSP, drive a
+terminal with full VT semantics, browse workspace files, attach MCP servers
+as tool sources, and watch an orchestrator drive sub-agents in parallel.
+Approvals, settings, and layouts persist across sessions, and the command
+palette makes every surface keyboard-discoverable. macOS is a first-class
+CI target.
+
+### Added
+
+#### Pane layout and persistence
+- Split-pane primitives (`SplitPane`, `GridContainer`) with resize and
+  recursive nesting (F-117); drag-to-dock hook + drop-zone overlay for
+  rearranging panes (F-118); minimum-width collapse rules so a pane never
+  renders below its usable width (F-119); layout persistence to and
+  restoration from `.forge/layouts.json` (F-120).
+- Activity bar chrome + `FilesSidebar` component with a `tree` IPC for
+  workspace navigation (F-126).
+- `EditorPane` integrated into the `GridContainer` tree in place of the
+  singleton editor slot (F-150).
+
+#### Editor and language services
+- `web/packages/monaco-host` iframe built on `monaco-languageclient`
+  (F-121); `EditorPane` Solid component with `read_file` / `write_file` /
+  `tree` IPC (F-122); frontend architecture §9.3 LSP-spawn model
+  reconciled with the monaco-host parent-relay model (F-148).
+- `forge-lsp` server discovery, download bootstrap, and stdio lifecycle
+  (F-123).
+
+#### Terminal
+- `forge-term` crate wrapping ghostty-vt with PTY I/O and a byte stream
+  interface (F-124); `TerminalPane` on `xterm.js` with PTY IPC for
+  keyboard and resize (F-125); `libghostty-vt` wired as the authoritative
+  Rust-side VT state with a zig-enabled CI path (F-146).
+
+#### MCP
+- `forge-mcp` crate skeleton + universal `.mcp.json` parser (F-127);
+  stdio transport with JSON-RPC line framing (F-128); HTTP transport
+  via SSE + long-poll over `reqwest` (F-129); `McpManager` lifecycle
+  — start / stop / health-check / restart-backoff (F-130); `forge mcp
+  import` six-source converter CLI (F-131); Tauri commands + tool-call
+  routing through sessions (F-132); `McpManager` subprocess integration
+  test on a serial CI job (F-154); unified shell + daemon `McpManager`
+  so `toggle_mcp_server` affects running sessions (F-155).
+
+#### Agents and sub-agents
+- `AgentInstance` + orchestrator API in `forge-agents` (F-133); sub-agent
+  spawning via the `agent.spawn` tool call with isolation enforcement
+  (F-134); AGENTS.md auto-injection into the system prompt (F-135);
+  sub-agent banners in `ChatPane` (F-136); session-orchestrator
+  background-agent lifecycle + Tauri commands (F-137); status-bar
+  background-agent indicator + completion notifications (F-138);
+  fine-grained agent step events in `forge-session` (F-139).
+
+#### Agent Monitor
+- Three-column Agent Monitor view with Stop wired through (F-140);
+  entry points from the command palette and a status-bar badge (F-153);
+  backend resource monitor for cpu / rss / fds pills (F-152); macOS
+  and Windows resource samplers for the pills (F-156).
+
+#### Context picker and re-run variants
+- `ContextPicker` component + `@`-trigger in the composer (F-141);
+  context category resolvers + provider adaptation (F-142);
+  context-picker spec §7 placement prose reconciled with the
+  viewport-aware flip (F-147).
+- Re-run Replace variant: truncate and regenerate (F-143); Re-run Branch
+  variant: `branch_parent` threading + `BranchSelected` (F-144); Branch
+  UI: variant selector, gutter indicator, metadata popover (F-145).
+
+#### Settings and approvals
+- User + workspace settings store with persistence and Tauri IPC
+  (F-151).
+- Persistent approval config at workspace and user level (F-036).
+
+#### Shell chrome
+- Command palette infrastructure (`Cmd/Ctrl+Shift+P`, registry API,
+  fuzzy search) (F-157).
+
+#### Platform
+- macOS CI job: zig + cargo + rustdoc + tests + Tauri webview (F-158).
+
+### Changed
+
+- Sandbox PID limits now enforced via cgroup v2 `pids.max` for true
+  per-sandbox ceilings, replacing the uid-wide `RLIMIT_NPROC` approach
+  (F-149); sandbox NPROC uid-wide semantics documented with the
+  cgroup-based per-sandbox limit plan (F-078).
+- Supply-chain tooling consolidated onto a single `deny.toml` source,
+  retiring the parallel `cargo-audit` path (F-115).
+
+### Fixed
+
+- Cfg-gate the `pid_file.rs` `/proc/self/stat` read for macOS so
+  `forge-session` builds on non-Linux targets (F-338).
+- Cfg-gate sandbox module exports at `forge-session` `lib.rs` to match
+  the Linux-only module body (F-340).
+- macOS XDG_RUNTIME_DIR fallback with documented onboarding so the UDS
+  path resolves on macOS (F-339).
+- Harden the `forge-cli` socket test against future `XDG_RUNTIME_DIR`
+  readers by path-composing via dependency injection rather than
+  mutating the environment (F-344).
 
 ## [0.1.0] — 2026-04-20 — Phase 1: Single Provider + GUI
 
