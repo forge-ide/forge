@@ -47,6 +47,19 @@ updating both simultaneously.
 
 ---
 
+### Drafted sibling — raw-`<button>` check (F-398, disabled)
+
+`scripts/check-raw-buttons.mjs` mirrors the token-check pattern for raw
+`<button>` JSX under `web/packages/app/src/`. It is **not wired into
+`just check-web`** today because the primitives it steers toward
+(`Button` / `IconButton` / `Tab+Tabs` / `MenuItem` in `@forge/design`)
+ship in Phase 3. Activate it in the final migration PR per
+[`button-primitives-migration.md`](button-primitives-migration.md) §"Migration
+PRs — PR 4". Unit tests live at `scripts/check-raw-buttons.test.mjs` and run
+via `node scripts/check-raw-buttons.test.mjs`.
+
+---
+
 ## 2. ts-rs Rust to TypeScript IPC types
 
 Rust IPC types in `crates/forge-core` are the source of truth for the
