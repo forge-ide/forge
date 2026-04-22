@@ -28,11 +28,114 @@ Forge has **two distinct IPC boundaries**. They must not be confused.
 
 ### 4.1 Boundary 1: Tauri ↔ webview
 
-> **Phase 1 coverage.** Phase 1 ships the following Tauri commands: `session_hello`, `session_subscribe`, `session_send_message`, `session_approve_tool`, `session_reject_tool`, `session_list`, `open_session`, `provider_status`. Every other command listed below is reserved for subsequent milestones and is not wired in Phase 1. See ADR-001 §4 for the corresponding subset note on the UDS boundary.
+> **Shipped coverage.** Phase 1 shipped `session_hello`, `session_subscribe`, `session_send_message`, `session_approve_tool`, `session_reject_tool`. Phase 2 extends that surface with 29 additional commands enumerated under **§4.1.1 Phase 2 additions — shipped** below. Anything that appears in the speculative block after §4.1.1 (e.g. `list_sessions`, `attach_session`, `list_providers`, `list_containers`, …) is reserved for Phase 3+ and is **not** wired today. The canonical registration list is `forge-shell/src/ipc.rs::build_invoke_handler`'s `tauri::generate_handler!` invocation. See ADR-001 §4 for the matching subset note on the UDS boundary.
 
 **Pattern.** Tauri `command` handlers for request/response (webview → host) and Tauri `events` for push (host → webview).
 
-#### Commands (webview → host)
+#### 4.1.1 Phase 2 additions — shipped
+
+Registered in `crates/forge-shell/src/ipc.rs::build_invoke_handler`. Every command returns `Result<T, String>` on the wire; the `String` error carries a stable tag (e.g. `forbidden: window label mismatch`, `stop_background_agent: unknown instance`). Types are derived with `ts-rs` and regenerated into `web/packages/ipc/src/generated/`.
+
+**Authz gate column.**
+
+| Gate | Helper call | Meaning |
+|------|-------------|---------|
+| `session-{id}` | `require_window_label(&webview, "session-{session_id}")` | Only the exact session webview that owns the `session_id` may invoke |
+| `dashboard` | `require_window_label_in(&webview, &["dashboard"], false)` | Only the dashboard window may invoke |
+| `dashboard + session-*` | `require_window_label_in(&webview, &["dashboard"], true)` | Dashboard **or** any `session-*` webview may invoke |
+| `any session-*` | `require_window_label_in(&webview, &[], true)` | Any `session-*` webview may invoke; dashboard is rejected |
+
+**Turn-flow extensions** (reach the daemon via `SessionBridge`):
+
+| Command | Args | Response | Authz |
+|---------|------|----------|-------|
+| `rerun_message` | `session_id: String, msg_id: String, variant: RerunVariant` | `()` | `session-{id}` |
+| `select_branch` | `session_id: String, parent_id: String, variant_index: u32` | `()` | `session-{id}` |
+| `delete_branch` | `session_id: String, parent_id: String, variant_index: u32` | `()` | `session-{id}` |
+
+`RerunVariant` is `{ Replace, Branch, Fresh }` (see `forge-core/src/types.rs`).
+
+**Persistent approvals** (F-036) — user/workspace scoped, read/written through `SessionBridge`:
+
+| Command | Args | Response | Authz |
+|---------|------|----------|-------|
+| `get_persistent_approvals` | `workspace_root: String` | `Vec<PersistentApprovalEntry>` | `dashboard + session-*` |
+| `save_approval` | `entry: ApprovalEntry, level: ApprovalLevel, workspace_root: String` | `()` | `dashboard + session-*` |
+| `remove_approval` | `scope_key: String, level: ApprovalLevel, workspace_root: String` | `()` | `dashboard + session-*` |
+
+`ApprovalLevel` is `{ Session, Workspace, User }`. `PersistentApprovalEntry { scope_key, tool_name, label, level }` mirrors `forge-core::ApprovalEntry` with the level tag carried through.
+
+**Terminal** (F-125) — each spawn is owned by the calling webview label; subsequent write/resize/kill from a different label are rejected:
+
+| Command | Args | Response | Authz |
+|---------|------|----------|-------|
+| `terminal_spawn` | `args: TerminalSpawnArgs { terminal_id, shell?, cwd, cols, rows }` | `()` | `any session-*` |
+| `terminal_write` | `terminal_id: TerminalId, data: Vec<u8>` | `()` | `any session-*` (+ owner-label check) |
+| `terminal_resize` | `terminal_id: TerminalId, cols: u16, rows: u16` | `()` | `any session-*` (+ owner-label check) |
+| `terminal_kill` | `terminal_id: TerminalId` | `()` | `any session-*` (+ owner-label check) |
+
+Output bytes flow back via the `terminal:bytes` Tauri event (see §4.1 events).
+
+**Layouts** (F-131) — single-file on-disk store at `.forge/layouts.json`; UI is dashboard-only:
+
+| Command | Args | Response | Authz |
+|---------|------|----------|-------|
+| `read_layouts` | `workspace_root: String` | `Layouts { active, named: HashMap<String, Layout> }` | `dashboard` |
+| `write_layouts` | `workspace_root: String, layouts: Layouts` | `()` | `dashboard` |
+
+**Filesystem** (F-126 / F-143 / F-150) — session-scoped and routed through the session daemon so edits stay inside the sandboxed workspace root:
+
+| Command | Args | Response | Authz |
+|---------|------|----------|-------|
+| `read_file` | `session_id: String, path: String` | `FileContent { path, content, bytes, sha256 }` | `session-{id}` |
+| `write_file` | `session_id: String, path: String, bytes: Vec<u8>` | `()` | `session-{id}` |
+| `tree` | `session_id: String, root: String, depth: Option<u32>` | `TreeNodeDto { name, path, kind, children }` | `session-{id}` |
+| `rename_path` | `session_id: String, from: String, to: String` | `()` | `session-{id}` |
+| `delete_path` | `session_id: String, path: String` | `()` | `session-{id}` |
+
+`TreeKindDto` is `{ File, Dir, Symlink, Other }`.
+
+**LSP** (F-127) — caller resolves the binary (via `forge-lsp::Bootstrap::ensure`) before spawning; downloads stay outside the Tauri trust boundary. Server messages flow back via the `lsp_message` Tauri event.
+
+| Command | Args | Response | Authz |
+|---------|------|----------|-------|
+| `lsp_start` | `args: LspStartArgs { server, binary_path, args: Vec<String> }` | `()` | `any session-*` |
+| `lsp_stop` | `server: String` | `()` | `any session-*` |
+| `lsp_send` | `server: String, message: serde_json::Value` | `()` | `any session-*` |
+
+**Background agents** (F-137 / F-138) — quartet of lifecycle commands against the per-session `BgAgentRegistry`:
+
+| Command | Args | Response | Authz |
+|---------|------|----------|-------|
+| `start_background_agent` | `session_id: String, agent_name: String, prompt: String` | `String` (instance id) | `session-{id}` |
+| `promote_background_agent` | `session_id: String, instance_id: String` | `()` | `session-{id}` |
+| `list_background_agents` | `session_id: String` | `Vec<BgAgentSummary { id, agent_name, state }>` | `session-{id}` |
+| `stop_background_agent` | `session_id: String, instance_id: String` | `()` | `session-{id}` |
+
+`BgAgentStateDto` is `{ Running, Completed, Failed }`.
+
+**Settings** (F-151) — persistent user/workspace-scoped kv store; dashboard is the primary editor but session windows also read their effective values:
+
+| Command | Args | Response | Authz |
+|---------|------|----------|-------|
+| `get_settings` | `workspace_root: String` | `AppSettings { notifications, windows, … }` | `dashboard + session-*` |
+| `set_setting` | `key: String, value: serde_json::Value, level: SettingsLevel, workspace_root: String` | `()` | `dashboard + session-*` |
+
+`SettingsLevel` is `{ User, Workspace }`.
+
+**MCP** (F-132 / F-155) — session-scoped wrappers over `SessionBridge`'s `McpManager`. Server state transitions stream back via the session event log, not the command response.
+
+| Command | Args | Response | Authz |
+|---------|------|----------|-------|
+| `list_mcp_servers` | `session_id: String` | `Vec<McpServerInfo { name, state, tools }>` | `session-{id}` |
+| `toggle_mcp_server` | `session_id: String, name: String, enabled: bool` | `McpToggleResult { name, enabled_after, error }` | `session-{id}` |
+| `import_mcp_config` | `session_id: String, source: String, apply: bool` | `McpImportResult { source, imported, destination_path, error }` | `session-{id}` |
+
+---
+
+#### 4.1.2 Speculative — Phase 3 and later
+
+All commands below are design sketches targeting later phases (multi-provider, containers, skills, memory, usage, preview). They are not registered in `build_invoke_handler` today and their exact shapes may change before they ship.
 
 All commands live in `forge-shell/src/commands.rs`. Types in `forge-ipc/src/tauri.rs` are derived with `ts-rs` and regenerated into `web/packages/ipc/src/generated.ts`.
 
