@@ -586,6 +586,155 @@ fn stop_rejects_oversize_instance_id_at_command_layer() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// F-365: explicit DoD coverage for `stop_background_agent`.
+//
+// The sibling tests above (`stop_completes_instance_and_emits_completion_event`
+// + `cross_session_stop_is_rejected_with_label_mismatch`) cover the event
+// fan-out and window-label authz. These two add the remaining gaps the
+// F-365 review called out:
+//
+// 1. `stop_background_agent_transitions_instance_to_terminal_and_stops_sampling`
+//    asserts that a successful stop, driven through the IPC command, (a) flips
+//    the instance to terminal and (b) causes the registry's forwarder to
+//    untrack the instance from the resource monitor. Without this, a regression
+//    that decoupled the forwarder from `monitor.untrack` would leak sampler
+//    tasks and produce misleading `list` rows.
+// 2. `stop_background_agent_from_wrong_session_is_rejected` mirrors the
+//    existing `delete_branch` / promote authz shape — the window label is a
+//    session window, but the payload's `sessionId` targets a different session.
+//    The label check must reject this before the bridge resolves a registry.
+// ---------------------------------------------------------------------------
+
+/// DoD: flip the registry to `Completed` through `stop_background_agent`,
+/// assert the monitor untracks so future samples stop.
+#[tokio::test(flavor = "multi_thread")]
+async fn stop_background_agent_transitions_instance_to_terminal_and_stops_sampling() {
+    use forge_agents::Orchestrator as AgentOrchestrator;
+    use forge_session::{FakeSampler, ResourceMonitor, Sample};
+
+    let app = make_app();
+
+    // Fast-tick monitor with a scripted FakeSampler so we can observe the
+    // `tracked_count` drop without waiting for the 1 s production cadence.
+    let orchestrator = Arc::new(AgentOrchestrator::new());
+    let fake = Arc::new(FakeSampler::new(Sample {
+        cpu_seconds: Some(0.0),
+        rss_bytes: Some(0),
+        fd_count: Some(0),
+    }));
+    let monitor = Arc::new(ResourceMonitor::new(
+        fake as Arc<dyn forge_session::Sampler>,
+        Duration::from_millis(20),
+    ));
+    let registry = Arc::new(BackgroundAgentRegistry::with_monitor(
+        Arc::clone(&orchestrator),
+        Arc::new(vec![def("writer"), def("reviewer")]),
+        Arc::clone(&monitor),
+    ));
+    install_bg_session_for_test(&app.handle().clone(), "sess-term", Arc::clone(&registry));
+    let window = make_window(&app, "session-sess-term");
+
+    let start_res = invoke(
+        &window,
+        "start_background_agent",
+        serde_json::json!({
+            "sessionId": "sess-term",
+            "agentName": "writer",
+            "prompt": "work",
+        }),
+    )
+    .expect("start must succeed");
+    let instance_id = start_res
+        .deserialize::<serde_json::Value>()
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Wait until the monitor has actually begun tracking — `start` registers
+    // on the tracking set synchronously but the monitor hand-off runs on a
+    // spawned task, so we observe it eventually.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while monitor.tracked_count().await == 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        monitor.tracked_count().await,
+        1,
+        "monitor must track the instance while it is running"
+    );
+
+    invoke(
+        &window,
+        "stop_background_agent",
+        serde_json::json!({
+            "sessionId": "sess-term",
+            "instanceId": instance_id.clone(),
+        }),
+    )
+    .expect("stop must succeed under matching label");
+
+    // (a) Terminal transition: the registry's forwarder drops the id from
+    // `list` once it observes the orchestrator's terminal event.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let rows: serde_json::Value = invoke(
+            &window,
+            "list_background_agents",
+            serde_json::json!({ "sessionId": "sess-term" }),
+        )
+        .expect("list must succeed")
+        .deserialize()
+        .unwrap();
+        if rows.as_array().unwrap().is_empty() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!("terminal transition did not drop id from list: {rows}");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    // (b) Sampler is released: `monitor.untrack(id)` ran in the forwarder and
+    // the sampler task is gone. `tracked_count` is the observable proxy for
+    // "sampler not leaking".
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while monitor.tracked_count().await != 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        monitor.tracked_count().await,
+        0,
+        "monitor must untrack the instance on terminal transition — otherwise \
+         the sampler task leaks and `list` rows are misleading"
+    );
+}
+
+/// DoD: `stop_background_agent` from a session-A window with a payload
+/// claiming session-B must be rejected by the window-label gate before any
+/// registry lookup happens.
+#[test]
+fn stop_background_agent_from_wrong_session_is_rejected() {
+    let app = make_app();
+    install_registry(&app, "session-owner");
+    let window = make_window(&app, "session-attacker");
+
+    let err = invoke(
+        &window,
+        "stop_background_agent",
+        serde_json::json!({
+            "sessionId": "session-owner",
+            "instanceId": "deadbeefcafebabe",
+        }),
+    )
+    .expect_err("a session-attacker window must not stop session-owner's agents");
+    assert!(
+        err.contains(LABEL_MISMATCH),
+        "expected label-mismatch error, got: {err}"
+    );
+}
+
 /// Size-cap regression: oversize prompts must be rejected at the command
 /// layer (`require_size`) before the registry's `start` allocates anything.
 #[test]
