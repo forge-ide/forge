@@ -107,11 +107,20 @@ async fn pump_routes_concurrent_responses_by_id() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pump_isolates_per_server_pending_tables() {
+async fn pump_does_not_leak_response_across_servers() {
     // Two independent pumps simulate two servers managed side-by-side.
-    // Each owns its own pending table — a response arriving on server A's
-    // transport with an id that exists in server B's table must not
-    // reach server B's waiter.
+    // Each owns its own pending table — a response arriving on server B's
+    // transport with an id that *also* exists in server A's table must
+    // not reach server A's waiter. The original form of this test merely
+    // proved two pumps both work; it never cross-wired a response, so a
+    // regression that shared a global pending table would still pass.
+    //
+    // Shape: both pumps have an in-flight call with id=1 (each has its
+    // own AtomicU64 counter). We deliver a response *only* to server B's
+    // transport, assert server B's call resolves, then assert server A's
+    // call is *still parked* after a short grace period. Finally we
+    // unblock A with its own correct response to prove the pump is
+    // otherwise healthy.
     let (pump_a, mut server_a) = spawn_pump_in_proc("server-a");
     let (pump_b, mut server_b) = spawn_pump_in_proc("server-b");
 
@@ -125,34 +134,50 @@ async fn pump_isolates_per_server_pending_tables() {
         tokio::spawn(async move { p.call_raw("tools/call", json!({ "where": "B" })).await })
     };
 
-    // Both pumps independently assign id=1 (each has its own AtomicU64
-    // counter). Pull the frames out and verify.
+    // Both pumps independently assign id=1. Drain the outbound frames so
+    // we know both calls have reached their respective pending tables
+    // before we start delivering responses.
     let fa = next_frame(&mut server_a).await;
     let fb = next_frame(&mut server_b).await;
     assert_eq!(fa.get("id").and_then(|v| v.as_u64()), Some(1));
     assert_eq!(fb.get("id").and_then(|v| v.as_u64()), Some(1));
 
-    // Cross-wire the responses: send A's id=1 response to *server A*
-    // with B's payload (to prove the tables don't leak), and vice versa.
-    // Each caller must still receive the payload its own server sent.
-    server_a
-        .send_to_client(response(1, json!({ "from": "A" })))
-        .await;
+    // Deliver B's response on B's transport only. Nothing goes to A yet.
     server_b
         .send_to_client(response(1, json!({ "from": "B" })))
         .await;
 
-    let ra = call_a.await.expect("a task").expect("a call");
-    let rb = call_b.await.expect("b task").expect("b call");
+    // B must resolve — routing within one server still works.
+    let rb = timeout(Duration::from_secs(2), call_b)
+        .await
+        .expect("call_b did not resolve after its own response was delivered")
+        .expect("b task")
+        .expect("b call");
+    assert_eq!(rb, json!({ "from": "B" }), "server B got its own response");
 
-    assert_eq!(
-        ra,
-        json!({ "from": "A" }),
-        "server A caller got server A response"
+    // A must NOT have resolved. If the pending tables were shared, A's
+    // waiter would have picked up B's id=1 response and the task would
+    // now be finished. Poll with a short timeout; the timeout *firing*
+    // is the passing condition. `&mut call_a` is itself a Future because
+    // `JoinHandle: Unpin`, so we can retry the await after the timeout.
+    let mut call_a = call_a;
+    assert!(
+        timeout(Duration::from_millis(100), &mut call_a)
+            .await
+            .is_err(),
+        "server A's call resolved before its own response was delivered — pending tables are leaking across servers"
     );
-    assert_eq!(
-        rb,
-        json!({ "from": "B" }),
-        "server B caller got server B response"
-    );
+
+    // Unblock A with its own response and confirm the pump is healthy
+    // end-to-end (otherwise a broken pump would also fail the negative
+    // assertion above, making this test ambiguous).
+    server_a
+        .send_to_client(response(1, json!({ "from": "A" })))
+        .await;
+    let ra = timeout(Duration::from_secs(2), &mut call_a)
+        .await
+        .expect("call_a did not resolve after its own response was delivered")
+        .expect("a task")
+        .expect("a call");
+    assert_eq!(ra, json!({ "from": "A" }), "server A got its own response");
 }

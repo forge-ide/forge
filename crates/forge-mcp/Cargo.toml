@@ -4,6 +4,14 @@ version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
+[features]
+# F-369: gates the in-memory pump transport + `manager::test_util` module
+# used by the concurrent-call integration test. Not enabled by default so
+# the production build excludes the mock transport entirely. The
+# `pump_concurrent` integration test declares this as a required-feature
+# below, and `cargo test -p forge-mcp --features test-util` turns it on.
+test-util = []
+
 [dependencies]
 anyhow = "1"
 # F-380: `McpStateEvent.at` carries a `chrono::DateTime<Utc>` now; the manager
@@ -47,3 +55,13 @@ name = "forge-mcp-mock-stdio"
 path = "tests/bin/mock_stdio.rs"
 test = false
 doc = false
+
+# F-369: concurrent-pump coverage reaches into the `test_util` module
+# that's feature-gated out of production builds. Declaring the feature
+# here means the test target only compiles when `--features test-util`
+# is passed, so default `cargo test -p forge-mcp` does *not* silently
+# drag the mock transport back in.
+[[test]]
+name = "pump_concurrent"
+path = "tests/pump_concurrent.rs"
+required-features = ["test-util"]

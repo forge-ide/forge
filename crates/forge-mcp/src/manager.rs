@@ -188,6 +188,7 @@ enum Command {
 enum TransportHalf {
     Stdio(Stdio),
     Http(Http),
+    #[cfg(any(test, feature = "test-util"))]
     InProc(InProcHalf),
 }
 
@@ -196,6 +197,7 @@ impl TransportHalf {
         match self {
             TransportHalf::Stdio(s) => s.send(value).await,
             TransportHalf::Http(h) => h.send(value).await,
+            #[cfg(any(test, feature = "test-util"))]
             TransportHalf::InProc(p) => p.send(value).await,
         }
     }
@@ -220,6 +222,7 @@ impl TransportHalf {
                 }
                 None => TransportEvent::Closed("http channel closed".into()),
             },
+            #[cfg(any(test, feature = "test-util"))]
             TransportHalf::InProc(p) => p.recv().await,
         }
     }
@@ -228,6 +231,7 @@ impl TransportHalf {
 /// Test-only transport that ferries JSON frames between the pump and a
 /// mock "server" side via two mpsc channels. Owned exclusively by the
 /// pump task after construction, mirroring the real transports.
+#[cfg(any(test, feature = "test-util"))]
 struct InProcHalf {
     /// Pump → server direction: the pump writes outbound frames here.
     outbound: mpsc::Sender<serde_json::Value>,
@@ -235,6 +239,7 @@ struct InProcHalf {
     inbound: mpsc::Receiver<serde_json::Value>,
 }
 
+#[cfg(any(test, feature = "test-util"))]
 impl InProcHalf {
     async fn send(&mut self, value: serde_json::Value) -> Result<()> {
         self.outbound
@@ -977,6 +982,12 @@ async fn register_restart(
 ///
 /// Marked `#[doc(hidden)]` — this is not stable surface; callers should
 /// not depend on it outside of `forge-mcp`'s own tests.
+///
+/// Feature-gated behind `test-util` so production builds don't ship the
+/// in-memory transport or the pump harness. Enabled automatically under
+/// `cfg(test)` for the crate's own unit tests; integration tests that
+/// need it set `required-features = ["test-util"]` in `Cargo.toml`.
+#[cfg(any(test, feature = "test-util"))]
 #[doc(hidden)]
 pub mod test_util {
     use super::*;
