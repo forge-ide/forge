@@ -27,7 +27,7 @@
 //! `envFile`, `auth`, `supports_parallel_tool_calls`, ...) that have no
 //! universal-schema analogue.
 
-use crate::{McpServerSpec, ServerKind};
+use crate::{build_server_kind, McpServerSpec, StrictFields};
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use std::{
@@ -180,46 +180,16 @@ struct JsonServer {
 
 impl JsonServer {
     fn into_spec(self) -> Result<McpServerSpec> {
-        let kind_str = self.kind.as_deref().map(normalize_kind);
-        let transport = match kind_str {
-            Some("stdio") => Transport::Stdio,
-            Some("http") => Transport::Http,
-            Some(other) => {
-                return Err(anyhow!(
-                    "unknown MCP server type {other:?}; expected \"stdio\" or \"http\""
-                ))
-            }
-            None => match (self.command.is_some(), self.url.is_some()) {
-                (true, false) => Transport::Stdio,
-                (false, true) => Transport::Http,
-                (true, true) => {
-                    return Err(anyhow!(
-                        "MCP server declares both `command` and `url`; set `type` explicitly"
-                    ))
-                }
-                (false, false) => {
-                    return Err(anyhow!(
-                    "MCP server missing transport fields: need `command` (stdio) or `url` (http)"
-                ))
-                }
-            },
-        };
-
-        let kind = match transport {
-            Transport::Stdio => ServerKind::Stdio {
-                command: self
-                    .command
-                    .ok_or_else(|| anyhow!("stdio MCP server missing `command`"))?,
-                args: self.args,
-                env: self.env,
-            },
-            Transport::Http => ServerKind::Http {
-                url: self
-                    .url
-                    .ok_or_else(|| anyhow!("http MCP server missing `url`"))?,
-                headers: self.headers,
-            },
-        };
+        let normalized = self.kind.as_deref().map(normalize_kind);
+        let kind = build_server_kind(
+            normalized,
+            self.command,
+            self.args,
+            self.env,
+            self.url,
+            self.headers,
+            StrictFields::Drop,
+        )?;
         Ok(McpServerSpec { kind })
     }
 }
@@ -234,11 +204,6 @@ fn normalize_kind(raw: &str) -> &str {
         "http" | "sse" | "streamable-http" | "streamable_http" => "http",
         other => other,
     }
-}
-
-enum Transport {
-    Stdio,
-    Http,
 }
 
 fn parse_json_map(raw: &str, key: &str) -> Result<BTreeMap<String, McpServerSpec>> {
@@ -410,6 +375,7 @@ pub mod codex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ServerKind;
 
     fn assert_stdio<'a>(
         servers: &'a BTreeMap<String, McpServerSpec>,
