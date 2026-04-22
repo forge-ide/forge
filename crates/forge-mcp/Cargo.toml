@@ -27,6 +27,10 @@ futures = "0.3"
 # for SSE, `json` for the POST request body.
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
+# SSRF guard (transport/ssrf.rs) uses url::Host for IP-range matching. url is
+# already an indirect dep via reqwest; pinning it directly avoids relying on
+# reqwest's internal re-exports.
+url = "2"
 serde_json = "1"
 tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "rt", "rt-multi-thread", "time"] }
 # F-130 state_stream adapts `tokio::sync::broadcast` into a futures `Stream`

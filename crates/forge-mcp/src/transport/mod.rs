@@ -9,6 +9,7 @@
 //! [crate_manager]: https://docs.rs/forge-mcp/latest/forge_mcp/
 
 pub mod http;
+pub mod ssrf;
 pub mod stdio;
 
 pub use http::{Http, HttpEvent};
