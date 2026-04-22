@@ -204,7 +204,7 @@ export const CommandPalette: Component = () => {
                 role="option"
                 aria-disabled="true"
               >
-                No matching commands
+                // no matching commands
               </li>
             </Show>
           </ul>

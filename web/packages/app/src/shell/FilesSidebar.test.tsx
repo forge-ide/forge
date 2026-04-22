@@ -277,4 +277,25 @@ describe('FilesSidebar context menu', () => {
     fireEvent.click(await findByTestId('files-sidebar-menu-delete'));
     expect(deletePath).not.toHaveBeenCalled();
   });
+
+  // F-411 (V8): context-menu items are buttons executing an action on the
+  // selected tree row — per voice-terminology.md §8, they carry verb(+noun)
+  // labels in display caps as literal text so screen readers announce them
+  // uppercase.
+  it('context-menu items carry OPEN / RENAME / DELETE as literal text', async () => {
+    const loadTree = vi.fn().mockResolvedValue(demoTree());
+    const { findByText, findByTestId } = render(() => (
+      <FilesSidebar
+        sessionId={SID}
+        workspaceRoot={WS}
+        onOpen={vi.fn()}
+        loadTree={loadTree}
+      />
+    ));
+    const readme = await findByText('README.md');
+    fireEvent.contextMenu(readme);
+    expect((await findByTestId('files-sidebar-menu-open')).textContent).toContain('OPEN');
+    expect((await findByTestId('files-sidebar-menu-rename')).textContent).toContain('RENAME');
+    expect((await findByTestId('files-sidebar-menu-delete')).textContent).toContain('DELETE');
+  });
 });

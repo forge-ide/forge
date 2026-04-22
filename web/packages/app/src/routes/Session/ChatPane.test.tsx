@@ -1490,6 +1490,17 @@ describe('Composer Stop button (F-391)', () => {
     expect(stop.className).toContain('composer__btn--primary');
   });
 
+  // F-411 (V7): per voice-terminology.md §8, button labels are verb+noun in
+  // display caps. The composer's in-stream cancel button must read
+  // "STOP TURN" — naked "STOP" is a verb without a noun object and an
+  // earlier bare "Stop" regressed casing to mixed-case.
+  it('Stop button renders literal "STOP TURN" text for SR/voice parity', () => {
+    setAwaitingResponse(SID, true);
+    const { getByTestId } = render(() => <ChatPane />);
+    const stop = getByTestId('composer-stop-btn');
+    expect(stop.textContent?.trim()).toBe('STOP TURN');
+  });
+
   it('clicking Stop invokes session_cancel with the active sessionId', () => {
     invokeMock.mockReset();
     invokeMock.mockResolvedValue(undefined);

@@ -172,7 +172,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
           role="radiogroup"
           aria-label="Persistence level"
         >
-          <span class="approval-prompt__level-label">Persist:</span>
+          <span class="approval-prompt__level-label">PERSIST:</span>
           <button
             type="button"
             class="approval-prompt__level-btn"
@@ -182,7 +182,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
             aria-checked={level() === 'session'}
             onClick={() => setLevel('session')}
           >
-            Session
+            SESSION
           </button>
           <button
             type="button"
@@ -193,7 +193,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
             aria-checked={level() === 'workspace'}
             onClick={() => setLevel('workspace')}
           >
-            Workspace
+            WORKSPACE
           </button>
           <button
             type="button"
@@ -204,7 +204,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
             aria-checked={level() === 'user'}
             onClick={() => setLevel('user')}
           >
-            User
+            USER
           </button>
         </div>
       </Show>
@@ -213,7 +213,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
       <Show when={patternMode()}>
         <div class="approval-prompt__pattern-editor" data-testid="pattern-editor">
           <label class="approval-prompt__pattern-label" for="approval-pattern-input">
-            Approve this pattern:
+            APPROVE THIS PATTERN:
           </label>
           <div class="approval-prompt__pattern-row">
             <input
@@ -230,7 +230,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
               data-testid="pattern-confirm-btn"
               onClick={() => approveWithScope('ThisPattern', pattern())}
             >
-              Confirm
+              CONFIRM PATTERN
             </button>
             <button
               type="button"
@@ -238,7 +238,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
               data-testid="pattern-cancel-btn"
               onClick={() => setPatternMode(false)}
             >
-              Cancel
+              CANCEL
             </button>
           </div>
         </div>
@@ -253,7 +253,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
             data-testid="reject-btn"
             onClick={() => props.onReject()}
           >
-            Reject
+            REJECT CALL
             <kbd class="approval-prompt__kbd">R</kbd>
           </button>
 
@@ -265,7 +265,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
               data-testid="approve-once-btn"
               onClick={() => approveWithScope('Once')}
             >
-              Approve
+              APPROVE ONCE
               <kbd class="approval-prompt__kbd">A</kbd>
             </button>
 
@@ -291,7 +291,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
                   role="menuitem"
                   onClick={() => approveWithScope('Once')}
                 >
-                  Once
+                  APPROVE ONCE
                   <kbd class="approval-prompt__kbd">A</kbd>
                 </button>
 
@@ -303,7 +303,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
                     role="menuitem"
                     onClick={() => approveWithScope('ThisFile')}
                   >
-                    This file
+                    APPROVE FILE
                     <kbd class="approval-prompt__kbd">F</kbd>
                   </button>
 
@@ -314,7 +314,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
                     role="menuitem"
                     onClick={openPatternEditor}
                   >
-                    This pattern
+                    APPROVE PATTERN
                     <kbd class="approval-prompt__kbd">P</kbd>
                   </button>
                 </Show>
@@ -326,7 +326,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
                   role="menuitem"
                   onClick={() => approveWithScope('ThisTool')}
                 >
-                  This tool
+                  APPROVE TOOL
                   <kbd class="approval-prompt__kbd">T</kbd>
                 </button>
               </div>

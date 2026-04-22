@@ -297,6 +297,29 @@ describe('StatusBar — popover interaction', () => {
       expect(stop).toHaveBeenCalledWith(SID, 'a1');
     });
   });
+
+  // F-411 (V5): verb+noun display caps per voice-terminology.md §8.
+  // Popover actions must carry literal UPPERCASE source strings so screen
+  // readers announce the branded phrasing; CSS text-transform alone does not
+  // reach assistive tech.
+  it('popover action buttons carry PROMOTE AGENT / STOP AGENT as literal text', async () => {
+    const bus = fakeBus();
+    const list = vi.fn().mockResolvedValue([running('a1', 'writer')]);
+    const { findByTestId } = render(() => (
+      <StatusBar
+        sessionId={SID}
+        listBackgroundAgents={list}
+        subscribe={bus.subscribe}
+      />
+    ));
+    fireEvent.click(await findByTestId('bg-agents-badge'));
+    const promote = await findByTestId('bg-agents-promote-a1');
+    const stop = await findByTestId('bg-agents-stop-a1');
+    expect(promote.textContent).toContain('PROMOTE AGENT');
+    expect(stop.textContent).toContain('STOP AGENT');
+    expect(promote.textContent).not.toBe('Promote');
+    expect(stop.textContent).not.toBe('Stop');
+  });
 });
 
 describe('StatusBar — notification modes', () => {

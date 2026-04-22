@@ -882,7 +882,7 @@ export const Composer: Component<ComposerProps> = (props) => {
               data-testid="composer-stop-btn"
               onClick={() => props.onCancel?.()}
             >
-              STOP
+              STOP TURN
             </button>
           </Show>
           {/* F-391: Send is a real primary/ember button, UPPERCASE per

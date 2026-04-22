@@ -377,7 +377,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
                     void onPromote(row.id);
                   }}
                 >
-                  Promote
+                  PROMOTE AGENT
                 </button>
                 <button
                   type="button"
@@ -387,7 +387,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
                     void onStop(row.id);
                   }}
                 >
-                  Stop
+                  STOP AGENT
                 </button>
               </div>
             )}

@@ -178,7 +178,7 @@ export const BranchMetadataPopover: Component<BranchMetadataPopoverProps> = (pro
                   disabled={!canDelete(row)}
                   onClick={() => props.onDelete(row.index)}
                 >
-                  Delete
+                  DELETE VARIANT
                 </button>
               </li>
             );
@@ -192,7 +192,7 @@ export const BranchMetadataPopover: Component<BranchMetadataPopoverProps> = (pro
           data-testid="branch-popover-export"
           onClick={props.onExportAll}
         >
-          Export all
+          EXPORT ALL
         </button>
       </footer>
     </div>

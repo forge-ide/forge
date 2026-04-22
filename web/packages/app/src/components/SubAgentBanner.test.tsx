@@ -107,10 +107,15 @@ describe('SubAgentBanner — expand/collapse', () => {
     );
   });
 
-  it('renders the "No step events yet" placeholder when expanded with no children', () => {
+  it('renders the "// no steps yet" placeholder when expanded with no children', () => {
     const { getByTestId } = render(() => <SubAgentBanner turn={makeTurn()} />);
     fireEvent.click(getByTestId('sub-agent-banner-header-child-1'));
-    expect(getByTestId('sub-agent-banner-empty-child-1')).toBeInTheDocument();
+    const empty = getByTestId('sub-agent-banner-empty-child-1');
+    expect(empty).toBeInTheDocument();
+    // F-411: canonical empty-state form is `// <noun phrase>` per
+    // voice-terminology.md §8.
+    expect(empty).toHaveTextContent('// no steps yet');
+    expect(empty.textContent).not.toMatch(/No step events yet/i);
   });
 });
 
@@ -135,7 +140,7 @@ describe('SubAgentBanner — nested rendering for sub-of-sub', () => {
     expect(nestedHeader).toHaveTextContent('deep-helper');
   });
 
-  it('replaces nested inline children with an "Open in new window" button past max depth (3)', () => {
+  it('replaces nested inline children with an "OPEN MONITOR" button past max depth (3)', () => {
     const grandchild: Extract<ChatTurn, { type: 'sub_agent_banner' }> = {
       type: 'sub_agent_banner',
       child_instance_id: 'too-deep-1',
@@ -212,7 +217,7 @@ describe('SubAgentBanner — double-click to Agent Monitor (F-140)', () => {
     expect(open).toHaveBeenCalledWith('child-1');
   });
 
-  it('invokes the "Open in new window" button when depth exceeds the inline cap', () => {
+  it('invokes the "OPEN MONITOR" button when depth exceeds the inline cap', () => {
     const open = vi.fn();
     const grandchild: Extract<ChatTurn, { type: 'sub_agent_banner' }> = {
       type: 'sub_agent_banner',
@@ -230,7 +235,12 @@ describe('SubAgentBanner — double-click to Agent Monitor (F-140)', () => {
       />
     ));
     fireEvent.click(getByTestId('sub-agent-banner-header-child-1'));
-    fireEvent.click(getByTestId('sub-agent-banner-open-monitor-child-1'));
+    const openBtn = getByTestId('sub-agent-banner-open-monitor-child-1');
+    // F-411: button label must be the sanctioned verb+noun display-caps form
+    // (voice-terminology.md §8).
+    expect(openBtn).toHaveTextContent('OPEN MONITOR');
+    expect(openBtn.textContent).not.toMatch(/Open in new window/);
+    fireEvent.click(openBtn);
     expect(open).toHaveBeenCalledWith('child-1');
   });
 });

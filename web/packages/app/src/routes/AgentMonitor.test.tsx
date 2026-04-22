@@ -622,7 +622,7 @@ describe('<AgentTrace>', () => {
 // ---------------------------------------------------------------------------
 
 describe('<AgentInspector>', () => {
-  it('renders definition/tools/paths sections and a Stop button', () => {
+  it('renders definition/tools/paths sections and a STOP AGENT button', () => {
     const data = inspector({
       source: 'a.agents/coder.md:12',
       provider: 'anthropic',
@@ -631,14 +631,16 @@ describe('<AgentInspector>', () => {
       allowedPaths: ['/workspace/**'],
       resources: { cpu: 12.5, rss: 128, fds: 4 },
     });
-    const { getByText, getAllByText } = render(() => (
+    const { getByText, getAllByText, queryByText } = render(() => (
       <AgentInspector agent={row()} data={data} onStop={() => {}} />
     ));
     expect(getByText('Definition')).toBeTruthy();
     expect(getByText('Allowed tools')).toBeTruthy();
     expect(getByText('Allowed paths')).toBeTruthy();
     expect(getByText('Resource usage')).toBeTruthy();
-    expect(getByText('Stop agent')).toBeTruthy();
+    // F-411: §8 verb+noun display caps — the sanctioned label is "STOP AGENT".
+    expect(getByText('STOP AGENT')).toBeTruthy();
+    expect(queryByText('Stop agent')).toBeNull();
 
     // Pills rendered literally.
     expect(getByText('fs.read')).toBeTruthy();
@@ -664,7 +666,7 @@ describe('<AgentInspector>', () => {
     const { getByText } = render(() => (
       <AgentInspector agent={row({ id: 'kill-me' })} data={inspector()} onStop={onStop} />
     ));
-    fireEvent.click(getByText('Stop agent'));
+    fireEvent.click(getByText('STOP AGENT'));
     expect(onStop).toHaveBeenCalledWith('kill-me');
   });
 });

@@ -126,6 +126,32 @@ describe('ProviderPanel', () => {
     expect(await findByText(/Error: authz denied: dashboard/)).toBeInTheDocument();
   });
 
+  // F-411 (V11): pre-resolution loading label must follow the noun+state rule
+  // (`ollama · probing`), not the verb-state `PROBING`. voice-terminology.md
+  // §8 is explicit: "Status indicators: noun + state, no verbs."
+  it('shows "ollama · probing" (noun+state) while provider_status is in-flight', async () => {
+    let resolveStatus: ((v: ProviderStatus) => void) | undefined;
+    const invoke = vi.fn().mockImplementation(
+      () =>
+        new Promise<ProviderStatus>((resolve) => {
+          resolveStatus = resolve;
+        }),
+    );
+    setInvokeForTesting(invoke as never);
+
+    const { findByText, queryByText } = render(() => <ProviderPanel />);
+    const loading = await findByText('ollama · probing');
+    expect(loading).toBeInTheDocument();
+    // Guard against regression to the verb-state form.
+    expect(queryByText('PROBING')).toBeNull();
+
+    // Resolve so React-query/Solid resource doesn't leak across tests.
+    resolveStatus?.(reachable);
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalled();
+    });
+  });
+
   it('retry button on the error state re-invokes provider_status and recovers', async () => {
     const invoke = vi
       .fn()

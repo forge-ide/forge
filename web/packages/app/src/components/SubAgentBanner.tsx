@@ -176,7 +176,7 @@ export const SubAgentBanner: Component<SubAgentBannerProps> = (props) => {
                 data-testid={`sub-agent-banner-open-monitor-${props.turn.child_instance_id}`}
                 onClick={openInMonitor}
               >
-                Open in new window
+                OPEN MONITOR
               </button>
             }
           >
@@ -187,7 +187,7 @@ export const SubAgentBanner: Component<SubAgentBannerProps> = (props) => {
                   class="sub-agent-banner__empty"
                   data-testid={`sub-agent-banner-empty-${props.turn.child_instance_id}`}
                 >
-                  No step events yet.
+                  // no steps yet
                 </p>
               }
             >

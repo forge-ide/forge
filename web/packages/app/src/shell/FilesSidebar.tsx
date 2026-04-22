@@ -245,7 +245,7 @@ export const FilesSidebar: Component<FilesSidebarProps> = (props) => {
                 disabled={target().isDir}
                 onClick={() => doOpen(target().path)}
               >
-                Open
+                OPEN
               </button>
             </li>
             <li role="none">
@@ -257,7 +257,7 @@ export const FilesSidebar: Component<FilesSidebarProps> = (props) => {
                   void doRename();
                 }}
               >
-                Rename…
+                RENAME
               </button>
             </li>
             <li role="none">
@@ -269,7 +269,7 @@ export const FilesSidebar: Component<FilesSidebarProps> = (props) => {
                   void doDelete();
                 }}
               >
-                Delete
+                DELETE
               </button>
             </li>
           </ul>
