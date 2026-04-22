@@ -133,11 +133,18 @@ pub(crate) fn canonicalize_no_symlink(path: &Path) -> std::result::Result<PathBu
         }
     };
 
-    let input: Vec<_> = path.components().collect();
+    // F-356: normalize `.`/`..` in the caller-supplied path before the
+    // right-aligned compare. `Path::components()` already drops `CurDir` for
+    // non-leading occurrences, but `ParentDir` survives iteration and used to
+    // inflate the input length past the canonical count — which skipped the
+    // symlink guard entirely for any input containing `..`. Fold `ParentDir`
+    // against the prior `Normal` component so the check runs on a semantically
+    // equivalent, length-matched view of the input.
+    let normalized_input = normalize_components(path);
     let canonical_comps: Vec<_> = canonical.components().collect();
-    if canonical_comps.len() >= input.len() {
-        let offset = canonical_comps.len() - input.len();
-        for (i, comp) in input.iter().enumerate().rev() {
+    if canonical_comps.len() >= normalized_input.len() {
+        let offset = canonical_comps.len() - normalized_input.len();
+        for (i, comp) in normalized_input.iter().enumerate().rev() {
             if matches!(
                 comp,
                 std::path::Component::RootDir | std::path::Component::Prefix(_)
@@ -155,6 +162,28 @@ pub(crate) fn canonicalize_no_symlink(path: &Path) -> std::result::Result<PathBu
     Ok(canonical)
 }
 
+/// Returns a component list equivalent to `path.components()` with `CurDir`
+/// dropped and `ParentDir` folded against the preceding `Normal` entry. Root
+/// and prefix components are preserved so absolute-vs-relative intent is kept
+/// intact; `ParentDir` past the root is left in place for the caller to decide.
+fn normalize_components(path: &Path) -> Vec<std::path::Component<'_>> {
+    use std::path::Component;
+    let mut out: Vec<Component<'_>> = Vec::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => match out.last() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                _ => out.push(comp),
+            },
+            _ => out.push(comp),
+        }
+    }
+    out
+}
+
 pub(crate) fn enforce_allowed(
     path: &Path,
     allowed_paths: &[String],
@@ -169,4 +198,210 @@ pub(crate) fn enforce_allowed(
     Err(FsError::PathDenied {
         path: path.to_path_buf(),
     })
+}
+
+#[cfg(test)]
+mod canonicalize_no_symlink_tests {
+    //! F-356: `canonicalize_no_symlink` right-aligns `path.components()` against
+    //! `canonical.components()` to catch user-space symlink substitution. The
+    //! original implementation skipped that compare whenever the component
+    //! counts disagreed — which happens for any caller path containing `.` or
+    //! `..` (those inflate `path.components().len()` without appearing in the
+    //! canonical form). That silently bypassed the symlink guard for
+    //! symlink-through-dot and symlink-through-parent-dir inputs, leaving the
+    //! defense-in-depth narrative in the module docstring technically inert.
+    //!
+    //! These tests nail down the matrix called out in the Definition of Done:
+    //! `.`, `..`, symlink-in-the-middle, symlink-at-the-leaf — each with and
+    //! without the sandbox boundary being crossed. The `enforce_allowed` layer
+    //! that runs one frame up in the write/edit/rename/delete wrappers is
+    //! orthogonal; these tests focus on the symlink-component decision this
+    //! helper owns.
+    use super::*;
+
+    // ------------------------------------------------------------------
+    // Dot/parent-dir components without any symlink — must be accepted.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn accepts_path_with_cur_dir_component() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real_dir = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(real_dir.join("a").join("b")).unwrap();
+        std::fs::File::create(real_dir.join("a").join("b").join("c.txt")).unwrap();
+
+        let ambiguous = real_dir.join("a").join(".").join("b").join("c.txt");
+        let got = canonicalize_no_symlink(&ambiguous).expect("dot component must be accepted");
+
+        assert_eq!(got, real_dir.join("a").join("b").join("c.txt"));
+    }
+
+    #[test]
+    fn accepts_path_with_parent_dir_component() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real_dir = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(real_dir.join("a").join("x")).unwrap();
+        std::fs::create_dir_all(real_dir.join("a").join("b")).unwrap();
+        std::fs::File::create(real_dir.join("a").join("b").join("c.txt")).unwrap();
+
+        let ambiguous = real_dir
+            .join("a")
+            .join("x")
+            .join("..")
+            .join("b")
+            .join("c.txt");
+        let got =
+            canonicalize_no_symlink(&ambiguous).expect("parent-dir component must be accepted");
+
+        assert_eq!(got, real_dir.join("a").join("b").join("c.txt"));
+    }
+
+    #[test]
+    fn accepts_path_with_cur_dir_on_nonexistent_leaf() {
+        // Lenient-fallback path: `a/./b/new.txt` where `new.txt` does not yet
+        // exist. `fs.write` must still be allowed to create it.
+        let tmp = tempfile::tempdir().unwrap();
+        let real_dir = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(real_dir.join("a").join("b")).unwrap();
+
+        let ambiguous = real_dir.join("a").join(".").join("b").join("new.txt");
+        let got = canonicalize_no_symlink(&ambiguous)
+            .expect("dot component on non-existent leaf must be accepted");
+
+        assert_eq!(got, real_dir.join("a").join("b").join("new.txt"));
+    }
+
+    #[test]
+    fn accepts_path_with_parent_dir_on_nonexistent_leaf() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real_dir = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(real_dir.join("a").join("x")).unwrap();
+        std::fs::create_dir_all(real_dir.join("a").join("b")).unwrap();
+
+        let ambiguous = real_dir
+            .join("a")
+            .join("x")
+            .join("..")
+            .join("b")
+            .join("new.txt");
+        let got = canonicalize_no_symlink(&ambiguous)
+            .expect("parent-dir component on non-existent leaf must be accepted");
+
+        assert_eq!(got, real_dir.join("a").join("b").join("new.txt"));
+    }
+
+    // ------------------------------------------------------------------
+    // Real symlinks without any `.`/`..` — must be rejected (these already
+    // worked before F-356, pinning them here catches regressions in the
+    // normalized compare).
+    // ------------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_in_the_middle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real_dir = tmp.path().canonicalize().unwrap();
+        let real_sub = real_dir.join("real_mid");
+        std::fs::create_dir_all(real_sub.join("leaf")).unwrap();
+        std::fs::File::create(real_sub.join("leaf").join("file.txt")).unwrap();
+
+        let link = real_dir.join("link_mid");
+        std::os::unix::fs::symlink(&real_sub, &link).unwrap();
+
+        let via_link = link.join("leaf").join("file.txt");
+        let err =
+            canonicalize_no_symlink(&via_link).expect_err("symlink in the middle must be rejected");
+        assert!(matches!(err, FsError::SymlinkDenied { .. }), "got: {err:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_at_the_leaf() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real_dir = tmp.path().canonicalize().unwrap();
+        let real_target = real_dir.join("real_leaf.txt");
+        std::fs::File::create(&real_target).unwrap();
+
+        let link = real_dir.join("link_leaf.txt");
+        std::os::unix::fs::symlink(&real_target, &link).unwrap();
+
+        let err = canonicalize_no_symlink(&link).expect_err("symlink at the leaf must be rejected");
+        assert!(matches!(err, FsError::SymlinkDenied { .. }), "got: {err:?}");
+    }
+
+    // ------------------------------------------------------------------
+    // F-356 bug: symlink + `.`/`..` in the same input. The length mismatch
+    // caused by the `.`/`..` used to short-circuit the guard, so these fed
+    // a resolved symlink through silently.
+    // ------------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_in_the_middle_when_combined_with_cur_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real_dir = tmp.path().canonicalize().unwrap();
+        let real_sub = real_dir.join("real_mid");
+        std::fs::create_dir_all(real_sub.join("leaf")).unwrap();
+        std::fs::File::create(real_sub.join("leaf").join("file.txt")).unwrap();
+
+        let link = real_dir.join("link_mid");
+        std::os::unix::fs::symlink(&real_sub, &link).unwrap();
+
+        let via_link_and_dot = link.join(".").join("leaf").join("file.txt");
+        let err = canonicalize_no_symlink(&via_link_and_dot)
+            .expect_err("symlink-in-middle combined with `.` must be rejected");
+        assert!(matches!(err, FsError::SymlinkDenied { .. }), "got: {err:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_in_the_middle_when_combined_with_parent_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real_dir = tmp.path().canonicalize().unwrap();
+        let real_sub = real_dir.join("real_mid");
+        std::fs::create_dir_all(real_sub.join("leaf")).unwrap();
+        std::fs::File::create(real_sub.join("leaf").join("file.txt")).unwrap();
+
+        let link = real_dir.join("link_mid");
+        std::os::unix::fs::symlink(&real_sub, &link).unwrap();
+
+        // `link/sibling/../leaf/file.txt` — the `..` normalizes to `link/leaf`
+        // but the `link` symlink is still in the middle.
+        std::fs::create_dir_all(real_sub.join("sibling")).unwrap();
+        let via_link_and_dotdot = link
+            .join("sibling")
+            .join("..")
+            .join("leaf")
+            .join("file.txt");
+        let err = canonicalize_no_symlink(&via_link_and_dotdot)
+            .expect_err("symlink-in-middle combined with `..` must be rejected");
+        assert!(matches!(err, FsError::SymlinkDenied { .. }), "got: {err:?}");
+    }
+
+    // ------------------------------------------------------------------
+    // Boundary-crossing variants. The helper catches user-space symlinks
+    // whose target rides the *same* ancestor tree (component-rename at
+    // fixed depth). Symlinks whose target sits in a different ancestor
+    // tree alter the canonical form's component count — those are rejected
+    // one frame up by `enforce_allowed`'s allowlist match, which is tested
+    // through the public `write()` API in `tests/fs_write.rs`. The helper
+    // tests below pin what this function owns directly.
+    // ------------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_at_the_leaf_pointing_outside_via_sibling() {
+        // Leaf symlink points to a sibling file. The helper catches the
+        // link name vs resolved file name at the same depth.
+        let tmp = tempfile::tempdir().unwrap();
+        let real_dir = tmp.path().canonicalize().unwrap();
+        let target = real_dir.join("secret.txt");
+        std::fs::File::create(&target).unwrap();
+
+        let link = real_dir.join("leak.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = canonicalize_no_symlink(&link).expect_err("leaf-rename symlink must be rejected");
+        assert!(matches!(err, FsError::SymlinkDenied { .. }), "got: {err:?}");
+    }
 }
