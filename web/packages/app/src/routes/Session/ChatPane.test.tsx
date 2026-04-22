@@ -1875,6 +1875,61 @@ describe('ToolCallCard Phase 3 — expand/collapse (F-447)', () => {
       'false',
     );
   });
+
+  // F-447 follow-up (PR #547 review): the row's Enter/Space handler must be a
+  // no-op when the card is awaiting approval — otherwise it collapses the diff
+  // the user just read AND the keydown bubbles to ApprovalPrompt's native
+  // listener, which interprets Enter as "approve once."
+  it('ignores Enter on the row while awaiting-approval (does not collapse the open body)', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-aa-kb',
+      tool_name: 'fs.edit',
+      args_json: JSON.stringify({ path: '/src/foo.ts' }),
+    });
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-aa-kb',
+      tool_name: 'fs.edit',
+      args_json: JSON.stringify({ path: '/src/foo.ts' }),
+      preview: { description: '--- a\n+++ b\n@@ -1 +1 @@\n-x\n+y' },
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    const card = getByTestId('tool-call-card-tc-aa-kb');
+    // awaiting-approval cards open by default
+    expect(card).toHaveAttribute('data-expanded', 'true');
+
+    const row = getByTestId('tool-call-row-tc-aa-kb');
+    // Row must not be in the tab order while the outer card owns activation.
+    expect(row).not.toHaveAttribute('tabindex', '0');
+
+    fireEvent.keyDown(row, { key: 'Enter' });
+    // Row handler was a no-op — body is still expanded.
+    expect(card).toHaveAttribute('data-expanded', 'true');
+  });
+
+  it('ignores Space on the row while awaiting-approval (duplicate-activate guard)', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-aa-sp',
+      tool_name: 'fs.edit',
+      args_json: JSON.stringify({ path: '/src/bar.ts' }),
+    });
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-aa-sp',
+      tool_name: 'fs.edit',
+      args_json: JSON.stringify({ path: '/src/bar.ts' }),
+      preview: { description: 'Edit' },
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    const card = getByTestId('tool-call-card-tc-aa-sp');
+    expect(card).toHaveAttribute('data-expanded', 'true');
+
+    const row = getByTestId('tool-call-row-tc-aa-sp');
+    fireEvent.keyDown(row, { key: ' ' });
+    expect(card).toHaveAttribute('data-expanded', 'true');
+  });
 });
 
 describe('ToolCallCard Phase 3 — expanded body (F-447)', () => {

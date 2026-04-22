@@ -342,9 +342,13 @@ const ToolCallCard: Component<{
   // pressing Enter / Space anywhere on the header toggles expanded.
   const handleHeaderKeyDown = (e: KeyboardEvent): void => {
     if (e.key !== 'Enter' && e.key !== ' ') return;
-    // Let the existing tabIndex=0 awaiting-approval focus-ring path own
-    // activation when the card is the approval target — otherwise we'd
-    // swallow the keyboard approve-confirm in the prompt below.
+    // While awaiting approval, the outer card owns activation and
+    // ApprovalPrompt attaches a native `keydown` listener that treats Enter as
+    // "approve once." Running the row handler would (a) collapse the diff the
+    // user just read and (b) bubble to the approval listener, producing both a
+    // collapse AND an approve on a single key press. No-op here so the prompt
+    // stays in sole control of keyboard activation.
+    if (props.turn.status === 'awaiting-approval') return;
     if (!canExpand()) return;
     e.preventDefault();
     toggleExpanded();
@@ -401,7 +405,13 @@ const ToolCallCard: Component<{
         class="tool-call-card__row"
         data-testid={`tool-call-row-${props.turn.tool_call_id}`}
         role={canExpand() ? 'button' : undefined}
-        tabIndex={canExpand() ? 0 : undefined}
+        tabIndex={
+          canExpand()
+            ? props.turn.status === 'awaiting-approval'
+              ? -1
+              : 0
+            : undefined
+        }
         aria-expanded={canExpand() ? expanded() : undefined}
         aria-controls={
           canExpand() ? `tool-call-body-${props.turn.tool_call_id}` : undefined
