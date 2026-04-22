@@ -1,34 +1,51 @@
-// F-142: URL resolver.
+// F-142 + F-359: URL resolver.
 //
 // A URL is accepted as a candidate only if its hostname is on the
 // `allowedHosts` list (see `./settings.ts`). At resolve time we fetch the
-// URL with `fetch()` from the webview — no new IPC command was added for
-// this task. Disallowed URLs raise a user-visible toast and return an empty
-// string candidate list so the picker shows "No url results".
+// URL via the Rust-side `context_fetch_url` IPC command, **not** the
+// browser `fetch()` API. The Rust path enforces the allowlist server-side,
+// rejects non-http(s) schemes, blocks private / loopback / link-local IP
+// literals, re-validates every redirect hop, caps the body at 32 KiB, and
+// wraps the returned body in the dual-LLM containment markers.
 //
-// Truncation mirrors the file resolver's 32 KiB budget: a fetched page's
-// body beyond that is dropped with a visible marker.
+// Why replace `fetch()`. F-359 filed the webview's direct `fetch()` as an
+// SSRF-adjacent surface: the moment the page CSP's `connect-src` is
+// widened to match the user-configured allowed hosts, a compromised or
+// prompt-injected renderer could redirect a fetch to a private-range IP,
+// pull IAM creds from AWS IMDS or LAN services, and smuggle the response
+// body verbatim into the next LLM turn. Routing through an IPC command
+// keeps the allowlist on the Rust side (the webview cannot lie about the
+// target host) and is a prerequisite to widening the CSP safely.
+//
+// Disallowed URLs still raise a user-visible toast and return an empty
+// string candidate list so the picker shows "No url results".
 
+import { invoke as defaultInvoke } from '../lib/tauri';
+import type { FetchedUrl } from '@forge/ipc';
 import type { Candidate, ContextBlock, Resolver } from './types';
 import { allowedHosts as defaultAllowedHosts, isUrlAllowed } from './settings';
 import { pushToast as defaultPushToast } from '../components/toast';
-import { truncateToBytes } from './file';
 
-export const URL_RESOLVER_MAX_BYTES = 32 * 1024;
+// Re-export so test files can `import type { FetchedUrl }` from this module
+// (the local shape is the ts-rs-generated wire type, not a separate spec).
+export type { FetchedUrl };
 
 export interface UrlResolverDeps {
-  /** Injection seam — defaults to the browser `fetch`. Tests pass stubs. */
-  fetchImpl?: typeof fetch;
+  /** Session id — required for the Rust-side authz check. */
+  sessionId: string;
+  /** Injection seam — defaults to the real Tauri invoker. Tests pass stubs. */
+  invoke?: typeof defaultInvoke;
   /** Override the allowed-hosts source (tests). Defaults to the live signal. */
   allowedHosts?: () => readonly string[];
   /** Override the toast sink (tests). Defaults to the global queue. */
   pushToast?: (kind: 'info' | 'warning' | 'error', message: string) => void;
 }
 
-export function createUrlResolver(deps: UrlResolverDeps = {}): Resolver<string> {
-  const fetchFn = deps.fetchImpl ?? fetch.bind(globalThis);
+export function createUrlResolver(deps: UrlResolverDeps): Resolver<string> {
+  const invokeFn = deps.invoke ?? defaultInvoke;
   const hostsFn = deps.allowedHosts ?? (() => defaultAllowedHosts());
   const toast = deps.pushToast ?? defaultPushToast;
+  const { sessionId } = deps;
 
   return {
     async list(query: string): Promise<Candidate[]> {
@@ -62,7 +79,8 @@ export function createUrlResolver(deps: UrlResolverDeps = {}): Resolver<string> 
 
     async resolve(url: string): Promise<ContextBlock> {
       // Re-check the allowed-hosts list at send time — the setting could
-      // have changed between pick and send.
+      // have changed between pick and send. The webview-side check is
+      // advisory; the Rust IPC command is the authoritative gate.
       if (!isUrlAllowed(url, hostsFn())) {
         toast(
           'error',
@@ -76,21 +94,17 @@ export function createUrlResolver(deps: UrlResolverDeps = {}): Resolver<string> 
         };
       }
       try {
-        const res = await fetchFn(url);
-        if (!res.ok) {
-          return {
-            type: 'url',
-            path: url,
-            content: `[fetch failed: HTTP ${res.status}]`,
-            meta: { status: res.status },
-          };
-        }
-        const body = await res.text();
-        return {
+        const fetched = await invokeFn<FetchedUrl>('context_fetch_url', {
+          sessionId,
+          url,
+        });
+        const block: ContextBlock = {
           type: 'url',
           path: url,
-          content: truncateToBytes(body, URL_RESOLVER_MAX_BYTES),
+          content: fetched.body,
         };
+        if (fetched.truncated) block.meta = { truncated: true };
+        return block;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return {

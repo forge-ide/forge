@@ -8,6 +8,7 @@ export type { ApprovalEntry } from './generated/ApprovalEntry';
 export type { ApprovalLevel } from './generated/ApprovalLevel';
 export type { ApprovalScope } from './generated/ApprovalScope';
 export type { CompactTrigger } from './generated/CompactTrigger';
+export type { FetchedUrl } from './generated/FetchedUrl';
 export type { FileContent } from './generated/FileContent';
 export type { Layout } from './generated/Layout';
 export type { Layouts } from './generated/Layouts';

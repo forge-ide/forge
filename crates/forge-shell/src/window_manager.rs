@@ -91,6 +91,11 @@ pub fn run() -> Result<()> {
             crate::ipc::lsp_start,
             crate::ipc::lsp_stop,
             crate::ipc::lsp_send,
+            // F-359: server-side URL context fetch replaces the webview's
+            // direct `fetch()` — the allowlist lives on the Rust side so a
+            // compromised renderer cannot widen its reach.
+            crate::ipc::context_fetch_url,
+            crate::ipc::set_context_allowed_hosts,
             // F-137: background-agent lifecycle commands. Registered here
             // alongside F-138's `stop_background_agent` so the shell binary
             // exposes the full quartet in production. Tests reach the same
@@ -123,6 +128,8 @@ pub fn run() -> Result<()> {
             // to be managed up-front so the `State<'_, BgAgentState>` extractor
             // on each command doesn't panic.
             crate::ipc::manage_bg_agents(&app.handle().clone());
+            // F-359: the URL context fetch pool + allowlist state.
+            crate::ipc::manage_context_fetch(&app.handle().clone());
             // F-155: MCP commands now dispatch over the session UDS
             // bridge; no shell-side manager state to initialise.
             let manager = WindowManager::new(app.handle().clone());

@@ -29,6 +29,7 @@
 //! ad-hoc field names at emission sites.
 
 pub mod bridge;
+pub mod context_fetch;
 pub mod dashboard;
 pub mod dashboard_sessions;
 pub mod window_spec;
