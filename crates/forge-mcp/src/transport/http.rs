@@ -45,22 +45,40 @@ const INITIAL_RECONNECT_DELAY: Duration = Duration::from_millis(100);
 /// responsive when the server comes back.
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 
+/// Consecutive reconnect failures tolerated before the SSE reader gives
+/// up and emits a terminal [`HttpEvent::Closed`]. Counts only errors —
+/// a clean stream end that is followed by a successful reconnect resets
+/// the counter. Picked to bound crash-to-Degraded latency to sub-second
+/// wall time (100ms + 200ms + 400ms backoff ladder ≈ 700ms) while
+/// tolerating a transient blip. See F-361.
+const CONSECUTIVE_RECONNECT_FAILURE_THRESHOLD: usize = 3;
+
 /// Channel depth for outbound [`HttpEvent`]s. Matches stdio's capacity so
 /// the two transports back-pressure consumers identically.
 const EVENT_CHANNEL_CAPACITY: usize = 128;
 
 /// Events emitted on [`Http::recv`].
 ///
-/// Unlike stdio there is no terminal exit event — an HTTP MCP server is
-/// a remote process out of our lifecycle. The reader task keeps retrying
-/// until the [`Http`] handle is dropped. If the caller needs to know when
-/// the stream is unhealthy, it can observe the absence of events; the
-/// manager (F-130) owns the restart policy.
+/// Terminal-event parity with stdio (F-361): after a sustained run of
+/// reconnect failures the reader emits exactly one [`HttpEvent::Closed`]
+/// and then exits. The manager (F-130) treats that as the cue to flip
+/// the server to `Degraded` and drop the transport — without it a dead
+/// remote only surfaced on the 30s health-check tick.
+///
+/// Unlike stdio, the channel does not guarantee `recv()` returns `None`
+/// after `Closed`: [`Http::send`] keeps a sender clone alive for POST
+/// response forwarding. Consumers should treat `Closed` itself as the
+/// terminal signal and drop the transport.
 #[derive(Debug)]
 pub enum HttpEvent {
     /// A JSON-RPC message: either a response to a prior POST or an SSE
     /// notification. Dispatch is the manager's job.
     Message(serde_json::Value),
+    /// The SSE reader exhausted its sustained-failure budget (see
+    /// `CONSECUTIVE_RECONNECT_FAILURE_THRESHOLD`) and has exited. The
+    /// string is a short human-readable reason suitable for surfacing
+    /// as the manager's `Degraded { reason }`.
+    Closed(String),
 }
 
 /// An active HTTP JSON-RPC connection to one MCP server.
@@ -230,9 +248,15 @@ fn build_header_map(raw: &BTreeMap<String, String>) -> Result<HeaderMap> {
 
 /// Drive the SSE reader indefinitely. Each iteration opens a GET and
 /// streams frames until the body ends or an error surfaces, then sleeps
-/// with exponential backoff before retrying. The loop exits only when
-/// [`mpsc::Sender::send`] returns `Err`, meaning the consumer has
-/// dropped [`Http`].
+/// with exponential backoff before retrying.
+///
+/// The loop exits when either:
+/// * the consumer drops [`Http`] (clean teardown), or
+/// * consecutive reconnect failures reach
+///   `CONSECUTIVE_RECONNECT_FAILURE_THRESHOLD` — in which case we emit
+///   a terminal [`HttpEvent::Closed`] before returning so the manager
+///   (F-130) can flip the server to `Degraded` without waiting for the
+///   30s health-check tick (F-361).
 async fn sse_reader_loop(
     client: reqwest::Client,
     url: String,
@@ -240,6 +264,7 @@ async fn sse_reader_loop(
     tx: mpsc::Sender<HttpEvent>,
 ) {
     let mut delay = INITIAL_RECONNECT_DELAY;
+    let mut consecutive_failures: usize = 0;
 
     loop {
         match open_and_read_sse(&client, &url, &headers, &tx).await {
@@ -248,9 +273,10 @@ async fn sse_reader_loop(
                 return;
             }
             Ok(ReaderExit::StreamEnded) => {
-                // Clean server disconnect. Reset the delay so the next
-                // reconnect is fast, then reconnect immediately.
+                // Clean server disconnect. Reset backoff + failure count
+                // so a server that recovers doesn't trip the threshold.
                 delay = INITIAL_RECONNECT_DELAY;
+                consecutive_failures = 0;
                 tracing::debug!(
                     target: "forge_mcp::transport::http",
                     url = %url,
@@ -258,12 +284,34 @@ async fn sse_reader_loop(
                 );
             }
             Err(err) => {
+                consecutive_failures += 1;
+                let reason = format!("{err:#}");
                 tracing::warn!(
                     target: "forge_mcp::transport::http",
                     url = %url,
                     error = %err,
+                    attempts = consecutive_failures,
                     "SSE read failed; backing off before reconnect",
                 );
+
+                if consecutive_failures >= CONSECUTIVE_RECONNECT_FAILURE_THRESHOLD {
+                    let detail = format!(
+                        "http sse reader gave up after {consecutive_failures} \
+                         consecutive reconnect failures: {reason}"
+                    );
+                    tracing::warn!(
+                        target: "forge_mcp::transport::http",
+                        url = %url,
+                        %detail,
+                        "SSE reader terminating; surfacing Closed to consumer",
+                    );
+                    // Best-effort — if the consumer already dropped we
+                    // just exit, the receiver will observe a closed
+                    // channel the same way.
+                    let _ = tx.send(HttpEvent::Closed(detail)).await;
+                    return;
+                }
+
                 tokio::time::sleep(delay).await;
                 delay = (delay * 2).min(MAX_RECONNECT_DELAY);
             }
