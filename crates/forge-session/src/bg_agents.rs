@@ -262,12 +262,15 @@ impl BackgroundAgentRegistry {
             "started",
         );
 
-        // F-152: start per-instance resource sampling. No per-agent
-        // sidecar process exists yet, so we sample the daemon's own PID
-        // — this gives the AgentMonitor inspector a *live* pill stream
-        // today and lets a future step executor swap in the real PID by
-        // calling `monitor().track(id, child_pid)` at spawn time without
-        // reshaping the event wiring.
+        // F-152 / F-370: no per-agent sidecar process exists yet. Passing
+        // the daemon's own PID hits the `ResourceMonitor::track` daemon-PID
+        // guard, which makes the call a deliberate no-op — no task is
+        // registered and no `ResourceSample` is emitted, so the UI
+        // AgentMonitor pills render the `—` placeholder instead of
+        // session-wide numbers that look per-instance. When a future step
+        // executor forks a provider sidecar per instance, it calls
+        // `registry.monitor().track(id, child_pid)` with the real PID and
+        // the event wiring below begins forwarding samples unchanged.
         self.monitor.track(id.clone(), std::process::id()).await;
 
         // `broadcast::Sender::send` errors only when no subscribers are
@@ -397,11 +400,13 @@ impl BackgroundAgentRegistry {
         &self.orchestrator
     }
 
-    /// F-152: accessor for the resource monitor. A future step executor
-    /// that forks a provider sidecar per instance can call
-    /// `registry.monitor().track(id, child_pid)` to swap the degenerate
-    /// daemon-PID sampling set up in `start()` for real per-child
-    /// sampling.
+    /// F-152 / F-370: accessor for the resource monitor. A future step
+    /// executor that forks a provider sidecar per instance calls
+    /// `registry.monitor().track(id, child_pid)` with the real child PID
+    /// to start emitting `ResourceSample` events. Today `start()` only
+    /// invokes `track` with the daemon's own PID, which hits the
+    /// monitor's daemon-PID no-op guard, so no misleading per-instance
+    /// sample reaches the webview until a real child PID is supplied.
     pub fn monitor(&self) -> &Arc<ResourceMonitor> {
         &self.monitor
     }
@@ -594,15 +599,64 @@ mod tests {
         );
     }
 
-    // F-152: end-to-end wiring — spawning a background agent must produce
-    // `Event::ResourceSample` on the registry's event bus. This pins the
-    // integration that connects the sampler to the webview-facing stream.
+    // F-152 / F-370: end-to-end wiring for the resource monitor. Today
+    // `start()` has no per-child PID to attach, so it does NOT emit
+    // `ResourceSample` (the daemon-PID guard in `ResourceMonitor::track`
+    // makes that call a deliberate no-op). The forwarder wiring that
+    // carries samples from the monitor's broadcast onto the registry's
+    // event bus is still covered here — we just drive it by calling
+    // `monitor().track(id, real_pid)` directly, mirroring what a future
+    // step executor will do once per-child PIDs exist.
+
+    /// Simulate a future step executor by handing the monitor a PID other
+    /// than the daemon's — that's the real-world path the guard exists to
+    /// protect, and the only case in which `ResourceSample` should fire.
+    fn non_daemon_pid() -> u32 {
+        std::process::id().wrapping_add(1)
+    }
 
     #[tokio::test]
-    async fn start_drives_resource_samples_onto_the_registry_event_bus() {
+    async fn start_does_not_emit_resource_sample_for_background_agents() {
+        // F-370 DoD invariant: a plain `start` (no real child PID) must
+        // NOT stream `ResourceSample` on the registry bus — the daemon's
+        // own process metrics are not a meaningful per-instance pill.
+        // The UI falls back to the `—` placeholder because no event ever
+        // arrives for this id.
         let reg = fresh_with_fast_monitor().await;
         let mut rx = reg.events();
         let id = reg.start("writer", Arc::from("p")).await.unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await {
+                Ok(Ok(Event::ResourceSample { instance_id, .. })) if instance_id == id => {
+                    panic!(
+                        "start() must not emit ResourceSample for bg agents \
+                         until real per-child PIDs are available (F-370)"
+                    );
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn monitor_track_with_real_pid_reaches_registry_event_bus() {
+        // Forwarder wiring check: when a (future) caller hands the monitor
+        // a real per-instance PID, the resulting `ResourceSample` reaches
+        // the registry's subscribers on the same bus that carries
+        // `BackgroundAgent*` events.
+        let reg = fresh_with_fast_monitor().await;
+        let mut rx = reg.events();
+        let id = reg.start("writer", Arc::from("p")).await.unwrap();
+
+        // Drain the Started event so the next ResourceSample stands out.
+        match rx.recv().await.unwrap() {
+            Event::BackgroundAgentStarted { .. } => {}
+            other => panic!("expected Started, got {other:?}"),
+        }
+
+        reg.monitor().track(id.clone(), non_daemon_pid()).await;
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let mut saw_sample = false;
@@ -620,7 +674,8 @@ mod tests {
         }
         assert!(
             saw_sample,
-            "registry event bus must surface ResourceSample after start"
+            "registry event bus must surface ResourceSample when monitor is \
+             tracking a real per-instance PID"
         );
     }
 
@@ -633,6 +688,9 @@ mod tests {
         let reg = fresh_with_fast_monitor().await;
         let mut rx = reg.events();
         let id = reg.start("writer", Arc::from("p")).await.unwrap();
+        // Stand in for a future step executor: wire the monitor to a real
+        // PID so the forwarder has actual samples to propagate.
+        reg.monitor().track(id.clone(), non_daemon_pid()).await;
 
         // Wait for at least one resource sample so we know the sampler is live.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
