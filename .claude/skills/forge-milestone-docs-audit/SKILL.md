@@ -35,7 +35,7 @@ Delegate to an `Explore` subagent. Brief:
 >    - **Code areas** (first two path segments of each changed file): `crates/forge_ipc`, `web/packages/app`, `scripts`, etc.
 >    - **Doc surfaces implicated** — for each code area, return the matching doc surfaces that *should* describe it. Forge's mapping:
 >      - `crates/<crate>` → `docs/architecture/*.md` (by topic), that crate's `README.md`, and its rustdoc
->      - `web/packages/<pkg>` → `docs/frontend/*.md` and that package's `README.md`
+>      - `web/packages/<pkg>` → `docs/frontend/*.md` and that package's `README.md`. When a package's contract is co-located with its source (e.g. `web/packages/monaco-host/README.md` holds the authoritative postMessage protocol next to `src/protocol.ts`), treat the package README as canonical and expect `docs/frontend/*.md` to cross-reference it rather than duplicate the tables
 >      - Any UI component under `web/packages/app/src/features/*` → `docs/ui-specs/<component>.md`
 >      - Design tokens → `docs/design/token-reference.md` (authoritative) vs `web/packages/design/src/tokens.css` (derived)
 >      - Any milestone adds a testing story → `docs/testing/phase<N>-uat.md` should cover it
