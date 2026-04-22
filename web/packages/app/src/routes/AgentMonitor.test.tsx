@@ -495,6 +495,47 @@ describe('<AgentList>', () => {
     fireEvent.click(getByLabelText(/Select agent reviewer/i));
     expect(onSelect).toHaveBeenCalledWith('x');
   });
+
+  // F-416: filter tabs are the WAI-ARIA tabs pattern; each tab must carry
+  // aria-controls pointing at the row-list tabpanel, and the tabpanel must
+  // reciprocate via aria-labelledby on the currently-selected tab.
+  describe('F-416 — filter tabs ↔ rows tabpanel association', () => {
+    it('every filter tab has a non-empty aria-controls and id', () => {
+      const { getAllByRole } = render(() => (
+        <AgentList
+          rows={[row()]}
+          filter="all"
+          onFilter={() => {}}
+          selectedId={null}
+          onSelect={() => {}}
+        />
+      ));
+      const tabs = getAllByRole('tab');
+      for (const tab of tabs) {
+        expect(tab.id).toBeTruthy();
+        expect(tab.getAttribute('aria-controls')).toBeTruthy();
+      }
+    });
+
+    it('the rows tabpanel is labelled by the currently-selected filter tab', () => {
+      const { getAllByRole, container } = render(() => (
+        <AgentList
+          rows={[row()]}
+          filter="running"
+          onFilter={() => {}}
+          selectedId={null}
+          onSelect={() => {}}
+        />
+      ));
+      const tabs = getAllByRole('tab');
+      const selected = tabs.find((t) => t.getAttribute('aria-selected') === 'true');
+      expect(selected).toBeTruthy();
+      const panel = container.querySelector('[role="tabpanel"]') as HTMLElement | null;
+      expect(panel).not.toBeNull();
+      expect(panel!.id).toBe(selected!.getAttribute('aria-controls'));
+      expect(panel!.getAttribute('aria-labelledby')).toBe(selected!.id);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

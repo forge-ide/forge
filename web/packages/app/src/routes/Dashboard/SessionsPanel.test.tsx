@@ -195,4 +195,136 @@ describe('SessionsPanel', () => {
     const alert = await findByRole('alert');
     expect(alert.textContent ?? '').toMatch(/open denied/);
   });
+
+  // F-416: tabs ↔ tabpanel association. Each role="tab" must reference its
+  // panel via aria-controls; the matching role="tabpanel" must
+  // reciprocate via aria-labelledby. This is the WAI-ARIA APG tabs pattern
+  // and is the specific association axe-core flags when missing.
+  describe('F-416 — tabs ↔ tabpanel association', () => {
+    it('each tab carries an aria-controls pointing at an existing tabpanel', async () => {
+      invokeMock.mockResolvedValueOnce([
+        sample({ id: '1', state: 'active' }),
+        sample({ id: '2', state: 'archived' }),
+      ]);
+      const { container, findByRole } = render(() => <SessionsPanel />);
+      await waitForFetch();
+      await findByRole('tab', { name: /active/i });
+
+      const tabs = container.querySelectorAll<HTMLElement>('[role="tab"]');
+      expect(tabs.length).toBeGreaterThanOrEqual(2);
+      for (const tab of Array.from(tabs)) {
+        const panelId = tab.getAttribute('aria-controls');
+        expect(panelId, `tab "${tab.textContent}" missing aria-controls`).toBeTruthy();
+        // The panel referenced by aria-controls only needs to exist when the
+        // tab is selected; inactive tabs may reference a panel id that is
+        // mounted only on selection. Selected tab's panel must be in-DOM now.
+        if (tab.getAttribute('aria-selected') === 'true') {
+          const panel = document.getElementById(panelId!);
+          expect(panel, `panel ${panelId} not found for selected tab`).not.toBeNull();
+          expect(panel!.getAttribute('role')).toBe('tabpanel');
+          expect(panel!.getAttribute('aria-labelledby')).toBe(tab.id);
+          expect(tab.id).toBeTruthy();
+        }
+      }
+    });
+
+    it('clicking a different tab swaps which tabpanel is labelled by which tab', async () => {
+      invokeMock.mockResolvedValueOnce([
+        sample({ id: '1', state: 'active' }),
+        sample({ id: '2', state: 'archived' }),
+      ]);
+      const { container, findByRole } = render(() => <SessionsPanel />);
+      await waitForFetch();
+
+      const archivedTab = await findByRole('tab', { name: /archived/i });
+      fireEvent.click(archivedTab);
+
+      const panels = container.querySelectorAll<HTMLElement>('[role="tabpanel"]');
+      expect(panels.length).toBeGreaterThanOrEqual(1);
+      const panel = panels[0]!;
+      expect(panel.getAttribute('aria-labelledby')).toBe(archivedTab.id);
+      expect(archivedTab.getAttribute('aria-controls')).toBe(panel.id);
+    });
+  });
+
+  // F-416: roving tabindex on the session grid. Tab enters the grid at
+  // whichever card is the current tab stop; arrows, Home, and End move
+  // focus within the grid without leaving it.
+  describe('F-416 — session grid roving tabindex', () => {
+    it('renders exactly one card with tabindex=0; the rest are tabindex=-1', async () => {
+      invokeMock.mockResolvedValueOnce([
+        sample({ id: '1', subject: 'alpha', state: 'active' }),
+        sample({ id: '2', subject: 'beta', state: 'active' }),
+        sample({ id: '3', subject: 'gamma', state: 'active' }),
+      ]);
+      const { container } = render(() => <SessionsPanel />);
+      await waitForFetch();
+
+      const cards = container.querySelectorAll<HTMLElement>('.session-card');
+      expect(cards.length).toBe(3);
+      const tabStops = Array.from(cards).filter(
+        (c) => c.getAttribute('tabindex') === '0',
+      );
+      expect(tabStops.length).toBe(1);
+      const inactive = Array.from(cards).filter(
+        (c) => c.getAttribute('tabindex') === '-1',
+      );
+      expect(inactive.length).toBe(2);
+    });
+
+    it('ArrowRight moves focus to the next card', async () => {
+      invokeMock.mockResolvedValueOnce([
+        sample({ id: '1', subject: 'alpha', state: 'active' }),
+        sample({ id: '2', subject: 'beta', state: 'active' }),
+      ]);
+      const { container } = render(() => <SessionsPanel />);
+      await waitForFetch();
+
+      const cards = container.querySelectorAll<HTMLElement>('.session-card');
+      const first = cards[0]!;
+      const second = cards[1]!;
+      first.focus();
+      first.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowRight',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      expect(document.activeElement).toBe(second);
+      expect(second.getAttribute('tabindex')).toBe('0');
+      expect(first.getAttribute('tabindex')).toBe('-1');
+    });
+
+    it('End moves focus to the last card; Home moves it back to the first', async () => {
+      invokeMock.mockResolvedValueOnce([
+        sample({ id: '1', subject: 'alpha', state: 'active' }),
+        sample({ id: '2', subject: 'beta', state: 'active' }),
+        sample({ id: '3', subject: 'gamma', state: 'active' }),
+      ]);
+      const { container } = render(() => <SessionsPanel />);
+      await waitForFetch();
+
+      const cards = container.querySelectorAll<HTMLElement>('.session-card');
+      const first = cards[0]!;
+      const last = cards[2]!;
+      first.focus();
+      first.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'End',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      expect(document.activeElement).toBe(last);
+      last.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Home',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      expect(document.activeElement).toBe(first);
+    });
+  });
 });
