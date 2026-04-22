@@ -194,6 +194,18 @@ export function setAwaitingResponse(sessionId: SessionId, value: boolean): void 
   setMessagesStore(sessionId, 'awaitingResponse', value);
 }
 
+/**
+ * F-391: locally drop the "streaming lock" on the composer after the user
+ * invokes Stop / Esc. The backend cancel is fired-and-forgotten; we don't
+ * wait for its ack before re-enabling the UI, because spec §4.1 treats Stop
+ * as an immediate interaction.
+ */
+export function cancelStream(sessionId: SessionId): void {
+  ensureSession(sessionId);
+  setMessagesStore(sessionId, 'awaitingResponse', false);
+  setMessagesStore(sessionId, 'streamingMessageId', null);
+}
+
 // ---------------------------------------------------------------------------
 // F-145 — branch-group helpers
 // ---------------------------------------------------------------------------

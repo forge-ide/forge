@@ -12,6 +12,7 @@ import {
   getMessagesState,
   pushEvent,
   setAwaitingResponse,
+  cancelStream,
   activeVariantPosition,
   liveVariantCount,
   neighbourVariantId,
@@ -578,6 +579,13 @@ export interface ComposerProps {
    */
   onSend: (text: string, chips: InsertedChip[]) => void;
   /**
+   * F-391: cancel the in-flight turn. Fired by the Stop button click and by
+   * Esc while the composer is in the streaming/disabled state. The Composer
+   * itself is purely a view — the owner (`ChatPane`) handles the IPC
+   * dispatch and local state cleanup.
+   */
+  onCancel?: () => void;
+  /**
    * Optional category-indexed items forwarded to the ContextPicker. Exposed
    * for tests that drive the end-to-end "type @ → pick → chip appears" flow
    * without booting the resolver registry.
@@ -781,8 +789,19 @@ export const Composer: Component<ComposerProps> = (props) => {
     setChips((prev) => prev.filter((c) => c.id !== id));
   };
 
+  // F-391: Esc must cancel the stream even when the textarea is disabled
+  // (browsers skip keydown on disabled controls). Listening at the composer
+  // wrapper instead keeps Esc live through the lock.
+  const handleComposerKeyDown = (e: KeyboardEvent) => {
+    if (e.key !== 'Escape') return;
+    if (!props.disabled) return;
+    if (pickerOpen()) return;
+    e.preventDefault();
+    props.onCancel?.();
+  };
+
   return (
-    <div class="composer" ref={composerRef}>
+    <div class="composer" ref={composerRef} onKeyDown={handleComposerKeyDown}>
       {/* ctx-chips row — chips inserted from the picker live here. The spec
           places it above the textarea so chips are visually attached to
           the message being composed. */}
@@ -851,14 +870,30 @@ export const Composer: Component<ComposerProps> = (props) => {
           </Show>
         </span>
         <div class="composer__actions">
+          {/* F-391: Stop flips to primary/ember while streaming (spec §4.1) and
+              fires `onCancel` — same path as Esc. */}
           <Show when={props.disabled}>
-            <button type="button" class="composer__btn composer__btn--ghost">
-              Stop
+            <button
+              type="button"
+              class="composer__btn composer__btn--primary"
+              data-testid="composer-stop-btn"
+              onClick={() => props.onCancel?.()}
+            >
+              STOP
             </button>
           </Show>
-          <span class="composer__send-hint">
-            {props.disabled ? 'Streaming…' : 'Send ↵'}
-          </span>
+          {/* F-391: Send is a real primary/ember button, UPPERCASE per
+              voice-terminology.md, disabled while streaming, and shares the
+              bare-Enter code path via `handleSend`. */}
+          <button
+            type="button"
+            class="composer__btn composer__btn--primary"
+            data-testid="composer-send-btn"
+            disabled={props.disabled}
+            onClick={handleSend}
+          >
+            SEND <span class="composer__btn-kbd">↵</span>
+          </button>
         </div>
       </div>
     </div>
@@ -961,6 +996,19 @@ export const ChatPane: Component<ChatPaneProps> = (props) => {
     if (!listRef) return;
     const atBottom = listRef.scrollHeight - listRef.scrollTop - listRef.clientHeight < 8;
     setUserScrolledUp(!atBottom);
+  };
+
+  // F-391: Stop / Esc path. The composer fires this on Stop click or Esc
+  // while the lock is up. We dispatch `session_cancel` fire-and-forget and
+  // locally clear the composer's stream lock so the UI becomes interactive
+  // immediately (spec §4.1 treats Stop as an instant interaction).
+  const handleCancel = () => {
+    const id = sessionId();
+    if (!id) return;
+    cancelStream(id);
+    invoke('session_cancel', { sessionId: id }).catch((err) =>
+      reportInvokeError(id, 'session_cancel', err),
+    );
   };
 
   const handleSend = (text: string, chips: InsertedChip[]) => {
@@ -1070,6 +1118,7 @@ export const ChatPane: Component<ChatPaneProps> = (props) => {
       <Composer
         disabled={state().awaitingResponse || state().streamingMessageId !== null}
         onSend={handleSend}
+        onCancel={handleCancel}
         registry={registry()}
         loadFilePreview={loadFilePreview}
       />

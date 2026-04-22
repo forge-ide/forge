@@ -1403,3 +1403,209 @@ describe('ChatPane — branch variants (F-145)', () => {
     expect(queryByText('variant one')).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// F-391: Composer Stop + Send buttons
+// ---------------------------------------------------------------------------
+//
+// chat-pane.md §4.1 bottom bar: `[Stop] [Send ⌘↵]`
+// - Stop is visible only while streaming, flips to primary/ember.
+// - Esc while streaming cancels (same as Stop click).
+// - Send is a real primary/ember button, UPPERCASE label, disabled while
+//   streaming, wired to the same handler as bare-Enter.
+describe('Composer Stop button (F-391)', () => {
+  it('Stop button is not rendered when not streaming', () => {
+    setAwaitingResponse(SID, false);
+    const { queryByTestId } = render(() => <ChatPane />);
+    expect(queryByTestId('composer-stop-btn')).not.toBeInTheDocument();
+  });
+
+  it('Stop button is rendered while streaming', () => {
+    setAwaitingResponse(SID, true);
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('composer-stop-btn')).toBeInTheDocument();
+  });
+
+  it('Stop button uses primary (ember) class while streaming', () => {
+    setAwaitingResponse(SID, true);
+    const { getByTestId } = render(() => <ChatPane />);
+    const stop = getByTestId('composer-stop-btn');
+    expect(stop.className).toContain('composer__btn--primary');
+  });
+
+  it('clicking Stop invokes session_cancel with the active sessionId', () => {
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue(undefined);
+    setAwaitingResponse(SID, true);
+    const { getByTestId } = render(() => <ChatPane />);
+
+    fireEvent.click(getByTestId('composer-stop-btn'));
+
+    const cancelCalls = invokeMock.mock.calls.filter(
+      (c) => c[0] === 'session_cancel',
+    );
+    expect(cancelCalls).toHaveLength(1);
+    expect(cancelCalls[0]?.[1]).toEqual({ sessionId: SID });
+  });
+
+  it('clicking Stop locally re-enables the composer (clears awaiting + streaming)', () => {
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue(undefined);
+    // Simulate a mid-stream state: awaitingResponse has flipped false but
+    // a streamingMessageId is still set.
+    pushEvent(SID, { kind: 'AssistantDelta', delta: 'partial', message_id: 'streaming-1' });
+    const { getByTestId } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+    expect(textarea).toBeDisabled();
+
+    fireEvent.click(getByTestId('composer-stop-btn'));
+
+    expect(textarea).not.toBeDisabled();
+  });
+
+  it('Esc on textarea while streaming fires session_cancel', () => {
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue(undefined);
+    setAwaitingResponse(SID, true);
+    const { getByTestId } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+
+    fireEvent.keyDown(textarea, { key: 'Escape' });
+
+    const cancelCalls = invokeMock.mock.calls.filter(
+      (c) => c[0] === 'session_cancel',
+    );
+    expect(cancelCalls).toHaveLength(1);
+    expect(cancelCalls[0]?.[1]).toEqual({ sessionId: SID });
+  });
+
+  it('Esc on textarea when not streaming does not fire session_cancel', () => {
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue(undefined);
+    setAwaitingResponse(SID, false);
+    const { getByTestId } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+
+    fireEvent.keyDown(textarea, { key: 'Escape' });
+
+    const cancelCalls = invokeMock.mock.calls.filter(
+      (c) => c[0] === 'session_cancel',
+    );
+    expect(cancelCalls).toHaveLength(0);
+  });
+
+  it('surfaces an error turn when session_cancel rejects', async () => {
+    invokeMock.mockReset();
+    invokeMock.mockRejectedValueOnce(new Error('cancel boom'));
+    setAwaitingResponse(SID, true);
+    const { getByTestId, findByText } = render(() => <ChatPane />);
+
+    fireEvent.click(getByTestId('composer-stop-btn'));
+
+    await flushMicrotasks();
+    expect(await findByText(/cancel boom/)).toBeInTheDocument();
+  });
+});
+
+describe('Composer Send button (F-391)', () => {
+  it('renders a Send button at all times', () => {
+    setAwaitingResponse(SID, false);
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('composer-send-btn')).toBeInTheDocument();
+  });
+
+  it('Send button label is UPPERCASE SEND', () => {
+    setAwaitingResponse(SID, false);
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('composer-send-btn').textContent).toContain('SEND');
+  });
+
+  it('Send button uses primary (ember) class', () => {
+    setAwaitingResponse(SID, false);
+    const { getByTestId } = render(() => <ChatPane />);
+    const send = getByTestId('composer-send-btn');
+    expect(send.className).toContain('composer__btn--primary');
+  });
+
+  it('Send button is disabled while streaming', () => {
+    setAwaitingResponse(SID, true);
+    const { getByTestId } = render(() => <ChatPane />);
+    const send = getByTestId('composer-send-btn') as HTMLButtonElement;
+    expect(send.disabled).toBe(true);
+  });
+
+  it('Send button is enabled when idle', () => {
+    setAwaitingResponse(SID, false);
+    const { getByTestId } = render(() => <ChatPane />);
+    const send = getByTestId('composer-send-btn') as HTMLButtonElement;
+    expect(send.disabled).toBe(false);
+  });
+
+  it('clicking Send invokes session_send_message with the trimmed text', () => {
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue(undefined);
+    const { getByTestId } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+
+    fireEvent.input(textarea, { target: { value: 'click send' } });
+    fireEvent.click(getByTestId('composer-send-btn'));
+
+    expect(invokeMock).toHaveBeenCalledWith('session_send_message', {
+      sessionId: SID,
+      text: 'click send',
+    });
+  });
+
+  it('clicking Send with empty text does not fire session_send_message', () => {
+    invokeMock.mockReset();
+    const { getByTestId } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('composer-send-btn'));
+    const sendCalls = invokeMock.mock.calls.filter(
+      (c) => c[0] === 'session_send_message',
+    );
+    expect(sendCalls).toHaveLength(0);
+  });
+
+  it('clicking Send clears the textarea', () => {
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue(undefined);
+    const { getByTestId } = render(() => <ChatPane />);
+    const textarea = getByTestId('composer-textarea') as HTMLTextAreaElement;
+
+    fireEvent.input(textarea, { target: { value: 'hi' } });
+    fireEvent.click(getByTestId('composer-send-btn'));
+
+    expect(textarea.value).toBe('');
+  });
+
+  it('Send button click and Enter key take the same code path', () => {
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue(undefined);
+
+    // Path A: Enter
+    const a = render(() => <ChatPane />);
+    const taA = a.getByTestId('composer-textarea') as HTMLTextAreaElement;
+    fireEvent.input(taA, { target: { value: 'same path' } });
+    fireEvent.keyDown(taA, { key: 'Enter' });
+    const viaEnter = invokeMock.mock.calls.filter(
+      (c) => c[0] === 'session_send_message',
+    );
+    a.unmount();
+
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue(undefined);
+    resetMessagesStore();
+    setActiveSessionId(SID);
+
+    // Path B: Send click
+    const b = render(() => <ChatPane />);
+    const taB = b.getByTestId('composer-textarea') as HTMLTextAreaElement;
+    fireEvent.input(taB, { target: { value: 'same path' } });
+    fireEvent.click(b.getByTestId('composer-send-btn'));
+    const viaClick = invokeMock.mock.calls.filter(
+      (c) => c[0] === 'session_send_message',
+    );
+
+    expect(viaClick).toEqual(viaEnter);
+  });
+});

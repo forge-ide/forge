@@ -339,9 +339,38 @@
   color: var(--color-ember-400);
 }
 
-.composer__send-hint {
-  font-family: var(--font-mono);
-  font-size: 10px;
+/* F-391: ember-filled primary used by Stop (streaming) and Send (idle).
+   Shares sizing with `.composer__btn` so width stays stable across the
+   stream→idle flip. */
+.composer__btn--primary {
+  background: var(--color-ember-400);
+  border: 1px solid var(--color-ember-400);
+  color: var(--color-text-primary);
   letter-spacing: 0.08em;
-  color: var(--color-text-tertiary);
+}
+
+.composer__btn--primary:hover {
+  background: var(--color-ember-300);
+  border-color: var(--color-ember-300);
+}
+
+.composer__btn--primary:active {
+  background: var(--color-ember-500);
+  border-color: var(--color-ember-500);
+  transform: translateY(1px);
+}
+
+/* `component-principles.md` — Buttons: disabled uses iron-600 surface with
+   disabled text; never drop opacity. Applies to the composer's Send while
+   streaming. */
+.composer__btn--primary:disabled {
+  background: var(--color-iron-600);
+  border-color: var(--color-iron-600);
+  color: var(--color-text-disabled);
+  cursor: not-allowed;
+}
+
+.composer__btn-kbd {
+  margin-left: var(--sp-1);
+  opacity: 0.7;
 }
