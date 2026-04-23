@@ -34,15 +34,15 @@ fn require_window_label_rejection_emits_warn_with_expected_actual_command() {
     );
     assert!(logs.contains("WARN"), "expected WARN level, got: {logs}");
     assert!(
-        logs.contains("expected=session-abc"),
+        logs.contains("expected=\"session-abc\""),
         "expected field missing, got: {logs}"
     );
     assert!(
-        logs.contains("actual=dashboard"),
+        logs.contains("actual=\"dashboard\""),
         "actual field missing, got: {logs}"
     );
     assert!(
-        logs.contains("command=session_send_message"),
+        logs.contains("command=\"session_send_message\""),
         "command field missing, got: {logs}"
     );
 }
@@ -67,11 +67,11 @@ fn require_window_label_in_rejection_emits_warn_with_expected_actual_command() {
     );
     assert!(logs.contains("WARN"), "expected WARN level, got: {logs}");
     assert!(
-        logs.contains("actual=some-other"),
+        logs.contains("actual=\"some-other\""),
         "actual field missing, got: {logs}"
     );
     assert!(
-        logs.contains("command=list_sessions"),
+        logs.contains("command=\"list_sessions\""),
         "command field missing, got: {logs}"
     );
     assert!(

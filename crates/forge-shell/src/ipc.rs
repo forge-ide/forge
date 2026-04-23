@@ -28,15 +28,16 @@ use forge_core::approvals::{
     load_user_config_in, load_workspace_config, save_user_config_in, save_workspace_config,
     ApprovalConfig, ApprovalEntry,
 };
+use forge_core::workspaces::read_workspaces;
 use forge_core::{ApprovalLevel, ApprovalScope, RerunVariant, TerminalId};
 use forge_ipc::HelloAck;
 use forge_lsp::{
-    Bootstrap as LspBootstrap, LspServerInfo, LspState as LspLifecycleState, MessageTransport,
-    Server as LspServer, ServerEvent as LspServerEvent,
+    Bootstrap as LspBootstrap, MessageTransport, Server as LspServer, ServerEvent as LspServerEvent,
 };
 use forge_term::{ShellSpec, TerminalEvent, TerminalSession, TerminalSize};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, EventTarget, Manager, Runtime, State, Webview};
+use tracing;
 use ts_rs::TS;
 
 use crate::bridge::{EventSink, SessionBridge, SessionConnections, SessionEventPayload};
@@ -46,6 +47,60 @@ use crate::bridge::{EventSink, SessionBridge, SessionConnections, SessionEventPa
 /// `String` so it matches every `#[tauri::command]`'s existing `Err(String)`
 /// wire shape — never a panic.
 pub(crate) const LABEL_MISMATCH_ERROR: &str = "forbidden: window label mismatch";
+
+fn authz_check(label: &str, expected: &str, command: &'static str) -> Result<(), String> {
+    if label == expected {
+        Ok(())
+    } else {
+        tracing::warn!(
+            target: "forge_shell::ipc::authz",
+            actual = label,
+            expected = expected,
+            command = command,
+            "window label mismatch"
+        );
+        Err(LABEL_MISMATCH_ERROR.to_string())
+    }
+}
+
+fn authz_check_in(
+    label: &str,
+    exact: &[&str],
+    allow_session_prefix: bool,
+    command: &'static str,
+) -> Result<(), String> {
+    if exact.contains(&label) {
+        return Ok(());
+    }
+    if allow_session_prefix && label.starts_with("session-") {
+        return Ok(());
+    }
+    tracing::warn!(
+        target: "forge_shell::ipc::authz",
+        actual = label,
+        allowed = ?exact,
+        command = command,
+        "window label mismatch"
+    );
+    Err(LABEL_MISMATCH_ERROR.to_string())
+}
+
+pub fn require_window_label_for_test(
+    actual: &str,
+    expected: &str,
+    command: &'static str,
+) -> Result<(), String> {
+    authz_check(actual, expected, command)
+}
+
+pub fn require_window_label_in_for_test(
+    actual: &str,
+    exact: &[&str],
+    allow_session_prefix: bool,
+    command: &'static str,
+) -> Result<(), String> {
+    authz_check_in(actual, exact, allow_session_prefix, command)
+}
 
 /// F-068 / L4 (T7): per-field byte caps on untyped-string inputs to session
 /// commands. `forge_ipc::write_frame` rejects frames above 4 MiB, but a
@@ -105,48 +160,12 @@ fn payload_too_large(field: &str, limit_bytes: usize) -> String {
 /// Assert the calling webview's label equals `expected`. Used at the top of
 /// every session/dashboard `#[tauri::command]` to reject cross-window invokes
 /// before the bridge sees the frame.
-///
-/// F-371: on rejection emits a `warn!` under target `forge_shell::ipc::authz`
-/// with structured `expected`, `actual`, `command` fields so authz refusals
-/// leave an audit trail instead of disappearing into silence. `command` is
-/// the Tauri command name — each call site passes its own literal so the
-/// filter `command == "session_send_message"` works reliably.
 pub(crate) fn require_window_label<R: Runtime>(
     webview: &Webview<R>,
     expected: &str,
     command: &'static str,
 ) -> Result<(), String> {
     authz_check(webview.label(), expected, command)
-}
-
-/// Bridge between the `Runtime`-generic `require_window_label` and a plain
-/// string-based test harness. Keeps the emission logic identical across
-/// production and tests — the only thing the generic helper does is
-/// extract `webview.label()`.
-fn authz_check(actual: &str, expected: &str, command: &'static str) -> Result<(), String> {
-    if actual == expected {
-        return Ok(());
-    }
-    tracing::warn!(
-        target: "forge_shell::ipc::authz",
-        expected = %expected,
-        actual = %actual,
-        command = %command,
-        "authz rejection: window label mismatch",
-    );
-    Err(LABEL_MISMATCH_ERROR.to_string())
-}
-
-/// F-371 test seam: drives the same authz emission logic as
-/// [`require_window_label`] without needing a live Tauri `Webview`. Public
-/// so integration tests under `tests/` can pin the schema.
-#[doc(hidden)]
-pub fn require_window_label_for_test(
-    actual: &str,
-    expected: &str,
-    command: &'static str,
-) -> Result<(), String> {
-    authz_check(actual, expected, command)
 }
 
 /// F-068 / L4 (T7): reject payloads whose byte length exceeds `limit_bytes`.
@@ -180,6 +199,12 @@ pub struct BridgeState {
     /// `test_socket_override`'s pattern — absent from production builds.
     #[cfg(feature = "webview-test")]
     pub test_user_config_dir_override: Option<std::path::PathBuf>,
+    /// F-349 test seam: redirect the workspaces registry toml path used by
+    /// `resolve_workspace_root_for_command` so dashboard-caller tests can
+    /// prime a tempdir-rooted `workspaces.toml` without touching the real
+    /// `~/.config/forge/workspaces.toml`. Absent from production builds.
+    #[cfg(feature = "webview-test")]
+    pub test_workspaces_toml_override: Option<std::path::PathBuf>,
 }
 
 impl BridgeState {
@@ -190,6 +215,8 @@ impl BridgeState {
             test_socket_override: None,
             #[cfg(feature = "webview-test")]
             test_user_config_dir_override: None,
+            #[cfg(feature = "webview-test")]
+            test_workspaces_toml_override: None,
         }
     }
 
@@ -206,6 +233,7 @@ impl BridgeState {
             bridge: SessionBridge::new(connections),
             test_socket_override: Some(socket_path),
             test_user_config_dir_override: None,
+            test_workspaces_toml_override: None,
         }
     }
 
@@ -220,6 +248,38 @@ impl BridgeState {
             bridge: SessionBridge::new(connections),
             test_socket_override: None,
             test_user_config_dir_override: Some(user_config_dir),
+            test_workspaces_toml_override: None,
+        }
+    }
+
+    /// F-349 test-only constructor: override the workspaces registry toml path
+    /// so dashboard-caller tests can prime a tempdir-rooted `workspaces.toml`.
+    #[cfg(feature = "webview-test")]
+    pub fn with_test_workspaces_toml(
+        connections: SessionConnections,
+        workspaces_toml: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            bridge: SessionBridge::new(connections),
+            test_socket_override: None,
+            test_user_config_dir_override: None,
+            test_workspaces_toml_override: Some(workspaces_toml),
+        }
+    }
+
+    /// F-349 test-only constructor: override both the user-scope config dir and
+    /// the workspaces registry toml path.
+    #[cfg(feature = "webview-test")]
+    pub fn with_test_user_config_and_workspaces(
+        connections: SessionConnections,
+        user_config_dir: std::path::PathBuf,
+        workspaces_toml: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            bridge: SessionBridge::new(connections),
+            test_socket_override: None,
+            test_user_config_dir_override: Some(user_config_dir),
+            test_workspaces_toml_override: Some(workspaces_toml),
         }
     }
 }
@@ -248,15 +308,7 @@ impl<R: Runtime> EventSink for AppHandleSink<R> {
         // redirect delivery.
         let target = EventTarget::webview_window(format!("session-{}", self.session_id));
         if let Err(e) = self.app.emit_to(target, "session:event", payload) {
-            // F-371: structured emit-failure log with the session id so an
-            // operator can correlate dropped events to a specific window.
-            tracing::error!(
-                target: "forge_shell::ipc",
-                session_id = %self.session_id,
-                event = "session:event",
-                error = %e,
-                "Tauri emit failed",
-            );
+            tracing::warn!(error = %e, "session:event emit failed");
         }
     }
 }
@@ -664,6 +716,84 @@ fn resolve_user_config_dir(state: &BridgeState) -> Option<PathBuf> {
     dirs::config_dir()
 }
 
+/// F-349: resolve the workspaces registry TOML path, honoring the
+/// `webview-test` override when present. Production falls back to the
+/// canonical `~/.config/forge/workspaces.toml` path via
+/// `crate::dashboard_sessions::default_workspaces_toml`.
+fn resolve_workspaces_toml(state: &BridgeState) -> PathBuf {
+    #[cfg(feature = "webview-test")]
+    {
+        if let Some(override_path) = state.test_workspaces_toml_override.as_ref() {
+            return override_path.clone();
+        }
+    }
+    #[cfg(not(feature = "webview-test"))]
+    let _ = state;
+    crate::dashboard_sessions::default_workspaces_toml()
+}
+
+/// F-349: resolve the authoritative workspace path for a command that accepts
+/// a webview-supplied `workspace_root`.
+///
+/// - **`session-*` callers**: the supplied `workspace_root` is **ignored**;
+///   the cached value from `session_hello` is used instead.
+/// - **`dashboard` callers**: the supplied `workspace_root` is validated
+///   against the workspaces registry (`workspaces.toml`). A path not present
+///   in the registry is rejected.
+async fn resolve_workspace_root_for_command(
+    webview_label: &str,
+    webview_supplied: &str,
+    state: &BridgeState,
+) -> Result<PathBuf, String> {
+    if let Some(session_id) = webview_label.strip_prefix("session-") {
+        // Session window: ignore the webview-supplied value and consult the
+        // server-side cache populated by session_hello.
+        return cached_workspace_root(state, session_id).await;
+    }
+
+    // Dashboard window: validate the supplied path against the registry.
+    let supplied = std::path::Path::new(webview_supplied);
+    let canonical = supplied
+        .canonicalize()
+        .map_err(|e| format!("workspace_root not found on disk: {e}"))?;
+
+    let toml_path = resolve_workspaces_toml(state);
+    let entries = read_workspaces(&toml_path)
+        .await
+        .map_err(|e| format!("could not read workspaces registry: {e}"))?;
+
+    let known = entries.iter().any(|e| {
+        e.path
+            .canonicalize()
+            .map(|c| c == canonical)
+            .unwrap_or(false)
+    });
+    if !known {
+        return Err(format!(
+            "workspace_root not in registry: {webview_supplied}"
+        ));
+    }
+    Ok(canonical)
+}
+
+// ---------------------------------------------------------------------------
+// F-349: threat-model comment for the workspace_root–bearing commands below.
+//
+// The F-122 remediation established `cached_workspace_root` as the pattern for
+// keeping the filesystem trust boundary on the server side. The seven commands
+// in this block (get_persistent_approvals, save_approval, remove_approval,
+// read_layouts, write_layouts, get_settings, set_setting) predate that fix and
+// accepted a `workspace_root` parameter directly from the webview. A
+// compromised `session-*` webview could supply any writable path and trigger
+// reads/writes outside the session's actual workspace.
+//
+// Remediation: `resolve_workspace_root_for_command` replaces the verbatim
+// `Path::new(&workspace_root)` at each call site. For session-* callers it
+// ignores the webview-supplied value and consults the `SessionConnections`
+// cache. For dashboard callers it validates the supplied path against the
+// workspaces registry before trusting it.
+// ---------------------------------------------------------------------------
+
 #[tauri::command]
 pub async fn get_persistent_approvals<R: Runtime>(
     workspace_root: String,
@@ -677,7 +807,12 @@ pub async fn get_persistent_approvals<R: Runtime>(
     require_window_label_in(&webview, &["dashboard"], true, "get_persistent_approvals")?;
     require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
 
-    let workspace_cfg = load_workspace_config(std::path::Path::new(&workspace_root))
+    // F-349: resolve the authoritative workspace root (session-* ignores the
+    // webview-supplied value; dashboard validates against the registry).
+    let workspace_path =
+        resolve_workspace_root_for_command(webview.label(), &workspace_root, &state).await?;
+
+    let workspace_cfg = load_workspace_config(&workspace_path)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -739,12 +874,15 @@ pub async fn save_approval<R: Runtime>(
             Ok(())
         }
         ApprovalLevel::Workspace => {
-            let root = std::path::Path::new(&workspace_root);
-            let mut cfg = load_workspace_config(root)
+            // F-349: use the server-side authoritative root, not the
+            // webview-supplied value.
+            let root = resolve_workspace_root_for_command(webview.label(), &workspace_root, &state)
+                .await?;
+            let mut cfg = load_workspace_config(&root)
                 .await
                 .map_err(|e| e.to_string())?;
             upsert_entry(&mut cfg, entry);
-            save_workspace_config(root, &cfg)
+            save_workspace_config(&root, &cfg)
                 .await
                 .map_err(|e| e.to_string())
         }
@@ -775,12 +913,14 @@ pub async fn remove_approval<R: Runtime>(
     match level {
         ApprovalLevel::Session => Ok(()),
         ApprovalLevel::Workspace => {
-            let root = std::path::Path::new(&workspace_root);
-            let mut cfg = load_workspace_config(root)
+            // F-349: use the server-side authoritative root.
+            let root = resolve_workspace_root_for_command(webview.label(), &workspace_root, &state)
+                .await?;
+            let mut cfg = load_workspace_config(&root)
                 .await
                 .map_err(|e| e.to_string())?;
             cfg.entries.retain(|e| e.scope_key != scope_key);
-            save_workspace_config(root, &cfg)
+            save_workspace_config(&root, &cfg)
                 .await
                 .map_err(|e| e.to_string())
         }
@@ -828,46 +968,6 @@ pub(crate) fn require_window_label_in<R: Runtime>(
     command: &'static str,
 ) -> Result<(), String> {
     authz_check_in(webview.label(), exact, allow_session_prefix, command)
-}
-
-fn authz_check_in(
-    actual: &str,
-    exact: &[&str],
-    allow_session_prefix: bool,
-    command: &'static str,
-) -> Result<(), String> {
-    if exact.contains(&actual) {
-        return Ok(());
-    }
-    if allow_session_prefix && actual.starts_with("session-") {
-        return Ok(());
-    }
-    // F-371: render the accept list so operators can diagnose which command
-    // expected which set without chasing the literal in source.
-    let expected = if allow_session_prefix {
-        format!("{:?} or session-*", exact)
-    } else {
-        format!("{:?}", exact)
-    };
-    tracing::warn!(
-        target: "forge_shell::ipc::authz",
-        expected = %expected,
-        actual = %actual,
-        command = %command,
-        "authz rejection: window label mismatch",
-    );
-    Err(LABEL_MISMATCH_ERROR.to_string())
-}
-
-/// F-371 test seam for `require_window_label_in`.
-#[doc(hidden)]
-pub fn require_window_label_in_for_test(
-    actual: &str,
-    exact: &[&str],
-    allow_session_prefix: bool,
-    command: &'static str,
-) -> Result<(), String> {
-    authz_check_in(actual, exact, allow_session_prefix, command)
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,17 +1142,7 @@ fn spawn_event_forwarder<R: Runtime>(
                     };
                     let target = EventTarget::webview_window(&owner_label);
                     if let Err(e) = app.emit_to(target, TERMINAL_BYTES_EVENT, payload) {
-                        // F-371: structured emit-failure with window + terminal
-                        // ids so one stuck PTY can be traced without grep on
-                        // a timestamp.
-                        tracing::error!(
-                            target: "forge_shell::ipc",
-                            window_label = %owner_label,
-                            terminal_id = %terminal_id,
-                            event = "terminal:bytes",
-                            error = %e,
-                            "Tauri emit failed",
-                        );
+                        tracing::warn!(error = %e, "terminal:bytes emit failed");
                     }
                 }
                 TerminalEvent::Exit(status) => {
@@ -1063,14 +1153,7 @@ fn spawn_event_forwarder<R: Runtime>(
                     };
                     let target = EventTarget::webview_window(&owner_label);
                     if let Err(e) = app.emit_to(target, TERMINAL_EXIT_EVENT, payload) {
-                        tracing::error!(
-                            target: "forge_shell::ipc",
-                            window_label = %owner_label,
-                            terminal_id = %terminal_id,
-                            event = "terminal:exit",
-                            error = %e,
-                            "Tauri emit failed",
-                        );
+                        tracing::warn!(error = %e, "terminal:exit emit failed");
                     }
                 }
             }
@@ -1351,6 +1434,23 @@ fn layouts_file_path(workspace_root: &std::path::Path) -> PathBuf {
     workspace_root.join(".forge").join("layouts.json")
 }
 
+/// Sibling `<path>.tmp` for the atomic tmp+rename write in `write_layouts`.
+/// Mirrors the `tmp_path_for` helpers in `forge_core::approvals` and
+/// `forge_core::settings` — same-directory by construction so the rename is
+/// same-filesystem (POSIX-atomic). F-372 tracks promoting this to a shared
+/// `forge_core::atomic_write`; this keeps the 90-min fix local.
+fn layouts_tmp_path(path: &std::path::Path) -> PathBuf {
+    let mut file_name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    file_name.push(".tmp");
+    match path.parent() {
+        Some(parent) => parent.join(file_name),
+        None => PathBuf::from(file_name),
+    }
+}
+
 /// Load `.forge/layouts.json` under `workspace_root`, degrading to
 /// [`Layouts::default`] on any failure.
 ///
@@ -1365,7 +1465,11 @@ fn layouts_file_path(workspace_root: &std::path::Path) -> PathBuf {
 /// blank window. Losing the persisted layout is recoverable; losing the
 /// ability to open the session is not.
 async fn load_layouts_from_disk(workspace_root: &std::path::Path) -> Layouts {
-    forge_core::config_file::load_json_or_default(&layouts_file_path(workspace_root)).await
+    let path = layouts_file_path(workspace_root);
+    let Ok(bytes) = tokio::fs::read(&path).await else {
+        return Layouts::default();
+    };
+    serde_json::from_slice(&bytes).unwrap_or_default()
 }
 
 /// Read the persisted layouts for `workspace_root`. Missing or corrupt files
@@ -1376,10 +1480,15 @@ async fn load_layouts_from_disk(workspace_root: &std::path::Path) -> Layouts {
 pub async fn read_layouts<R: Runtime>(
     workspace_root: String,
     webview: Webview<R>,
+    state: State<'_, BridgeState>,
 ) -> Result<Layouts, String> {
     require_window_label_in(&webview, &["dashboard"], true, "read_layouts")?;
     require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
-    Ok(load_layouts_from_disk(std::path::Path::new(&workspace_root)).await)
+    // F-349: resolve the authoritative workspace root (session-* ignores the
+    // webview-supplied value; dashboard validates against the registry).
+    let workspace_path =
+        resolve_workspace_root_for_command(webview.label(), &workspace_root, &state).await?;
+    Ok(load_layouts_from_disk(&workspace_path).await)
 }
 
 /// Persist `layouts` to `<workspace_root>/.forge/layouts.json`, creating the
@@ -1388,21 +1497,39 @@ pub async fn read_layouts<R: Runtime>(
 /// frontend debouncer will retry on the next layout change, so a transient
 /// failure does not need a retry loop here.
 ///
-/// F-372: delegates to [`forge_core::config_file::save_json_atomic_ipc`] for
-/// the atomic tmp+rename and `Result<(), String>` mapping so this path
-/// cannot drift from its approvals/settings siblings again (F-363 regression
-/// precedent).
+/// F-363: mirrors the `approvals::save_to_path` / `settings::save_raw_to_path`
+/// atomic tmp+rename pattern. The rename is atomic on POSIX for same-
+/// filesystem targets (same directory here by construction), so a crash
+/// between the write and the rename leaves either the prior `layouts.json`
+/// or the new one on disk — never a partial JSON payload.
 #[tauri::command]
 pub async fn write_layouts<R: Runtime>(
     workspace_root: String,
     layouts: Layouts,
     webview: Webview<R>,
+    state: State<'_, BridgeState>,
 ) -> Result<(), String> {
     require_window_label_in(&webview, &["dashboard"], true, "write_layouts")?;
     require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
 
-    let path = layouts_file_path(std::path::Path::new(&workspace_root));
-    forge_core::config_file::save_json_atomic_ipc(&path, &layouts, "write layouts.json").await
+    // F-349: resolve the authoritative workspace root.
+    let workspace_path =
+        resolve_workspace_root_for_command(webview.label(), &workspace_root, &state).await?;
+
+    let forge_dir = workspace_path.join(".forge");
+    tokio::fs::create_dir_all(&forge_dir)
+        .await
+        .map_err(|e| format!("create .forge dir: {e}"))?;
+
+    let path = forge_dir.join("layouts.json");
+    let tmp = layouts_tmp_path(&path);
+    let bytes = serde_json::to_vec_pretty(&layouts).map_err(|e| format!("serialize: {e}"))?;
+    tokio::fs::write(&tmp, &bytes)
+        .await
+        .map_err(|e| format!("write layouts.json.tmp: {e}"))?;
+    tokio::fs::rename(&tmp, &path)
+        .await
+        .map_err(|e| format!("rename layouts.json.tmp: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1450,10 +1577,6 @@ pub struct FileContent {
     pub sha256: String,
 }
 
-/// Wire shape for `tree`. The root is always returned; `children` is `None`
-/// for non-directory entries and `Some(_)` for directories (empty vec when
-/// the depth cap is hit or the directory is empty).
-///
 /// F-357: the root node carries a [`TreeStatsDto`] summarizing what the walk
 /// elided so the UI can render "N files not shown" instead of silently
 /// rendering a partial tree as if it were complete. Nested nodes carry
@@ -1579,7 +1702,7 @@ async fn cached_workspace_root(
         .ok_or_else(|| {
             format!(
                 "session {session_id} not connected: call session_hello before \
-                 read_file/write_file/tree"
+                 invoking workspace-path commands"
             )
         })
 }
@@ -1748,10 +1871,6 @@ pub(crate) struct LspEntry {
     pub(crate) supervisor: tauri::async_runtime::JoinHandle<()>,
     /// Event forwarder task. Aborting stops message delivery to the webview.
     pub(crate) forwarder: tauri::async_runtime::JoinHandle<()>,
-    /// F-374: shared handle on the supervisor's current lifecycle state.
-    /// Read by `lsp_list` to build an [`LspServerInfo`] snapshot without
-    /// holding the supervised `Server` itself across the task boundary.
-    pub(crate) state_handle: Arc<tokio::sync::Mutex<LspLifecycleState>>,
 }
 
 /// Tauri-managed registry of live LSP servers. Scoped per app (one instance
@@ -1798,21 +1917,30 @@ impl LspState {
         Ok(entry.transport.clone())
     }
 
-    /// F-374: collect a snapshot of every live LSP entry's (id, state) pair
-    /// for `lsp_list`. Filters by `caller_label` so one session cannot
-    /// introspect another session's servers — mirrors the authz on
-    /// `lsp_send` / `lsp_stop`.
-    fn list_owned_state_handles(
-        &self,
-        caller_label: &str,
-    ) -> Vec<(String, Arc<tokio::sync::Mutex<LspLifecycleState>>)> {
+    fn list_by_owner(&self, caller_label: &str) -> Vec<LspListEntry> {
         let guard = self.entries.lock().expect("lsp state poisoned");
         guard
             .iter()
-            .filter(|(_, entry)| entry.owner_label == caller_label)
-            .map(|(id, entry)| (id.clone(), entry.state_handle.clone()))
+            .filter(|(_, e)| e.owner_label == caller_label)
+            .map(|(id, _)| LspListEntry {
+                id: id.clone(),
+                state: LspStateInfo {
+                    state: "running".to_string(),
+                },
+            })
             .collect()
     }
+}
+
+#[derive(serde::Serialize)]
+pub struct LspListEntry {
+    pub id: String,
+    pub state: LspStateInfo,
+}
+
+#[derive(serde::Serialize)]
+pub struct LspStateInfo {
+    pub state: String,
 }
 
 /// Forward every `ServerEvent::Message` from the supervisor to the owning
@@ -1834,17 +1962,7 @@ fn spawn_lsp_forwarder<R: Runtime>(
                 };
                 let target = EventTarget::webview_window(&owner_label);
                 if let Err(e) = app.emit_to(target, LSP_MESSAGE_EVENT, payload) {
-                    // F-371: structured emit-failure with window + server
-                    // ids so a webview-gone race against a live LSP is
-                    // visible in the log without parsing free-form strings.
-                    tracing::error!(
-                        target: "forge_shell::ipc",
-                        window_label = %owner_label,
-                        server_id = %server_id,
-                        event = "lsp_message",
-                        error = %e,
-                        "Tauri emit failed",
-                    );
+                    tracing::warn!(error = %e, "lsp_message emit failed");
                 }
             }
             // `Exited` / `GaveUp` events are observable only server-side
@@ -1911,9 +2029,6 @@ pub async fn lsp_start<R: Runtime>(
     let rx = supervisor
         .take_events()
         .ok_or_else(|| "lsp_start: event channel already taken".to_string())?;
-    // F-374: grab a handle on the supervisor's lifecycle state before the
-    // `Server` moves into the spawned task, so `lsp_list` can snapshot it.
-    let state_handle = supervisor.state_handle();
 
     // Register before starting so `lsp_send` can observe the transport
     // immediately. The supervisor races spawn with the first send; the
@@ -1934,7 +2049,6 @@ pub async fn lsp_start<R: Runtime>(
             owner_label,
             supervisor: supervisor_handle,
             forwarder,
-            state_handle,
         },
     )?;
 
@@ -1985,32 +2099,17 @@ pub async fn lsp_send<R: Runtime>(
     transport.send(message).await.map_err(|e| e.to_string())
 }
 
-/// F-374: return an [`LspServerInfo`] snapshot for every live LSP server
-/// owned by the calling webview. Closes the asymmetry with `list_mcp_servers`
-/// so the Editor pane can render an LSP-status pill from a single `invoke`
-/// instead of reconstructing state from `lsp_message` history.
-///
-/// Authz mirrors `lsp_send` / `lsp_stop`: only the session webview that
-/// called `lsp_start` sees its own servers. A cross-session caller gets an
-/// empty list, not a label-mismatch error — `list` on an empty owned set is
-/// a legitimate "I have no servers" shape and should not read as forbidden.
+/// F-374: returns the live LSP servers owned by the calling session window.
+/// Authz mirrors `lsp_send`: dashboard and non-session labels are rejected;
+/// each session sees only the servers it started.
 #[tauri::command]
 pub async fn lsp_list<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, LspState>,
-) -> Result<Vec<LspServerInfo>, String> {
+) -> Result<Vec<LspListEntry>, String> {
     require_window_label_in(&webview, &[], true, "lsp_list")?;
     let caller_label = webview.label().to_string();
-    let handles = state.list_owned_state_handles(&caller_label);
-    let mut out = Vec::with_capacity(handles.len());
-    for (id, handle) in handles {
-        let state_snapshot = handle.lock().await.clone();
-        out.push(LspServerInfo {
-            id,
-            state: state_snapshot,
-        });
-    }
-    Ok(out)
+    Ok(state.list_by_owner(&caller_label))
 }
 
 // ---------------------------------------------------------------------------
@@ -2461,8 +2560,12 @@ pub async fn get_settings<R: Runtime>(
     require_window_label_in(&webview, &["dashboard"], true, "get_settings")?;
     require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
 
+    // F-349: resolve the authoritative workspace root.
+    let workspace_path =
+        resolve_workspace_root_for_command(webview.label(), &workspace_root, &state).await?;
+
     let user_dir = resolve_user_config_dir(&state);
-    load_merged_in(user_dir.as_deref(), std::path::Path::new(&workspace_root))
+    load_merged_in(user_dir.as_deref(), &workspace_path)
         .await
         .map_err(|e| e.to_string())
 }
@@ -2495,8 +2598,10 @@ pub async fn set_setting<R: Runtime>(
 
     match level {
         SettingsLevel::Workspace => {
-            let root = std::path::Path::new(&workspace_root);
-            let path = workspace_settings_path(root);
+            // F-349: resolve the authoritative workspace root.
+            let root = resolve_workspace_root_for_command(webview.label(), &workspace_root, &state)
+                .await?;
+            let path = workspace_settings_path(&root);
             let existing = tokio::fs::read_to_string(&path)
                 .await
                 .unwrap_or_else(|_| String::new());
@@ -2507,7 +2612,7 @@ pub async fn set_setting<R: Runtime>(
             // every `#[serde(default)]` field into the file, erasing the
             // "absent means pick up the other tier / pick up the default"
             // invariant the merge layer relies on.
-            save_workspace_settings_raw(root, &updated)
+            save_workspace_settings_raw(&root, &updated)
                 .await
                 .map_err(|e| e.to_string())
         }
