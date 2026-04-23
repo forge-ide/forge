@@ -6,6 +6,7 @@ import {
   computePopupPlacement,
   detectAtTrigger,
   type PickerResult,
+  type CategoryState,
 } from './ContextPicker';
 
 // ---------------------------------------------------------------------------
@@ -544,5 +545,113 @@ describe('ContextPicker placement data attribute', () => {
     ));
     const root = getByTestId('context-picker');
     expect(root.getAttribute('data-placement')).toBe('below');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-399: loading / error / success states per category
+// ---------------------------------------------------------------------------
+
+describe('ContextPicker — loading/error/success states (F-399)', () => {
+  const anchor = { top: 100, bottom: 160, left: 0, right: 360 };
+
+  it('renders "Searching…" when the active category state is loading', () => {
+    const loadingState: CategoryState = { status: 'loading' };
+    const { getByTestId, queryByTestId } = render(() => (
+      <ContextPicker
+        query="src"
+        anchorRect={anchor}
+        items={{ file: loadingState }}
+        onPick={() => {}}
+        onDismiss={() => {}}
+      />
+    ));
+    expect(getByTestId('context-picker-loading')).toBeInTheDocument();
+    expect(getByTestId('context-picker-loading')).toHaveTextContent('Searching…');
+    // Should not show empty or error states simultaneously.
+    expect(queryByTestId('context-picker-empty')).not.toBeInTheDocument();
+    expect(queryByTestId('context-picker-error')).not.toBeInTheDocument();
+  });
+
+  it('renders an error with the message when the category state is error', () => {
+    const errorState: CategoryState = { status: 'error', message: 'resolver timed out' };
+    const { getByTestId, queryByTestId } = render(() => (
+      <ContextPicker
+        query="src"
+        anchorRect={anchor}
+        items={{ file: errorState }}
+        onPick={() => {}}
+        onDismiss={() => {}}
+      />
+    ));
+    expect(getByTestId('context-picker-error')).toBeInTheDocument();
+    expect(getByTestId('context-picker-error')).toHaveTextContent('resolver timed out');
+    expect(queryByTestId('context-picker-loading')).not.toBeInTheDocument();
+    expect(queryByTestId('context-picker-empty')).not.toBeInTheDocument();
+  });
+
+  it('renders results when the category state is success with items', () => {
+    const successState: CategoryState = {
+      status: 'success',
+      items: [{ category: 'file', label: 'main.ts', value: 'main.ts' }],
+    };
+    const { getByTestId, queryByTestId } = render(() => (
+      <ContextPicker
+        query=""
+        anchorRect={anchor}
+        items={{ file: successState }}
+        onPick={() => {}}
+        onDismiss={() => {}}
+      />
+    ));
+    expect(getByTestId('context-picker-result-0')).toBeInTheDocument();
+    expect(queryByTestId('context-picker-loading')).not.toBeInTheDocument();
+    expect(queryByTestId('context-picker-error')).not.toBeInTheDocument();
+  });
+
+  it('renders the empty state when the category state is success with no items', () => {
+    const emptySuccess: CategoryState = { status: 'success', items: [] };
+    const { getByTestId } = render(() => (
+      <ContextPicker
+        query=""
+        anchorRect={anchor}
+        items={{ file: emptySuccess }}
+        onPick={() => {}}
+        onDismiss={() => {}}
+      />
+    ));
+    expect(getByTestId('context-picker-empty')).toBeInTheDocument();
+  });
+
+  it('backward-compat: plain PickerResult[] prop still renders as success', () => {
+    const items: PickerResult[] = [{ category: 'file', label: 'a.ts', value: 'a.ts' }];
+    const { getByTestId } = render(() => (
+      <ContextPicker
+        query=""
+        anchorRect={anchor}
+        items={{ file: items }}
+        onPick={() => {}}
+        onDismiss={() => {}}
+      />
+    ));
+    expect(getByTestId('context-picker-result-0')).toBeInTheDocument();
+  });
+
+  it('shows the error state for the active tab while other tabs are loading', () => {
+    const anchor2 = { top: 100, bottom: 160, left: 0, right: 360 };
+    const fileError: CategoryState = { status: 'error', message: 'file resolver failed' };
+    const dirLoading: CategoryState = { status: 'loading' };
+    const { getByTestId, queryByTestId } = render(() => (
+      <ContextPicker
+        query="x"
+        anchorRect={anchor2}
+        items={{ file: fileError, directory: dirLoading }}
+        onPick={() => {}}
+        onDismiss={() => {}}
+      />
+    ));
+    // file tab is active by default — should show error.
+    expect(getByTestId('context-picker-error')).toBeInTheDocument();
+    expect(queryByTestId('context-picker-loading')).not.toBeInTheDocument();
   });
 });

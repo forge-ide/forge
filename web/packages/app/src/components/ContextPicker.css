@@ -133,6 +133,26 @@
   font-style: italic;
 }
 
+/* F-399: loading sentinel — matches "Searching…" copy. */
+.context-picker__loading {
+  padding: var(--sp-3) var(--sp-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  font-style: italic;
+}
+
+/* F-399: per-tab error — ember-400 border per ai-patterns.md §"error". */
+.context-picker__error {
+  padding: var(--sp-2) var(--sp-3);
+  margin: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--color-ember-400);
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-ember-400);
+}
+
 .context-picker__result {
   display: flex;
   align-items: center;

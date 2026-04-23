@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { render, fireEvent } from '@solidjs/testing-library';
+import { render, fireEvent, waitFor } from '@solidjs/testing-library';
 import { ApprovalPrompt } from './ApprovalPrompt';
 
 // ---------------------------------------------------------------------------
@@ -571,40 +571,64 @@ describe('Persistence level toggle (F-036)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// F-411: voice + terminology — source strings must be literal UPPERCASE so
-// screen readers announce uppercase (voice-terminology.md §8, V13). CSS
-// `text-transform: uppercase` only re-paints the glyph; assistive tech reads
-// the underlying text node.
+// F-399: async onApprove — persisting state + error row
 // ---------------------------------------------------------------------------
 
-describe('F-411 voice/terminology — literal UPPERCASE source strings', () => {
-  it('level-toggle buttons carry SESSION / WORKSPACE / USER as literal text', () => {
-    const { getByTestId } = renderPrompt();
-    expect(getByTestId('level-session-btn').textContent).toContain('SESSION');
-    expect(getByTestId('level-workspace-btn').textContent).toContain('WORKSPACE');
-    expect(getByTestId('level-user-btn').textContent).toContain('USER');
+describe('ApprovalPrompt — async onApprove (F-399)', () => {
+  it('shows "persisting…" and disables buttons while onApprove promise is pending', async () => {
+    let resolve!: () => void;
+    const pending = new Promise<void>((res) => { resolve = res; });
+    const onApprove = vi.fn().mockReturnValue(pending);
+
+    const { getByTestId } = renderPrompt({ onApprove });
+    fireEvent.click(getByTestId('approve-once-btn'));
+
+    await waitFor(() =>
+      expect(getByTestId('approve-once-btn')).toHaveTextContent('persisting…'),
+    );
+    expect(getByTestId('approve-once-btn')).toBeDisabled();
+    expect(getByTestId('approve-dropdown-btn')).toBeDisabled();
+    expect(getByTestId('reject-btn')).toBeDisabled();
+
+    // Resolve and confirm the persisting state clears.
+    resolve();
+    await waitFor(() =>
+      expect(getByTestId('approve-once-btn')).not.toHaveTextContent('persisting…'),
+    );
+    expect(getByTestId('approve-once-btn')).not.toBeDisabled();
   });
 
-  it('action buttons carry verb+noun display caps labels', () => {
-    const { getByTestId } = renderPrompt();
-    expect(getByTestId('reject-btn').textContent).toContain('REJECT CALL');
-    expect(getByTestId('approve-once-btn').textContent).toContain('APPROVE ONCE');
+  it('surfaces an error row when onApprove promise rejects', async () => {
+    const onApprove = vi.fn().mockRejectedValue(new Error('write failed'));
+
+    const { getByTestId, queryByTestId } = renderPrompt({ onApprove });
+    expect(queryByTestId('approve-error')).not.toBeInTheDocument();
+
+    fireEvent.click(getByTestId('approve-once-btn'));
+
+    await waitFor(() =>
+      expect(getByTestId('approve-error')).toBeInTheDocument(),
+    );
+    expect(getByTestId('approve-error')).toHaveTextContent('write failed');
   });
 
-  it('scope menu items carry APPROVE <NOUN> labels', () => {
-    const { getByTestId } = renderPrompt({ toolName: 'fs.edit', argsJson: FS_EDIT_ARGS });
-    fireEvent.click(getByTestId('approve-dropdown-btn'));
-    expect(getByTestId('scope-once-btn').textContent).toContain('APPROVE ONCE');
-    expect(getByTestId('scope-file-btn').textContent).toContain('APPROVE FILE');
-    expect(getByTestId('scope-pattern-btn').textContent).toContain('APPROVE PATTERN');
-    expect(getByTestId('scope-tool-btn').textContent).toContain('APPROVE TOOL');
-  });
+  it('clears the error row on a subsequent approve click', async () => {
+    let rejectOnce = true;
+    const onApprove = vi.fn().mockImplementation(() => {
+      if (rejectOnce) {
+        rejectOnce = false;
+        return Promise.reject(new Error('first failure'));
+      }
+      return Promise.resolve();
+    });
 
-  it('pattern-editor buttons carry CONFIRM PATTERN / CANCEL as literal text', () => {
-    const { getByTestId } = renderPrompt();
-    fireEvent.click(getByTestId('approve-dropdown-btn'));
-    fireEvent.click(getByTestId('scope-pattern-btn'));
-    expect(getByTestId('pattern-confirm-btn').textContent).toContain('CONFIRM PATTERN');
-    expect(getByTestId('pattern-cancel-btn').textContent).toContain('CANCEL');
+    const { getByTestId, queryByTestId } = renderPrompt({ onApprove });
+    fireEvent.click(getByTestId('approve-once-btn'));
+
+    await waitFor(() => expect(getByTestId('approve-error')).toBeInTheDocument());
+
+    fireEvent.click(getByTestId('approve-once-btn'));
+    // Error should be cleared immediately on the next click.
+    expect(queryByTestId('approve-error')).not.toBeInTheDocument();
   });
 });

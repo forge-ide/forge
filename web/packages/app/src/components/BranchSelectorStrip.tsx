@@ -1,4 +1,4 @@
-import { type Component, Show } from 'solid-js';
+import { type Component, Show, createMemo } from 'solid-js';
 import './BranchSelectorStrip.css';
 
 /**
@@ -26,8 +26,12 @@ import './BranchSelectorStrip.css';
 export interface BranchSelectorStripProps {
   /** 1-indexed position of the active variant among live siblings. */
   position: number;
-  /** Total number of live (non-deleted) variants in this group. */
-  total: number;
+  /**
+   * Total number of live (non-deleted) variants in this group.
+   * When `undefined` the strip is in a loading state and renders a ghost
+   * skeleton label instead of live counts (F-399).
+   */
+  total: number | undefined;
   /** Invoked when the user requests the previous sibling. */
   onPrev: () => void;
   /** Invoked when the user requests the next sibling. */
@@ -36,9 +40,17 @@ export interface BranchSelectorStripProps {
   onToggleInfo: () => void;
   /** When `true`, the info button reflects the "open" state. */
   infoOpen: boolean;
+  /**
+   * When `true` the strip is loading variant data and renders a ghost label.
+   * Callers may pass `loading` instead of leaving `total` undefined; both
+   * paths produce the same skeleton treatment (F-399).
+   */
+  loading?: boolean;
 }
 
 export const BranchSelectorStrip: Component<BranchSelectorStripProps> = (props) => {
+  const isLoading = createMemo(() => props.loading === true || props.total === undefined);
+
   const handleKey = (e: KeyboardEvent): void => {
     if (e.key === 'ArrowLeft') {
       e.preventDefault();
@@ -70,9 +82,22 @@ export const BranchSelectorStrip: Component<BranchSelectorStripProps> = (props) 
       >
         {'\u25c0'}
       </button>
-      <span class="branch-strip__label" data-testid="branch-strip-label">
-        variant {props.position} of {props.total}
-      </span>
+      <Show
+        when={!isLoading()}
+        fallback={
+          <span
+            class="branch-strip__label branch-strip__label--loading"
+            data-testid="branch-strip-label"
+            aria-label="Loading variant count"
+          >
+            variant — of —
+          </span>
+        }
+      >
+        <span class="branch-strip__label" data-testid="branch-strip-label">
+          variant {props.position} of {props.total}
+        </span>
+      </Show>
       <button
         type="button"
         class="branch-strip__arrow branch-strip__arrow--next"

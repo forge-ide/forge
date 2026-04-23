@@ -162,6 +162,11 @@ export type ChatTurn =
       model?: string;
       /** F-448 Phase 3: number of tools exposed to the child agent. */
       tool_count?: number;
+      /**
+       * F-399: Human-readable error detail set when `status === 'error'`.
+       * Rendered as an error-detail row below the header.
+       */
+      error_detail?: string;
     }
   | { type: 'error'; message: string };
 

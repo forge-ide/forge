@@ -242,6 +242,27 @@
 }
 
 /* -------------------------------------------------------------------------
+   F-399: async approve error row
+   ---------------------------------------------------------------------- */
+
+.approval-prompt__error {
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--color-ember-400);
+  border-radius: var(--r-sm);
+  background: rgba(255, 74, 18, 0.08);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-ember-400);
+}
+
+/* Disabled state during persisting — lower opacity, no pointer events. */
+.approval-prompt__btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* -------------------------------------------------------------------------
    Scope dropdown menu
    ---------------------------------------------------------------------- */
 

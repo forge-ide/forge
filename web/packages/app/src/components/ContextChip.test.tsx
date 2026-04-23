@@ -95,4 +95,101 @@ describe('ContextChip', () => {
     fireEvent.mouseLeave(getByTestId('ctx-chip'));
     expect(queryByTestId('ctx-chip-preview')).toBeNull();
   });
+
+  // -------------------------------------------------------------------------
+  // F-399: error state, retry, role fix
+  // -------------------------------------------------------------------------
+
+  it('shows an error message in the popover when loadPreview rejects', async () => {
+    const loadPreview = vi.fn().mockRejectedValue(new Error('not found'));
+    const { getByTestId } = render(() => (
+      <ContextChip
+        category="file"
+        label="app.ts"
+        value="/ws/app.ts"
+        loadPreview={loadPreview}
+        onDismiss={() => {}}
+      />
+    ));
+    fireEvent.mouseEnter(getByTestId('ctx-chip'));
+    await waitFor(() =>
+      expect(getByTestId('ctx-chip-preview')).toHaveTextContent('not found'),
+    );
+  });
+
+  it('shows a RETRY button when the preview errors', async () => {
+    const loadPreview = vi.fn().mockRejectedValue(new Error('oops'));
+    const { getByTestId } = render(() => (
+      <ContextChip
+        category="file"
+        label="app.ts"
+        value="/ws/app.ts"
+        loadPreview={loadPreview}
+        onDismiss={() => {}}
+      />
+    ));
+    fireEvent.mouseEnter(getByTestId('ctx-chip'));
+    await waitFor(() => expect(getByTestId('ctx-chip-retry')).toBeInTheDocument());
+  });
+
+  it('retry button triggers a fresh load and shows the preview on success', async () => {
+    let attempt = 0;
+    const loadPreview = vi.fn().mockImplementation(() => {
+      attempt++;
+      if (attempt === 1) return Promise.reject(new Error('transient'));
+      return Promise.resolve('recovered content');
+    });
+    const { getByTestId } = render(() => (
+      <ContextChip
+        category="file"
+        label="app.ts"
+        value="/ws/app.ts"
+        loadPreview={loadPreview}
+        onDismiss={() => {}}
+      />
+    ));
+    fireEvent.mouseEnter(getByTestId('ctx-chip'));
+    await waitFor(() => expect(getByTestId('ctx-chip-retry')).toBeInTheDocument());
+
+    fireEvent.mouseDown(getByTestId('ctx-chip-retry'));
+    await waitFor(() =>
+      expect(getByTestId('ctx-chip-preview')).toHaveTextContent('recovered content'),
+    );
+  });
+
+  it('clears the error state at the start of a new hover after a previous error', async () => {
+    let attempt = 0;
+    const loadPreview = vi.fn().mockImplementation(() => {
+      attempt++;
+      if (attempt === 1) return Promise.reject(new Error('first error'));
+      return Promise.resolve('ok');
+    });
+    const { getByTestId, queryByTestId } = render(() => (
+      <ContextChip
+        category="file"
+        label="app.ts"
+        value="/ws/app.ts"
+        loadPreview={loadPreview}
+        onDismiss={() => {}}
+      />
+    ));
+    // First hover — error.
+    fireEvent.mouseEnter(getByTestId('ctx-chip'));
+    await waitFor(() => expect(getByTestId('ctx-chip-preview')).toHaveTextContent('first error'));
+
+    // Leave and re-enter — should clear error and attempt a fresh load.
+    fireEvent.mouseLeave(getByTestId('ctx-chip'));
+    fireEvent.mouseEnter(getByTestId('ctx-chip'));
+    await waitFor(() =>
+      expect(getByTestId('ctx-chip-preview')).toHaveTextContent('ok'),
+    );
+    expect(queryByTestId('ctx-chip-retry')).not.toBeInTheDocument();
+  });
+
+  it('chip root has role="group" (not a button or tooltip)', () => {
+    const { getByTestId } = render(() => (
+      <ContextChip category="file" label="main.ts" onDismiss={() => {}} />
+    ));
+    expect(getByTestId('ctx-chip')).toHaveAttribute('role', 'group');
+  });
 });

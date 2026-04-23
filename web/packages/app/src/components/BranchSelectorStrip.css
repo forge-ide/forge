@@ -61,6 +61,12 @@
   flex: 1 1 auto;
 }
 
+/* F-399: ghost/skeleton label while variant count is loading. */
+.branch-strip__label--loading {
+  color: var(--color-text-tertiary, #3a4a5a);
+  font-style: italic;
+}
+
 .branch-strip__info[aria-expanded='true'] {
   background: var(--color-surface-3, #181c26);
   color: var(--color-text-primary, #eae6de);

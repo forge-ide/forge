@@ -2,6 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { render, fireEvent } from '@solidjs/testing-library';
 import { BranchSelectorStrip } from './BranchSelectorStrip';
 
+// ---------------------------------------------------------------------------
+// F-399: loading state
+// ---------------------------------------------------------------------------
+
 describe('BranchSelectorStrip', () => {
   it('renders position/total label', () => {
     const { getByTestId } = render(() => (
@@ -99,5 +103,54 @@ describe('BranchSelectorStrip', () => {
     expect(info.getAttribute('aria-expanded')).toBe('true');
     fireEvent.click(info);
     expect(onToggleInfo).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('BranchSelectorStrip — loading state (F-399)', () => {
+  it('renders ghost label when total is undefined', () => {
+    const { getByTestId } = render(() => (
+      <BranchSelectorStrip
+        position={1}
+        total={undefined}
+        onPrev={() => {}}
+        onNext={() => {}}
+        onToggleInfo={() => {}}
+        infoOpen={false}
+      />
+    ));
+    const label = getByTestId('branch-strip-label');
+    expect(label.textContent).toContain('—');
+    expect(label.textContent).not.toMatch(/variant \d+ of \d+/);
+  });
+
+  it('renders ghost label when loading prop is true', () => {
+    const { getByTestId } = render(() => (
+      <BranchSelectorStrip
+        position={1}
+        total={3}
+        loading={true}
+        onPrev={() => {}}
+        onNext={() => {}}
+        onToggleInfo={() => {}}
+        infoOpen={false}
+      />
+    ));
+    const label = getByTestId('branch-strip-label');
+    expect(label.textContent).toContain('—');
+  });
+
+  it('renders live label when total is provided and loading is false', () => {
+    const { getByTestId } = render(() => (
+      <BranchSelectorStrip
+        position={2}
+        total={4}
+        loading={false}
+        onPrev={() => {}}
+        onNext={() => {}}
+        onToggleInfo={() => {}}
+        infoOpen={false}
+      />
+    ));
+    expect(getByTestId('branch-strip-label').textContent).toBe('variant 2 of 4');
   });
 });

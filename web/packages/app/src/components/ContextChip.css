@@ -90,3 +90,22 @@
   color: var(--color-error);
   font-style: normal;
 }
+
+/* F-399: retry button shown in the error state of the preview popover. */
+.ctx-chip__preview-retry {
+  display: inline-block;
+  margin-top: var(--sp-1);
+  padding: 0 var(--sp-2);
+  background: transparent;
+  border: 1px solid var(--color-ember-400);
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-ember-400);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.ctx-chip__preview-retry:hover {
+  background: rgba(255, 74, 18, 0.1);
+}
