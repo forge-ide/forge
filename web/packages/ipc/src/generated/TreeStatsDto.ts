@@ -8,17 +8,17 @@
  * frontend). A 4 B entry count is still well past any realistic workspace
  * tree — saturation is a surrender, not a silent overflow.
  */
-export type TreeStatsDto = {
+export type TreeStatsDto = { 
 /**
  * `true` if the entry budget was exhausted before the walk finished.
  */
-truncated: boolean,
+truncated: boolean, 
 /**
  * Count of entries the walker saw past the budget (best-effort — see
  * the `forge_fs::TreeStats` docs for the exact scope). Saturated to
  * `u32::MAX` for wire-compat with JS `number`.
  */
-omitted_count: number,
+omitted_count: number, 
 /**
  * Count of per-entry errors the walker swallowed (e.g. permission
  * denied, file disappeared mid-walk). Saturated to `u32::MAX` for

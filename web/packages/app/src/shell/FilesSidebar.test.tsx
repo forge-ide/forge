@@ -338,7 +338,6 @@ describe('FilesSidebar stats notice (F-536)', () => {
     const loadTree = vi.fn().mockResolvedValue(truncatedRoot);
     const { findByTestId } = render(() => (
       <FilesSidebar
-        sessionId={SID}
         workspaceRoot={WS}
         onOpen={vi.fn()}
         loadTree={loadTree}
@@ -357,7 +356,6 @@ describe('FilesSidebar stats notice (F-536)', () => {
     const loadTree = vi.fn().mockResolvedValue(truncatedRoot);
     const { findByTestId } = render(() => (
       <FilesSidebar
-        sessionId={SID}
         workspaceRoot={WS}
         onOpen={vi.fn()}
         loadTree={loadTree}
@@ -374,7 +372,6 @@ describe('FilesSidebar stats notice (F-536)', () => {
     const loadTree = vi.fn().mockResolvedValue(errorRoot);
     const { findByTestId } = render(() => (
       <FilesSidebar
-        sessionId={SID}
         workspaceRoot={WS}
         onOpen={vi.fn()}
         loadTree={loadTree}
@@ -393,7 +390,6 @@ describe('FilesSidebar stats notice (F-536)', () => {
     const loadTree = vi.fn().mockResolvedValue(combinedRoot);
     const { findByTestId } = render(() => (
       <FilesSidebar
-        sessionId={SID}
         workspaceRoot={WS}
         onOpen={vi.fn()}
         loadTree={loadTree}
@@ -408,7 +404,6 @@ describe('FilesSidebar stats notice (F-536)', () => {
     const loadTree = vi.fn().mockResolvedValue(demoTree());
     const { findByText, queryByTestId } = render(() => (
       <FilesSidebar
-        sessionId={SID}
         workspaceRoot={WS}
         onOpen={vi.fn()}
         loadTree={loadTree}
@@ -425,7 +420,6 @@ describe('FilesSidebar stats notice (F-536)', () => {
     const loadTree = vi.fn().mockResolvedValue(cleanRoot);
     const { findByText, queryByTestId } = render(() => (
       <FilesSidebar
-        sessionId={SID}
         workspaceRoot={WS}
         onOpen={vi.fn()}
         loadTree={loadTree}
