@@ -10,13 +10,13 @@ import type { TreeStatsDto } from "./TreeStatsDto";
  * existing frontend consumers that don't yet read `stats` keep compiling
  * against the regenerated TS type because it stays optional on the wire.
  */
-export type TreeNodeDto = { name: string, 
+export type TreeNodeDto = { name: string,
 /**
  * Absolute canonicalized path. The frontend joins this with a `file://`
  * scheme when building Monaco URIs so a round-trip to `read_file` lands
  * on the same on-disk object.
  */
-path: string, kind: TreeKindDto, children: Array<TreeNodeDto> | null, 
+path: string, kind: TreeKindDto, children: Array<TreeNodeDto> | null,
 /**
  * `Some(..)` on the root, `None` on nested nodes. `#[serde(default,
  * skip_serializing_if = ..)]` makes the field optional on the TS side

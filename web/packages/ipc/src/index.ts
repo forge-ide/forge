@@ -38,6 +38,7 @@ export type { TokenUsage } from './generated/TokenUsage';
 export type { ToolCallId } from './generated/ToolCallId';
 export type { TreeKindDto } from './generated/TreeKindDto';
 export type { TreeNodeDto } from './generated/TreeNodeDto';
+export type { TreeStatsDto } from './generated/TreeStatsDto';
 export type { WindowsSettings } from './generated/WindowsSettings';
 export type { WorkspaceId } from './generated/WorkspaceId';
 
