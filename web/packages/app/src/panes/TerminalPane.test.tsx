@@ -264,4 +264,54 @@ describe('TerminalPane', () => {
     btn.click();
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  describe('loading states (F-400)', () => {
+    it('shows SPAWNING SHELL loading overlay immediately on mount', () => {
+      const { getByTestId } = render(() => (
+        <TerminalPane cwd="/tmp" onClose={vi.fn()} />
+      ));
+      const loading = getByTestId('terminal-pane-loading');
+      expect(loading).toBeInTheDocument();
+      expect(loading.getAttribute('role')).toBe('status');
+      expect(loading.textContent).toContain('SPAWNING SHELL');
+    });
+
+    it('removes the loading overlay once spawn resolves', async () => {
+      const { queryByTestId } = render(() => (
+        <TerminalPane cwd="/tmp" onClose={vi.fn()} />
+      ));
+      // Let the spawn async chain finish (listen x2 + spawn resolve).
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(queryByTestId('terminal-pane-loading')).not.toBeInTheDocument();
+    });
+
+    it('hides loading overlay and shows error when spawn fails', async () => {
+      invokeMock.mockImplementation((command: string) => {
+        if (command === 'terminal_spawn') {
+          return Promise.reject(new Error('label mismatch'));
+        }
+        return Promise.resolve(undefined);
+      });
+
+      const { queryByTestId, findByRole } = render(() => (
+        <TerminalPane cwd="/tmp" onClose={vi.fn()} />
+      ));
+
+      const alert = await findByRole('alert');
+      expect(alert.textContent).toMatch(/terminal_spawn failed/);
+      expect(queryByTestId('terminal-pane-loading')).not.toBeInTheDocument();
+    });
+
+    it('does not show error before spawn resolves', () => {
+      const { queryByTestId, queryByRole } = render(() => (
+        <TerminalPane cwd="/tmp" onClose={vi.fn()} />
+      ));
+      // Before spawn: loading shown, no error.
+      expect(queryByTestId('terminal-pane-loading')).toBeInTheDocument();
+      expect(queryByRole('alert')).toBeNull();
+    });
+  });
 });

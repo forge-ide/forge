@@ -89,6 +89,7 @@ export function shellDisplayName(shell: string | undefined): string {
 export const TerminalPane: Component<TerminalPaneProps> = (props) => {
   const [terminalId] = createSignal<TerminalId>(newTerminalId());
   const [spawnError, setSpawnError] = createSignal<string | null>(null);
+  const [spawning, setSpawning] = createSignal(true);
 
   let hostRef: HTMLDivElement | undefined;
   let term: Terminal | undefined;
@@ -203,6 +204,8 @@ export const TerminalPane: Component<TerminalPaneProps> = (props) => {
       } catch (err) {
         setSpawnError(`terminal_spawn failed: ${String(err)}`);
         return;
+      } finally {
+        setSpawning(false);
       }
     })();
 
@@ -283,6 +286,15 @@ export const TerminalPane: Component<TerminalPaneProps> = (props) => {
         onClose={props.onClose}
       />
       <div class="terminal-pane__body">
+        <Show when={spawning() && !spawnError()}>
+          <div
+            class="terminal-pane__loading"
+            role="status"
+            data-testid="terminal-pane-loading"
+          >
+            SPAWNING SHELL…
+          </div>
+        </Show>
         <Show when={spawnError()}>
           <div class="terminal-pane__error" role="alert">
             {spawnError()}

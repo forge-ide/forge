@@ -429,3 +429,105 @@ describe('FilesSidebar stats notice (F-536)', () => {
     expect(queryByTestId('files-sidebar-stats-notice')).toBeNull();
   });
 });
+
+describe('FilesSidebar loading and empty states (F-400)', () => {
+  it('shows LOADING TREE while the first loadTree call is pending', async () => {
+    let resolve!: (v: TreeNodeDto) => void;
+    const loadTree = vi.fn().mockReturnValue(
+      new Promise<TreeNodeDto>((res) => {
+        resolve = res;
+      }),
+    );
+    const { getByTestId } = render(() => (
+      <FilesSidebar
+        sessionId={SID}
+        workspaceRoot={WS}
+        onOpen={vi.fn()}
+        loadTree={loadTree}
+      />
+    ));
+    const loading = getByTestId('files-sidebar-loading');
+    expect(loading).toBeInTheDocument();
+    expect(loading.getAttribute('role')).toBe('status');
+    expect(loading.textContent).toContain('LOADING TREE');
+
+    resolve(demoTree());
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  it('removes LOADING TREE after loadTree resolves', async () => {
+    const loadTree = vi.fn().mockResolvedValue(demoTree());
+    const { findByText, queryByTestId } = render(() => (
+      <FilesSidebar
+        sessionId={SID}
+        workspaceRoot={WS}
+        onOpen={vi.fn()}
+        loadTree={loadTree}
+      />
+    ));
+    await findByText('README.md');
+    expect(queryByTestId('files-sidebar-loading')).toBeNull();
+  });
+
+  it('shows NO FILES when the workspace is empty (loaded, no error)', async () => {
+    const emptyRoot: TreeNodeDto = {
+      name: 'empty',
+      path: WS,
+      kind: 'Dir',
+      children: [],
+      stats: null,
+    } as unknown as TreeNodeDto;
+    const loadTree = vi.fn().mockResolvedValue(emptyRoot);
+    const { findByTestId } = render(() => (
+      <FilesSidebar
+        sessionId={SID}
+        workspaceRoot={WS}
+        onOpen={vi.fn()}
+        loadTree={loadTree}
+      />
+    ));
+    const empty = await findByTestId('files-sidebar-empty');
+    expect(empty).toBeInTheDocument();
+    expect(empty.getAttribute('role')).toBe('status');
+    expect(empty.textContent).toContain('NO FILES');
+  });
+
+  it('does not show NO FILES while still loading', async () => {
+    let resolve!: (v: TreeNodeDto) => void;
+    const loadTree = vi.fn().mockReturnValue(
+      new Promise<TreeNodeDto>((res) => {
+        resolve = res;
+      }),
+    );
+    const { queryByTestId } = render(() => (
+      <FilesSidebar
+        sessionId={SID}
+        workspaceRoot={WS}
+        onOpen={vi.fn()}
+        loadTree={loadTree}
+      />
+    ));
+    // Still loading — empty placeholder must not appear
+    expect(queryByTestId('files-sidebar-empty')).toBeNull();
+    expect(queryByTestId('files-sidebar-loading')).toBeInTheDocument();
+
+    resolve(demoTree());
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  it('does not show NO FILES when there is a load error', async () => {
+    const loadTree = vi.fn().mockRejectedValue(new Error('permission denied'));
+    const { findByTestId, queryByTestId } = render(() => (
+      <FilesSidebar
+        sessionId={SID}
+        workspaceRoot={WS}
+        onOpen={vi.fn()}
+        loadTree={loadTree}
+      />
+    ));
+    await findByTestId('files-sidebar-error');
+    expect(queryByTestId('files-sidebar-empty')).toBeNull();
+  });
+});

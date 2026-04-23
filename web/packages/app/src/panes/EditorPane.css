@@ -24,6 +24,17 @@
   display: inline-block;
 }
 
+.editor-pane__loading {
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--color-surface-2);
+  color: var(--color-text-tertiary);
+  border-bottom: 1px solid var(--color-border-1);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  flex: 0 0 auto;
+}
+
 .editor-pane__error {
   padding: var(--sp-2) var(--sp-4);
   background: var(--color-surface-3);

@@ -40,6 +40,21 @@
   background: var(--color-surface-1, #161616);
 }
 
+.files-sidebar__loading {
+  padding: 6px 10px;
+  color: var(--color-text-tertiary, #888);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  border-bottom: 1px solid var(--color-border-1, #1f1f1f);
+}
+
+.files-sidebar__empty {
+  padding: 6px 10px;
+  color: var(--color-text-tertiary, #888);
+  font-size: 11px;
+  font-style: italic;
+}
+
 .files-sidebar__error {
   padding: 6px 10px;
   color: var(--color-accent-ember, #ff4a12);

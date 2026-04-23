@@ -136,7 +136,8 @@ export const EditorPane: Component<EditorPaneProps> = (props) => {
 
   const [isDirty, setIsDirty] = createSignal(false);
   const [errorMessage, setErrorMessage] = createSignal<string | null>(null);
-  const [, setIsReady] = createSignal(false);
+  const [isReady, setIsReady] = createSignal(false);
+  const [isFileLoading, setIsFileLoading] = createSignal(false);
   // Track last-saved contents separately from current to decide dirty.
   let lastSavedValue: string | null = null;
   let currentValue: string | null = null;
@@ -187,6 +188,7 @@ export const EditorPane: Component<EditorPaneProps> = (props) => {
   const sendOpen = async (): Promise<void> => {
     const sid = activeSessionId();
     if (sid === null) return;
+    setIsFileLoading(true);
     try {
       const file = await readFile(sid, props.path);
       lastSavedValue = file.content;
@@ -201,6 +203,8 @@ export const EditorPane: Component<EditorPaneProps> = (props) => {
       });
     } catch (err) {
       setErrorMessage(errorToString(err));
+    } finally {
+      setIsFileLoading(false);
     }
   };
 
@@ -313,6 +317,24 @@ export const EditorPane: Component<EditorPaneProps> = (props) => {
           ) : undefined
         }
       />
+      {!isReady() && errorMessage() === null && (
+        <div
+          class="editor-pane__loading"
+          role="status"
+          data-testid="editor-pane-loading"
+        >
+          LOADING EDITOR…
+        </div>
+      )}
+      {isReady() && isFileLoading() && errorMessage() === null && (
+        <div
+          class="editor-pane__loading"
+          role="status"
+          data-testid="editor-pane-file-loading"
+        >
+          LOADING FILE…
+        </div>
+      )}
       {errorMessage() !== null && (
         <div
           class="editor-pane__error"
