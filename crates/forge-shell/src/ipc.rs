@@ -1574,9 +1574,12 @@ pub struct FileContent {
     pub sha256: String,
 }
 
-/// Wire shape for `tree`. The root is always returned; `children` is `None`
-/// for non-directory entries and `Some(_)` for directories (empty vec when
-/// the depth cap is hit or the directory is empty).
+/// F-357: the root node carries a [`TreeStatsDto`] summarizing what the walk
+/// elided so the UI can render "N files not shown" instead of silently
+/// rendering a partial tree as if it were complete. Nested nodes carry
+/// `None` — the summary is a whole-tree concept, not per-directory — and
+/// existing frontend consumers that don't yet read `stats` keep compiling
+/// against the regenerated TS type because it stays optional on the wire.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
 pub struct TreeNodeDto {
@@ -1587,6 +1590,32 @@ pub struct TreeNodeDto {
     pub path: String,
     pub kind: TreeKindDto,
     pub children: Option<Vec<TreeNodeDto>>,
+    /// `Some(..)` on the root, `None` on nested nodes. `#[serde(default,
+    /// skip_serializing_if = ..)]` makes the field optional on the TS side
+    /// so existing frontend fixtures that predate F-357 keep compiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<TreeStatsDto>,
+}
+
+/// F-357: wire shape for [`TreeNodeDto::stats`]. Populated on the root
+/// only; nested nodes carry `None`. The Rust-side counters in
+/// [`forge_fs::TreeStats`] are `u64`, but we saturate to `u32` on the wire
+/// so the generated TS type is plain `number` (no `bigint` plumbing in the
+/// frontend). A 4 B entry count is still well past any realistic workspace
+/// tree — saturation is a surrender, not a silent overflow.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct TreeStatsDto {
+    /// `true` if the entry budget was exhausted before the walk finished.
+    pub truncated: bool,
+    /// Count of entries the walker saw past the budget (best-effort — see
+    /// the `forge_fs::TreeStats` docs for the exact scope). Saturated to
+    /// `u32::MAX` for wire-compat with JS `number`.
+    pub omitted_count: u32,
+    /// Count of per-entry errors the walker swallowed (e.g. permission
+    /// denied, file disappeared mid-walk). Saturated to `u32::MAX` for
+    /// wire-compat with JS `number`.
+    pub error_count: u32,
 }
 
 /// Wire shape for [`TreeNodeDto::kind`]. Narrow on purpose — anything
@@ -1602,22 +1631,42 @@ pub enum TreeKindDto {
 }
 
 impl From<forge_fs::TreeNode> for TreeNodeDto {
+    /// Converts the root of a `forge_fs` walk. `stats` is populated on the
+    /// returned root node; nested children collapse `stats` to `None` on the
+    /// wire so the JSON stays compact — the summary is a whole-tree concept.
     fn from(node: forge_fs::TreeNode) -> Self {
-        use forge_fs::NodeKind;
-        let kind = match node.kind {
-            NodeKind::File => TreeKindDto::File,
-            NodeKind::Dir => TreeKindDto::Dir,
-            NodeKind::Symlink => TreeKindDto::Symlink,
-            NodeKind::Other => TreeKindDto::Other,
+        let stats = TreeStatsDto {
+            truncated: node.stats.truncated,
+            omitted_count: u64_to_u32_saturating(node.stats.omitted_count),
+            error_count: u64_to_u32_saturating(node.stats.error_count),
         };
-        Self {
-            name: node.name,
-            path: node.path.to_string_lossy().into_owned(),
-            kind,
-            children: node
-                .children
-                .map(|cs| cs.into_iter().map(TreeNodeDto::from).collect()),
+        TreeNodeDto {
+            stats: Some(stats),
+            ..from_nested(node)
         }
+    }
+}
+
+fn u64_to_u32_saturating(v: u64) -> u32 {
+    u32::try_from(v).unwrap_or(u32::MAX)
+}
+
+fn from_nested(node: forge_fs::TreeNode) -> TreeNodeDto {
+    use forge_fs::NodeKind;
+    let kind = match node.kind {
+        NodeKind::File => TreeKindDto::File,
+        NodeKind::Dir => TreeKindDto::Dir,
+        NodeKind::Symlink => TreeKindDto::Symlink,
+        NodeKind::Other => TreeKindDto::Other,
+    };
+    TreeNodeDto {
+        name: node.name,
+        path: node.path.to_string_lossy().into_owned(),
+        kind,
+        children: node
+            .children
+            .map(|cs| cs.into_iter().map(from_nested).collect()),
+        stats: None,
     }
 }
 
