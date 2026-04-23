@@ -377,3 +377,36 @@ describe('SubAgentBanner — state-chip popover (F-448 Phase 3)', () => {
     expect(open).toHaveBeenCalledWith('child-1');
   });
 });
+
+// ---------------------------------------------------------------------------
+// F-399: error-detail row
+// ---------------------------------------------------------------------------
+
+describe('SubAgentBanner — error state (F-399)', () => {
+  it('renders the error-detail row when status is error and error_detail is set', () => {
+    const { getByTestId } = render(() => (
+      <SubAgentBanner
+        turn={makeTurn({ status: 'error', error_detail: 'timeout after 30s' })}
+      />
+    ));
+    const errorRow = getByTestId('sub-agent-banner-error-child-1');
+    expect(errorRow).toBeInTheDocument();
+    expect(errorRow).toHaveTextContent('timeout after 30s');
+  });
+
+  it('does not render the error-detail row when status is error but no error_detail', () => {
+    const { queryByTestId } = render(() => (
+      <SubAgentBanner turn={makeTurn({ status: 'error' })} />
+    ));
+    expect(queryByTestId('sub-agent-banner-error-child-1')).not.toBeInTheDocument();
+  });
+
+  it('does not render the error-detail row when status is done even if error_detail is set', () => {
+    const { queryByTestId } = render(() => (
+      <SubAgentBanner
+        turn={makeTurn({ status: 'done', error_detail: 'stale error' })}
+      />
+    ));
+    expect(queryByTestId('sub-agent-banner-error-child-1')).not.toBeInTheDocument();
+  });
+});

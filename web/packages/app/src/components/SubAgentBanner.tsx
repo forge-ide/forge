@@ -198,6 +198,17 @@ export const SubAgentBanner: Component<SubAgentBannerProps> = (props) => {
         </span>
       </header>
 
+      {/* F-399: Error-detail row — shown below the header when status is 'error'. */}
+      <Show when={props.turn.status === 'error' && props.turn.error_detail !== undefined}>
+        <div
+          class="sub-agent-banner__error-detail"
+          data-testid={`sub-agent-banner-error-${props.turn.child_instance_id}`}
+          role="alert"
+        >
+          {props.turn.error_detail}
+        </div>
+      </Show>
+
       {/* Collapsed body — one-line summary per spec §6 "Collapsed state". */}
       <Show when={!expanded()}>
         <div

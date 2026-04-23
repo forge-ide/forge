@@ -26,8 +26,11 @@ export interface ApprovalPromptProps {
    * ThisPattern / ThisTool); `level` picks the persistence tier (session /
    * workspace / user). `level` is always `'session'` when `scope === 'Once'`
    * because a one-shot approval has nothing to persist. F-036.
+   *
+   * May return a Promise — the prompt shows "persisting…" while pending and
+   * surfaces an error row if the promise rejects (F-399).
    */
-  onApprove: (scope: ApprovalScope, level: ApprovalLevel, pattern?: string) => void;
+  onApprove: (scope: ApprovalScope, level: ApprovalLevel, pattern?: string) => void | Promise<void>;
   onReject: () => void;
 }
 
@@ -58,6 +61,9 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
   const [pattern, setPattern] = createSignal('');
   // F-036: persistence level toggle. Defaults to `'session'` per DoD.
   const [level, setLevel] = createSignal<ApprovalLevel>('session');
+  // F-399: async approve — persisting state + error row.
+  const [persisting, setPersisting] = createSignal(false);
+  const [approveError, setApproveError] = createSignal<string | null>(null);
 
   // Capture the element that had focus before this prompt mounted so we can
   // restore focus to it on dismiss. Read synchronously during component setup,
@@ -81,14 +87,25 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
     setPatternMode(true);
   };
 
-  const approveWithScope = (scope: ApprovalScope, pat?: string) => {
+  const approveWithScope = (scope: ApprovalScope, pat?: string): void => {
     setMenuOpen(false);
     setPatternMode(false);
+    setApproveError(null);
     // A one-shot approval has nothing to persist; collapse the tier to session
     // regardless of which pill is active. Persistence only makes sense for
     // scopes > Once.
     const effectiveLevel: ApprovalLevel = scope === 'Once' ? 'session' : level();
-    props.onApprove(scope, effectiveLevel, pat);
+    const result = props.onApprove(scope, effectiveLevel, pat);
+    if (result instanceof Promise) {
+      setPersisting(true);
+      result
+        .catch((err: unknown) => {
+          setApproveError(err instanceof Error ? err.message : String(err));
+        })
+        .finally(() => {
+          setPersisting(false);
+        });
+    }
   };
 
   const handleKeyDown = (e: KeyboardEvent) => {
@@ -172,7 +189,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
           role="radiogroup"
           aria-label="Persistence level"
         >
-          <span class="approval-prompt__level-label">PERSIST:</span>
+          <span class="approval-prompt__level-label">Persist:</span>
           <button
             type="button"
             class="approval-prompt__level-btn"
@@ -182,7 +199,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
             aria-checked={level() === 'session'}
             onClick={() => setLevel('session')}
           >
-            SESSION
+            Session
           </button>
           <button
             type="button"
@@ -193,7 +210,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
             aria-checked={level() === 'workspace'}
             onClick={() => setLevel('workspace')}
           >
-            WORKSPACE
+            Workspace
           </button>
           <button
             type="button"
@@ -204,7 +221,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
             aria-checked={level() === 'user'}
             onClick={() => setLevel('user')}
           >
-            USER
+            User
           </button>
         </div>
       </Show>
@@ -213,7 +230,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
       <Show when={patternMode()}>
         <div class="approval-prompt__pattern-editor" data-testid="pattern-editor">
           <label class="approval-prompt__pattern-label" for="approval-pattern-input">
-            APPROVE THIS PATTERN:
+            Approve this pattern:
           </label>
           <div class="approval-prompt__pattern-row">
             <input
@@ -230,7 +247,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
               data-testid="pattern-confirm-btn"
               onClick={() => approveWithScope('ThisPattern', pattern())}
             >
-              CONFIRM PATTERN
+              Confirm
             </button>
             <button
               type="button"
@@ -238,9 +255,20 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
               data-testid="pattern-cancel-btn"
               onClick={() => setPatternMode(false)}
             >
-              CANCEL
+              Cancel
             </button>
           </div>
+        </div>
+      </Show>
+
+      {/* Error row — shown when onApprove promise rejects (F-399). */}
+      <Show when={approveError() !== null}>
+        <div
+          class="approval-prompt__error"
+          data-testid="approve-error"
+          role="alert"
+        >
+          {approveError()}
         </div>
       </Show>
 
@@ -251,9 +279,10 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
             type="button"
             class="approval-prompt__btn approval-prompt__btn--ghost"
             data-testid="reject-btn"
+            disabled={persisting()}
             onClick={() => props.onReject()}
           >
-            REJECT CALL
+            Reject
             <kbd class="approval-prompt__kbd">R</kbd>
           </button>
 
@@ -263,10 +292,12 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
               type="button"
               class="approval-prompt__btn approval-prompt__btn--primary"
               data-testid="approve-once-btn"
+              disabled={persisting()}
               onClick={() => approveWithScope('Once')}
             >
-              APPROVE ONCE
-              <kbd class="approval-prompt__kbd">A</kbd>
+              <Show when={persisting()} fallback={<>Approve<kbd class="approval-prompt__kbd">A</kbd></>}>
+                persisting…
+              </Show>
             </button>
 
             {/* Dropdown toggle */}
@@ -276,6 +307,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
               data-testid="approve-dropdown-btn"
               aria-label="More approval scopes"
               aria-expanded={menuOpen()}
+              disabled={persisting()}
               onClick={() => setMenuOpen((v) => !v)}
             >
               ▾
@@ -291,7 +323,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
                   role="menuitem"
                   onClick={() => approveWithScope('Once')}
                 >
-                  APPROVE ONCE
+                  Once
                   <kbd class="approval-prompt__kbd">A</kbd>
                 </button>
 
@@ -303,7 +335,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
                     role="menuitem"
                     onClick={() => approveWithScope('ThisFile')}
                   >
-                    APPROVE FILE
+                    This file
                     <kbd class="approval-prompt__kbd">F</kbd>
                   </button>
 
@@ -314,7 +346,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
                     role="menuitem"
                     onClick={openPatternEditor}
                   >
-                    APPROVE PATTERN
+                    This pattern
                     <kbd class="approval-prompt__kbd">P</kbd>
                   </button>
                 </Show>
@@ -326,7 +358,7 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
                   role="menuitem"
                   onClick={() => approveWithScope('ThisTool')}
                 >
-                  APPROVE TOOL
+                  This tool
                   <kbd class="approval-prompt__kbd">T</kbd>
                 </button>
               </div>

@@ -139,6 +139,15 @@ export interface PickerResult {
 // Component
 // ---------------------------------------------------------------------------
 
+/**
+ * Per-category async state for the results list (F-399).
+ * Either a resolved list, a loading sentinel, or an error string.
+ */
+export type CategoryState =
+  | { status: 'loading' }
+  | { status: 'error'; message: string }
+  | { status: 'success'; items: PickerResult[] };
+
 export interface ContextPickerProps {
   /** Current `@`-query (text after the `@`). */
   query: string;
@@ -151,11 +160,15 @@ export interface ContextPickerProps {
   /**
    * Optional category-indexed items — F-141 leaves this empty. F-142 will
    * wire a resolver that populates per category as the user types.
+   *
+   * Accepts either the legacy flat list shape (backward-compatible) or the
+   * richer `CategoryState` shape that carries loading/error per tab (F-399).
    */
-  items?: Partial<Record<ContextCategory, PickerResult[]>>;
+  items?: Partial<Record<ContextCategory, PickerResult[] | CategoryState>>;
 }
 
 const POPUP_MAX_HEIGHT = 360;
+const POPUP_MIN_WIDTH = 360;
 
 // Stable id prefix for option rows. The combobox root's
 // `aria-activedescendant` points at `<prefix>-<index>` so assistive tech can
@@ -176,8 +189,21 @@ export const ContextPicker: Component<ContextPickerProps> = (props) => {
     return def ? def.id : 'file';
   };
 
+  /**
+   * Normalise the raw prop value for the active category into a `CategoryState`.
+   * Accepts both the legacy `PickerResult[]` shape (treated as success) and the
+   * richer `CategoryState` shape (F-399).
+   */
+  const activeCategoryState = (): CategoryState => {
+    const raw = props.items?.[activeCategory()];
+    if (raw === undefined) return { status: 'success', items: [] };
+    if (Array.isArray(raw)) return { status: 'success', items: raw };
+    return raw;
+  };
+
   const activeItems = (): PickerResult[] => {
-    return props.items?.[activeCategory()] ?? [];
+    const state = activeCategoryState();
+    return state.status === 'success' ? state.items : [];
   };
 
   // Recompute placement whenever anchorRect updates. In real DOM this runs
@@ -285,6 +311,9 @@ export const ContextPicker: Component<ContextPickerProps> = (props) => {
       aria-haspopup="listbox"
       aria-activedescendant={activeDescendantId()}
       ref={rootRef}
+      style={{
+        'min-width': `${POPUP_MIN_WIDTH}px`,
+      }}
     >
       {/* Search field — echoes the live `@`-query from the composer. */}
       <div class="context-picker__search">
@@ -330,44 +359,66 @@ export const ContextPicker: Component<ContextPickerProps> = (props) => {
       </div>
 
       {/* Results list for the active category. F-141 renders empty — F-142
-          will populate via the `items` prop. */}
+          will populate via the `items` prop. F-399 adds loading/error states. */}
       <div
         class="context-picker__results"
         role="listbox"
         data-testid="context-picker-results"
       >
-        <Show
-          when={activeItems().length > 0}
-          fallback={
-            <div
-              class="context-picker__empty"
-              data-testid="context-picker-empty"
-            >
-              No {activeCategory()} results
-            </div>
-          }
-        >
-          <For each={activeItems()}>
-            {(item, i) => (
+        <Show when={activeCategoryState().status === 'loading'}>
+          <div
+            class="context-picker__loading"
+            data-testid="context-picker-loading"
+            aria-live="polite"
+          >
+            Searching…
+          </div>
+        </Show>
+
+        <Show when={activeCategoryState().status === 'error'}>
+          <div
+            class="context-picker__error"
+            data-testid="context-picker-error"
+            role="alert"
+          >
+            {(activeCategoryState() as { status: 'error'; message: string }).message}
+          </div>
+        </Show>
+
+        <Show when={activeCategoryState().status === 'success'}>
+          <Show
+            when={activeItems().length > 0}
+            fallback={
               <div
-                id={resultId(i())}
-                class="context-picker__result"
-                classList={{
-                  'context-picker__result--active':
-                    i() === activeItemIndex(),
-                }}
-                role="option"
-                aria-selected={i() === activeItemIndex()}
-                data-testid={`context-picker-result-${i()}`}
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  props.onPick(item);
-                }}
+                class="context-picker__empty"
+                data-testid="context-picker-empty"
               >
-                <span class="context-picker__result-label">{item.label}</span>
+                No {activeCategory()} results
               </div>
-            )}
-          </For>
+            }
+          >
+            <For each={activeItems()}>
+              {(item, i) => (
+                <div
+                  id={resultId(i())}
+                  class="context-picker__result"
+                  classList={{
+                    'context-picker__result--active':
+                      i() === activeItemIndex(),
+                  }}
+                  role="option"
+                  aria-selected={i() === activeItemIndex()}
+                  data-testid={`context-picker-result-${i()}`}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    props.onPick(item);
+                  }}
+                >
+                  <span class="context-picker__result-label">{item.label}</span>
+                </div>
+              )}
+            </For>
+          </Show>
         </Show>
       </div>
     </div>
