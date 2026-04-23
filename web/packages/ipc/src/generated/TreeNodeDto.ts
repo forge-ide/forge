@@ -3,10 +3,6 @@ import type { TreeKindDto } from "./TreeKindDto";
 import type { TreeStatsDto } from "./TreeStatsDto";
 
 /**
- * Wire shape for `tree`. The root is always returned; `children` is `None`
- * for non-directory entries and `Some(_)` for directories (empty vec when
- * the depth cap is hit or the directory is empty).
- *
  * F-357: the root node carries a [`TreeStatsDto`] summarizing what the walk
  * elided so the UI can render "N files not shown" instead of silently
  * rendering a partial tree as if it were complete. Nested nodes carry
