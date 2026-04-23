@@ -6,7 +6,6 @@ import {
   Show,
   createMemo,
 } from 'solid-js';
-import { invoke } from '../../lib/tauri';
 import { activeSessionId, activeWorkspaceRoot } from '../../stores/session';
 import {
   getMessagesState,
@@ -27,16 +26,22 @@ import {
   type VariantRow,
 } from '../../components/BranchMetadataPopover';
 import type { ApprovalLevel, ApprovalScope, SessionId } from '@forge/ipc';
-// `SessionId` is retained solely for `reportInvokeError`'s internal signature;
-// components in this file no longer accept a `sessionId` prop — they read
-// from the `activeSessionId` signal per the frontend-state decision doc.
 import {
   getApprovalWhitelist,
   addWhitelistEntry,
   revokeWhitelistEntry,
   matchWhitelistKey,
 } from '../../stores/approvals';
-import { removeApproval, saveApproval } from '../../ipc/session';
+import {
+  removeApproval,
+  saveApproval,
+  sessionApproveTool,
+  sessionRejectTool,
+  sessionSendMessage,
+  sessionCancel,
+  selectBranch,
+  deleteBranch,
+} from '../../ipc/session';
 import { ApprovalPrompt } from '../../components/ApprovalPrompt/ApprovalPrompt';
 import { WhitelistedPill } from '../../components/ApprovalPrompt/WhitelistedPill';
 import {
@@ -234,16 +239,18 @@ const ToolCallCard: Component<{
     const id = sessionId();
     const key = whitelistKey();
     if (!id || !key || props.turn.status !== 'awaiting-approval') return;
-    invoke('session_approve_tool', {
-      sessionId: id,
-      toolCallId: props.turn.tool_call_id,
-      // Derive scope from key prefix
-      scope: key.startsWith('tool:')
-        ? ('ThisTool' as ApprovalScope)
-        : key.startsWith('pattern:')
-          ? ('ThisPattern' as ApprovalScope)
-          : ('ThisFile' as ApprovalScope),
-    }).catch((err) => reportInvokeError(id, 'session_approve_tool', err));
+    // Derive ApprovalScope from the whitelist key prefix — keys are authored
+    // by `addWhitelistEntry` which follows the `tool:` / `pattern:` / `path:`
+    // prefix conventions, so the cast is grounded in the key's construction
+    // rather than being a stringly-typed guess.
+    const scope: ApprovalScope = key.startsWith('tool:')
+      ? 'ThisTool'
+      : key.startsWith('pattern:')
+        ? 'ThisPattern'
+        : 'ThisFile';
+    sessionApproveTool(id, props.turn.tool_call_id, scope).catch((err) =>
+      reportInvokeError(id, 'session_approve_tool', err),
+    );
   });
 
   // F-036: scope > Once approvals at workspace/user level need to persist on
@@ -289,20 +296,17 @@ const ToolCallCard: Component<{
       }
     }
 
-    invoke('session_approve_tool', {
-      sessionId: id,
-      toolCallId: props.turn.tool_call_id,
-      scope,
-    }).catch((err) => reportInvokeError(id, 'session_approve_tool', err));
+    sessionApproveTool(id, props.turn.tool_call_id, scope).catch((err) =>
+      reportInvokeError(id, 'session_approve_tool', err),
+    );
   };
 
   const handleReject = () => {
     const id = sessionId();
     if (!id) return;
-    invoke('session_reject_tool', {
-      sessionId: id,
-      toolCallId: props.turn.tool_call_id,
-    }).catch((err) => reportInvokeError(id, 'session_reject_tool', err));
+    sessionRejectTool(id, props.turn.tool_call_id).catch((err) =>
+      reportInvokeError(id, 'session_reject_tool', err),
+    );
   };
 
   // F-036: revoke removes from the in-memory whitelist and — for persistent
@@ -695,8 +699,7 @@ const AssistantBubble: Component<{ turn: Extract<ChatTurn, { type: 'assistant' }
   props,
 ) => (
   // F-405: aria-busy="true" while the turn is still streaming lets AT
-  // suppress partial announcements from the ancestor aria-live region,
-  // then drops once isStreaming flips so the final text announces cleanly.
+  // users know the content is live.
   <article class="turn turn--assistant" aria-busy={props.turn.isStreaming ? 'true' : undefined}>
     <header class="turn__author">● assistant</header>
     <p class="turn__body">
@@ -729,6 +732,7 @@ const BranchedAssistantTurn: Component<{
    * inactive variants from other branch points into the exported JSON.
    */
   visibleTurns: ChatTurn[];
+  sessionId: SessionId;
 }> = (props) => {
   const [popoverOpen, setPopoverOpen] = createSignal(false);
 
@@ -748,25 +752,17 @@ const BranchedAssistantTurn: Component<{
   const dispatchSelect = (messageId: string): void => {
     // Spec §15.3: switching variants dispatches `select_branch` with the
     // variant's index. Find that index from the group.
-    const sid = activeSessionId();
-    if (sid === null) return;
     const idx = props.group.variantIds.indexOf(messageId);
     if (idx < 0) return;
-    invoke('select_branch', {
-      sessionId: sid,
-      parentId: rootId(),
-      variantIndex: idx,
-    }).catch((err) => reportInvokeError(sid, 'select_branch', err));
+    selectBranch(props.sessionId, rootId(), idx).catch((err: unknown) =>
+      reportInvokeError(props.sessionId, 'select_branch', err),
+    );
   };
 
   const dispatchDelete = (variantIndex: number): void => {
-    const sid = activeSessionId();
-    if (sid === null) return;
-    invoke('delete_branch', {
-      sessionId: sid,
-      parentId: rootId(),
-      variantIndex,
-    }).catch((err) => reportInvokeError(sid, 'delete_branch', err));
+    deleteBranch(props.sessionId, rootId(), variantIndex).catch((err: unknown) =>
+      reportInvokeError(props.sessionId, 'delete_branch', err),
+    );
     setPopoverOpen(false);
   };
 
@@ -784,7 +780,6 @@ const BranchedAssistantTurn: Component<{
    * tool-call trees and deep provider metadata are out of scope for v1.
    */
   const handleExportAll = async (): Promise<void> => {
-    const sid = activeSessionId();
     const payload = props.visibleTurns
       .map((t) => {
         if (t.type === 'user') {
@@ -812,14 +807,7 @@ const BranchedAssistantTurn: Component<{
         await navigator.clipboard.writeText(json);
       }
     } catch (err) {
-      // The clipboard path is session-scoped only for error reporting; if
-      // the signal is cleared (e.g. unmount race) we fall back to logging
-      // rather than invent a SessionId.
-      if (sid !== null) {
-        reportInvokeError(sid, 'clipboard.writeText', err);
-      } else {
-        console.error('clipboard.writeText failed', err);
-      }
+      reportInvokeError(props.sessionId, 'clipboard.writeText', err);
     }
     setPopoverOpen(false);
   };
@@ -1434,9 +1422,7 @@ export const ChatPane: Component<ChatPaneProps> = (props) => {
     const id = sessionId();
     if (!id) return;
     cancelStream(id);
-    invoke('session_cancel', { sessionId: id }).catch((err) =>
-      reportInvokeError(id, 'session_cancel', err),
-    );
+    sessionCancel(id).catch((err: unknown) => reportInvokeError(id, 'session_cancel', err));
   };
 
   const handleSend = (text: string, chips: InsertedChip[]) => {
@@ -1447,8 +1433,8 @@ export const ChatPane: Component<ChatPaneProps> = (props) => {
     setUserScrolledUp(false);
 
     const sendText = (body: string): void => {
-      invoke('session_send_message', { sessionId: id, text: body }).catch(
-        (err) => reportInvokeError(id, 'session_send_message', err),
+      sessionSendMessage(id, body).catch((err) =>
+        reportInvokeError(id, 'session_send_message', err),
       );
     };
 
@@ -1521,14 +1507,18 @@ export const ChatPane: Component<ChatPaneProps> = (props) => {
                 const rootId = turn.branch_parent ?? turn.message_id;
                 const group = state().branchGroups[rootId];
                 if (group && liveVariantCount(group) > 1) {
-                  return (
-                    <BranchedAssistantTurn
-                      turn={turn}
-                      group={group}
-                      turns={state().turns}
-                      visibleTurns={visibleTurns()}
-                    />
-                  );
+                  const id = sessionId();
+                  if (id !== null) {
+                    return (
+                      <BranchedAssistantTurn
+                        turn={turn}
+                        group={group}
+                        turns={state().turns}
+                        visibleTurns={visibleTurns()}
+                        sessionId={id}
+                      />
+                    );
+                  }
                 }
                 return <AssistantBubble turn={turn} />;
               }

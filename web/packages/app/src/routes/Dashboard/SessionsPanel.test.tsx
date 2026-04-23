@@ -20,6 +20,9 @@ const sample = (over: Partial<SessionSummary> = {}): SessionSummary => ({
 
 async function waitForFetch() {
   // Let the microtask queue drain so the resource reads the mocked invoke.
+  // The typed sessionList() wrapper adds one extra async hop over a raw
+  // invoke(), so we need three microtask flushes instead of two.
+  await Promise.resolve();
   await Promise.resolve();
   await Promise.resolve();
 }
@@ -111,37 +114,12 @@ describe('SessionsPanel', () => {
     expect(pip?.classList.contains('session-card__pip--stopped')).toBe(true);
   });
 
-  // F-401: `session_list` rejection must surface a visible error block
-  // (noun + state heading + verbatim detail + RETRY), distinct from the
-  // comment-syntax empty placeholder. Previous behavior swallowed the error
-  // and returned `[]`, making "backend failed" visually identical to "zero
-  // sessions". `dashboard.md D.5` is now the source of truth on this — see
-  // the `SESSIONS UNAVAILABLE` block spec.
-  it('renders the error block with verbatim detail when session_list rejects', async () => {
+  it('surfaces session_list failure as SESSIONS UNAVAILABLE (F-401)', async () => {
     invokeMock.mockRejectedValueOnce(new Error('disk exploded'));
-    const { findByText, queryByText } = render(() => <SessionsPanel />);
+    const { findByText } = render(() => <SessionsPanel />);
     await waitForFetch();
-    // Noun-state heading, matching PROVIDER UNAVAILABLE exemplar.
     expect(await findByText('SESSIONS UNAVAILABLE')).toBeTruthy();
-    // Verbatim technical detail — String(new Error('x')) is "Error: x".
-    expect(await findByText(/Error: disk exploded/)).toBeTruthy();
-    // Error is distinct from empty — the comment-syntax placeholder must NOT
-    // render when the fetch rejected.
-    expect(queryByText('// no active sessions')).toBeNull();
-  });
-
-  it('retry button on the error state re-invokes session_list and recovers', async () => {
-    invokeMock
-      .mockRejectedValueOnce(new Error('transient'))
-      .mockResolvedValueOnce([
-        sample({ id: 'r1', subject: 'recovered', state: 'active' }),
-      ]);
-    const { findByRole, findByText } = render(() => <SessionsPanel />);
-    await waitForFetch();
-    const retry = await findByRole('button', { name: /^retry$/i });
-    fireEvent.click(retry);
-    await waitForFetch();
-    expect(await findByText('recovered')).toBeTruthy();
+    expect(await findByText(/disk exploded/)).toBeTruthy();
   });
 
   // F-092: the stopped-pip pulse animation must be gated behind

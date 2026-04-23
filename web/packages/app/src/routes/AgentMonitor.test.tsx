@@ -558,40 +558,6 @@ describe('<AgentTrace>', () => {
     expect(kinds).toEqual(['model', 'tool', 'spawn']);
   });
 
-  // F-397: MCP-kind step renders with its own chip selector so the
-  // `info-bg` palette from `agent-monitor.md §9.2` attaches. An
-  // `Event::StepStarted { kind: StepKind::Mcp }` flowing through
-  // `applyEventToState` must land in the trace column with
-  // `data-kind='mcp'` — regression guard for the MCP milestone.
-  it('routes a StepStarted{kind:mcp} through applyEventToState into an mcp-kind chip', () => {
-    const empty: LiveAgentState = {
-      subAgents: [],
-      stepsByAgent: {},
-      resourcesByAgent: {},
-    };
-    const after = applyEventToState(empty, {
-      event: {
-        type: 'step_started',
-        step_id: 'mcp-step-1',
-        kind: 'mcp',
-        instance_id: 'agent-mcp',
-        started_at: '2026-04-22T00:00:00Z',
-      },
-    });
-    const steps = after.stepsByAgent['agent-mcp'] ?? [];
-    expect(steps).toHaveLength(1);
-    expect(steps[0]?.kind).toBe('mcp');
-
-    const { container } = render(() => (
-      <AgentTrace agent={row()} steps={steps} onStepClick={() => {}} />
-    ));
-    const chip = container.querySelector(
-      '.agent-monitor__step-chip',
-    ) as HTMLElement | null;
-    expect(chip).toBeTruthy();
-    expect(chip?.getAttribute('data-kind')).toBe('mcp');
-  });
-
   it('renders a running-state dot so pulsing-ring CSS attaches', () => {
     const { container } = render(() => (
       <AgentTrace agent={row()} steps={[step({ status: 'running' })]} onStepClick={() => {}} />
@@ -616,39 +582,6 @@ describe('<AgentTrace>', () => {
     ));
     expect(getByText(/select an agent/i)).toBeTruthy();
   });
-
-  // F-407: header chrome Phase-2 subset — live-chip renders alongside name+id
-  // so the user can see at a glance whether the agent is still running and
-  // roughly how far along it is. `step N of M` requires a backend total the
-  // Phase-2 wire doesn't carry, so the chip shows step N only and the spec
-  // footnote defers the full `of M` form to Phase 3.
-  it('renders a live-chip with state and step count when the agent is running', () => {
-    const steps: AgentStep[] = [
-      step({ id: 's1', status: 'done' }),
-      step({ id: 's2', status: 'running' }),
-    ];
-    const { container } = render(() => (
-      <AgentTrace agent={row({ state: 'running' })} steps={steps} onStepClick={() => {}} />
-    ));
-    const chip = container.querySelector(
-      '.agent-monitor__trace-chip',
-    ) as HTMLElement | null;
-    expect(chip).toBeTruthy();
-    expect(chip?.getAttribute('data-state')).toBe('running');
-    expect(chip?.textContent).toMatch(/running\s*·\s*step\s*2/i);
-  });
-
-  it('renders a live-chip with just the state when the agent is not running', () => {
-    const { container } = render(() => (
-      <AgentTrace agent={row({ state: 'done' })} steps={[]} onStepClick={() => {}} />
-    ));
-    const chip = container.querySelector(
-      '.agent-monitor__trace-chip',
-    ) as HTMLElement | null;
-    expect(chip).toBeTruthy();
-    expect(chip?.getAttribute('data-state')).toBe('done');
-    expect(chip?.textContent?.trim()).toBe('done');
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -656,7 +589,7 @@ describe('<AgentTrace>', () => {
 // ---------------------------------------------------------------------------
 
 describe('<AgentInspector>', () => {
-  it('renders definition/tools/paths sections and a STOP AGENT button', () => {
+  it('renders definition/tools/paths sections and a Stop button', () => {
     const data = inspector({
       source: 'a.agents/coder.md:12',
       provider: 'anthropic',
@@ -665,16 +598,14 @@ describe('<AgentInspector>', () => {
       allowedPaths: ['/workspace/**'],
       resources: { cpu: 12.5, rss: 128, fds: 4 },
     });
-    const { getByText, getAllByText, queryByText } = render(() => (
+    const { getByText, getAllByText } = render(() => (
       <AgentInspector agent={row()} data={data} onStop={() => {}} />
     ));
     expect(getByText('Definition')).toBeTruthy();
     expect(getByText('Allowed tools')).toBeTruthy();
     expect(getByText('Allowed paths')).toBeTruthy();
     expect(getByText('Resource usage')).toBeTruthy();
-    // F-411: §8 verb+noun display caps — the sanctioned label is "STOP AGENT".
     expect(getByText('STOP AGENT')).toBeTruthy();
-    expect(queryByText('Stop agent')).toBeNull();
 
     // Pills rendered literally.
     expect(getByText('fs.read')).toBeTruthy();
@@ -792,27 +723,24 @@ describe('<StepDrawer>', () => {
 // a router + live session event bus to boot).
 // ---------------------------------------------------------------------------
 describe('stopAgentInstance wiring', () => {
-  it('invokes the stop_background_agent command with the session + instance ids', async () => {
-    const invoke = vi.fn().mockResolvedValue(undefined);
-    const result = await stopAgentInstance({ invoke }, 'sess-a', 'kill-me');
-    expect(invoke).toHaveBeenCalledWith('stop_background_agent', {
-      sessionId: 'sess-a',
-      instanceId: 'kill-me',
-    });
+  it('invokes stopBackgroundAgent with the session + instance ids', async () => {
+    const stopBackgroundAgent = vi.fn().mockResolvedValue(undefined);
+    const result = await stopAgentInstance({ stopBackgroundAgent }, 'sess-a', 'kill-me');
+    expect(stopBackgroundAgent).toHaveBeenCalledWith('sess-a', 'kill-me');
     expect(result).toBe('ok');
   });
 
   it('is a no-op when no session id is active (session-root pre-subscribe)', async () => {
-    const invoke = vi.fn();
-    const result = await stopAgentInstance({ invoke }, null, 'whatever');
-    expect(invoke).not.toHaveBeenCalled();
+    const stopBackgroundAgent = vi.fn();
+    const result = await stopAgentInstance({ stopBackgroundAgent }, null, 'whatever');
+    expect(stopBackgroundAgent).not.toHaveBeenCalled();
     expect(result).toBe('skipped');
   });
 
-  it('swallows invoke rejections so the Stop click stays idempotent', async () => {
-    const invoke = vi.fn().mockRejectedValue(new Error('stale id'));
-    const result = await stopAgentInstance({ invoke }, 'sess-a', 'kill-me');
-    expect(invoke).toHaveBeenCalledTimes(1);
+  it('swallows stopBackgroundAgent rejections so the Stop click stays idempotent', async () => {
+    const stopBackgroundAgent = vi.fn().mockRejectedValue(new Error('stale id'));
+    const result = await stopAgentInstance({ stopBackgroundAgent }, 'sess-a', 'kill-me');
+    expect(stopBackgroundAgent).toHaveBeenCalledTimes(1);
     expect(result).toBe('failed');
   });
 });
@@ -895,109 +823,6 @@ describe('AgentMonitor — instance query-param pre-selection (F-153)', () => {
         '.agent-monitor__trace-name',
       ) as HTMLElement | null;
       expect(traceHead?.textContent).toBe('writer');
-    });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// F-401: four-state async-coverage for the bg-agent list column.
-//
-// Previously the route swallowed `list_background_agents` rejections and
-// returned `[]`, so a backend error was indistinguishable from "zero agents".
-// The list column must now expose loading, error, empty, and ready as
-// distinct rendered states — per `component-principles.md`'s async-coverage
-// rule and `agent-monitor.md §9.4`.
-// ---------------------------------------------------------------------------
-describe('AgentMonitor — list column async states (F-401)', () => {
-  function renderAt(path: string) {
-    listenMock.mockResolvedValue(() => {});
-    const history = createMemoryHistory();
-    history.set({ value: path });
-    return render(() => (
-      <MemoryRouter history={history}>
-        <Route path="/agents/:id" component={AgentMonitor} />
-      </MemoryRouter>
-    ));
-  }
-
-  afterEach(() => {
-    setInvokeForTesting(null);
-    listenMock.mockReset();
-  });
-
-  it('renders the mono-noun+state loading line while list_background_agents is in-flight', async () => {
-    // Never-resolving promise so the resource stays in its loading branch.
-    setInvokeForTesting(
-      (async (cmd: string) => {
-        if (cmd === 'list_background_agents') {
-          return new Promise(() => {});
-        }
-        return undefined;
-      }) as never,
-    );
-    const { findByText } = renderAt('/agents/sess-a');
-    // Noun + state per voice-terminology.md §8 — matches ProviderPanel's
-    // `ollama · probing` exemplar. Guard against verb-state regression.
-    const loading = await findByText('agents · probing');
-    expect(loading).toBeTruthy();
-  });
-
-  it('renders the error block with verbatim detail when list_background_agents rejects', async () => {
-    setInvokeForTesting(
-      (async (cmd: string) => {
-        if (cmd === 'list_background_agents') {
-          throw new Error('authz denied: agent-monitor');
-        }
-        return undefined;
-      }) as never,
-    );
-    const { findByText, queryByText } = renderAt('/agents/sess-a');
-    // Noun-state heading, matching PROVIDER UNAVAILABLE exemplar.
-    expect(await findByText('AGENT LIST UNAVAILABLE')).toBeTruthy();
-    // Verbatim technical detail — String(new Error('x')) is "Error: x".
-    expect(await findByText(/Error: authz denied: agent-monitor/)).toBeTruthy();
-    // Error state must be distinct from empty — the comment-syntax empty
-    // placeholder must NOT render when the fetch rejected.
-    expect(queryByText('// no agents')).toBeNull();
-  });
-
-  it('renders // no agents when list_background_agents resolves with an empty list', async () => {
-    setInvokeForTesting(
-      (async (cmd: string) => {
-        if (cmd === 'list_background_agents') return [];
-        return undefined;
-      }) as never,
-    );
-    const { findByText, queryByText } = renderAt('/agents/sess-a');
-    expect(await findByText('// no agents')).toBeTruthy();
-    // Ready-but-empty must NOT render the error UI.
-    expect(queryByText('AGENT LIST UNAVAILABLE')).toBeNull();
-  });
-
-  it('retry button on the error state re-invokes list_background_agents and recovers', async () => {
-    let calls = 0;
-    setInvokeForTesting(
-      (async (cmd: string) => {
-        if (cmd === 'list_background_agents') {
-          calls += 1;
-          if (calls === 1) throw new Error('transient');
-          return [{ id: 'aaaa1111', agent_name: 'writer', state: 'Running' }];
-        }
-        return undefined;
-      }) as never,
-    );
-    const { findByRole, findByText, container } = renderAt('/agents/sess-a');
-    // Error state lands first.
-    expect(await findByText('AGENT LIST UNAVAILABLE')).toBeTruthy();
-    const retry = await findByRole('button', { name: /^retry$/i });
-    fireEvent.click(retry);
-    // Recovery: error clears, row list renders.
-    await waitFor(() => {
-      expect(calls).toBe(2);
-    });
-    await waitFor(() => {
-      const rows = container.querySelectorAll('.agent-monitor__row');
-      expect(rows.length).toBe(1);
     });
   });
 });

@@ -1,20 +1,14 @@
 import { createResource, createSignal, For, Show, type Component } from 'solid-js';
-import { invoke } from '../../lib/tauri';
+import {
+  sessionList,
+  openSession as ipcOpenSession,
+  type SessionWireState,
+  type SessionSummary,
+} from '../../ipc/dashboard';
 import { useRovingTabindex } from '../../lib/useRovingTabindex';
 import './SessionsPanel.css';
 
-export type SessionWireState = 'active' | 'archived' | 'stopped';
-
-export interface SessionSummary {
-  id: string;
-  subject: string;
-  state: SessionWireState;
-  persistence: 'persist' | 'ephemeral';
-  createdAt: string;
-  lastEventAt: string;
-  /** Optional; provider chip is shown when present. */
-  provider?: string;
-}
+export type { SessionWireState, SessionSummary };
 
 type Tab = 'active' | 'archived';
 
@@ -25,7 +19,7 @@ type Tab = 'active' | 'archived';
 // propagates to the SolidJS resource's `error` field, and the panel
 // renders a `SESSIONS UNAVAILABLE <detail>` block per `dashboard.md D.5`.
 async function fetchSessions(): Promise<SessionSummary[]> {
-  const result = await invoke<SessionSummary[]>('session_list');
+  const result = await sessionList();
   return Array.isArray(result) ? result : [];
 }
 
@@ -70,7 +64,7 @@ export const SessionsPanel: Component = () => {
 
   const handleOpen = (id: string) => {
     setOpenError(null);
-    invoke('open_session', { id }).catch((err) => {
+    ipcOpenSession(id).catch((err) => {
       const detail = err instanceof Error ? err.message : String(err);
       setOpenError(`open_session failed: ${detail}`);
     });
