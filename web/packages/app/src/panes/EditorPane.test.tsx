@@ -573,6 +573,109 @@ describe('EditorPane PaneHeader adoption (F-394)', () => {
   });
 });
 
+describe('loading states (F-400)', () => {
+  it('shows LOADING EDITOR placeholder before the iframe emits ready', () => {
+    const { getByTestId } = render(() => (
+      <EditorPane
+        path={FILE}
+        src="about:blank"
+        readFile={vi.fn().mockResolvedValue({ path: FILE, content: '', bytes: 0, sha256: '' })}
+        writeFile={vi.fn().mockResolvedValue(undefined)}
+        onClose={vi.fn()}
+      />
+    ));
+    const loading = getByTestId('editor-pane-loading');
+    expect(loading).toBeInTheDocument();
+    expect(loading.getAttribute('role')).toBe('status');
+    expect(loading.textContent).toContain('LOADING EDITOR');
+  });
+
+  it('removes the LOADING EDITOR placeholder once the iframe emits ready', async () => {
+    const readFile = vi.fn().mockResolvedValue({ path: FILE, content: 'x', bytes: 1, sha256: '' });
+    const { getByTestId, queryByTestId } = render(() => (
+      <EditorPane
+        path={FILE}
+        src="about:blank"
+        readFile={readFile}
+        writeFile={vi.fn().mockResolvedValue(undefined)}
+        postToIframe={vi.fn()}
+        onClose={vi.fn()}
+      />
+    ));
+    expect(queryByTestId('editor-pane-loading')).toBeInTheDocument();
+
+    const iframe = getByTestId('editor-pane-iframe') as HTMLIFrameElement;
+    const event = new MessageEvent('message', {
+      data: { kind: 'ready' },
+      source: iframe.contentWindow as MessageEventSource,
+    });
+    window.dispatchEvent(event);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(queryByTestId('editor-pane-loading')).not.toBeInTheDocument();
+  });
+
+  it('shows LOADING FILE while readFile is in-flight (after ready)', async () => {
+    let resolveRead!: (v: { path: string; content: string; bytes: number; sha256: string }) => void;
+    const readFile = vi.fn().mockReturnValue(
+      new Promise<{ path: string; content: string; bytes: number; sha256: string }>((res) => {
+        resolveRead = res;
+      }),
+    );
+    const { getByTestId, queryByTestId } = render(() => (
+      <EditorPane
+        path={FILE}
+        src="about:blank"
+        readFile={readFile}
+        writeFile={vi.fn().mockResolvedValue(undefined)}
+        postToIframe={vi.fn()}
+        onClose={vi.fn()}
+      />
+    ));
+
+    const iframe = getByTestId('editor-pane-iframe') as HTMLIFrameElement;
+    const event = new MessageEvent('message', {
+      data: { kind: 'ready' },
+      source: iframe.contentWindow as MessageEventSource,
+    });
+    window.dispatchEvent(event);
+    await Promise.resolve();
+
+    expect(getByTestId('editor-pane-file-loading')).toBeInTheDocument();
+
+    resolveRead({ path: FILE, content: 'done', bytes: 4, sha256: '' });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(queryByTestId('editor-pane-file-loading')).not.toBeInTheDocument();
+  });
+
+  it('hides the loading placeholder when an error is shown instead', async () => {
+    const readFile = vi.fn().mockRejectedValue(new Error('denied'));
+    const { getByTestId, queryByTestId } = render(() => (
+      <EditorPane
+        path={FILE}
+        src="about:blank"
+        readFile={readFile}
+        writeFile={vi.fn().mockResolvedValue(undefined)}
+        onClose={vi.fn()}
+      />
+    ));
+    const iframe = getByTestId('editor-pane-iframe') as HTMLIFrameElement;
+    const event = new MessageEvent('message', {
+      data: { kind: 'ready' },
+      source: iframe.contentWindow as MessageEventSource,
+    });
+    window.dispatchEvent(event);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(queryByTestId('editor-pane-loading')).not.toBeInTheDocument();
+    expect(getByTestId('editor-pane-error')).toBeInTheDocument();
+  });
+});
+
 beforeEach(() => {
   // F-385: EditorPane reads the session id from the global `activeSessionId`
   // signal. Tests mount outside of SessionWindow, so we seed the signal

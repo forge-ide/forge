@@ -32,6 +32,20 @@
   background: transparent;
 }
 
+.terminal-pane__loading {
+  position: absolute;
+  top: var(--sp-3);
+  left: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--color-border-1);
+  border-radius: var(--r-sm);
+  background: var(--color-surface-2);
+  color: var(--color-text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
+
 .terminal-pane__error {
   position: absolute;
   top: var(--sp-3);

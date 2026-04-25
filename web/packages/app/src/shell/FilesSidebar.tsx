@@ -71,12 +71,14 @@ export const FilesSidebar: Component<FilesSidebarProps> = (props) => {
 
   const [rootNode, setRootNode] = createSignal<TreeNodeDto | null>(null);
   const [error, setError] = createSignal<string | null>(null);
+  const [isLoading, setIsLoading] = createSignal(false);
   const [expanded, setExpanded] = createSignal<Set<string>>(new Set());
   const [menu, setMenu] = createSignal<ContextMenuTarget | null>(null);
 
   const refresh = async (): Promise<void> => {
     const sid = activeSessionId();
     if (sid === null) return;
+    setIsLoading(true);
     try {
       const next = await load()(sid, props.workspaceRoot);
       setRootNode(next);
@@ -90,6 +92,8 @@ export const FilesSidebar: Component<FilesSidebarProps> = (props) => {
       setError(null);
     } catch (err) {
       setError(errorToString(err));
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -233,6 +237,11 @@ export const FilesSidebar: Component<FilesSidebarProps> = (props) => {
           </svg>
         </button>
       </header>
+      <Show when={isLoading()}>
+        <div class="files-sidebar__loading" role="status" data-testid="files-sidebar-loading">
+          LOADING TREE
+        </div>
+      </Show>
       <Show when={error() !== null}>
         <div class="files-sidebar__error" role="alert" data-testid="files-sidebar-error">
           {error()}
@@ -244,6 +253,11 @@ export const FilesSidebar: Component<FilesSidebarProps> = (props) => {
         </div>
       </Show>
       <div class="files-sidebar__tree" role="tree">
+        <Show when={!isLoading() && rootChildren().length === 0 && error() === null}>
+          <div class="files-sidebar__empty" role="status" data-testid="files-sidebar-empty">
+            NO FILES
+          </div>
+        </Show>
         <For each={rootChildren()}>
           {(child) => (
             <TreeRow
