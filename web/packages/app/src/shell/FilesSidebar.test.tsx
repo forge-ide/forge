@@ -440,7 +440,6 @@ describe('FilesSidebar loading and empty states (F-400)', () => {
     );
     const { getByTestId } = render(() => (
       <FilesSidebar
-        sessionId={SID}
         workspaceRoot={WS}
         onOpen={vi.fn()}
         loadTree={loadTree}
@@ -460,7 +459,6 @@ describe('FilesSidebar loading and empty states (F-400)', () => {
     const loadTree = vi.fn().mockResolvedValue(demoTree());
     const { findByText, queryByTestId } = render(() => (
       <FilesSidebar
-        sessionId={SID}
         workspaceRoot={WS}
         onOpen={vi.fn()}
         loadTree={loadTree}
@@ -481,7 +479,6 @@ describe('FilesSidebar loading and empty states (F-400)', () => {
     const loadTree = vi.fn().mockResolvedValue(emptyRoot);
     const { findByTestId } = render(() => (
       <FilesSidebar
-        sessionId={SID}
         workspaceRoot={WS}
         onOpen={vi.fn()}
         loadTree={loadTree}
@@ -502,7 +499,6 @@ describe('FilesSidebar loading and empty states (F-400)', () => {
     );
     const { queryByTestId } = render(() => (
       <FilesSidebar
-        sessionId={SID}
         workspaceRoot={WS}
         onOpen={vi.fn()}
         loadTree={loadTree}
@@ -521,7 +517,6 @@ describe('FilesSidebar loading and empty states (F-400)', () => {
     const loadTree = vi.fn().mockRejectedValue(new Error('permission denied'));
     const { findByTestId, queryByTestId } = render(() => (
       <FilesSidebar
-        sessionId={SID}
         workspaceRoot={WS}
         onOpen={vi.fn()}
         loadTree={loadTree}
