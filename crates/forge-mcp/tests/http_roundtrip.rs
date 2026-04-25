@@ -32,20 +32,6 @@ fn http_spec(url: &str, auth: &str) -> McpServerSpec {
     }
 }
 
-async fn recv_message(t: &mut Http) -> serde_json::Value {
-    let ev = tokio::time::timeout(Duration::from_secs(10), t.recv())
-        .await
-        .expect("recv timed out")
-        .expect("channel closed before message");
-    match ev {
-        HttpEvent::Message(v) => v,
-        HttpEvent::Closed(reason) => panic!("expected Message, got Closed({reason})"),
-        HttpEvent::Malformed { bytes_discarded } => {
-            panic!("expected Message, got Malformed({bytes_discarded})")
-        }
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn post_roundtrip_and_sse_notification() {
     let server = MockServer::start().await;
@@ -96,15 +82,39 @@ async fn post_roundtrip_and_sse_notification() {
     .await
     .expect("POST send");
 
-    // Collect three messages — order between POST response and SSE
-    // frames is racy (the GET runs on a reader task from connect time),
-    // so we gather by id/method rather than assume order.
+    // Collect messages by id/method rather than count. Order between the
+    // POST response and the SSE frames is racy (the GET runs on a reader
+    // task from connect time), and wiremock re-serves the same SSE body
+    // on each reconnect — so the reader can emit *duplicate* SSE frames
+    // before the POST response surfaces. Drain until all three distinct
+    // signals have arrived (with a generous overall deadline) instead of
+    // capping at exactly three recvs (#561).
     let mut got_post_response = false;
     let mut got_tools_changed = false;
     let mut got_ping = false;
 
-    for _ in 0..3 {
-        let v = recv_message(&mut t).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !(got_post_response && got_tools_changed && got_ping) {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or_default();
+        let v = tokio::time::timeout(remaining, t.recv())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "timed out waiting for all three messages \
+                     (post_response={got_post_response}, \
+                     tools_changed={got_tools_changed}, ping={got_ping})"
+                )
+            })
+            .expect("channel closed before all messages surfaced");
+        let v = match v {
+            HttpEvent::Message(v) => v,
+            HttpEvent::Closed(reason) => panic!("expected Message, got Closed({reason})"),
+            HttpEvent::Malformed { bytes_discarded } => {
+                panic!("expected Message, got Malformed({bytes_discarded})")
+            }
+        };
         if v.get("id") == Some(&serde_json::json!(1)) {
             assert_eq!(v["result"]["protocolVersion"], "2024-11-05");
             got_post_response = true;
