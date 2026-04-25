@@ -4,7 +4,32 @@
 
 ---
 
+## Phase scope
+
+This spec was originally drafted in full but only partially shipped in Phase 2.
+The expanded body and parallel-reads grouping were deferred to Phase 3 to keep
+Phase 2 focused on data plumbing and approval flow.
+
+**Phase 2 (shipped):** Placeholder collapsed row only —
+`web/packages/app/src/routes/Session/ChatPane.tsx` (`tool-placeholder` class)
+rendered the ⚙ icon in `--color-text-tertiary`, the tool name, a one-line arg
+summary, and the raw status string (`awaiting-approval` / `completed`). No
+per-tool icon color, no status glyph, no duration readout, no chevron, no
+expanded body, no parallel grouping.
+
+**Phase 3 (now shipped under F-447 / #448):** §5 expanded body and §5.1
+parallel-reads grouping. Sections below describe the full Phase 3 surface and
+are the source of truth going forward.
+
+---
+
 ## 5. Tool call card
+
+> **Phase 3 surface.** The full collapsed-row chrome (per-tool icon color,
+> status glyph, duration, chevron) and the expanded body described below
+> were deferred from Phase 2 and shipped in Phase 3 under F-447 (#448).
+> Phase 2 rendered only the placeholder row documented in the
+> "Phase scope" section above.
 
 **Purpose.** Surface every tool invocation inline in the chat, with full transparency — name, arguments, result, duration, and approval state.
 
@@ -30,6 +55,9 @@
 
 ### 5.1 Parallel tool call grouping
 
+> **Phase 3 surface.** Deferred from Phase 2 and shipped in Phase 3 under
+> F-447 (#448).
+
 When the model issues multiple read-only tool calls in the same turn, Forge executes them in parallel and visually groups them under a single expandable card:
 
 ```
@@ -47,3 +75,4 @@ When the model issues multiple read-only tool calls in the same turn, Forge exec
 **Doesn't do.**
 - Never collapses the *currently streaming* tool call
 - Never hides arguments for security review — truncation only
+- Phase 2 placeholder row did not render the expanded body or parallel-reads grouping; both surfaces ship in Phase 3 under F-447 (#448).
