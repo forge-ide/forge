@@ -17,7 +17,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@solidjs/testing-library';
-import type { SessionId, TreeNodeDto } from '@forge/ipc';
+import type { SessionId, TreeNodeDto, TreeStatsDto } from '@forge/ipc';
 import { FilesSidebar } from './FilesSidebar';
 import { setActiveSessionId } from '../stores/session';
 
@@ -29,12 +29,14 @@ function node(
   path: string,
   kind: 'File' | 'Dir',
   children?: TreeNodeDto[],
+  stats?: TreeStatsDto | null,
 ): TreeNodeDto {
   return {
     name,
     path,
     kind,
     children: kind === 'Dir' ? children ?? [] : null,
+    stats,
   } as TreeNodeDto;
 }
 
@@ -325,5 +327,105 @@ describe('FilesSidebar context menu', () => {
     expect((await findByTestId('files-sidebar-menu-open')).textContent).toContain('OPEN');
     expect((await findByTestId('files-sidebar-menu-rename')).textContent).toContain('RENAME');
     expect((await findByTestId('files-sidebar-menu-delete')).textContent).toContain('DELETE');
+  });
+});
+
+describe('FilesSidebar stats notice (F-536)', () => {
+  it('shows "N files not shown" when stats.truncated and omitted_count > 0', async () => {
+    const truncatedRoot = node('demo', WS, 'Dir', [
+      node('README.md', `${WS}/README.md`, 'File'),
+    ], { truncated: true, omitted_count: 42, error_count: 0 });
+    const loadTree = vi.fn().mockResolvedValue(truncatedRoot);
+    const { findByTestId } = render(() => (
+      <FilesSidebar
+        workspaceRoot={WS}
+        onOpen={vi.fn()}
+        loadTree={loadTree}
+      />
+    ));
+    const notice = await findByTestId('files-sidebar-stats-notice');
+    expect(notice.textContent).toMatch(/42 files not shown/);
+  });
+
+  it('shows "1 file not shown" (singular) when omitted_count is 1', async () => {
+    const truncatedRoot = node('demo', WS, 'Dir', [], {
+      truncated: true,
+      omitted_count: 1,
+      error_count: 0,
+    });
+    const loadTree = vi.fn().mockResolvedValue(truncatedRoot);
+    const { findByTestId } = render(() => (
+      <FilesSidebar
+        workspaceRoot={WS}
+        onOpen={vi.fn()}
+        loadTree={loadTree}
+      />
+    ));
+    const notice = await findByTestId('files-sidebar-stats-notice');
+    expect(notice.textContent).toMatch(/1 file not shown/);
+  });
+
+  it('shows error count when error_count > 0', async () => {
+    const errorRoot = node('demo', WS, 'Dir', [
+      node('app.ts', `${WS}/app.ts`, 'File'),
+    ], { truncated: false, omitted_count: 0, error_count: 3 });
+    const loadTree = vi.fn().mockResolvedValue(errorRoot);
+    const { findByTestId } = render(() => (
+      <FilesSidebar
+        workspaceRoot={WS}
+        onOpen={vi.fn()}
+        loadTree={loadTree}
+      />
+    ));
+    const notice = await findByTestId('files-sidebar-stats-notice');
+    expect(notice.textContent).toMatch(/3 read errors/);
+  });
+
+  it('combines truncation and error messages with a separator', async () => {
+    const combinedRoot = node('demo', WS, 'Dir', [], {
+      truncated: true,
+      omitted_count: 10,
+      error_count: 2,
+    });
+    const loadTree = vi.fn().mockResolvedValue(combinedRoot);
+    const { findByTestId } = render(() => (
+      <FilesSidebar
+        workspaceRoot={WS}
+        onOpen={vi.fn()}
+        loadTree={loadTree}
+      />
+    ));
+    const notice = await findByTestId('files-sidebar-stats-notice');
+    expect(notice.textContent).toMatch(/10 files not shown/);
+    expect(notice.textContent).toMatch(/2 read errors/);
+  });
+
+  it('renders no stats notice when stats is absent', async () => {
+    const loadTree = vi.fn().mockResolvedValue(demoTree());
+    const { findByText, queryByTestId } = render(() => (
+      <FilesSidebar
+        workspaceRoot={WS}
+        onOpen={vi.fn()}
+        loadTree={loadTree}
+      />
+    ));
+    await findByText('README.md');
+    expect(queryByTestId('files-sidebar-stats-notice')).toBeNull();
+  });
+
+  it('renders no stats notice when stats shows no truncation and no errors', async () => {
+    const cleanRoot = node('demo', WS, 'Dir', [
+      node('README.md', `${WS}/README.md`, 'File'),
+    ], { truncated: false, omitted_count: 0, error_count: 0 });
+    const loadTree = vi.fn().mockResolvedValue(cleanRoot);
+    const { findByText, queryByTestId } = render(() => (
+      <FilesSidebar
+        workspaceRoot={WS}
+        onOpen={vi.fn()}
+        loadTree={loadTree}
+      />
+    ));
+    await findByText('README.md');
+    expect(queryByTestId('files-sidebar-stats-notice')).toBeNull();
   });
 });

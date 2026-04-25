@@ -191,6 +191,24 @@ export const FilesSidebar: Component<FilesSidebarProps> = (props) => {
     return r.children ?? [];
   });
 
+  /** Non-null when the root's stats signal truncation or walk errors. */
+  const statsNotice = createMemo<string | null>(() => {
+    const r = rootNode();
+    if (r === null) return null;
+    const s = r.stats;
+    if (!s) return null;
+    const parts: string[] = [];
+    if (s.truncated && s.omitted_count > 0) {
+      parts.push(`${s.omitted_count} file${s.omitted_count === 1 ? '' : 's'} not shown`);
+    } else if (s.truncated) {
+      parts.push('tree truncated');
+    }
+    if (s.error_count > 0) {
+      parts.push(`${s.error_count} read error${s.error_count === 1 ? '' : 's'}`);
+    }
+    return parts.length > 0 ? parts.join(' · ') : null;
+  });
+
   return (
     <aside
       class="files-sidebar"
@@ -218,6 +236,11 @@ export const FilesSidebar: Component<FilesSidebarProps> = (props) => {
       <Show when={error() !== null}>
         <div class="files-sidebar__error" role="alert" data-testid="files-sidebar-error">
           {error()}
+        </div>
+      </Show>
+      <Show when={statsNotice() !== null}>
+        <div class="files-sidebar__stats-notice" role="status" data-testid="files-sidebar-stats-notice">
+          {statsNotice()}
         </div>
       </Show>
       <div class="files-sidebar__tree" role="tree">
