@@ -26,6 +26,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use super::ssrf;
 use crate::{McpServerSpec, ServerKind};
 
 /// Total timeout for the POST round-trip, measured from send to the full
@@ -144,8 +145,9 @@ impl Http {
     /// Connect to the HTTP MCP server described by `spec`. Builds the
     /// shared `reqwest::Client`, materialises custom headers, and spawns
     /// the SSE reader. Errors if `spec` describes a stdio server, if any
-    /// custom header is malformed, or if the client builder fails (only
-    /// happens when no TLS backend is compiled in).
+    /// custom header is malformed, if the URL fails the SSRF guard (see
+    /// [`ssrf::check_url`]), or if the client builder fails (only happens
+    /// when no TLS backend is compiled in).
     pub async fn connect(spec: &McpServerSpec) -> Result<Self> {
         let (url, raw_headers) = match &spec.kind {
             ServerKind::Http { url, headers } => (url.clone(), headers),
@@ -155,6 +157,11 @@ impl Http {
                 ));
             }
         };
+
+        // Validate the URL before opening any network connection. This blocks
+        // loopback (except in dev builds), link-local, IMDS, and RFC-1918
+        // private ranges to prevent SSRF attacks via a crafted .mcp.json.
+        ssrf::check_url(&url)?;
 
         let headers = build_header_map(raw_headers)?;
 
