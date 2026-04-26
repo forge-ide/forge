@@ -26,15 +26,16 @@
 //! `window` has elapsed. Sleep is driven by the [`Clock`] seam so tests
 //! can drive backoff deterministically with `tokio::time::pause()`.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::process::Stdio as StdStdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use forge_core::process::{ManagedStdioChild, ManagedStdioConfig, StdioChildEvent};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{ChildStdin, Command};
+use tokio::io::AsyncWriteExt;
+use tokio::process::ChildStdin;
 use tokio::sync::{mpsc, Mutex};
 use ts_rs::TS;
 
@@ -88,32 +89,6 @@ pub struct LspServerInfo {
     /// Current lifecycle state.
     pub state: LspState,
 }
-
-/// Variables forwarded from the parent process into every spawned LSP
-/// child. Mirrors the F-345 stdio-MCP allow-list.
-///
-/// Security posture: the child environment is **deny-by-default**. The
-/// spawn path calls `env_clear()` on the `Command` and then re-injects
-/// only this minimal allow-list, so a language server cannot silently
-/// read parent-held credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
-/// `GITHUB_TOKEN`, `AWS_*`, arbitrary shell exports). Parent-env vars a
-/// real LSP server actually needs to locate its own binaries (e.g.
-/// `PATH` for `solargraph` → `ruby`, `HOME` for user config) are
-/// included explicitly.
-const PARENT_ENV_ALLOWLIST: &[&str] = &[
-    "PATH",
-    "HOME",
-    "LANG",
-    "LC_ALL",
-    "USER",
-    "LOGNAME",
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    "SystemRoot",
-    "ComSpec",
-    "PATHEXT",
-];
 
 /// Errors returned by [`Server`] operations.
 #[derive(Debug, thiserror::Error)]
@@ -312,7 +287,7 @@ impl Server {
     /// Build a supervised server from a [`ServerId`] resolved against the
     /// [`Bootstrap`]'s registry. The resolved binary path is enforced to
     /// live inside the cache-root sandbox before it ever reaches
-    /// [`Command::new`]. This is the **only** public constructor: callers
+    /// [`ManagedStdioChild::spawn`]. This is the **only** public constructor: callers
     /// at the IPC boundary cannot name an arbitrary binary path, closing
     /// the arbitrary-binary-exec surface the raw-`PathBuf` constructor
     /// left open (F-353).
@@ -564,40 +539,32 @@ impl Server {
     /// which case `code` is `None`); any transient I/O while draining is
     /// logged, not propagated, so a single spawn completes the attempt.
     async fn spawn_once(&self) -> Result<Option<i32>, ServerError> {
-        let mut cmd = Command::new(&self.program);
-        cmd.args(&self.args)
-            // Security (F-353, mirrors F-345 on the MCP axis): wipe the
-            // inherited environment first, then re-inject only the minimal
-            // `PARENT_ENV_ALLOWLIST`. A language server should not see the
-            // parent's AI-provider API keys, GitHub tokens, or arbitrary
-            // shell exports. LSP servers communicate via stdio; everything
-            // they need to locate their own dependencies is in the
-            // allow-list.
-            .env_clear();
-        for key in PARENT_ENV_ALLOWLIST {
-            if let Ok(val) = std::env::var(key) {
-                cmd.env(key, val);
-            }
-        }
-        cmd.stdin(StdStdio::piped())
-            .stdout(StdStdio::piped())
-            .stderr(StdStdio::piped())
-            .kill_on_drop(true);
+        // Spawn / env-scrub / stderr-drain / stdout reader / reap all
+        // live in [`forge_core::process::ManagedStdioChild`]. The
+        // supervisor here keeps its own backoff + transport-swap policy;
+        // the primitive owns the per-spawn mechanics.
+        let cfg = ManagedStdioConfig {
+            program: self.program.as_os_str().into(),
+            args: self.args.iter().map(Into::into).collect(),
+            extra_env: BTreeMap::new(),
+            // F-386: stderr-drain and malformed-frame log lines must
+            // carry the program path so a field engineer can
+            // disambiguate concurrent servers in the log ring.
+            server_id: Some(self.program.display().to_string()),
+            // F-351: bound the per-line ceiling at 4 MiB so a hostile
+            // language server cannot DoS the host with an unterminated
+            // line. The primitive surfaces over-cap lines as
+            // `StdioChildEvent::MalformedStdout` /
+            // `::MalformedStderr`, mapped below to
+            // `ServerEvent::Malformed`.
+            max_frame_bytes: Some(MAX_LSP_LINE_BYTES),
+        };
+        let mut managed =
+            ManagedStdioChild::spawn(cfg).map_err(|e| ServerError::Spawn(e.to_string()))?;
 
-        let mut child = cmd.spawn().map_err(|e| ServerError::Spawn(e.to_string()))?;
-
-        let stdin = child
-            .stdin
-            .take()
+        let stdin = managed
+            .take_stdin()
             .ok_or_else(|| ServerError::Pipe("child has no stdin pipe".into()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| ServerError::Pipe("child has no stdout pipe".into()))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| ServerError::Pipe("child has no stderr pipe".into()))?;
 
         // Hand the live stdin pipe to the transport so `lsp_send` can write.
         self.transport.install(stdin).await;
@@ -607,143 +574,45 @@ impl Server {
         // transition is the current-state surface F-374 adds.
         *self.state.lock().await = LspState::Running;
 
-        // Drain stderr at DEBUG — stderr on LSP is free-form logs. Each
-        // line carries `server_id` (the program path) so a field engineer
-        // can disambiguate output when multiple servers run concurrently
-        // (F-386). Reads are capped at `MAX_LSP_LINE_BYTES`; over-cap lines
-        // are discarded (F-351) and surface as `ServerEvent::Malformed`
-        // with `MalformedStream::Stderr` so the host can observe the
-        // misbehavior without buffering the payload.
-        let stderr_server_id = self.program.clone();
-        let stderr_tx = self.event_tx.clone();
-        let stderr_task = tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr);
-            // Reuse one `Vec<u8>` across every frame (F-574): chatty
-            // servers floods stderr too, and the prior per-call
-            // allocation showed up under flame graphs.
-            let mut buf: Vec<u8> = Vec::with_capacity(1024);
-            loop {
-                match read_line_bounded(&mut reader, &mut buf, MAX_LSP_LINE_BYTES).await {
-                    Ok(BoundedLine::Eof) => break,
-                    Ok(BoundedLine::Line) => {
-                        let line = String::from_utf8_lossy(&buf);
-                        let line = line.trim_end_matches('\n').trim_end_matches('\r');
-                        tracing::debug!(
-                            target: "forge_lsp::server",
-                            server_id = %stderr_server_id.display(),
-                            stderr = %line,
-                        );
-                    }
-                    Ok(BoundedLine::Overflow { bytes_discarded }) => {
-                        tracing::warn!(
-                            target: "forge_lsp::server",
-                            server_id = %stderr_server_id.display(),
-                            stream = "stderr",
-                            bytes_discarded = bytes_discarded,
-                            cap = MAX_LSP_LINE_BYTES,
-                            "dropping over-cap stderr line",
-                        );
-                        if stderr_tx
-                            .send(ServerEvent::Malformed {
-                                stream: MalformedStream::Stderr,
-                                bytes_discarded,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
+        // Drain the primitive's events into our `ServerEvent` channel.
+        // The terminal `Exit` event ends the loop; we then surface its
+        // exit code to the supervisor. F-351 over-cap events on either
+        // pipe surface as `ServerEvent::Malformed` so subscribers can
+        // observe DoS attempts (stdout) and log floods (stderr).
+        let mut exit_code: Option<i32> = None;
+        while let Some(ev) = managed.events.recv().await {
+            let mapped = match ev {
+                StdioChildEvent::Message(v) => ServerEvent::Message(v),
+                StdioChildEvent::MalformedStdout { bytes_discarded } => ServerEvent::Malformed {
+                    stream: MalformedStream::Stdout,
+                    bytes_discarded,
+                },
+                StdioChildEvent::MalformedStderr { bytes_discarded } => ServerEvent::Malformed {
+                    stream: MalformedStream::Stderr,
+                    bytes_discarded,
+                },
+                StdioChildEvent::Exit(status) => {
+                    exit_code = status.code();
+                    break;
                 }
+            };
+            if self.event_tx.send(mapped).await.is_err() {
+                // Consumer dropped; nothing more to do — the
+                // primitive's reader will reap the child on the
+                // next loop iteration as `managed` drops below.
+                break;
             }
-        });
+        }
 
-        // Stdout → `ServerEvent::Message`. Reads are capped at
-        // `MAX_LSP_LINE_BYTES`; over-cap frames are discarded (F-351) and
-        // surface as `ServerEvent::Malformed { stream: Stdout, .. }`. The
-        // reader keeps running so a well-formed frame following an over-cap
-        // line still reaches the event channel. The task-scoped reusable
-        // `Vec<u8>` (F-574) collapses per-frame allocations to one realloc
-        // after the buffer reaches steady state — the prior per-call
-        // `Vec::new()` mattered under chatty servers
-        // (`textDocument/publishDiagnostics` floods at 100+ msg/sec).
-        let tx = self.event_tx.clone();
-        let reader_server_id = self.program.clone();
-        let reader_task = tokio::spawn(async move {
-            let mut reader = BufReader::new(stdout);
-            let mut buf: Vec<u8> = Vec::with_capacity(1024);
-            loop {
-                match read_line_bounded(&mut reader, &mut buf, MAX_LSP_LINE_BYTES).await {
-                    Ok(BoundedLine::Eof) => break,
-                    Ok(BoundedLine::Line) => {
-                        // `read_line_bounded` fills `buf` with bytes up to
-                        // and including any trailing '\n'. Parse the raw
-                        // slice so UTF-8 errors flow through the same
-                        // `serde_json` sad path as any other malformed
-                        // frame, and trim the delimiter before the
-                        // empty-line skip check.
-                        let trimmed: &[u8] = trim_trailing_newline(&buf);
-                        if trimmed.iter().all(|b| b.is_ascii_whitespace()) {
-                            continue;
-                        }
-                        match serde_json::from_slice::<serde_json::Value>(trimmed) {
-                            Ok(v) => {
-                                if tx.send(ServerEvent::Message(v)).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(err) => {
-                                let as_str = String::from_utf8_lossy(trimmed);
-                                tracing::warn!(
-                                    target: "forge_lsp::server",
-                                    server_id = %reader_server_id.display(),
-                                    error = %err,
-                                    line = %truncate(&as_str, 512),
-                                    "dropping malformed stdout frame",
-                                );
-                            }
-                        }
-                    }
-                    Ok(BoundedLine::Overflow { bytes_discarded }) => {
-                        tracing::warn!(
-                            target: "forge_lsp::server",
-                            server_id = %reader_server_id.display(),
-                            stream = "stdout",
-                            bytes_discarded = bytes_discarded,
-                            cap = MAX_LSP_LINE_BYTES,
-                            "dropping over-cap stdout line",
-                        );
-                        if tx
-                            .send(ServerEvent::Malformed {
-                                stream: MalformedStream::Stdout,
-                                bytes_discarded,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        // Wait for the child to reap.
-        let status = child.wait().await.ok();
-        // Drain both readers (stdout and stderr pipes close with the child).
-        // We await the stderr task as well so any pending `Malformed` event
-        // the F-351 cap produced is observed in-order before the
-        // supervisor's `Exited` reaches subscribers — without this, a slow
-        // stderr drain could race the `Exited` event and surface out of
-        // order (or after the receiver has already moved on).
-        let _ = reader_task.await;
-        let _ = stderr_task.await;
-        // Clear the transport: any in-flight `send` past this point returns
-        // NotRunning until the next spawn reinstalls a live stdin.
+        // Clear the transport: any in-flight `send` past this point
+        // returns NotRunning until the next spawn reinstalls a live
+        // stdin. Drain ordering for `Malformed` vs `Exit` is guaranteed
+        // by the primitive: its reader awaits the stderr drain before
+        // emitting the terminal `Exit`, so any pending stderr-Malformed
+        // event has already crossed the channel by the time this loop
+        // observed `StdioChildEvent::Exit`.
         self.transport.uninstall().await;
-        Ok(status.and_then(|s| s.code()))
+        Ok(exit_code)
     }
 }
 
@@ -759,146 +628,17 @@ fn backoff_delay(policy: &BackoffPolicy, attempt: u32) -> Duration {
     }
 }
 
-/// Outcome of a single [`read_line_bounded`] call.
-enum BoundedLine {
-    /// A full line was read within the byte ceiling. The raw bytes (up to
-    /// and including any trailing `\n`) live in the caller-supplied buffer.
-    Line,
-    /// EOF on the stream — no bytes available. Caller-supplied buffer is
-    /// untouched.
-    Eof,
-    /// The line exceeded the ceiling. All bytes through the terminating
-    /// `\n` (or EOF) have been consumed and discarded; `bytes_discarded`
-    /// reports the total dropped, always `>=` the cap. Caller-supplied
-    /// buffer is left empty.
-    Overflow { bytes_discarded: usize },
-}
-
-/// Read bytes up to and including the next `\n` from `reader` into a
-/// caller-supplied `buf`, but never buffer more than `cap` bytes in
-/// memory. Closes F-351: a compromised / buggy / hostile child writing a
-/// single enormous line cannot DoS the host. The caller-owned buffer
-/// (F-574) lets reader tasks reuse one allocation across all frames
-/// instead of paying a per-frame `Vec` alloc on chatty servers
-/// (`textDocument/publishDiagnostics` floods at 100+ msg/sec).
-///
-/// `buf` is cleared on entry. On success it contains the bytes read
-/// (possibly ending in `\n`); on `Overflow` / `Eof` it is left empty.
-///
-/// Behavior:
-/// - Within the cap → fills `buf` and returns [`BoundedLine::Line`].
-/// - At EOF → returns [`BoundedLine::Eof`].
-/// - Over the cap → continues reading-and-discarding byte-by-byte from the
-///   same reader until the next `\n` (or EOF) so the reader resyncs on the
-///   stream without buffering, then returns [`BoundedLine::Overflow`] with
-///   the total discarded count (always `>= cap`).
-/// - Pure I/O error → surfaces as `Err`.
-async fn read_line_bounded<R: tokio::io::AsyncBufRead + Unpin>(
-    reader: &mut R,
-    buf: &mut Vec<u8>,
-    cap: usize,
-) -> std::io::Result<BoundedLine> {
-    buf.clear();
-    // Accumulate up to `cap+1` bytes: any overshoot proves the line exceeded
-    // the ceiling without a newline. `Take` enforces the ceiling at the
-    // reader layer so `buf` never grows past `cap+1`.
-    let mut limited = (&mut *reader).take(cap as u64 + 1);
-    let _ = limited.read_until(b'\n', buf).await?;
-    if buf.is_empty() {
-        return Ok(BoundedLine::Eof);
-    }
-    let hit_newline = buf.last() == Some(&b'\n');
-    if hit_newline || buf.len() <= cap {
-        return Ok(BoundedLine::Line);
-    }
-
-    // Over the cap and no newline yet — drain the remainder of the line
-    // from the underlying reader. We read-and-discard via the `BufRead`
-    // fill/consume pair so no intermediate buffer grows beyond the
-    // reader's own internal read-ahead (8 KiB by default for tokio's
-    // `BufReader`).
-    let mut bytes_discarded = buf.len();
-    buf.clear();
-    loop {
-        let chunk = reader.fill_buf().await?;
-        if chunk.is_empty() {
-            // EOF mid-line — still an overflow, the line never terminated.
-            return Ok(BoundedLine::Overflow { bytes_discarded });
-        }
-        match chunk.iter().position(|&b| b == b'\n') {
-            Some(idx) => {
-                // Include the newline in the discard count, then stop.
-                // `consume(idx + 1)` leaves any bytes *after* the newline
-                // in the reader's buffer, so the next `read_line_bounded`
-                // call picks up the subsequent line correctly.
-                bytes_discarded = bytes_discarded.saturating_add(idx + 1);
-                reader.consume(idx + 1);
-                return Ok(BoundedLine::Overflow { bytes_discarded });
-            }
-            None => {
-                let n = chunk.len();
-                bytes_discarded = bytes_discarded.saturating_add(n);
-                reader.consume(n);
-            }
-        }
-    }
-}
-
-/// Strip at most one trailing `\n` (and a preceding `\r`) from `bytes`.
-/// Matches `BufReader::lines` semantics for downstream JSON parsing.
-fn trim_trailing_newline(bytes: &[u8]) -> &[u8] {
-    let mut end = bytes.len();
-    if end > 0 && bytes[end - 1] == b'\n' {
-        end -= 1;
-        if end > 0 && bytes[end - 1] == b'\r' {
-            end -= 1;
-        }
-    }
-    &bytes[..end]
-}
-
-/// Cap a log field at `max` bytes so a runaway frame can't flood the log
-/// ring. `line` is guaranteed UTF-8 here, but we still slice on a char
-/// boundary via `char_indices` to avoid panicking on multi-byte glyphs.
-///
-/// Ported from `forge-mcp`'s `transport::truncate` (F-375). Once the
-/// Phase-3 `forge_core::process::ManagedStdioChild` extraction lands, this
-/// helper will move there and both crates will share a single copy.
-fn truncate(line: &str, max: usize) -> String {
-    if line.len() <= max {
-        return line.to_string();
-    }
-    let mut end = max;
-    for (i, _) in line.char_indices() {
-        if i > max {
-            break;
-        }
-        end = i;
-    }
-    format!("{}…", &line[..end])
-}
-
 /// Byte-transparent stdio transport implementing [`MessageTransport`]. The
 /// inner `ChildStdin` is swapped in and out by the supervisor around each
 /// spawn; if no child is alive, `send` returns [`ServerError::NotRunning`].
-///
-/// `send_buf` is a reusable scratch `Vec<u8>` that backs every outbound
-/// frame: each `send` clears it, serialises into it, appends the newline
-/// delimiter, then writes it to the child's stdin. Allocator pressure on
-/// chatty servers (`textDocument/publishDiagnostics` floods at 100+
-/// msg/sec) collapses to one `realloc` after the buffer reaches
-/// steady-state capacity, instead of a fresh `serde_json::to_vec` +
-/// `push(b'\n')` per message (F-574).
 pub struct StdioTransport {
     stdin: Mutex<Option<ChildStdin>>,
-    send_buf: Mutex<Vec<u8>>,
 }
 
 impl StdioTransport {
     fn new_empty() -> Self {
         Self {
             stdin: Mutex::new(None),
-            send_buf: Mutex::new(Vec::new()),
         }
     }
 
@@ -914,20 +654,13 @@ impl StdioTransport {
 #[async_trait]
 impl MessageTransport for StdioTransport {
     async fn send(&self, message: serde_json::Value) -> Result<(), ServerError> {
-        // Reuse the struct-owned scratch buffer. After the first few
-        // frames its capacity reaches steady state and this is allocation-
-        // free per send. Framing is unchanged: line-delimited JSON between
-        // this transport and `forge-lsp-mock-stdio` (see module-level doc).
-        // Real LSP `Content-Length` framing is the caller's responsibility.
-        let mut buf = self.send_buf.lock().await;
-        buf.clear();
-        serde_json::to_writer(&mut *buf, &message)?;
-        buf.push(b'\n');
+        let mut bytes = serde_json::to_vec(&message)?;
+        bytes.push(b'\n');
         let mut guard = self.stdin.lock().await;
         match guard.as_mut() {
             Some(stdin) => {
                 stdin
-                    .write_all(&buf)
+                    .write_all(&bytes)
                     .await
                     .map_err(|e| ServerError::StdinWrite(e.to_string()))?;
                 stdin
@@ -1620,19 +1353,12 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // F-375: malformed-frame warn must carry a size-capped `line` field so
-    // a runaway stdout frame can't flood the log ring. Ported from
-    // forge-mcp's `truncate` pattern.
+    // a runaway stdout frame can't flood the log ring. The `truncate`
+    // helper itself has migrated to `forge_core::process::truncate` (the
+    // shared `ManagedStdioChild` primitive owns it now); this test still
+    // pins the supervisor's behavioural contract: a >512 byte malformed
+    // frame must reach the log ring with the ellipsis marker, not raw.
     // -----------------------------------------------------------------------
-
-    #[test]
-    fn truncate_is_utf8_safe() {
-        // Long ASCII + one multi-byte glyph at the tail forces the slice to
-        // land on a char boundary. A naive byte-index slice would panic.
-        let s = "a".repeat(600) + "é";
-        let out = truncate(&s, 300);
-        assert!(out.ends_with('…'));
-        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
-    }
 
     /// A malformed stdout frame longer than the 512-byte cap must be
     /// logged with a truncated `line` field, not the raw bytes.
