@@ -23,6 +23,7 @@ tracing = "0.1"
 ts-rs = "12"
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "rt", "rt-multi-thread", "time", "test-util", "fs"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
@@ -36,3 +37,10 @@ name = "forge-lsp-mock-stdio"
 path = "tests/bin/mock_stdio.rs"
 test = false
 doc = false
+
+# F-574 perf evidence. Streams 100 MiB through the new `fetch_into`,
+# samples peak RSS via `/proc/self/status` on Linux + a counting
+# allocator on every target. Run with `cargo bench -p forge-lsp`.
+[[bench]]
+name = "streaming"
+harness = false

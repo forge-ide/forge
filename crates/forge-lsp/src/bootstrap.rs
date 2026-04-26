@@ -35,6 +35,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use crate::registry::{Checksum, Registry, ServerSpec};
 
@@ -115,7 +116,7 @@ pub enum BootstrapError {
     },
 }
 
-/// Error returned by [`HttpDownloader::fetch`] when the streamed body
+/// Error returned by [`HttpDownloader::fetch_into`] when the streamed body
 /// exceeds [`HttpClientOptions::max_body_bytes`]. Surfaced through the
 /// [`Downloader`] trait as a boxed `std::error::Error`; [`Bootstrap::ensure`]
 /// downcasts it into [`BootstrapError::OversizeBody`] for callers.
@@ -159,11 +160,25 @@ impl Default for HttpClientOptions {
 
 /// Network seam. Tests inject a stub impl with in-memory fixtures;
 /// production uses [`HttpDownloader`] backed by reqwest.
+///
+/// The stream-into-sink shape lets the production downloader avoid buffering
+/// the full body in RAM (peak RSS becomes bounded by chunk size, not body
+/// size) and folds the hash into the same single pass — no post-write
+/// re-hash on the fresh-fetch path. Test stubs that already hold their
+/// bytes in-memory just write the buffer through and feed it to the same
+/// `Sha256` accumulator.
 #[async_trait]
 pub trait Downloader: Send + Sync {
-    /// Fetch the bytes of `url`. Any transport error surfaces as
-    /// [`BootstrapError::Download`].
-    async fn fetch(&self, url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>;
+    /// Stream `url` into `sink` and return the streaming SHA-256 digest of
+    /// the bytes written. Any transport error surfaces as
+    /// [`BootstrapError::Download`]. Implementations must enforce their
+    /// configured body ceiling (the production [`HttpDownloader`] surfaces
+    /// [`OversizeBody`]).
+    async fn fetch_into(
+        &self,
+        url: &str,
+        sink: &mut (dyn AsyncWrite + Send + Unpin),
+    ) -> Result<[u8; 32], Box<dyn std::error::Error + Send + Sync>>;
 }
 
 /// Production [`Downloader`] backed by `reqwest`. Configured for DoS-
@@ -214,15 +229,19 @@ impl Default for HttpDownloader {
 
 #[async_trait]
 impl Downloader for HttpDownloader {
-    async fn fetch(&self, url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    async fn fetch_into(
+        &self,
+        url: &str,
+        sink: &mut (dyn AsyncWrite + Send + Unpin),
+    ) -> Result<[u8; 32], Box<dyn std::error::Error + Send + Sync>> {
         let mut resp = self.client.get(url).send().await?;
         let status = resp.status();
         if !status.is_success() {
             return Err(format!("HTTP {status}").into());
         }
         // Short-circuit on an honest `Content-Length` that already
-        // overshoots the cap; skips buffering large responses we know
-        // we'll reject anyway.
+        // overshoots the cap; skips streaming responses we know we'll
+        // reject anyway.
         if let Some(declared) = resp.content_length() {
             if declared > self.max_body_bytes {
                 return Err(Box::new(OversizeBody {
@@ -230,16 +249,24 @@ impl Downloader for HttpDownloader {
                 }));
             }
         }
-        let mut acc: Vec<u8> = Vec::new();
+        // Stream the body chunk-by-chunk: each chunk is written straight
+        // to `sink` (the caller's temp file) and folded into a streaming
+        // `Sha256`. Peak RSS is now bounded by the chunk size, not the
+        // body size, and the hash falls out of the same single pass —
+        // no post-write re-hash on the fresh-fetch path.
+        let mut hasher = Sha256::new();
+        let mut written: u64 = 0;
         while let Some(chunk) = resp.chunk().await? {
-            if (acc.len() as u64).saturating_add(chunk.len() as u64) > self.max_body_bytes {
+            if written.saturating_add(chunk.len() as u64) > self.max_body_bytes {
                 return Err(Box::new(OversizeBody {
                     limit: self.max_body_bytes,
                 }));
             }
-            acc.extend_from_slice(&chunk);
+            hasher.update(&chunk);
+            sink.write_all(&chunk).await?;
+            written = written.saturating_add(chunk.len() as u64);
         }
-        Ok(acc)
+        Ok(hasher.finalize().into())
     }
 }
 
@@ -379,14 +406,18 @@ impl Bootstrap {
             // read + one sha256 per call, but `ensure` fires at most once
             // per server spawn, so the cost is bounded. The original bytes
             // are still served from disk — no network I/O on a hit.
-            let cached =
-                tokio::fs::read(&archive_path)
+            //
+            // Stream the file through `tokio::io::copy` into a streaming
+            // `Sha256` sink (F-574) so peak RSS stays bounded by the copy
+            // buffer instead of the full archive size — `fs::read` +
+            // `Sha256::digest` would allocate the entire body up-front.
+            let cached_hash =
+                hash_file_streaming(&archive_path)
                     .await
                     .map_err(|source| BootstrapError::Io {
                         server: spec.id.to_string(),
                         source,
                     })?;
-            let cached_hash = hex::encode(Sha256::digest(&cached));
             if !cached_hash.eq_ignore_ascii_case(&expected) {
                 return Err(BootstrapError::ChecksumMismatch {
                     server: spec.id.to_string(),
@@ -397,37 +428,11 @@ impl Bootstrap {
             return Ok(archive_path);
         }
 
-        let bytes = self
-            .downloader
-            .fetch(spec.download_url)
-            .await
-            .map_err(|source| {
-                // Rewrap a typed oversize error into the structured
-                // `BootstrapError::OversizeBody` variant so callers can
-                // surface a specific message instead of an opaque
-                // `Download` source.
-                if let Some(over) = source.downcast_ref::<OversizeBody>() {
-                    let limit = over.limit;
-                    return BootstrapError::OversizeBody {
-                        server: spec.id.to_string(),
-                        limit,
-                    };
-                }
-                BootstrapError::Download {
-                    server: spec.id.to_string(),
-                    source,
-                }
-            })?;
-
-        let actual = hex::encode(Sha256::digest(&bytes));
-        if !actual.eq_ignore_ascii_case(&expected) {
-            return Err(BootstrapError::ChecksumMismatch {
-                server: spec.id.to_string(),
-                expected,
-                actual,
-            });
-        }
-
+        // Stream the body straight into a temp file inside `server_dir`,
+        // hashing as we go. The temp+rename keeps the cache atomic: a
+        // checksum mismatch or partial transfer never leaves a half-written
+        // `archive.bin` on disk for the next `ensure` to mistake as a hit.
+        //
         // Create the cache dirs with 0o700 on unix so another user on a
         // shared host cannot list or mutate the signed archive. Relying on
         // the platform default leaves the dir 0o755 on most Linux. On
@@ -443,7 +448,64 @@ impl Bootstrap {
         // install before F-355). No-op on non-unix.
         tighten_dir_perms_0700(&self.cache_root).await;
         tighten_dir_perms_0700(&server_dir).await;
-        tokio::fs::write(&archive_path, &bytes)
+        let tmp_path = server_dir.join("archive.bin.partial");
+        let mut tmp_file =
+            tokio::fs::File::create(&tmp_path)
+                .await
+                .map_err(|source| BootstrapError::Io {
+                    server: spec.id.to_string(),
+                    source,
+                })?;
+
+        let actual_digest = match self
+            .downloader
+            .fetch_into(spec.download_url, &mut tmp_file)
+            .await
+        {
+            Ok(d) => d,
+            Err(source) => {
+                // Drop the partial bytes regardless of error class.
+                let _ = tmp_file.shutdown().await;
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                // Rewrap a typed oversize error into the structured
+                // `BootstrapError::OversizeBody` variant so callers can
+                // surface a specific message instead of an opaque
+                // `Download` source.
+                if let Some(over) = source.downcast_ref::<OversizeBody>() {
+                    let limit = over.limit;
+                    return Err(BootstrapError::OversizeBody {
+                        server: spec.id.to_string(),
+                        limit,
+                    });
+                }
+                return Err(BootstrapError::Download {
+                    server: spec.id.to_string(),
+                    source,
+                });
+            }
+        };
+        // Flush + close before rename so the bytes are durable on disk.
+        tmp_file
+            .flush()
+            .await
+            .map_err(|source| BootstrapError::Io {
+                server: spec.id.to_string(),
+                source,
+            })?;
+        drop(tmp_file);
+
+        let actual = hex::encode(actual_digest);
+        if !actual.eq_ignore_ascii_case(&expected) {
+            // Tampered or corrupt — surface the mismatch and discard bytes.
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(BootstrapError::ChecksumMismatch {
+                server: spec.id.to_string(),
+                expected,
+                actual,
+            });
+        }
+
+        tokio::fs::rename(&tmp_path, &archive_path)
             .await
             .map_err(|source| BootstrapError::Io {
                 server: spec.id.to_string(),
@@ -451,6 +513,47 @@ impl Bootstrap {
             })?;
 
         Ok(archive_path)
+    }
+}
+
+/// Stream `path` through a `Sha256` sink and return the hex digest. Used by
+/// [`Bootstrap::ensure`] on a cache hit so peak RSS stays bounded by the
+/// copy buffer instead of the full archive size — a 256 MiB tarball would
+/// otherwise sit in the heap for the duration of the re-verify.
+async fn hash_file_streaming(path: &Path) -> std::io::Result<String> {
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut hasher = Sha256Writer(Sha256::new());
+    tokio::io::copy(&mut file, &mut hasher).await?;
+    Ok(hex::encode(hasher.0.finalize()))
+}
+
+/// `AsyncWrite` adapter that folds every written chunk into a streaming
+/// `Sha256`. `tokio::io::copy` drives the bounded-memory hash in
+/// [`hash_file_streaming`].
+struct Sha256Writer(Sha256);
+
+impl tokio::io::AsyncWrite for Sha256Writer {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        self.0.update(buf);
+        std::task::Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
     }
 }
 
@@ -554,12 +657,14 @@ mod tests {
 
     #[async_trait]
     impl Downloader for StubDownloader {
-        async fn fetch(
+        async fn fetch_into(
             &self,
             _url: &str,
-        ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+            sink: &mut (dyn AsyncWrite + Send + Unpin),
+        ) -> Result<[u8; 32], Box<dyn std::error::Error + Send + Sync>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(self.bytes.clone())
+            sink.write_all(&self.bytes).await?;
+            Ok(Sha256::digest(&self.bytes).into())
         }
     }
 

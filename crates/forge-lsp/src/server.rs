@@ -618,13 +618,15 @@ impl Server {
         let stderr_tx = self.event_tx.clone();
         let stderr_task = tokio::spawn(async move {
             let mut reader = BufReader::new(stderr);
+            // Reuse one `Vec<u8>` across every frame (F-574): chatty
+            // servers floods stderr too, and the prior per-call
+            // allocation showed up under flame graphs.
+            let mut buf: Vec<u8> = Vec::with_capacity(1024);
             loop {
-                match read_line_bounded(&mut reader, MAX_LSP_LINE_BYTES).await {
-                    Ok(BoundedLine::Line(bytes)) => {
-                        if bytes.is_empty() {
-                            break;
-                        }
-                        let line = String::from_utf8_lossy(&bytes);
+                match read_line_bounded(&mut reader, &mut buf, MAX_LSP_LINE_BYTES).await {
+                    Ok(BoundedLine::Eof) => break,
+                    Ok(BoundedLine::Line) => {
+                        let line = String::from_utf8_lossy(&buf);
                         let line = line.trim_end_matches('\n').trim_end_matches('\r');
                         tracing::debug!(
                             target: "forge_lsp::server",
@@ -661,23 +663,27 @@ impl Server {
         // `MAX_LSP_LINE_BYTES`; over-cap frames are discarded (F-351) and
         // surface as `ServerEvent::Malformed { stream: Stdout, .. }`. The
         // reader keeps running so a well-formed frame following an over-cap
-        // line still reaches the event channel.
+        // line still reaches the event channel. The task-scoped reusable
+        // `Vec<u8>` (F-574) collapses per-frame allocations to one realloc
+        // after the buffer reaches steady state — the prior per-call
+        // `Vec::new()` mattered under chatty servers
+        // (`textDocument/publishDiagnostics` floods at 100+ msg/sec).
         let tx = self.event_tx.clone();
         let reader_server_id = self.program.clone();
         let reader_task = tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
+            let mut buf: Vec<u8> = Vec::with_capacity(1024);
             loop {
-                match read_line_bounded(&mut reader, MAX_LSP_LINE_BYTES).await {
-                    Ok(BoundedLine::Line(bytes)) => {
-                        if bytes.is_empty() {
-                            break;
-                        }
-                        // `read_line_bounded` yields bytes including any
-                        // trailing '\n'. Parse the raw slice so UTF-8 errors
-                        // flow through the same `serde_json` sad path as any
-                        // other malformed frame, and trim the delimiter
-                        // before the empty-line skip check.
-                        let trimmed: &[u8] = trim_trailing_newline(&bytes);
+                match read_line_bounded(&mut reader, &mut buf, MAX_LSP_LINE_BYTES).await {
+                    Ok(BoundedLine::Eof) => break,
+                    Ok(BoundedLine::Line) => {
+                        // `read_line_bounded` fills `buf` with bytes up to
+                        // and including any trailing '\n'. Parse the raw
+                        // slice so UTF-8 errors flow through the same
+                        // `serde_json` sad path as any other malformed
+                        // frame, and trim the delimiter before the
+                        // empty-line skip check.
+                        let trimmed: &[u8] = trim_trailing_newline(&buf);
                         if trimmed.iter().all(|b| b.is_ascii_whitespace()) {
                             continue;
                         }
@@ -755,23 +761,33 @@ fn backoff_delay(policy: &BackoffPolicy, attempt: u32) -> Duration {
 
 /// Outcome of a single [`read_line_bounded`] call.
 enum BoundedLine {
-    /// A full line was read within the byte ceiling. Carries the raw bytes
-    /// up to and including any trailing `\n`. An empty `Vec` indicates EOF
-    /// on the stream.
-    Line(Vec<u8>),
+    /// A full line was read within the byte ceiling. The raw bytes (up to
+    /// and including any trailing `\n`) live in the caller-supplied buffer.
+    Line,
+    /// EOF on the stream — no bytes available. Caller-supplied buffer is
+    /// untouched.
+    Eof,
     /// The line exceeded the ceiling. All bytes through the terminating
     /// `\n` (or EOF) have been consumed and discarded; `bytes_discarded`
-    /// reports the total dropped, always `>=` the cap.
+    /// reports the total dropped, always `>=` the cap. Caller-supplied
+    /// buffer is left empty.
     Overflow { bytes_discarded: usize },
 }
 
-/// Read bytes up to and including the next `\n` from `reader`, but never
-/// buffer more than `cap` bytes in memory. Closes F-351: a compromised /
-/// buggy / hostile child writing a single enormous line cannot DoS the host.
+/// Read bytes up to and including the next `\n` from `reader` into a
+/// caller-supplied `buf`, but never buffer more than `cap` bytes in
+/// memory. Closes F-351: a compromised / buggy / hostile child writing a
+/// single enormous line cannot DoS the host. The caller-owned buffer
+/// (F-574) lets reader tasks reuse one allocation across all frames
+/// instead of paying a per-frame `Vec` alloc on chatty servers
+/// (`textDocument/publishDiagnostics` floods at 100+ msg/sec).
+///
+/// `buf` is cleared on entry. On success it contains the bytes read
+/// (possibly ending in `\n`); on `Overflow` / `Eof` it is left empty.
 ///
 /// Behavior:
-/// - Within the cap → returns [`BoundedLine::Line`] with the bytes read
-///   (possibly ending in `\n`; may be empty at EOF).
+/// - Within the cap → fills `buf` and returns [`BoundedLine::Line`].
+/// - At EOF → returns [`BoundedLine::Eof`].
 /// - Over the cap → continues reading-and-discarding byte-by-byte from the
 ///   same reader until the next `\n` (or EOF) so the reader resyncs on the
 ///   stream without buffering, then returns [`BoundedLine::Overflow`] with
@@ -779,20 +795,21 @@ enum BoundedLine {
 /// - Pure I/O error → surfaces as `Err`.
 async fn read_line_bounded<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
+    buf: &mut Vec<u8>,
     cap: usize,
 ) -> std::io::Result<BoundedLine> {
+    buf.clear();
     // Accumulate up to `cap+1` bytes: any overshoot proves the line exceeded
     // the ceiling without a newline. `Take` enforces the ceiling at the
-    // reader layer so the `Vec` never grows past `cap+1`.
-    let mut buf: Vec<u8> = Vec::new();
+    // reader layer so `buf` never grows past `cap+1`.
     let mut limited = (&mut *reader).take(cap as u64 + 1);
-    let _ = limited.read_until(b'\n', &mut buf).await?;
+    let _ = limited.read_until(b'\n', buf).await?;
     if buf.is_empty() {
-        return Ok(BoundedLine::Line(Vec::new()));
+        return Ok(BoundedLine::Eof);
     }
     let hit_newline = buf.last() == Some(&b'\n');
     if hit_newline || buf.len() <= cap {
-        return Ok(BoundedLine::Line(buf));
+        return Ok(BoundedLine::Line);
     }
 
     // Over the cap and no newline yet — drain the remainder of the line
@@ -864,14 +881,24 @@ fn truncate(line: &str, max: usize) -> String {
 /// Byte-transparent stdio transport implementing [`MessageTransport`]. The
 /// inner `ChildStdin` is swapped in and out by the supervisor around each
 /// spawn; if no child is alive, `send` returns [`ServerError::NotRunning`].
+///
+/// `send_buf` is a reusable scratch `Vec<u8>` that backs every outbound
+/// frame: each `send` clears it, serialises into it, appends the newline
+/// delimiter, then writes it to the child's stdin. Allocator pressure on
+/// chatty servers (`textDocument/publishDiagnostics` floods at 100+
+/// msg/sec) collapses to one `realloc` after the buffer reaches
+/// steady-state capacity, instead of a fresh `serde_json::to_vec` +
+/// `push(b'\n')` per message (F-574).
 pub struct StdioTransport {
     stdin: Mutex<Option<ChildStdin>>,
+    send_buf: Mutex<Vec<u8>>,
 }
 
 impl StdioTransport {
     fn new_empty() -> Self {
         Self {
             stdin: Mutex::new(None),
+            send_buf: Mutex::new(Vec::new()),
         }
     }
 
@@ -887,13 +914,20 @@ impl StdioTransport {
 #[async_trait]
 impl MessageTransport for StdioTransport {
     async fn send(&self, message: serde_json::Value) -> Result<(), ServerError> {
-        let mut bytes = serde_json::to_vec(&message)?;
-        bytes.push(b'\n');
+        // Reuse the struct-owned scratch buffer. After the first few
+        // frames its capacity reaches steady state and this is allocation-
+        // free per send. Framing is unchanged: line-delimited JSON between
+        // this transport and `forge-lsp-mock-stdio` (see module-level doc).
+        // Real LSP `Content-Length` framing is the caller's responsibility.
+        let mut buf = self.send_buf.lock().await;
+        buf.clear();
+        serde_json::to_writer(&mut *buf, &message)?;
+        buf.push(b'\n');
         let mut guard = self.stdin.lock().await;
         match guard.as_mut() {
             Some(stdin) => {
                 stdin
-                    .write_all(&bytes)
+                    .write_all(&buf)
                     .await
                     .map_err(|e| ServerError::StdinWrite(e.to_string()))?;
                 stdin
@@ -1130,10 +1164,11 @@ mod tests {
     struct NoopDownloader;
     #[async_trait]
     impl Downloader for NoopDownloader {
-        async fn fetch(
+        async fn fetch_into(
             &self,
             _url: &str,
-        ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+            _sink: &mut (dyn tokio::io::AsyncWrite + Send + Unpin),
+        ) -> Result<[u8; 32], Box<dyn std::error::Error + Send + Sync>> {
             unreachable!("from_registry must not hit the network");
         }
     }
