@@ -1488,6 +1488,12 @@ pub struct TreeStatsDto {
     /// Count of entries the walker saw past the budget (best-effort — see
     /// the `forge_fs::TreeStats` docs for the exact scope). Saturated to
     /// `u32::MAX` for wire-compat with JS `number`.
+    ///
+    /// F-571: the gitignored walker (the FilesSidebar's path) now reports
+    /// `u32::MAX` when truncation fires — it short-circuits at the budget
+    /// instead of draining the rest of the tree. Frontends should treat any
+    /// non-zero value as "more files exist on disk" and rely on `truncated`
+    /// as the authoritative boolean.
     pub omitted_count: u32,
     /// Count of per-entry errors the walker swallowed (e.g. permission
     /// denied, file disappeared mid-walk). Saturated to `u32::MAX` for

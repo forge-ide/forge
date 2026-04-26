@@ -48,10 +48,15 @@ pub struct TreeNode {
 ///   override) was exhausted mid-walk. More entries exist on disk than the
 ///   tree describes.
 /// * `omitted_count` — best-effort count of entries skipped after the budget
-///   tripped. Exact within each directory the walker was traversing when the
-///   budget ran out; directories it never opened are not counted (we refuse
-///   to spend additional I/O inflating a number we already know is
-///   truncated).
+///   tripped. For `list_tree`, this is exact within each directory the walker
+///   was traversing when the budget ran out (directories it never opened are
+///   not counted). For `list_tree_gitignored`, F-571 short-circuits the
+///   `ignore::Walk` stream the moment the budget trips (the post-budget drain
+///   was the dominant cost on monorepos); when that fires `omitted_count` is
+///   reported as `u64::MAX` to signal "truncated, exact count not
+///   enumerated". Frontend consumers should treat any non-zero value as "more
+///   files exist on disk" and rely on `truncated` as the authoritative
+///   boolean.
 /// * `error_count` — per-entry errors the walker swallowed rather than
 ///   failing the whole request. For `list_tree`, this is entries whose
 ///   `read_dir` iterator yielded `Err`. For `list_tree_gitignored`, this is
@@ -217,12 +222,15 @@ pub fn list_tree_gitignored_with_limit(
     let mut seen_entries: usize = 0;
     let mut stats = TreeStats::default();
 
-    // F-357: drain the iterator even after the budget trips so we can count
-    // (and report) how many further entries existed rather than silently
-    // dropping them. `ignore::Walk` does not cheaply bound the remaining
-    // stream, so a one-time post-budget drain is the honest way to surface
-    // `omitted_count`. The user already paid for the `read_dir` enumeration
-    // — we just skip the `TreeNode` allocation for anything past the cap.
+    // F-571: short-circuit the iterator the moment the budget trips. The
+    // pre-F-571 path drained the entire remaining `ignore::Walk` stream just
+    // to inflate `omitted_count` — on a monorepo with hundreds of thousands
+    // of gitignored files (`node_modules`, `target/`, vendored deps) the
+    // drain alone dominated wall-time. We surrender the exact remainder
+    // count and set `omitted_count = u64::MAX` to signal "truncated, exact
+    // count not enumerated"; the FilesSidebar already only reads the boolean
+    // `truncated` flag plus `omitted_count > 0`, so the sentinel keeps the
+    // "N files not shown" notice honest without paying the drain cost.
     for entry in builder.build() {
         let entry = match entry {
             Ok(e) => e,
@@ -237,8 +245,8 @@ pub fn list_tree_gitignored_with_limit(
         }
         if seen_entries >= max_entries {
             stats.truncated = true;
-            stats.omitted_count = stats.omitted_count.saturating_add(1);
-            continue;
+            stats.omitted_count = u64::MAX;
+            break;
         }
         seen_entries += 1;
 
@@ -288,7 +296,10 @@ pub fn list_tree_gitignored_with_limit(
             return node;
         }
         let mut children = buckets.remove(&node.path).unwrap_or_default();
-        children.sort_by_key(|c| c.name.to_lowercase());
+        // F-571: cached lowercase key — `to_lowercase` runs once per child
+        // rather than O(n log n) times during the comparator. Same correctness
+        // as `sort_by_key`, lower constant factor on large directories.
+        children.sort_by_cached_key(|c| c.name.to_lowercase());
         let assembled = children.into_iter().map(|c| assemble(c, buckets)).collect();
         TreeNode {
             children: Some(assembled),
@@ -337,10 +348,16 @@ fn walk_dir(
             Err(_) => stats.error_count = stats.error_count.saturating_add(1),
         }
     }
-    // Stable ordering so snapshot-like diffs don't flake on platform-specific
-    // readdir order. Case-insensitive on the name lower-case keeps mixed-case
-    // workspace roots deterministic.
-    raw.sort_by_key(|e| e.file_name().to_string_lossy().to_lowercase());
+    // F-571: stable ordering so snapshot-like diffs don't flake on
+    // platform-specific readdir order. Case-insensitive on the name
+    // lower-case keeps mixed-case workspace roots deterministic.
+    // `sort_by_cached_key` evaluates `to_lowercase()` once per entry into
+    // a side table, instead of `sort_by_key`'s O(n log n) comparator-time
+    // recomputation. On a 20k-entry directory this drops ~280k transient
+    // `String` allocations to ~20k. (The std lib does not expose an
+    // `unstable_by_cached_key` — `sort_by_cached_key` is stable-sort, which
+    // is what we want here anyway since names are unique within a dir.)
+    raw.sort_by_cached_key(|e| e.file_name().to_string_lossy().to_lowercase());
 
     let mut iter = raw.into_iter();
     while let Some(entry) = iter.next() {
@@ -568,9 +585,17 @@ mod tests {
             tree.stats.truncated,
             "budget exhaustion must flag truncated"
         );
+        // F-571: the gitignored walker now short-circuits at budget instead of
+        // draining the rest of the `ignore::Walk` stream. The exact remainder
+        // is no longer enumerated; `omitted_count == u64::MAX` is the
+        // sentinel for "truncated, count unknown". The FilesSidebar only
+        // reads `omitted_count > 0` plus the `truncated` flag, so the
+        // sentinel keeps the "N files not shown" notice honest without
+        // paying the O(remaining-tree) drain cost.
         assert_eq!(
-            tree.stats.omitted_count, 15,
-            "15 of 20 files must be reported as omitted"
+            tree.stats.omitted_count,
+            u64::MAX,
+            "post-budget short-circuit must signal unknown remainder via u64::MAX"
         );
     }
 

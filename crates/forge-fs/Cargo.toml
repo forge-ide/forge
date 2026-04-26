@@ -24,3 +24,7 @@ tempfile = "3"
 [[bench]]
 name = "mutate"
 harness = false
+
+[[bench]]
+name = "tree_walk"
+harness = false
