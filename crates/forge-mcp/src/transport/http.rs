@@ -18,6 +18,7 @@
 //! to recover from dead sockets.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -57,6 +58,29 @@ const CONSECUTIVE_RECONNECT_FAILURE_THRESHOLD: usize = 3;
 /// Channel depth for outbound [`HttpEvent`]s. Matches stdio's capacity so
 /// the two transports back-pressure consumers identically.
 const EVENT_CHANNEL_CAPACITY: usize = 128;
+
+/// Process-wide shared `reqwest::Client`. F-569: building a fresh
+/// `reqwest::Client` per server allocates an independent connection pool,
+/// DNS cache, TLS root store, and cipher suite list — hundreds of KB per
+/// server. A 10-server `.mcp.json` paid that cost ten times. The shared
+/// handle gets cloned (cheap `Arc` bump) into every [`Http`]; per-call
+/// timeouts on the [`reqwest::RequestBuilder`] continue to work because
+/// they override the client default. `connect_timeout` is identical
+/// across all MCP servers so the shared default is correct.
+fn shared_client() -> &'static reqwest::Client {
+    static SHARED: OnceLock<reqwest::Client> = OnceLock::new();
+    SHARED.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .build()
+            // The only documented failure path is "no TLS backend compiled
+            // in" — we always link rustls (see Cargo.toml). Falling back to
+            // `Client::new()` keeps the panic-free invariant of `connect`
+            // even if a future build flag drops rustls; reqwest's default
+            // is functionally equivalent for the MCP transport.
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
 
 /// Maximum bytes the SSE reader will buffer across network chunks waiting
 /// for the next event boundary (`\n\n` or `\r\n\r\n`). Closes F-347: the
@@ -107,14 +131,20 @@ pub enum HttpEvent {
 
 /// An active HTTP JSON-RPC connection to one MCP server.
 ///
-/// Construct with [`Http::connect`]. Internally holds a `reqwest::Client`
-/// for POSTs, an SSE reader task subscribed to the server's GET endpoint,
-/// and an `mpsc` receiver that muxes POST responses and SSE notifications
-/// into a single stream.
+/// Construct with [`Http::connect`]. Holds a clone of the process-wide
+/// shared `reqwest::Client` (F-569: one connection pool, DNS cache, and
+/// TLS root store across every MCP server), an SSE reader task subscribed
+/// to the server's GET endpoint, and an `mpsc` receiver that muxes POST
+/// responses and SSE notifications into a single stream.
 pub struct Http {
     client: reqwest::Client,
     url: String,
-    headers: HeaderMap,
+    /// Spec-derived custom headers (auth tokens, tenant ids, …). F-569:
+    /// behind an `Arc` so spawning the SSE reader and per-call sends
+    /// don't deep-copy the `HeaderMap` on every use — a `HeaderMap`
+    /// `Clone` is one allocation per name + value, which adds up at
+    /// tool-dispatch rate against many servers.
+    headers: Arc<HeaderMap>,
     tx: mpsc::Sender<HttpEvent>,
     rx: mpsc::Receiver<HttpEvent>,
     /// SSE reader task. Explicitly aborted in [`Drop`] so the reconnect
@@ -142,12 +172,12 @@ impl std::fmt::Debug for Http {
 }
 
 impl Http {
-    /// Connect to the HTTP MCP server described by `spec`. Builds the
-    /// shared `reqwest::Client`, materialises custom headers, and spawns
-    /// the SSE reader. Errors if `spec` describes a stdio server, if any
-    /// custom header is malformed, if the URL fails the SSRF guard (see
-    /// [`ssrf::check_url`]), or if the client builder fails (only happens
-    /// when no TLS backend is compiled in).
+    /// Connect to the HTTP MCP server described by `spec`. Clones the
+    /// process-wide shared `reqwest::Client` handle (cheap `Arc` bump —
+    /// see F-569), materialises the custom headers behind an `Arc`, and
+    /// spawns the SSE reader. Errors if `spec` describes a stdio server,
+    /// if any custom header is malformed, or if the URL fails the SSRF
+    /// guard (see [`ssrf::check_url`]).
     pub async fn connect(spec: &McpServerSpec) -> Result<Self> {
         let (url, raw_headers) = match &spec.kind {
             ServerKind::Http { url, headers } => (url.clone(), headers),
@@ -163,18 +193,14 @@ impl Http {
         // private ranges to prevent SSRF attacks via a crafted .mcp.json.
         ssrf::check_url(&url)?;
 
-        let headers = build_header_map(raw_headers)?;
-
-        let client = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .build()
-            .context("building reqwest client for HTTP MCP transport")?;
+        let headers = Arc::new(build_header_map(raw_headers)?);
+        let client = shared_client().clone();
 
         let (tx, rx) = mpsc::channel::<HttpEvent>(EVENT_CHANNEL_CAPACITY);
 
         let reader_client = client.clone();
         let reader_url = url.clone();
-        let reader_headers = headers.clone();
+        let reader_headers = Arc::clone(&headers);
         let reader_tx = tx.clone();
         let reader = tokio::spawn(async move {
             sse_reader_loop(reader_client, reader_url, reader_headers, reader_tx).await;
@@ -201,10 +227,12 @@ impl Http {
     /// the manager is expected to decide whether to retry the request,
     /// restart the whole session, or surface a user-visible failure.
     pub async fn send(&self, message: serde_json::Value) -> Result<()> {
-        let resp = self
-            .client
-            .post(&self.url)
-            .headers(self.headers.clone())
+        // F-569: hand the spec headers in by reference rather than
+        // `self.headers.clone()` — `apply_headers` extends the
+        // `RequestBuilder`'s own header map in place, avoiding the
+        // per-call `HeaderMap` allocation that otherwise fires on every
+        // tool call + 30s health check ping.
+        let resp = apply_headers(self.client.post(&self.url), &self.headers)
             .header(CONTENT_TYPE, "application/json")
             .timeout(POST_TIMEOUT)
             .json(&message)
@@ -303,6 +331,24 @@ fn build_header_map(raw: &BTreeMap<String, String>) -> Result<HeaderMap> {
     Ok(out)
 }
 
+/// Merge `headers` into `req`'s outgoing `HeaderMap` without cloning the
+/// caller's map. F-569: previously every POST and SSE GET called
+/// `req.headers(self.headers.clone())`, which deep-copies the entire
+/// `HeaderMap` (one allocation per name + value entry) on every request.
+/// Iterating and calling `header()` per entry merges in place, sharing
+/// `HeaderName` references and only cloning the small `HeaderValue`s
+/// (typically inline-stored, so close to free). Per-call header overrides
+/// (set on the returned builder) still work because reqwest applies them
+/// after these defaults. Stable-sort preservation of duplicate-name
+/// values is unchanged: spec headers come from a `BTreeMap<String,
+/// String>` so each name appears at most once.
+fn apply_headers(mut req: reqwest::RequestBuilder, headers: &HeaderMap) -> reqwest::RequestBuilder {
+    for (name, value) in headers.iter() {
+        req = req.header(name, value);
+    }
+    req
+}
+
 /// Drive the SSE reader indefinitely. Each iteration opens a GET and
 /// streams frames until the body ends or an error surfaces, then sleeps
 /// with exponential backoff before retrying.
@@ -317,7 +363,7 @@ fn build_header_map(raw: &BTreeMap<String, String>) -> Result<HeaderMap> {
 async fn sse_reader_loop(
     client: reqwest::Client,
     url: String,
-    headers: HeaderMap,
+    headers: Arc<HeaderMap>,
     tx: mpsc::Sender<HttpEvent>,
 ) {
     let mut delay = INITIAL_RECONNECT_DELAY;
@@ -396,9 +442,11 @@ async fn open_and_read_sse(
     headers: &HeaderMap,
     tx: &mpsc::Sender<HttpEvent>,
 ) -> Result<ReaderExit> {
-    let resp = client
-        .get(url)
-        .headers(headers.clone())
+    // F-569: extend the `RequestBuilder`'s header map in place rather
+    // than handing it a per-call `headers.clone()`. The SSE GET fires
+    // on connect *and* on every reconnect, so this clone showed up on
+    // restart-storms in addition to the steady-state cost.
+    let resp = apply_headers(client.get(url), headers)
         .header(ACCEPT, "text/event-stream")
         .send()
         .await
@@ -444,11 +492,18 @@ async fn open_and_read_sse(
         }
 
         while let Some(end) = find_event_boundary(&buf) {
-            let raw_event = buf.drain(..end.frame_end).collect::<Vec<u8>>();
-            // Strip the trailing delimiter bytes from the slice we parse.
-            let event_bytes = &raw_event[..raw_event.len() - end.delim_len];
+            // F-569: parse the event in place against the accumulator
+            // rather than draining into a fresh `Vec<u8>` per event. On
+            // notification-heavy servers this saves one allocation per
+            // event and prevents the per-event Vec from holding the
+            // accumulator's high-water-mark capacity. We scope the
+            // borrow tightly so `buf.drain(..end.frame_end)` below is
+            // free to mutate it.
+            let event_end = end.frame_end - end.delim_len;
+            let payload = parse_event_data(&buf[..event_end]);
+            buf.drain(..end.frame_end);
 
-            if let Some(payload) = parse_event_data(event_bytes) {
+            if let Some(payload) = payload {
                 match serde_json::from_str::<serde_json::Value>(&payload) {
                     Ok(value) => {
                         if tx.send(HttpEvent::Message(value)).await.is_err() {

@@ -48,9 +48,14 @@ tracing = "0.1"
 ts-rs = "12"
 
 [dev-dependencies]
+# F-569: criterion drives the HTTP-transport allocation benches under
+# `crates/forge-mcp/benches/`. Mirrors the version pin in forge-ipc so
+# the workspace lockfile stays single-version on criterion.
+criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "rt", "rt-multi-thread", "time", "test-util"] }
-# Used by the HTTP transport integration test to stub POST + SSE endpoints.
+# Used by the HTTP transport integration test (and the F-569 bench) to
+# stub POST + SSE endpoints.
 wiremock = "0.6"
 
 # Mock stdio MCP server used by the stdio transport integration test.
@@ -71,3 +76,11 @@ doc = false
 name = "pump_concurrent"
 path = "tests/pump_concurrent.rs"
 required-features = ["test-util"]
+
+# F-569: HTTP-transport allocation benches. Measures the per-server
+# `reqwest::Client` cost (shared singleton vs per-server) and the SSE
+# accumulator's per-event allocation count (in-place drain vs
+# `drain(..).collect()`). Run with `cargo bench -p forge-mcp`.
+[[bench]]
+name = "http_transport"
+harness = false
