@@ -4,6 +4,8 @@
 
 **Outcome gate:** A user can launch Forge, lay out a four-pane workspace (FilesSidebar + EditorPane + TerminalPane + ChatPane), drag the layout into a 2×2 grid, see the layout persist across a restart, and use it to drive an end-to-end agent flow (open a file, run a terminal command, exchange messages, invoke an MCP tool, observe a sub-agent banner, monitor a background agent).
 
+> **Authoring convention:** new UATs in this plan should follow the `contract-level` / `acceptance-only` labelling defined in [`docs/testing/uat-conventions.md`](./uat-conventions.md). The convention's migration table tentatively classifies each Phase 2 UAT below; back-labelling each scenario in place is tracked under F-327 follow-up. The `contract-level` set feeds the persistent smoke-UAT suite (F-326).
+
 ---
 
 ## Known gap before reading further

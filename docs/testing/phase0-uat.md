@@ -3,6 +3,8 @@
 **Scope:** Phase 0: Foundations — CLI-only, no GUI  
 **Outcome gate:** A user can spawn a session, send a message, approve a tool call, receive a response, and replay the transcript from disk.
 
+> **Authoring convention:** new UATs in this plan should follow the `contract-level` / `acceptance-only` labelling defined in [`docs/testing/uat-conventions.md`](./uat-conventions.md). The convention's migration table tentatively classifies every Phase 0 UAT below as `contract-level`; back-labelling each scenario in place is tracked under F-327 follow-up. The `contract-level` set feeds the persistent smoke-UAT suite (F-326).
+
 ---
 
 ## Prerequisites
