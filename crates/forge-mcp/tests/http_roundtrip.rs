@@ -12,13 +12,17 @@
 //! than waiting up to 30s for the next health-check tick.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use forge_mcp::manager::LifecycleTuning;
 use forge_mcp::transport::http::MAX_SSE_FRAME_BYTES;
 use forge_mcp::transport::{Http, HttpEvent};
 use forge_mcp::{McpManager, McpServerSpec, ServerKind, ServerState};
-use wiremock::matchers::{header, method, path};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::sync::Notify;
+use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn http_spec(url: &str, auth: &str) -> McpServerSpec {
@@ -32,47 +36,183 @@ fn http_spec(url: &str, auth: &str) -> McpServerSpec {
     }
 }
 
+/// In-test HTTP server purpose-built for [`post_roundtrip_and_sse_notification`].
+///
+/// F-561 follow-up: wiremock writes its mocked body in one shot then
+/// closes the socket, which forces the SSE reader into its reconnect
+/// ladder for the rest of the test. Under CI load that ladder can trip
+/// `CONSECUTIVE_RECONNECT_FAILURE_THRESHOLD` (3 errors inside ~700ms
+/// backoff) before all three signals have surfaced, and the transport
+/// emits a terminal `HttpEvent::Closed` mid-test. See PR #562 for the
+/// initial drain-loop hardening that didn't fully eliminate the flake.
+///
+/// This fixture sidesteps the entire failure mode by holding the SSE
+/// connection open for the lifetime of the test: it writes the two
+/// notification frames immediately and then parks on a shutdown signal,
+/// so the reader stays inside `bytes_stream().next().await` and never
+/// reconnects. POST is handled by the same listener — there is no
+/// wiremock dependency for this test.
+struct InTestHttpServer {
+    addr: std::net::SocketAddr,
+    shutdown: Arc<Notify>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl InTestHttpServer {
+    async fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let shutdown = Arc::new(Notify::new());
+        let server_shutdown = Arc::clone(&shutdown);
+
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = server_shutdown.notified() => return,
+                    accept = listener.accept() => {
+                        let Ok((mut sock, _)) = accept else { return };
+                        let conn_shutdown = Arc::clone(&server_shutdown);
+                        tokio::spawn(async move {
+                            handle_connection(&mut sock, conn_shutdown).await;
+                        });
+                    }
+                }
+            }
+        });
+
+        Self {
+            addr,
+            shutdown,
+            handle,
+        }
+    }
+
+    fn url(&self) -> String {
+        format!("http://{}/", self.addr)
+    }
+}
+
+impl Drop for InTestHttpServer {
+    fn drop(&mut self) {
+        self.shutdown.notify_waiters();
+        self.handle.abort();
+    }
+}
+
+/// Read the request line + headers (terminated by `\r\n\r\n`), inspect
+/// the method, and serve a canned response. POST returns the JSON-RPC
+/// response and closes; GET writes the SSE headers + two `data:` frames
+/// and then parks on the shutdown signal so the reader never sees the
+/// connection close mid-test.
+async fn handle_connection(sock: &mut tokio::net::TcpStream, shutdown: Arc<Notify>) {
+    let mut buf = Vec::with_capacity(1024);
+    let mut tmp = [0u8; 1024];
+    let header_end = loop {
+        match sock.read(&mut tmp).await {
+            Ok(0) => return,
+            Ok(n) => {
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break p + 4;
+                }
+                if buf.len() > 16 * 1024 {
+                    return;
+                }
+            }
+            Err(_) => return,
+        }
+    };
+    let head = std::str::from_utf8(&buf[..header_end]).unwrap_or("");
+    let is_post = head.starts_with("POST ");
+    let is_get = head.starts_with("GET ");
+
+    // Preserve the original test's spec-header propagation coverage:
+    // every request must carry the spec-supplied `Authorization: Bearer
+    // token`. POST additionally has to declare JSON content-type; GET
+    // has to declare it accepts SSE. A header miss aborts the
+    // connection so the transport observes a hard error and the test
+    // panics with a clear message instead of silently passing.
+    let lower = head.to_ascii_lowercase();
+    if !lower.contains("authorization: bearer token") {
+        return;
+    }
+    if is_post && !lower.contains("content-type: application/json") {
+        return;
+    }
+    if is_get && !lower.contains("accept: text/event-stream") {
+        return;
+    }
+
+    if is_post {
+        // Drain the request body if Content-Length was advertised so the
+        // peer doesn't see a write-side reset before reading the response.
+        let content_length = head
+            .lines()
+            .find_map(|l| {
+                l.strip_prefix("Content-Length: ")
+                    .or_else(|| l.strip_prefix("content-length: "))
+            })
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        let already = buf.len() - header_end;
+        if content_length > already {
+            let mut remaining = content_length - already;
+            while remaining > 0 {
+                let n = match sock.read(&mut tmp).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                };
+                remaining = remaining.saturating_sub(n);
+            }
+        }
+
+        let body = br#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}"#;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = sock.write_all(resp.as_bytes()).await;
+        let _ = sock.write_all(body).await;
+        let _ = sock.shutdown().await;
+        return;
+    }
+
+    if is_get {
+        // Write SSE headers with `Transfer-Encoding: chunked` and stream
+        // both notification frames immediately so the reader observes
+        // `tools/list_changed` and `ping` regardless of how the runtime
+        // schedules the POST round-trip relative to the reader task.
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n";
+        if sock.write_all(head.as_bytes()).await.is_err() {
+            return;
+        }
+        for frame in [
+            "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}\n\n",
+            "data: {\"jsonrpc\":\"2.0\",\"method\":\"ping\"}\n\n",
+        ] {
+            let chunk = format!("{:x}\r\n{}\r\n", frame.len(), frame);
+            if sock.write_all(chunk.as_bytes()).await.is_err() {
+                return;
+            }
+        }
+        // Park until the test drops the server, keeping the SSE
+        // connection open so the reader never enters the reconnect
+        // ladder. This is the load-bearing change: wiremock's
+        // close-after-body behaviour was the root cause of the F-561
+        // post-fix residual flake.
+        shutdown.notified().await;
+        let _ = sock.shutdown().await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn post_roundtrip_and_sse_notification() {
-    let server = MockServer::start().await;
+    let server = InTestHttpServer::start().await;
 
-    // POST: respond with a JSON-RPC response for id=1.
-    Mock::given(method("POST"))
-        .and(path("/"))
-        .and(header("authorization", "Bearer token"))
-        .and(header("content-type", "application/json"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": { "protocolVersion": "2024-11-05", "capabilities": {} }
-        })))
-        .mount(&server)
-        .await;
-
-    // GET: respond with two SSE `data:` frames. wiremock doesn't stream
-    // over time, it delivers the full body and closes — that's enough to
-    // exercise frame splitting + JSON parsing + forwarding.
-    let sse_body =
-        "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}\n\n\
-                    data: {\"jsonrpc\":\"2.0\",\"method\":\"ping\"}\n\n";
-    Mock::given(method("GET"))
-        .and(path("/"))
-        .and(header("authorization", "Bearer token"))
-        .and(header("accept", "text/event-stream"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(sse_body),
-        )
-        .mount(&server)
-        .await;
-
-    let url = server.uri();
-    let mut t = Http::connect(&http_spec(&url, "Bearer token"))
+    let mut t = Http::connect(&http_spec(&server.url(), "Bearer token"))
         .await
         .expect("connect");
 
-    // Kick a POST and expect the response to surface on recv().
     t.send(serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -84,46 +224,60 @@ async fn post_roundtrip_and_sse_notification() {
 
     // Collect messages by id/method rather than count. Order between the
     // POST response and the SSE frames is racy (the GET runs on a reader
-    // task from connect time), and wiremock re-serves the same SSE body
-    // on each reconnect — so the reader can emit *duplicate* SSE frames
-    // before the POST response surfaces. Drain until all three distinct
-    // signals have arrived (with a generous overall deadline) instead of
-    // capping at exactly three recvs (#561).
+    // task from connect time). The fixture holds the SSE connection open
+    // for the test's lifetime, so the reader does not reconnect and we
+    // do not see duplicate SSE frames — but the drain loop still
+    // tolerates them and surfaces detailed diagnostics on failure so a
+    // future regression points at the right culprit.
     let mut got_post_response = false;
     let mut got_tools_changed = false;
     let mut got_ping = false;
+    let mut observed: Vec<String> = Vec::new();
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(15);
     while !(got_post_response && got_tools_changed && got_ping) {
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .unwrap_or_default();
-        let v = tokio::time::timeout(remaining, t.recv())
-            .await
-            .unwrap_or_else(|_| {
-                panic!(
-                    "timed out waiting for all three messages \
-                     (post_response={got_post_response}, \
-                     tools_changed={got_tools_changed}, ping={got_ping})"
-                )
-            })
-            .expect("channel closed before all messages surfaced");
-        let v = match v {
-            HttpEvent::Message(v) => v,
-            HttpEvent::Closed(reason) => panic!("expected Message, got Closed({reason})"),
-            HttpEvent::Malformed { bytes_discarded } => {
-                panic!("expected Message, got Malformed({bytes_discarded})")
-            }
+        if remaining.is_zero() {
+            panic!("deadline reached before all three signals; observed={observed:?}");
+        }
+        let recv_result = tokio::time::timeout(remaining, t.recv()).await;
+        let event = match recv_result {
+            Err(_) => panic!("recv timeout; observed={observed:?}"),
+            Ok(None) => panic!(
+                "channel closed before all signals surfaced; observed={observed:?} \
+                 (post_response={got_post_response}, tools_changed={got_tools_changed}, \
+                 ping={got_ping})"
+            ),
+            Ok(Some(ev)) => ev,
         };
-        if v.get("id") == Some(&serde_json::json!(1)) {
-            assert_eq!(v["result"]["protocolVersion"], "2024-11-05");
-            got_post_response = true;
-        } else if v.get("method") == Some(&serde_json::json!("notifications/tools/list_changed")) {
-            got_tools_changed = true;
-        } else if v.get("method") == Some(&serde_json::json!("ping")) {
-            got_ping = true;
-        } else {
-            panic!("unexpected message {v}");
+        match event {
+            HttpEvent::Closed(reason) => panic!(
+                "transport surfaced Closed({reason}) mid-test; observed={observed:?} \
+                 (post_response={got_post_response}, tools_changed={got_tools_changed}, \
+                 ping={got_ping})"
+            ),
+            HttpEvent::Malformed { bytes_discarded } => {
+                panic!("transport surfaced Malformed({bytes_discarded}); observed={observed:?}")
+            }
+            HttpEvent::Message(v) => {
+                if v.get("id") == Some(&serde_json::json!(1)) {
+                    assert_eq!(v["result"]["protocolVersion"], "2024-11-05");
+                    got_post_response = true;
+                    observed.push("Message(post_response)".into());
+                } else if v.get("method")
+                    == Some(&serde_json::json!("notifications/tools/list_changed"))
+                {
+                    got_tools_changed = true;
+                    observed.push("Message(tools/list_changed)".into());
+                } else if v.get("method") == Some(&serde_json::json!("ping")) {
+                    got_ping = true;
+                    observed.push("Message(ping)".into());
+                } else {
+                    panic!("unexpected message {v}; observed={observed:?}");
+                }
+            }
         }
     }
 
