@@ -93,10 +93,18 @@ impl EventLog {
     }
 
     pub async fn append(&mut self, event: &Event) -> Result<()> {
-        let line = serde_json::to_string(event)?;
+        // F-572: serialize directly into a single buffer with the trailing
+        // newline so the Mutex covers exactly one `write_all` await instead
+        // of two. Halves the lock-held await count under streaming-delta
+        // load, which is what the 50ms background flusher contends against.
+        //
+        // Crash safety is unchanged: the BufWriter still buffers in memory
+        // and the durability boundary remains the explicit `flush()` /
+        // background flush_task tick, exactly as before.
+        let mut line = serde_json::to_vec(event)?;
+        line.push(b'\n');
         let mut w = self.writer.lock().await;
-        w.write_all(line.as_bytes()).await?;
-        w.write_all(b"\n").await?;
+        w.write_all(&line).await?;
         Ok(())
     }
 
