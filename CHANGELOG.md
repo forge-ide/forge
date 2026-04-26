@@ -5,7 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased] — Phase 2: Full Layout + MCP
+## [Unreleased]
+
+## [0.2.0] — Phase 2: Full Layout + MCP — 2026-04-26
 
 Second milestone. A user can arrange the shell into a full multi-pane IDE
 layout, edit code through an embedded Monaco editor backed by LSP, drive a
