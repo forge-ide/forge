@@ -12,7 +12,11 @@
 // constructor seam (tests pass stubs; production passes real stores).
 
 import { adaptContextBlocks, type ContextBlock, type ProviderId } from '@forge/ipc';
-import type { ContextCategory, PickerResult } from '../components/ContextPicker';
+import type {
+  CategoryState,
+  ContextCategory,
+  PickerResult,
+} from '../components/ContextPicker';
 import type { Candidate, Resolver } from './types';
 import { createFileResolver, type FileResolverDeps } from './file';
 import { createDirectoryResolver, type DirectoryResolverDeps } from './directory';
@@ -68,29 +72,52 @@ export function buildRegistry(deps: BuildRegistryDeps): ResolverRegistry {
  * ContextPicker's `items` prop expects. Resolvers that throw produce an
  * empty list for their tab rather than short-circuiting the whole fan-out —
  * one misbehaving source should not dismiss the picker.
+ *
+ * F-536: tree-backed resolvers (file, directory) expose `listStats()`. The
+ * registry calls it after `list()` resolves and threads the root
+ * `TreeNodeDto.stats` onto `CategoryState.stats` so the picker can render a
+ * "files not shown" / "tree truncated" / "N read errors" notice. Tabs with
+ * stats are kept even when the candidate list is empty, so the user still
+ * sees the notice on a query that filtered every candidate out.
  */
 export async function listCandidates(
   registry: ResolverRegistry,
   query: string,
-): Promise<Partial<Record<ContextCategory, PickerResult[]>>> {
+): Promise<Partial<Record<ContextCategory, CategoryState>>> {
   const entries = Object.entries(registry) as Array<[
     ContextCategory,
     Resolver<string> | undefined,
   ]>;
   const settled = await Promise.all(
-    entries.map(async ([cat, resolver]): Promise<[ContextCategory, PickerResult[]]> => {
-      if (!resolver) return [cat, []];
-      try {
-        const list = await resolver.list(query);
-        return [cat, candidatesToPickerResults(list)];
-      } catch {
-        return [cat, []];
-      }
-    }),
+    entries.map(
+      async ([cat, resolver]): Promise<[ContextCategory, CategoryState]> => {
+        if (!resolver) return [cat, { status: 'success', items: [] }];
+        try {
+          const list = await resolver.list(query);
+          const stats = resolver.listStats?.() ?? null;
+          return [
+            cat,
+            {
+              status: 'success',
+              items: candidatesToPickerResults(list),
+              stats,
+            },
+          ];
+        } catch {
+          return [cat, { status: 'success', items: [] }];
+        }
+      },
+    ),
   );
-  const out: Partial<Record<ContextCategory, PickerResult[]>> = {};
-  for (const [cat, list] of settled) {
-    if (list.length > 0) out[cat] = list;
+  const out: Partial<Record<ContextCategory, CategoryState>> = {};
+  for (const [cat, state] of settled) {
+    if (state.status !== 'success') {
+      out[cat] = state;
+      continue;
+    }
+    const hasItems = state.items.length > 0;
+    const hasStats = !!state.stats;
+    if (hasItems || hasStats) out[cat] = state;
   }
   return out;
 }

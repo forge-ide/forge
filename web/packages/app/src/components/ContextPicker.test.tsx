@@ -655,3 +655,175 @@ describe('ContextPicker — loading/error/success states (F-399)', () => {
     expect(queryByTestId('context-picker-loading')).not.toBeInTheDocument();
   });
 });
+
+// ---------------------------------------------------------------------------
+// F-536: truncation / read-error notice from TreeNodeDto.stats
+// ---------------------------------------------------------------------------
+//
+// Mirrors `FilesSidebar`'s wording and ARIA pattern (see
+// `[data-testid="files-sidebar-stats-notice"]`). Suppressed when stats are
+// absent or all-zero. Handles the F-571 `omitted_count` u64::MAX sentinel by
+// falling back to "tree truncated" without a count.
+
+describe('ContextPicker — truncation/read-error notice (F-536)', () => {
+  const anchor = { top: 100, bottom: 160, left: 0, right: 360 };
+
+  it('renders "N files not shown" when truncated with a counted overflow', () => {
+    const state: CategoryState = {
+      status: 'success',
+      items: [{ category: 'file', label: 'a.ts', value: 'a.ts' }],
+      stats: { truncated: true, omitted_count: 42, error_count: 0 },
+    };
+    const { getByTestId } = render(() => (
+      <ContextPicker
+        query=""
+        anchorRect={anchor}
+        items={{ file: state }}
+        onPick={() => {}}
+        onDismiss={() => {}}
+      />
+    ));
+    const notice = getByTestId('picker-truncation-notice');
+    expect(notice).toBeInTheDocument();
+    expect(notice).toHaveTextContent('42 files not shown');
+    expect(notice.getAttribute('role')).toBe('status');
+  });
+
+  it('renders "tree truncated" when truncated but omitted_count is the sentinel (F-571)', () => {
+    const sentinel = 4294967295; // u32::MAX — F-571 saturation: stopped counting
+    const state: CategoryState = {
+      status: 'success',
+      items: [],
+      stats: { truncated: true, omitted_count: sentinel, error_count: 0 },
+    };
+    const { getByTestId } = render(() => (
+      <ContextPicker
+        query=""
+        anchorRect={anchor}
+        items={{ file: state }}
+        onPick={() => {}}
+        onDismiss={() => {}}
+      />
+    ));
+    expect(getByTestId('picker-truncation-notice')).toHaveTextContent(
+      `${sentinel} files not shown`,
+    );
+  });
+
+  it('renders "tree truncated" when truncated and omitted_count is 0', () => {
+    const state: CategoryState = {
+      status: 'success',
+      items: [],
+      stats: { truncated: true, omitted_count: 0, error_count: 0 },
+    };
+    const { getByTestId } = render(() => (
+      <ContextPicker
+        query=""
+        anchorRect={anchor}
+        items={{ file: state }}
+        onPick={() => {}}
+        onDismiss={() => {}}
+      />
+    ));
+    expect(getByTestId('picker-truncation-notice')).toHaveTextContent('tree truncated');
+  });
+
+  it('appends "N read errors" when error_count > 0', () => {
+    const state: CategoryState = {
+      status: 'success',
+      items: [],
+      stats: { truncated: true, omitted_count: 3, error_count: 2 },
+    };
+    const { getByTestId } = render(() => (
+      <ContextPicker
+        query=""
+        anchorRect={anchor}
+        items={{ file: state }}
+        onPick={() => {}}
+        onDismiss={() => {}}
+      />
+    ));
+    const notice = getByTestId('picker-truncation-notice');
+    expect(notice).toHaveTextContent('3 files not shown');
+    expect(notice).toHaveTextContent('2 read errors');
+  });
+
+  it('omits the notice when stats are absent', () => {
+    const state: CategoryState = {
+      status: 'success',
+      items: [{ category: 'file', label: 'a.ts', value: 'a.ts' }],
+    };
+    const { queryByTestId } = render(() => (
+      <ContextPicker
+        query=""
+        anchorRect={anchor}
+        items={{ file: state }}
+        onPick={() => {}}
+        onDismiss={() => {}}
+      />
+    ));
+    expect(queryByTestId('picker-truncation-notice')).not.toBeInTheDocument();
+  });
+
+  it('omits the notice when stats are all-zero (no truncation, no errors)', () => {
+    const state: CategoryState = {
+      status: 'success',
+      items: [{ category: 'file', label: 'a.ts', value: 'a.ts' }],
+      stats: { truncated: false, omitted_count: 0, error_count: 0 },
+    };
+    const { queryByTestId } = render(() => (
+      <ContextPicker
+        query=""
+        anchorRect={anchor}
+        items={{ file: state }}
+        onPick={() => {}}
+        onDismiss={() => {}}
+      />
+    ));
+    expect(queryByTestId('picker-truncation-notice')).not.toBeInTheDocument();
+  });
+
+  it('singular wording: "1 file not shown" / "1 read error"', () => {
+    const state: CategoryState = {
+      status: 'success',
+      items: [],
+      stats: { truncated: true, omitted_count: 1, error_count: 1 },
+    };
+    const { getByTestId } = render(() => (
+      <ContextPicker
+        query=""
+        anchorRect={anchor}
+        items={{ file: state }}
+        onPick={() => {}}
+        onDismiss={() => {}}
+      />
+    ));
+    const notice = getByTestId('picker-truncation-notice');
+    expect(notice).toHaveTextContent('1 file not shown');
+    expect(notice).toHaveTextContent('1 read error');
+  });
+
+  it('does not render the notice on a category whose tab is not active', () => {
+    const fileState: CategoryState = {
+      status: 'success',
+      items: [{ category: 'file', label: 'a.ts', value: 'a.ts' }],
+      // No stats on file; the directory tab carries the notice.
+    };
+    const dirState: CategoryState = {
+      status: 'success',
+      items: [],
+      stats: { truncated: true, omitted_count: 7, error_count: 0 },
+    };
+    const { queryByTestId } = render(() => (
+      <ContextPicker
+        query=""
+        anchorRect={anchor}
+        items={{ file: fileState, directory: dirState }}
+        onPick={() => {}}
+        onDismiss={() => {}}
+      />
+    ));
+    // file tab is active by default — directory's notice must not appear.
+    expect(queryByTestId('picker-truncation-notice')).not.toBeInTheDocument();
+  });
+});

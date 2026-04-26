@@ -1,18 +1,17 @@
-// UAT-07 — F-141/142/147/357 — @-context picker + truncation notice.
+// UAT-07 — F-141/142/147/357/536 — @-context picker + truncation notice.
 // Plan: docs/testing/phase2-uat.md §UAT-07
 //
 // Blocked on `tauri-driver` (real `forge-fs` walker over a 5000-file
 // fixture to trigger the truncation cap, plus end-to-end provider IPC for
-// Step 8's content-injection assertion). The picker itself has no
-// in-results-panel truncation notice (instrumentation gap, plan §UAT-07);
-// Step 4 verifies the sidebar's notice instead.
+// Step 8's content-injection assertion). The in-picker truncation selector
+// landed under issue #536; Step 4 now verifies both surfaces.
 
 import { test } from '@playwright/test';
 
-test.describe('UAT-07 — F-141/142/147/357 — @-context picker + truncation notice', () => {
+test.describe('UAT-07 — F-141/142/147/357/536 — @-context picker + truncation notice', () => {
   test.skip(
     true,
-    'Blocked on tauri-driver + 5000-file fixture + in-picker truncation selector. See docs/testing/phase2-uat.md §UAT-07.',
+    'Blocked on tauri-driver + 5000-file fixture. See docs/testing/phase2-uat.md §UAT-07.',
   );
 
   test('Step 1: focus chat composer', () => {
@@ -33,8 +32,13 @@ test.describe('UAT-07 — F-141/142/147/357 — @-context picker + truncation no
     // await expect(driver.byTestId('context-picker-results').locator('li')).toHaveCount.greaterThan(0);
   });
 
-  test('Step 4: truncation notice -> files-sidebar-stats-notice shows "N files not shown"', () => {
+  test('Step 4: truncation notice -> sidebar AND picker both show "N files not shown" (F-536)', () => {
     // await expect(driver.byTestId('files-sidebar-stats-notice')).toContainText(/files not shown/);
+    // // F-536: the picker also renders an inline notice on tree-backed tabs
+    // // (file / directory). role="status" and wording mirrors the sidebar.
+    // const pickerNotice = driver.byTestId('picker-truncation-notice');
+    // await expect(pickerNotice).toContainText(/files not shown/);
+    // await expect(pickerNotice).toHaveAttribute('role', 'status');
   });
 
   test('Step 5: ArrowDown navigates options -> aria-activedescendant advances', () => {

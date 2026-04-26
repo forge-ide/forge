@@ -48,6 +48,7 @@ import { WhitelistedPill } from '../../components/ApprovalPrompt/WhitelistedPill
 import {
   ContextPicker,
   detectAtTrigger,
+  type CategoryState,
   type PickerResult,
   type ContextCategory,
 } from '../../components/ContextPicker';
@@ -1017,7 +1018,7 @@ export const Composer: Component<ComposerProps> = (props) => {
   // result wins. When no registry is wired, `items()` stays `undefined` and
   // the picker renders empty tabs (or consumes `props.items` for tests).
   const [registryItems, setRegistryItems] = createSignal<
-    Partial<Record<ContextCategory, PickerResult[]>> | undefined
+    Partial<Record<ContextCategory, CategoryState>> | undefined
   >(undefined);
   // Guard against races: the newest query wins when multiple in-flight
   // promises resolve out of order.

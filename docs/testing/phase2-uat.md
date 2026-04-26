@@ -262,16 +262,16 @@ done
 | 1 | Open a session, focus the chat composer | Composer is focused |
 | 2 | Type `@` | `[data-testid="context-picker"][role="combobox"]` mounts; `aria-expanded="true"`, `aria-haspopup="listbox"` |
 | 3 | Type `read` after `@` | `[data-testid="context-picker-query"]` reflects "read"; `[data-testid="context-picker-results"]` lists matching files |
-| 4 | Verify truncation notice | `[data-testid="files-sidebar-stats-notice"]` (in the sidebar) shows "N files not shown" reflecting the cap (cross-checked against `TreeNodeDto.stats.omitted_count`) |
+| 4 | Verify truncation notice | `[data-testid="files-sidebar-stats-notice"]` (in the sidebar) AND `[data-testid="picker-truncation-notice"]` (inside the picker results panel, on the file/directory tabs) both show "N files not shown" reflecting the cap (cross-checked against `TreeNodeDto.stats.omitted_count`) |
 | 5 | ArrowDown to navigate options | `aria-activedescendant` advances; visible selection moves |
 | 6 | Tab to switch category to "Folder" | `[data-testid="context-picker-tab-folder"]` becomes active |
 | 7 | Press Enter on a result | Picker closes; chat composer's text contains a chip referencing the picked file path |
 | 8 | Submit the message | Provider receives the file's contents inlined into the prompt (verify via mocked-IPC spy) |
 | 9 | Press Escape with picker open | Picker closes without inserting; composer focus restored |
 
-**Failure criteria:** picker never opens on `@`, truncation notice missing when over cap, ArrowDown/Tab navigation broken, Escape does not dismiss, or selected content is not injected.
+**Failure criteria:** picker never opens on `@`, truncation notice missing when over cap (in either surface), ArrowDown/Tab navigation broken, Escape does not dismiss, or selected content is not injected.
 
-**Instrumentation gap:** no inline truncation notice inside the picker results panel itself (only in the sidebar). If the picker should display its own truncation row, add `data-testid="picker-truncation-notice"` and extend Step 4.
+**Instrumentation:** the inline truncation notice inside the picker results panel landed under issue #536 (`[data-testid="picker-truncation-notice"]`). It mirrors the FilesSidebar's wording ("N files not shown" / "tree truncated" / "N read errors") and `role="status"` ARIA pattern, and renders only on the file / directory tabs (the only categories backed by the `tree` IPC).
 
 ---
 
