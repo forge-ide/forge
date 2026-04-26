@@ -3,6 +3,8 @@
 **Scope:** Phase 1: Single Provider + GUI — Dashboard, Session window, chat pane, tool calls, four-scope approval, Ollama provider, archive-on-end.
 **Outcome gate:** A user can launch Forge, open a session from the Dashboard, exchange messages (with streaming) against either MockProvider or a real local Ollama model, trigger a tool call, approve it inline, and see the result rendered in the chat pane.
 
+> **Authoring convention:** new UATs in this plan should follow the `contract-level` / `acceptance-only` labelling defined in [`docs/testing/uat-conventions.md`](./uat-conventions.md). The convention's migration table tentatively classifies each Phase 1 UAT below; back-labelling each scenario in place is tracked under F-327 follow-up. The `contract-level` set feeds the persistent smoke-UAT suite (F-326).
+
 ---
 
 ## Provider selection
