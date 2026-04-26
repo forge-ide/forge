@@ -321,7 +321,11 @@ impl Provider for OllamaProvider {
         // the per-turn allocation count from O(N + Σ M) `Value` allocations
         // (plus a separate `to_string` per tool-result that's then re-quoted)
         // to a single `Vec<u8>` write that scales linearly with serialized size.
-        let body_result = serialize_chat_body(&self.model, &req.system, &req.messages);
+        //
+        // F-566: `req.system` is `Option<Arc<str>>`; `.as_deref()` yields
+        // `Option<&str>` so the serializer borrows the cached prefix directly
+        // (no allocation, no clone of the `Arc`'s inner bytes).
+        let body_result = serialize_chat_body(&self.model, req.system.as_deref(), &req.messages);
         let client = self.stream_client.clone();
         let cfg = self.stream_cfg;
 
@@ -787,11 +791,15 @@ fn unparseable_log_counter_for_test() -> usize {
 /// per-turn allocations from O(N) `Value` allocations + N `to_string` walks
 /// to a single `Vec<u8>` write that scales with serialized output size.
 ///
+/// F-566: `system` is `Option<&str>` so callers borrow the session's cached
+/// `Arc<str>` prefix via `.as_deref()` — no clone of the (potentially
+/// hundreds-of-KiB) AGENTS.md prefix per turn.
+///
 /// Public for `benches/ollama_stream.rs`; not part of the stable API surface.
 #[doc(hidden)]
 pub fn serialize_chat_body(
     model: &str,
-    system: &Option<String>,
+    system: Option<&str>,
     messages: &[ChatMessage],
 ) -> std::result::Result<Vec<u8>, serde_json::Error> {
     use crate::ChatBlock;
@@ -807,7 +815,7 @@ pub fn serialize_chat_body(
     // ── messages: serialize as a sequence with a wrapper that streams each
     // ChatMessage directly into the `Serializer`, avoiding any `Value` build.
     struct Messages<'a> {
-        system: &'a Option<String>,
+        system: Option<&'a str>,
         messages: &'a [ChatMessage],
     }
 
@@ -1001,7 +1009,7 @@ pub fn serialize_chat_body(
 }
 
 #[cfg(test)]
-fn to_ollama_messages(system: &Option<String>, messages: &[ChatMessage]) -> Vec<serde_json::Value> {
+fn to_ollama_messages(system: Option<&str>, messages: &[ChatMessage]) -> Vec<serde_json::Value> {
     use crate::{ChatBlock, ChatRole};
 
     let mut out = Vec::with_capacity(messages.len() + 1);
@@ -1071,7 +1079,7 @@ mod tests {
 
     fn body_value(
         model: &str,
-        system: &Option<String>,
+        system: Option<&str>,
         messages: &[ChatMessage],
     ) -> serde_json::Value {
         let bytes = serialize_chat_body(model, system, messages).expect("serialize");
@@ -1080,7 +1088,7 @@ mod tests {
 
     fn legacy_body_value(
         model: &str,
-        system: &Option<String>,
+        system: Option<&str>,
         messages: &[ChatMessage],
     ) -> serde_json::Value {
         serde_json::json!({
@@ -1101,10 +1109,10 @@ mod tests {
                 ChatBlock::Text("there".into()),
             ],
         }];
-        let sys = Some("be helpful".to_string());
+        let sys = "be helpful";
         assert_eq!(
-            body_value("llama3", &sys, &msgs),
-            legacy_body_value("llama3", &sys, &msgs)
+            body_value("llama3", Some(sys), &msgs),
+            legacy_body_value("llama3", Some(sys), &msgs)
         );
     }
 
@@ -1130,8 +1138,8 @@ mod tests {
             },
         ];
         assert_eq!(
-            body_value("llama3", &None, &msgs),
-            legacy_body_value("llama3", &None, &msgs)
+            body_value("llama3", None, &msgs),
+            legacy_body_value("llama3", None, &msgs)
         );
     }
 
@@ -1143,7 +1151,7 @@ mod tests {
             role: ChatRole::User,
             content: vec![],
         }];
-        let parsed = body_value("llama3", &None, &msgs);
+        let parsed = body_value("llama3", None, &msgs);
         let messages = parsed.get("messages").and_then(|m| m.as_array()).unwrap();
         assert!(
             messages.is_empty(),
@@ -1264,7 +1272,7 @@ mod tests {
             ],
         }];
 
-        let out = to_ollama_messages(&Some("sys-prompt".into()), &msgs);
+        let out = to_ollama_messages(Some("sys-prompt"), &msgs);
 
         assert_eq!(
             out,
@@ -1297,7 +1305,7 @@ mod tests {
             },
         ];
 
-        let out = to_ollama_messages(&None, &msgs);
+        let out = to_ollama_messages(None, &msgs);
 
         assert_eq!(
             out,

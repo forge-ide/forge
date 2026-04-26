@@ -595,11 +595,16 @@ pub async fn serve_with_session<P: Provider + 'static>(
     let allowed_paths: Arc<Vec<String>> =
         Arc::new(compute_allowed_paths(workspace_path.as_deref()));
 
-    // F-135 / F-352: load workspace `AGENTS.md` exactly once at session start
-    // and cache the contents for every turn on this session. Missing file is
-    // not an error. Files that exceed the size cap (AgentsMdTooLarge) or are
-    // otherwise unreadable are logged as warnings and treated as absent so a
-    // bad or oversized AGENTS.md never fails the session.
+    // F-135 / F-352 / F-566: load workspace `AGENTS.md` exactly once at
+    // session start **and** pre-build the labeled system-prompt prefix here so
+    // `run_turn` never re-formats per turn. Missing file is not an error;
+    // unreadable file is logged once and treated as absent so a transient
+    // filesystem problem never fails the session.
+    //
+    // Stored as `Option<Arc<str>>`: each turn clones the `Arc` into
+    // `ChatRequest.system` (refcount bump), and per-iteration `req.clone()`
+    // inside `run_request_loop` is now refcount-only on the prefix even when
+    // the prefix is hundreds of KiB.
     let agents_md: Option<Arc<str>> = match workspace_path.as_deref() {
         Some(ws) => match forge_agents::load_agents_md(ws) {
             Ok(Some(content)) => {
@@ -608,7 +613,9 @@ pub async fn serve_with_session<P: Provider + 'static>(
                     "AGENTS.md injected into session system prompt; \
                      review the file if this workspace is not fully trusted"
                 );
-                Some(Arc::from(content))
+                Some(Arc::from(format!(
+                    "\n\n---\nAGENTS.md (workspace):\n{content}"
+                )))
             }
             Ok(None) => None,
             Err(e) => {
@@ -645,6 +652,13 @@ pub async fn serve_with_session<P: Provider + 'static>(
     // (`agent_runtime`) still read it below through the `Arc` clone.
     let session_id = Arc::new(session_id.unwrap_or_else(|| SessionId::new().to_string()));
 
+    // F-567: shared epoch the dispatcher cache keys against. Every
+    // `McpStateEvent` bumps it so the cached dispatcher is invalidated
+    // exactly when a server transition could change the advertised tool
+    // set. With no MCP wired up, the epoch stays at zero forever and the
+    // cache rebuilds the dispatcher exactly once.
+    let mcp_tools_epoch = crate::dispatcher_cache::McpToolsEpoch::new();
+
     // F-155: fan out `McpManager::state_stream()` onto the session event
     // log. Every `Starting / Healthy / Degraded / Failed / Disabled`
     // transition becomes an `Event::McpState(McpStateEvent)` on the log,
@@ -652,13 +666,20 @@ pub async fn serve_with_session<P: Provider + 'static>(
     // via the normal event pipeline. Subscribe once per daemon (not per
     // connection) because the broadcast channel fans out identical events
     // and the session event log is the sole canonical destination.
+    //
+    // F-567: same forwarder bumps `mcp_tools_epoch` so the next turn
+    // rebuilds the dispatcher cache from `mgr.list().await`. Bumping
+    // before emitting keeps the invariant simple: if a turn observes the
+    // event on the log, the corresponding cache entry is already stale.
     if let Some(mcp_mgr) = mcp.as_ref() {
         let session_for_mcp = Arc::clone(&session);
         let session_id_for_mcp = Arc::clone(&session_id);
+        let epoch_for_mcp = mcp_tools_epoch.clone();
         let mut stream = mcp_mgr.state_stream();
         tokio::spawn(async move {
             use futures::StreamExt;
             while let Some(ev) = stream.next().await {
+                epoch_for_mcp.bump();
                 if let Err(e) = session_for_mcp.emit(forge_core::Event::McpState(ev)).await {
                     tracing::error!(
                         target: "forge_session::mcp",
@@ -670,6 +691,11 @@ pub async fn serve_with_session<P: Provider + 'static>(
             }
         });
     }
+
+    // F-567: the per-session dispatcher cache. Lives across every turn so
+    // the builtins register exactly once and MCP adapters rebuild only
+    // when `mcp_tools_epoch` advances.
+    let dispatcher_cache = crate::dispatcher_cache::DispatcherCache::new(mcp_tools_epoch);
 
     // F-140: session-scoped agent runtime so live turns can actually spawn
     // sub-agents via `agent.spawn`.
@@ -725,6 +751,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
             agents_md,
             agent_runtime,
             mcp,
+            dispatcher_cache,
         )
         .await;
     }
@@ -782,6 +809,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
                 let agents_md = agents_md.clone();
                 let mcp = mcp.clone();
                 let agent_runtime = Arc::clone(&agent_runtime);
+                let dispatcher_cache = Arc::clone(&dispatcher_cache);
                 tokio::spawn(async move {
                     // F-371: capture session_id for logging *before* the move
                     // into `handle_connection` consumes the Arc.
@@ -802,6 +830,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
                         agents_md,
                         agent_runtime,
                         mcp,
+                        dispatcher_cache,
                     )
                     .await
                     {
@@ -859,6 +888,9 @@ async fn handle_connection<P: Provider + 'static>(
     agents_md: Option<Arc<str>>,
     agent_runtime: Arc<Option<AgentRuntime>>,
     mcp: Option<Arc<forge_mcp::McpManager>>,
+    // F-567: shared dispatcher cache, refreshed only on MCP-tools-list epoch
+    // bumps. Cloning the `Arc` per turn is the steady-state cost.
+    dispatcher_cache: Arc<crate::dispatcher_cache::DispatcherCache>,
 ) -> Result<()> {
     // ── Handshake ──────────────────────────────────────────────────────────────
     // F-354: both handshake reads are subject to a bounded deadline so a
@@ -978,6 +1010,7 @@ async fn handle_connection<P: Provider + 'static>(
                         let agents_md = agents_md.clone();
                         let mcp = mcp.clone();
                         let agent_runtime = (*agent_runtime).clone();
+                        let dispatcher_cache = Arc::clone(&dispatcher_cache);
                         let session_id_for_turn = Arc::clone(&session_id);
                         tokio::spawn(async move {
                             let result = run_turn(
@@ -993,6 +1026,7 @@ async fn handle_connection<P: Provider + 'static>(
                                 agents_md,
                                 agent_runtime,
                                 mcp,
+                                Some(dispatcher_cache),
                             ).await;
                             if let Err(e) = &result {
                                 tracing::warn!(

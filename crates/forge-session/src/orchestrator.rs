@@ -14,6 +14,7 @@ use futures::StreamExt;
 use tokio::sync::{oneshot, Mutex};
 
 use crate::byte_budget::ByteBudget;
+use crate::dispatcher_cache::DispatcherCache;
 use crate::sandbox::ChildRegistry;
 use crate::session::Session;
 use crate::tools::{
@@ -92,6 +93,14 @@ pub async fn run_turn<P: Provider>(
     agents_md: Option<Arc<str>>,
     agent_runtime: Option<AgentRuntime>,
     mcp: Option<Arc<McpManager>>,
+    // F-567: optional shared dispatcher cache. When `Some`, the cache hands
+    // out a single `Arc<ToolDispatcher>` across turns and only rebuilds when
+    // the MCP tools-list epoch advances — eliminating the per-turn HashMap
+    // alloc, the M·T `McpTool` adapter allocations, and the `McpManager`
+    // lock acquisition that previously sat on the time-to-first-token path.
+    // `None` preserves the legacy "build a fresh dispatcher per turn"
+    // behavior for tests and embedders without the cache wired up.
+    dispatcher_cache: Option<Arc<DispatcherCache>>,
 ) -> Result<()> {
     let msg_id = MessageId::new();
 
@@ -111,12 +120,14 @@ pub async fn run_turn<P: Provider>(
 
     // F-135: Inject workspace `AGENTS.md` into the system prompt. Placement
     // follows the DoD: a leading `\n\n---\n` separator so a future base-persona
-    // prepend slots cleanly before the labeled section. The cache is loaded
-    // once at session start (see `serve_with_session`) and reused across every
-    // turn to avoid re-reading the file on each provider call.
-    let system = agents_md
-        .as_deref()
-        .map(|content| format!("\n\n---\nAGENTS.md (workspace):\n{content}"));
+    // prepend slots cleanly before the labeled section.
+    //
+    // F-566: `agents_md` is now the **already-wrapped** labeled prefix, built
+    // once at session start in `serve_with_session::build_system_prompt`. The
+    // orchestrator clones the `Arc<str>` into `req.system` (refcount bump),
+    // never the underlying bytes. Eliminates the per-turn `format!()` against
+    // a potentially 256 KiB AGENTS.md.
+    let system: Option<Arc<str>> = agents_md.clone();
 
     let initial_req = ChatRequest {
         system,
@@ -126,56 +137,23 @@ pub async fn run_turn<P: Provider>(
         }],
     };
 
-    let mut dispatcher = ToolDispatcher::new();
-    dispatcher
-        .register(Box::new(FsReadTool))
-        .expect("fs.read must register on a fresh dispatcher");
-    dispatcher
-        .register(Box::new(FsWriteTool))
-        .expect("fs.write must register on a fresh dispatcher");
-    dispatcher
-        .register(Box::new(FsEditTool))
-        .expect("fs.edit must register on a fresh dispatcher");
-    dispatcher
-        .register(Box::new(ShellExecTool))
-        .expect("shell.exec must register on a fresh dispatcher");
-    // F-134: `agent.spawn` is registered on every `run_turn` dispatcher
-    // so a provider can discover and invoke it. Under F-140 the caller
-    // threads an `AgentRuntime` — when present we synthesize the per-turn
-    // `AgentSpawnCtx` here so a provider-emitted `agent.spawn` actually
-    // spawns a child against the session's shared orchestrator. Callers
-    // that pass `None` (legacy tests, embedders without a runtime) keep
-    // the previous "agent runtime not configured" behaviour.
-    dispatcher
-        .register(Box::new(AgentSpawnTool))
-        .expect("agent.spawn must register on a fresh dispatcher");
-
-    // F-132: register an `McpTool` adapter per tool advertised by every
-    // currently-connected MCP server. Snapshot at turn start (not
-    // per-chunk) so a mid-turn `tools/list` refresh cannot change the
-    // dispatch table under the running loop. Un-connected servers
-    // contribute zero tools (their `tools` vec is empty until the first
-    // healthy `tools/list` succeeds) — that's the intended fail-open:
-    // a server that's still restarting simply isn't callable this turn.
-    if let Some(mgr) = mcp.as_ref() {
-        for server in mgr.list().await {
-            for tool in server.tools {
-                if let Some(adapter) = McpTool::new(
-                    tool.name.clone(),
-                    tool.description,
-                    tool.read_only,
-                    mgr.clone(),
-                ) {
-                    // Silently skip duplicate registrations — a malformed
-                    // tools/list response that repeats a name shouldn't
-                    // fail the whole turn. The namespace guarantees
-                    // cross-server collision-free names; within a single
-                    // server, the MCP spec forbids duplicates.
-                    let _ = dispatcher.register(Box::new(adapter));
-                }
-            }
-        }
-    }
+    // F-567: pull the dispatcher from the session-scoped cache when one is
+    // wired (steady state: a single `Arc::clone`). When the cache is absent
+    // — tests / embedders that pass `None` — fall back to the legacy
+    // build-per-turn shape so the runtime contract on those paths stays
+    // identical to pre-F-567 behavior.
+    //
+    // F-134 / F-132: builtins (`fs.read` / `fs.write` / `fs.edit` /
+    // `shell.exec` / `agent.spawn`) plus one `McpTool` adapter per
+    // currently-advertised tool. The cache snapshots at turn start (not
+    // per-chunk) just like the original inline build, so a mid-turn
+    // `tools/list` refresh can never mutate the dispatch table under the
+    // running loop. Un-connected servers contribute zero tools — fail-open,
+    // matches the prior behavior.
+    let dispatcher: Arc<ToolDispatcher> = match dispatcher_cache.as_ref() {
+        Some(cache) => cache.get(mcp.as_ref()).await,
+        None => Arc::new(build_legacy_dispatcher(mcp.as_ref()).await),
+    };
 
     let agent_ctx = agent_runtime.as_ref().map(|rt| AgentSpawnCtx {
         agent_defs: Arc::clone(&rt.agent_defs),
@@ -204,12 +182,51 @@ pub async fn run_turn<P: Provider>(
         None, // branch_parent — top-level turns are never a branch variant
         0,    // branch_variant_index — root position
         pending_approvals,
-        &dispatcher,
+        dispatcher.as_ref(),
         &ctx,
         auto_approve,
         instance_id,
     )
     .await
+}
+
+/// F-567 fallback: build a fresh dispatcher when no [`DispatcherCache`] is
+/// wired (tests, embedders that don't pass one). Mirrors the historical
+/// inline body so behavior on the uncached path stays identical.
+async fn build_legacy_dispatcher(mcp: Option<&Arc<McpManager>>) -> ToolDispatcher {
+    let mut dispatcher = ToolDispatcher::new();
+    dispatcher
+        .register(Box::new(FsReadTool))
+        .expect("fs.read must register on a fresh dispatcher");
+    dispatcher
+        .register(Box::new(FsWriteTool))
+        .expect("fs.write must register on a fresh dispatcher");
+    dispatcher
+        .register(Box::new(FsEditTool))
+        .expect("fs.edit must register on a fresh dispatcher");
+    dispatcher
+        .register(Box::new(ShellExecTool))
+        .expect("shell.exec must register on a fresh dispatcher");
+    dispatcher
+        .register(Box::new(AgentSpawnTool))
+        .expect("agent.spawn must register on a fresh dispatcher");
+
+    if let Some(mgr) = mcp {
+        for server in mgr.list().await {
+            for tool in server.tools {
+                if let Some(adapter) = McpTool::new(
+                    tool.name.clone(),
+                    tool.description,
+                    tool.read_only,
+                    mgr.clone(),
+                ) {
+                    let _ = dispatcher.register(Box::new(adapter));
+                }
+            }
+        }
+    }
+
+    dispatcher
 }
 
 /// Drives the provider request loop for one logical turn.
@@ -1465,10 +1482,12 @@ mod tests {
             MockProvider::from_responses(vec![script.clone(), script]).expect("construct mock"),
         );
 
-        // Simulate the cache that `serve_with_session` would build from
-        // `forge_agents::load_agents_md`.
+        // F-566: simulate the labeled-prefix cache that `serve_with_session`
+        // would build once via `build_system_prompt`. `run_turn` no longer
+        // reformats per turn — it clones the prebuilt `Arc<str>`.
         let original = "be helpful";
-        let agents_md: Option<Arc<str>> = Some(Arc::from(original));
+        let expected = format!("\n\n---\nAGENTS.md (workspace):\n{original}");
+        let agents_md: Option<Arc<str>> = Some(Arc::from(expected.as_str()));
 
         let pending: PendingApprovals = Arc::new(Mutex::new(HashMap::new()));
 
@@ -1483,6 +1502,7 @@ mod tests {
             None,
             None,
             agents_md.clone(),
+            None,
             None,
             None,
         )
@@ -1508,6 +1528,7 @@ mod tests {
             agents_md,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1515,7 +1536,6 @@ mod tests {
         let reqs = provider.recorded_requests();
         assert_eq!(reqs.len(), 2, "exactly two turns dispatched");
 
-        let expected = format!("\n\n---\nAGENTS.md (workspace):\n{original}");
         assert_eq!(
             reqs[0].system.as_deref(),
             Some(expected.as_str()),
@@ -1563,6 +1583,7 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new())),
             vec![],
             true,
+            None,
             None,
             None,
             None,

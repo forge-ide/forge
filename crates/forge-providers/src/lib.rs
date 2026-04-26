@@ -28,7 +28,14 @@ pub struct ChatRequest {
     /// Optional system prompt. Providers handle it in role-specific ways:
     /// e.g. Anthropic hoists it to a top-level `system` field, Ollama
     /// prepends it to the message stream. `None` means "no system prompt".
-    pub system: Option<String>,
+    ///
+    /// F-566: held as `Arc<str>` so per-iteration `req.clone()` on the
+    /// orchestrator hot loop is a refcount bump rather than a deep copy
+    /// of the (potentially 256 KiB) AGENTS.md prefix. Construction sites
+    /// wrap with `Arc::from(s)` once; readers go through `as_deref()`
+    /// (returns `Option<&str>`) which keeps every existing call-site
+    /// shape unchanged.
+    pub system: Option<Arc<str>>,
     /// Conversation history in chronological order. Typically alternates
     /// [`ChatRole::User`] and [`ChatRole::Assistant`], though providers
     /// vary in how strictly they enforce that.
