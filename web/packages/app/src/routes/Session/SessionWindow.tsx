@@ -40,6 +40,7 @@ import { seedSettings } from '../../stores/settings';
 import { PaneHeader } from './PaneHeader';
 import { ChatPane } from './ChatPane';
 import { EditorPane } from '../../panes/EditorPane';
+import { TerminalPane } from '../../panes/TerminalPane';
 import { usePaneWidth } from '../../layout/usePaneWidth';
 import {
   createLayoutStore,
@@ -328,6 +329,7 @@ export const SessionWindow: Component = () => {
         providerLabel={providerLabel()}
         costLabel={costLabel()}
         activeFile={paneStateFor(leaf.id)?.active_file ?? null}
+        workspaceRoot={activeWorkspaceRoot()}
         onCloseLeaf={() => onCloseLeaf(leaf.id)}
         onPointerDownHeader={dockApi.startDrag(leaf.id)}
       />
@@ -380,6 +382,7 @@ interface LeafHostProps {
   providerLabel: string;
   costLabel: string;
   activeFile: string | null;
+  workspaceRoot: string | null;
   onCloseLeaf: () => void;
   onPointerDownHeader: (e: PointerEvent) => void;
 }
@@ -395,10 +398,12 @@ const LeafHost: Component<LeafHostProps> = (props) => {
   const closeAriaLabel = (): string =>
     props.leaf.pane_type === 'chat' ? 'Close session window' : 'Close pane';
 
-  // The editor pane owns its own header (breadcrumb + CLOSE TAB), so we
-  // suppress the outer PaneHeader for editor leaves to avoid a double-header
-  // row. Everything else uses the standard PaneHeader.
-  const showOuterHeader = (): boolean => props.leaf.pane_type !== 'editor';
+  // The editor and terminal panes own their own headers (EditorPane:
+  // breadcrumb + CLOSE TAB; TerminalPane: shell subject + cwd + CLOSE PANE),
+  // so we suppress the outer PaneHeader for those leaves to avoid a
+  // double-header row. Everything else uses the standard PaneHeader.
+  const showOuterHeader = (): boolean =>
+    props.leaf.pane_type !== 'editor' && props.leaf.pane_type !== 'terminal';
 
   return (
     <div
@@ -454,9 +459,15 @@ const LeafHost: Component<LeafHostProps> = (props) => {
             No file open.
           </div>
         </Show>
-        <Show when={props.leaf.pane_type === 'terminal'}>
-          <div class="session-window__pane-empty" data-testid="terminal-pane-stub">
-            Terminal pane (F-125).
+        <Show when={props.leaf.pane_type === 'terminal' && props.workspaceRoot !== null}>
+          <TerminalPane
+            cwd={props.workspaceRoot as string}
+            onClose={props.onCloseLeaf}
+          />
+        </Show>
+        <Show when={props.leaf.pane_type === 'terminal' && props.workspaceRoot === null}>
+          <div class="session-window__pane-empty" data-testid="terminal-pane-empty">
+            Waiting for workspace…
           </div>
         </Show>
         <Show when={props.leaf.pane_type === 'files'}>
