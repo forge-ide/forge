@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # Phase 2 User Acceptance Test Harness
-# Usage: ./docs/testing/phase2-uat.sh [--build] [--test UAT-NN] [--gui-only] [--cli-only]
+# Usage: ./docs/testing/phase2-uat.sh [--build] [--test UAT-NN] [--gui-only] [--cli-only] [--contract-only] [--help]
 #
 # Flags:
-#   --build         Build Rust workspace + web app + MCP mocks before running tests
-#   --test UAT-NN   Run only the specified test (e.g. --test UAT-04)
-#   --gui-only      Run only Playwright specs (UAT-01, 02, 03, 05, 06, 07, 08, 09, 11, 12-GUI)
-#   --cli-only      Run only bash-driven UATs (UAT-04, UAT-10, UAT-12-CLI portion)
+#   --build           Build Rust workspace + web app + MCP mocks before running tests
+#   --test UAT-NN     Run only the specified test (e.g. --test UAT-04)
+#   --gui-only        Run only Playwright specs (UAT-01, 02, 03, 05, 06, 07, 08, 09, 11, 12-GUI)
+#   --cli-only        Run only bash-driven UATs (UAT-04, UAT-10, UAT-12-CLI portion)
+#   --contract-only   Run only the contract-level UATs as classified in
+#                     docs/testing/uat-conventions.md (consumed by
+#                     docs/testing/smoke-uat.sh — see F-326).
+#   --help, -h        Print this usage message and exit.
 #
 # Prerequisites: cargo, python3, pnpm, @playwright/test installed.
 # See docs/testing/phase2-uat-setup.md for full setup.
@@ -14,6 +18,15 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# ── Contract-level UAT manifest ─────────────────────────────────────────────
+# Sourced from docs/testing/uat-conventions.md (Phase 2 classification table).
+# CLI subset (uat_NN bash functions): UAT-04, UAT-10.
+# GUI subset (Playwright specs):       UAT-05, UAT-12.
+CONTRACT_LEVEL_UATS=(
+  UAT-04 UAT-05 UAT-10 UAT-12
+)
+CONTRACT_LEVEL_GUI_FILTER="uat-05|uat-12"
 
 # ── Colour helpers ──────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -26,20 +39,44 @@ header() { echo -e "\n${BOLD}$*${RESET}"; }
 
 PASS=0; FAIL=0; SKIP=0; FAILED_TESTS=()
 
+print_help() {
+  sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
 # ── Argument parsing ────────────────────────────────────────────────────────
 DO_BUILD=false
 ONLY_TEST=""
 GUI_ONLY=false
 CLI_ONLY=false
+CONTRACT_ONLY=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --build) DO_BUILD=true; shift ;;
     --test)  ONLY_TEST="$2"; shift 2 ;;
     --gui-only) GUI_ONLY=true; shift ;;
     --cli-only) CLI_ONLY=true; shift ;;
+    --contract-only) CONTRACT_ONLY=true; shift ;;
+    -h|--help) print_help; exit 0 ;;
     *) echo "Unknown flag: $1"; exit 1 ;;
   esac
 done
+
+is_contract_level() {
+  local id="$1"
+  for c in "${CONTRACT_LEVEL_UATS[@]}"; do
+    [[ "$c" == "$id" ]] && return 0
+  done
+  return 1
+}
+
+run_test() {
+  local id="$1"
+  if $CONTRACT_ONLY && ! is_contract_level "$id"; then
+    return 1
+  fi
+  [[ -z "$ONLY_TEST" || "$ONLY_TEST" == "$id" ]] && return 0
+  return 1
+}
 
 # ── Build ───────────────────────────────────────────────────────────────────
 if $DO_BUILD; then
@@ -230,6 +267,8 @@ run_gui_suite() {
   if [[ -n "$ONLY_TEST" ]]; then
     local num="${ONLY_TEST#UAT-}"
     filter="uat-${num}"
+  elif $CONTRACT_ONLY; then
+    filter="$CONTRACT_LEVEL_GUI_FILTER"
   fi
   local pw_cmd="test:e2e:phase2"
   if [[ -n "$filter" ]]; then
@@ -249,8 +288,8 @@ run_gui_suite() {
 
 # ── Main ────────────────────────────────────────────────────────────────────
 if ! $GUI_ONLY; then
-  if [[ -z "$ONLY_TEST" || "$ONLY_TEST" == "UAT-04" ]]; then uat_04; fi
-  if [[ -z "$ONLY_TEST" || "$ONLY_TEST" == "UAT-10" ]]; then uat_10; fi
+  if run_test UAT-04; then uat_04; fi
+  if run_test UAT-10; then uat_10; fi
 fi
 
 if ! $CLI_ONLY; then

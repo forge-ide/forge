@@ -1,16 +1,29 @@
 #!/usr/bin/env bash
 # Phase 0 User Acceptance Test Harness
-# Usage: ./docs/testing/phase0-uat.sh [--build] [--test UAT-NN]
+# Usage: ./docs/testing/phase0-uat.sh [--build] [--test UAT-NN] [--contract-only] [--help]
 #
 # Flags:
-#   --build         Build forge + forged before running tests
-#   --test UAT-NN   Run only the specified test (e.g. --test UAT-01)
+#   --build           Build forge + forged before running tests
+#   --test UAT-NN     Run only the specified test (e.g. --test UAT-01)
+#   --contract-only   Run only the contract-level UATs as classified in
+#                     docs/testing/uat-conventions.md (consumed by
+#                     docs/testing/smoke-uat.sh — see F-326).
+#   --help, -h        Print this usage message and exit.
 #
 # Prerequisites: cargo, python3, socat (optional, for UAT-10)
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# ── Contract-level UAT manifest ─────────────────────────────────────────────
+# Sourced from docs/testing/uat-conventions.md (Phase 0 classification table).
+# Phase 0 is entirely contract-level — it pre-dates the GUI and tests CLI/IPC
+# primitives that everything else depends on.
+CONTRACT_LEVEL_UATS=(
+  UAT-01 UAT-02 UAT-03 UAT-04 UAT-05 UAT-06 UAT-07
+  UAT-08 UAT-09 UAT-10 UAT-11 UAT-12 UAT-13
+)
 
 # ── Colour helpers ──────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -23,19 +36,37 @@ header() { echo -e "\n${BOLD}$*${RESET}"; }
 
 PASS=0; FAIL=0; SKIP=0; FAILED_TESTS=()
 
+print_help() {
+  sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
 # ── Argument parsing ────────────────────────────────────────────────────────
 DO_BUILD=false
 ONLY_TEST=""
+CONTRACT_ONLY=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --build) DO_BUILD=true; shift ;;
     --test)  ONLY_TEST="$2"; shift 2 ;;
+    --contract-only) CONTRACT_ONLY=true; shift ;;
+    -h|--help) print_help; exit 0 ;;
     *) echo "Unknown flag: $1"; exit 1 ;;
   esac
 done
 
+is_contract_level() {
+  local id="$1"
+  for c in "${CONTRACT_LEVEL_UATS[@]}"; do
+    [[ "$c" == "$id" ]] && return 0
+  done
+  return 1
+}
+
 run_test() {
   local id="$1"
+  if $CONTRACT_ONLY && ! is_contract_level "$id"; then
+    return 1
+  fi
   [[ -z "$ONLY_TEST" || "$ONLY_TEST" == "$id" ]] && return 0
   return 1
 }

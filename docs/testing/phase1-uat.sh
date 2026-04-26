@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # Phase 1 User Acceptance Test Harness
-# Usage: ./docs/testing/phase1-uat.sh [--build] [--test UAT-NN] [--gui-only] [--cli-only]
+# Usage: ./docs/testing/phase1-uat.sh [--build] [--test UAT-NN] [--gui-only] [--cli-only] [--contract-only] [--help]
 #
 # Flags:
-#   --build         Build Rust workspace + web app before running tests
-#   --test UAT-NN   Run only the specified test (e.g. --test UAT-09)
-#   --gui-only      Run only Playwright specs (UAT-01..08, 11, 12)
-#   --cli-only      Run only bash-driven disk-state UATs (UAT-09, 10, 13)
+#   --build           Build Rust workspace + web app before running tests
+#   --test UAT-NN     Run only the specified test (e.g. --test UAT-09)
+#   --gui-only        Run only Playwright specs (UAT-01..08, 11, 12)
+#   --cli-only        Run only bash-driven disk-state UATs (UAT-09, 10, 13)
+#   --contract-only   Run only the contract-level UATs as classified in
+#                     docs/testing/uat-conventions.md (consumed by
+#                     docs/testing/smoke-uat.sh — see F-326).
+#   --help, -h        Print this usage message and exit.
 #
 # Prerequisites: cargo, python3, pnpm, @playwright/test installed.
 # See docs/testing/phase1-uat-setup.md for full setup.
@@ -14,6 +18,18 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# ── Contract-level UAT manifest ─────────────────────────────────────────────
+# Sourced from docs/testing/uat-conventions.md (Phase 1 classification table).
+# CLI subset (uat_NN bash functions): UAT-09, UAT-10, UAT-13.
+# GUI subset (Playwright specs):       UAT-01c, UAT-08, UAT-11, UAT-14 (CSP).
+CONTRACT_LEVEL_UATS=(
+  UAT-01c UAT-08 UAT-09 UAT-10 UAT-11 UAT-13 UAT-14
+)
+# Playwright filename stems for GUI contract-level UATs (matched as a regex
+# against the spec file basename — Playwright's positional arg is a substring
+# filter that accepts | alternation).
+CONTRACT_LEVEL_GUI_FILTER="uat-01c|uat-08|uat-11|uat-csp"
 
 # ── Colour helpers ──────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -26,23 +42,41 @@ header() { echo -e "\n${BOLD}$*${RESET}"; }
 
 PASS=0; FAIL=0; SKIP=0; FAILED_TESTS=()
 
+print_help() {
+  sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
 # ── Argument parsing ────────────────────────────────────────────────────────
 DO_BUILD=false
 ONLY_TEST=""
 GUI_ONLY=false
 CLI_ONLY=false
+CONTRACT_ONLY=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --build) DO_BUILD=true; shift ;;
     --test)  ONLY_TEST="$2"; shift 2 ;;
     --gui-only) GUI_ONLY=true; shift ;;
     --cli-only) CLI_ONLY=true; shift ;;
+    --contract-only) CONTRACT_ONLY=true; shift ;;
+    -h|--help) print_help; exit 0 ;;
     *) echo "Unknown flag: $1"; exit 1 ;;
   esac
 done
 
+is_contract_level() {
+  local id="$1"
+  for c in "${CONTRACT_LEVEL_UATS[@]}"; do
+    [[ "$c" == "$id" ]] && return 0
+  done
+  return 1
+}
+
 run_test() {
   local id="$1"
+  if $CONTRACT_ONLY && ! is_contract_level "$id"; then
+    return 1
+  fi
   [[ -z "$ONLY_TEST" || "$ONLY_TEST" == "$id" ]] && return 0
   return 1
 }
@@ -202,6 +236,8 @@ run_gui_suite() {
   if [[ -n "$ONLY_TEST" ]]; then
     local num="${ONLY_TEST#UAT-}"
     filter="uat-${num}"
+  elif $CONTRACT_ONLY; then
+    filter="$CONTRACT_LEVEL_GUI_FILTER"
   fi
   # `pnpm run test:e2e foo` forwards `foo` to Playwright as a file-name filter.
   # Playwright does NOT use the `--` separator the way npm does.
@@ -223,9 +259,9 @@ run_gui_suite() {
 
 # ── Main ────────────────────────────────────────────────────────────────────
 if ! $GUI_ONLY; then
-  if [[ -z "$ONLY_TEST" || "$ONLY_TEST" == "UAT-09" ]]; then uat_09; fi
-  if [[ -z "$ONLY_TEST" || "$ONLY_TEST" == "UAT-10" ]]; then uat_10; fi
-  if [[ -z "$ONLY_TEST" || "$ONLY_TEST" == "UAT-13" ]]; then uat_13; fi
+  if run_test UAT-09; then uat_09; fi
+  if run_test UAT-10; then uat_10; fi
+  if run_test UAT-13; then uat_13; fi
 fi
 
 if ! $CLI_ONLY; then
