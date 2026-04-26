@@ -10,12 +10,13 @@
 //! child process exits (or its stdout EOFs), the receiver yields exactly
 //! one terminal [`StdioEvent::Exit`] before closing.
 
-use std::process::{ExitStatus, Stdio as StdStdio};
+use std::process::ExitStatus;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{ChildStdin, Command};
+use forge_core::process::{ManagedStdioChild, ManagedStdioConfig, StdioChildEvent};
+use tokio::io::AsyncWriteExt;
+use tokio::process::ChildStdin;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
@@ -50,7 +51,7 @@ pub enum StdioEvent {
 }
 
 /// Channel depth for outbound [`StdioEvent`]s. Generous enough that a brief
-/// scheduling delay in the consumer doesn't back-pressure the reader task.
+/// scheduling delay in the consumer doesn't back-pressure the relay task.
 const EVENT_CHANNEL_CAPACITY: usize = 128;
 
 /// Maximum bytes the stdout reader will buffer for a single JSON-RPC frame
@@ -60,77 +61,30 @@ const EVENT_CHANNEL_CAPACITY: usize = 128;
 /// large enough for realistic MCP payloads (tool-list responses,
 /// base64-encoded resource reads) and small enough to keep the worst-case
 /// resident set of a misbehaving child bounded. Mirrors F-351's
-/// `MAX_LSP_LINE_BYTES` policy for the LSP stdio transport.
+/// `MAX_LSP_LINE_BYTES` policy for the LSP stdio transport. The cap is
+/// enforced inside the [`ManagedStdioChild`] reader; this constant is the
+/// MCP-shaped contract surface that callers and tests assert against.
 pub const MAX_STDIO_FRAME_BYTES: usize = 4 * 1024 * 1024;
-
-/// Variables forwarded from the parent process into every stdio MCP child.
-///
-/// Security posture: the child environment is **deny-by-default**. We
-/// `env_clear()` the `Command` and then re-inject only this allow-list
-/// plus whatever the spec's `env` map declares. This prevents a hostile
-/// or careless `.mcp.json` entry from silently exfiltrating parent-held
-/// credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GITHUB_TOKEN`,
-/// `AWS_*`, arbitrary shell exports, etc.) — see F-345.
-///
-/// Entries are the minimal set the overwhelming majority of MCP servers
-/// need to locate binaries and render text correctly: `PATH` (command
-/// resolution), `HOME` (per-user config), `LANG` / `LC_ALL` (locale),
-/// `USER` / `LOGNAME` (user identity), `TMPDIR` / `TMP` / `TEMP` (tempdir
-/// discovery, platform-dependent), `SystemRoot` / `ComSpec` / `PATHEXT`
-/// (Windows subprocess basics).
-const PARENT_ENV_ALLOWLIST: &[&str] = &[
-    "PATH",
-    "HOME",
-    "LANG",
-    "LC_ALL",
-    "USER",
-    "LOGNAME",
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    "SystemRoot",
-    "ComSpec",
-    "PATHEXT",
-];
 
 /// An active stdio JSON-RPC connection to one MCP server subprocess.
 ///
 /// Construct with [`Stdio::connect`]. The handle owns the child's stdin
-/// (for [`Stdio::send`]), a receiver of [`StdioEvent`]s driven by a
-/// background task reading stdout, and a join handle so we can tear the
-/// reader down on drop. `stderr` is drained by a sibling task and logged
-/// at DEBUG.
+/// (for [`Stdio::send`]) and a receiver of [`StdioEvent`]s relayed from
+/// the underlying [`ManagedStdioChild`]. The shared primitive owns the
+/// child process, drains stderr at DEBUG, parses stdout into JSON
+/// frames, and reaps the child after stdout EOF.
 pub struct Stdio {
     /// Protected so concurrent senders serialise their frames; JSON-RPC
     /// frames must be atomic relative to `\n`.
     stdin: Arc<Mutex<ChildStdin>>,
     rx: mpsc::Receiver<StdioEvent>,
-    /// Reader task that owns the child process and drives
-    /// `child.wait().await` to completion. The handle is held purely
-    /// to tie the task's lifetime to this struct. We deliberately do
-    /// NOT `.abort()` it in [`Drop`]: the reader is the *only* task
-    /// that `wait()`s on the child, and aborting mid-wait leaves the
-    /// child un-reaped — later `Command::spawn()` calls in the same
-    /// tokio runtime then observe zombie handles and stall. Relying
-    /// on `Command::kill_on_drop(true)` (set in [`Stdio::connect`])
-    /// plus the reader's own end-of-stream `wait()` is both
-    /// necessary and sufficient for clean teardown.
-    _reader: JoinHandle<()>,
-    /// Stderr drain task. Explicitly aborted in [`Drop`]: unlike the
-    /// reader it holds no child handle, only a log-forwarding loop
-    /// over the (now-closed-on-drop) stderr pipe. Aborting it
-    /// guarantees the tokio runtime's blocking thread pool releases
-    /// the read as soon as the handle is gone.
-    stderr: JoinHandle<()>,
-}
-
-impl Drop for Stdio {
-    fn drop(&mut self) {
-        // See field docs: reader is left alone so it finishes
-        // `child.wait()`; stderr is aborted so the runtime reclaims
-        // its blocking slot promptly.
-        self.stderr.abort();
-    }
+    /// Translator task that maps `StdioChildEvent` → `StdioEvent`. Held
+    /// purely to tie its lifetime to this struct; it ends naturally when
+    /// the underlying primitive emits `Exit`. We do NOT abort it on drop
+    /// for the same reason `ManagedStdioChild` doesn't abort its reader:
+    /// it owns the only handle that observes the terminal `Exit` event,
+    /// and aborting mid-await would lose that observation.
+    _relay: JoinHandle<()>,
 }
 
 impl std::fmt::Debug for Stdio {
@@ -143,6 +97,11 @@ impl Stdio {
     /// Spawn `spec`'s configured command and connect a JSON-RPC channel to
     /// its stdio. Errors if `spec` describes an HTTP server (caller's bug)
     /// or if the subprocess cannot be spawned (e.g. command not on `PATH`).
+    ///
+    /// Spawn / env-scrub / stderr-drain / reader / reap all live in
+    /// [`forge_core::process::ManagedStdioChild`]; this method is the
+    /// MCP-shaped facade that adds line-delimited JSON-RPC framing on
+    /// top of the shared primitive.
     pub async fn connect(spec: &McpServerSpec) -> Result<Self> {
         let (command, args, env) = match &spec.kind {
             ServerKind::Stdio { command, args, env } => (command, args, env),
@@ -153,186 +112,70 @@ impl Stdio {
             }
         };
 
-        let mut cmd = Command::new(command);
-        cmd.args(args)
-            // Security (F-345): wipe the inherited environment first, then
-            // re-inject an explicit allow-list, then the spec's declared
-            // `env` map last so spec values override allow-list values for
-            // the same key. Without `env_clear()`, a hostile `.mcp.json`
-            // can silently exfiltrate every credential in the parent's env.
-            .env_clear();
-        for key in PARENT_ENV_ALLOWLIST {
-            if let Ok(val) = std::env::var(key) {
-                cmd.env(key, val);
-            }
-        }
-        cmd.envs(env)
-            .stdin(StdStdio::piped())
-            .stdout(StdStdio::piped())
-            .stderr(StdStdio::piped())
-            // Ensure the child is killed if the transport is dropped before
-            // an explicit shutdown. MCP servers are long-running; without
-            // this they'd leak past the parent on panic / early return.
-            .kill_on_drop(true);
-
-        let mut child = cmd
-            .spawn()
+        let cfg = ManagedStdioConfig {
+            program: command.into(),
+            args: args.iter().map(Into::into).collect(),
+            extra_env: env.clone(),
+            // The MCP transport logs through the primitive's own
+            // tracing target (`forge_core::process`); per-server
+            // disambiguation is left to the manager's tracing context.
+            server_id: None,
+            // F-347: bound the per-frame ceiling at 4 MiB so a
+            // compromised / buggy / hostile MCP server cannot DoS the
+            // host with an unterminated line. Surfaces over-cap stdout
+            // as `StdioChildEvent::MalformedStdout`, which the relay
+            // below maps to `StdioEvent::Malformed`.
+            max_frame_bytes: Some(MAX_STDIO_FRAME_BYTES),
+        };
+        let mut managed = ManagedStdioChild::spawn(cfg)
             .with_context(|| format!("spawning MCP server {command:?}"))?;
 
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow!("child has no stdin pipe"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow!("child has no stdout pipe"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| anyhow!("child has no stderr pipe"))?;
+        // Lift the primitive's `ChildStdin` into the `Arc<Mutex<…>>`
+        // shape MCP's `send` API requires. The remainder of `managed`
+        // (events receiver + reader/stderr task handles) is moved into
+        // the relay task below so the underlying primitive stays alive
+        // until the terminal `Exit` event is observed.
+        let stdin = managed
+            .take_stdin()
+            .ok_or_else(|| anyhow!("managed stdio child had no stdin pipe"))?;
 
+        // Translate the primitive's `StdioChildEvent` enum into this
+        // crate's `StdioEvent` so the public API stays unchanged. The
+        // primitive's reader does the heavy lifting (parse, drain,
+        // reap); this task is just a thin re-channel. The relay task
+        // owns `managed` so the underlying `ManagedStdioChild` stays
+        // alive (and its reader continues to wait on the child) until
+        // the terminal `Exit` event has been observed and forwarded.
         let (tx, rx) = mpsc::channel::<StdioEvent>(EVENT_CHANNEL_CAPACITY);
-
-        // Stderr drain: prevents the child's stderr pipe from filling up
-        // and blocking its writes. Log at DEBUG — stderr is free-form.
-        // Reads are capped at `MAX_STDIO_FRAME_BYTES` (F-347); an over-cap
-        // line is discarded and logged at WARN. Stderr is not part of the
-        // event contract, so over-cap lines do not surface as
-        // `StdioEvent::Malformed`.
-        let stderr_task = tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr);
-            loop {
-                match read_line_bounded(&mut reader, MAX_STDIO_FRAME_BYTES).await {
-                    Ok(BoundedLine::Line(bytes)) => {
-                        if bytes.is_empty() {
-                            break;
-                        }
-                        let text = String::from_utf8_lossy(&bytes);
-                        let line = text.trim_end_matches('\n').trim_end_matches('\r');
-                        tracing::debug!(
-                            target: "forge_mcp::transport::stdio",
-                            stderr = %line,
-                        );
+        let relay = tokio::spawn(async move {
+            while let Some(ev) = managed.events.recv().await {
+                let mapped = match ev {
+                    StdioChildEvent::Message(v) => StdioEvent::Message(v),
+                    StdioChildEvent::Exit(s) => StdioEvent::Exit(s),
+                    // F-347: stdout over-cap surfaces to MCP consumers; the
+                    // primitive already logged the discard.
+                    StdioChildEvent::MalformedStdout { bytes_discarded } => {
+                        StdioEvent::Malformed { bytes_discarded }
                     }
-                    Ok(BoundedLine::Overflow { bytes_discarded }) => {
-                        tracing::warn!(
-                            target: "forge_mcp::transport::stdio",
-                            stream = "stderr",
-                            bytes_discarded = bytes_discarded,
-                            cap = MAX_STDIO_FRAME_BYTES,
-                            "dropping over-cap stderr line",
-                        );
-                    }
-                    Err(err) => {
-                        tracing::debug!(
-                            target: "forge_mcp::transport::stdio",
-                            error = %err,
-                            "stderr read error; draining aborted",
-                        );
-                        break;
-                    }
+                    // Stderr over-cap is not part of the MCP event contract;
+                    // the primitive already logged it. Skip the relay so we
+                    // don't fabricate a `Malformed` for a non-frame stream.
+                    StdioChildEvent::MalformedStderr { .. } => continue,
+                };
+                if tx.send(mapped).await.is_err() {
+                    break;
                 }
             }
-        });
-
-        // Reader: owns stdout + child, so it can wait() after EOF and emit
-        // the terminal Exit event without racing the consumer. Reads are
-        // capped at `MAX_STDIO_FRAME_BYTES` (F-347); over-cap frames are
-        // discarded and surface as `StdioEvent::Malformed`. The reader
-        // keeps running so a well-formed frame following an over-cap line
-        // still reaches the event channel.
-        let reader_tx = tx.clone();
-        let reader_task = tokio::spawn(async move {
-            let mut reader = BufReader::new(stdout);
-            loop {
-                match read_line_bounded(&mut reader, MAX_STDIO_FRAME_BYTES).await {
-                    Ok(BoundedLine::Line(bytes)) => {
-                        if bytes.is_empty() {
-                            break; // EOF: child closed stdout.
-                        }
-                        let trimmed = trim_trailing_newline(&bytes);
-                        // Tolerate blank lines (some servers pad frames).
-                        if trimmed.iter().all(|b| b.is_ascii_whitespace()) {
-                            continue;
-                        }
-                        match serde_json::from_slice::<serde_json::Value>(trimmed) {
-                            Ok(value) => {
-                                if reader_tx.send(StdioEvent::Message(value)).await.is_err() {
-                                    // Consumer dropped; no need to keep reading.
-                                    break;
-                                }
-                            }
-                            Err(err) => {
-                                // DoD: malformed frames are logged + skipped,
-                                // never fatal.
-                                let as_str = String::from_utf8_lossy(trimmed);
-                                tracing::warn!(
-                                    target: "forge_mcp::transport::stdio",
-                                    error = %err,
-                                    line = %super::truncate(&as_str, 512),
-                                    "dropping malformed JSON-RPC frame",
-                                );
-                            }
-                        }
-                    }
-                    Ok(BoundedLine::Overflow { bytes_discarded }) => {
-                        tracing::warn!(
-                            target: "forge_mcp::transport::stdio",
-                            stream = "stdout",
-                            bytes_discarded = bytes_discarded,
-                            cap = MAX_STDIO_FRAME_BYTES,
-                            "dropping over-cap stdout line",
-                        );
-                        if reader_tx
-                            .send(StdioEvent::Malformed { bytes_discarded })
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            target: "forge_mcp::transport::stdio",
-                            error = %err,
-                            "stdout read error; surfacing as exit",
-                        );
-                        break;
-                    }
-                }
-            }
-
-            // Reap the child and surface the exit status. `wait()` is safe
-            // to call after we've dropped stdout — the pipe is closed.
-            let status = match child.wait().await {
-                Ok(s) => s,
-                Err(err) => {
-                    tracing::warn!(
-                        target: "forge_mcp::transport::stdio",
-                        error = %err,
-                        "wait() failed; forcing kill",
-                    );
-                    // Best-effort kill, then synthesise a failure status.
-                    let _ = child.kill().await;
-                    // If even this fails, fall back to whatever wait returns.
-                    child.wait().await.unwrap_or_else(|_| {
-                        // Fabricate a status via a throw-away successful
-                        // command so we can always emit an Exit event.
-                        std::process::ExitStatus::default()
-                    })
-                }
-            };
-
-            // `send` may fail if the consumer dropped — that's fine.
-            let _ = reader_tx.send(StdioEvent::Exit(status)).await;
+            // `managed` drops here: the primitive's reader has already
+            // reaped the child by this point (it sent us the Exit
+            // event), so this drop is just bookkeeping.
+            drop(managed);
         });
 
         Ok(Self {
             stdin: Arc::new(Mutex::new(stdin)),
             rx,
-            _reader: reader_task,
-            stderr: stderr_task,
+            _relay: relay,
         })
     }
 
@@ -360,90 +203,6 @@ impl Stdio {
     pub async fn recv(&mut self) -> Option<StdioEvent> {
         self.rx.recv().await
     }
-}
-
-/// Outcome of a single [`read_line_bounded`] call.
-enum BoundedLine {
-    /// A full line was read within the byte ceiling. Carries the raw bytes
-    /// up to and including any trailing `\n`. An empty `Vec` indicates EOF
-    /// on the stream.
-    Line(Vec<u8>),
-    /// The line exceeded the ceiling. All bytes through the terminating
-    /// `\n` (or EOF) have been consumed and discarded; `bytes_discarded`
-    /// reports the total dropped, always `>=` the cap.
-    Overflow { bytes_discarded: usize },
-}
-
-/// Read bytes up to and including the next `\n` from `reader`, but never
-/// buffer more than `cap` bytes in memory. Closes F-347: a compromised /
-/// buggy / hostile MCP server writing a single enormous line cannot DoS
-/// the host. Mirrors F-351's `read_line_bounded` for the LSP transport.
-///
-/// Behavior:
-/// - Within the cap → returns [`BoundedLine::Line`] with the bytes read
-///   (possibly ending in `\n`; may be empty at EOF).
-/// - Over the cap → continues reading-and-discarding via the reader's
-///   internal read-ahead buffer until the next `\n` (or EOF) so the
-///   reader resyncs on the stream without ever holding more than the
-///   reader's own read-ahead (8 KiB default for tokio's `BufReader`),
-///   then returns [`BoundedLine::Overflow`] with the total discarded
-///   count (always `>= cap`).
-/// - Pure I/O error → surfaces as `Err`.
-async fn read_line_bounded<R: AsyncBufRead + Unpin>(
-    reader: &mut R,
-    cap: usize,
-) -> std::io::Result<BoundedLine> {
-    // Accumulate up to `cap+1` bytes: any overshoot proves the line
-    // exceeded the ceiling without a newline. `Take` enforces the ceiling
-    // at the reader layer so the `Vec` never grows past `cap+1`.
-    let mut buf: Vec<u8> = Vec::new();
-    let mut limited = (&mut *reader).take(cap as u64 + 1);
-    let _ = limited.read_until(b'\n', &mut buf).await?;
-    if buf.is_empty() {
-        return Ok(BoundedLine::Line(Vec::new()));
-    }
-    let hit_newline = buf.last() == Some(&b'\n');
-    if hit_newline || buf.len() <= cap {
-        return Ok(BoundedLine::Line(buf));
-    }
-
-    // Over the cap and no newline yet — drain the remainder of the line
-    // from the underlying reader via the `BufRead` fill/consume pair so
-    // no intermediate buffer grows beyond the reader's own read-ahead.
-    let mut bytes_discarded = buf.len();
-    buf.clear();
-    loop {
-        let chunk = reader.fill_buf().await?;
-        if chunk.is_empty() {
-            // EOF mid-line — still an overflow, the line never terminated.
-            return Ok(BoundedLine::Overflow { bytes_discarded });
-        }
-        match chunk.iter().position(|&b| b == b'\n') {
-            Some(idx) => {
-                bytes_discarded = bytes_discarded.saturating_add(idx + 1);
-                reader.consume(idx + 1);
-                return Ok(BoundedLine::Overflow { bytes_discarded });
-            }
-            None => {
-                let n = chunk.len();
-                bytes_discarded = bytes_discarded.saturating_add(n);
-                reader.consume(n);
-            }
-        }
-    }
-}
-
-/// Strip at most one trailing `\n` (and a preceding `\r`) from `bytes`.
-/// Matches `BufReader::lines` semantics for downstream JSON parsing.
-fn trim_trailing_newline(bytes: &[u8]) -> &[u8] {
-    let mut end = bytes.len();
-    if end > 0 && bytes[end - 1] == b'\n' {
-        end -= 1;
-        if end > 0 && bytes[end - 1] == b'\r' {
-            end -= 1;
-        }
-    }
-    &bytes[..end]
 }
 
 #[cfg(test)]

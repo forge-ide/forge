@@ -22,6 +22,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use forge_core::process::truncate;
 use futures::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE};
 use tokio::sync::mpsc;
@@ -247,7 +248,7 @@ impl Http {
                 "POST {} returned HTTP {}: {}",
                 redacted(&self.url),
                 status,
-                super::truncate(&body, 512),
+                truncate(&body, 512),
             ));
         }
 
@@ -266,7 +267,7 @@ impl Http {
             format!(
                 "parsing POST {} response as JSON: {}",
                 redacted(&self.url),
-                super::truncate(&String::from_utf8_lossy(&body), 512),
+                truncate(&String::from_utf8_lossy(&body), 512),
             )
         })?;
 
@@ -514,7 +515,7 @@ async fn open_and_read_sse(
                         tracing::warn!(
                             target: "forge_mcp::transport::http",
                             error = %err,
-                            payload = %super::truncate(&payload, 512),
+                            payload = %truncate(&payload, 512),
                             "dropping malformed SSE JSON frame",
                         );
                     }

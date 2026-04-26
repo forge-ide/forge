@@ -6,6 +6,7 @@ mod event_log;
 pub mod ids;
 pub mod mcp_state;
 pub mod meta;
+pub mod process;
 pub mod runtime_dir;
 pub mod settings;
 mod tool;
