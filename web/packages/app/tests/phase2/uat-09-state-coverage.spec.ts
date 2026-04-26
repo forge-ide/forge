@@ -248,9 +248,15 @@ test.describe('UAT-09 — F-400 — loading/empty/error states across panes', ()
       kind: 'Dir',
       children: [
         { path: `${WORKSPACE}/notes.txt`, name: 'notes.txt', kind: 'File' },
+        { path: `${WORKSPACE}/other.md`, name: 'other.md', kind: 'File' },
       ],
     }));
-    await tauri.onInvoke('read_file', async () => {
+    // First file rejects; second file succeeds. Drives the F-582 recovery
+    // assertion below — opening a different file in the same EditorPane
+    // after a failed initial read must clear the error and succeed.
+    await tauri.onInvoke('read_file', async (args) => {
+      const path = (args as { path?: string }).path ?? '';
+      if (path.endsWith('other.md')) return { content: 'recovered\n' };
       throw new Error('read denied');
     });
 
@@ -285,14 +291,15 @@ test.describe('UAT-09 — F-400 — loading/empty/error states across panes', ()
     await expect(errorBanner).toHaveAttribute('role', 'alert');
     await expect(errorBanner).toContainText('read denied');
 
-    // Note: error -> recovery via "open the next file in the same EditorPane"
-    // is intentionally NOT exercised here. EditorPane's path-change effect
-    // (see EditorPane.tsx createEffect on `props.path`) skips sendOpen()
-    // while `currentValue === null`, which is the state after a failed
-    // initial read. Production recovery is via close+reopen of the pane;
-    // the LSP-error Reload affordance documented in UAT-02 step 8 is a
-    // separate code path. The loading -> error transition (the F-400
-    // surface area) is fully verified above.
+    // F-582: error -> recovery via "open a different file in the same
+    // EditorPane". The path-change effect must re-issue `sendOpen()` even
+    // when the prior `read_file` failed (previously gated on
+    // `currentValue !== null`, which trapped the pane in its error state
+    // and forced close+reopen). Double-clicking the second sidebar row
+    // updates `props.path` on the live EditorPane; the new file's success
+    // payload should clear the error banner.
+    await rows.nth(1).dblclick();
+    await expect(errorBanner).toBeHidden();
   });
 
   // Steps 7-9 (TerminalPane loading / error / recovery) are not exercised

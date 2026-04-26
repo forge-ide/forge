@@ -11,6 +11,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render } from '@solidjs/testing-library';
+import { createSignal } from 'solid-js';
 import type { SessionId } from '@forge/ipc';
 import {
   EditorPane,
@@ -145,6 +146,57 @@ describe('open-on-ready flow', () => {
     await Promise.resolve();
     const alert = queryByTestId('editor-pane-error');
     expect(alert?.textContent).toContain('path denied');
+  });
+
+  // F-582: after a failed initial read, changing `props.path` MUST re-issue
+  // `sendOpen()` so the user can recover by opening a different file in the
+  // same pane (the natural "I'll try a different file" motion). Previously
+  // the path-change effect gated on `currentValue !== null`, which silently
+  // dropped the second open and forced a close+reopen.
+  it('re-issues read_file when path changes after a prior failed read (recovery)', async () => {
+    const SECOND_FILE = '/workspace/demo/src/other.ts';
+    const readFile = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('path denied'))
+      .mockResolvedValueOnce({
+        path: SECOND_FILE,
+        content: 'recovered\n',
+        bytes: 10,
+        sha256: 'sha2',
+      });
+    const posted: unknown[] = [];
+    const [path, setPath] = createSignal(FILE);
+
+    const { getByTestId, queryByTestId } = render(() => (
+      <EditorPane
+        path={path()}
+        src="about:blank"
+        readFile={readFile}
+        writeFile={vi.fn().mockResolvedValue(undefined)}
+        postToIframe={(m) => posted.push(m)}
+        onClose={vi.fn()}
+      />
+    ));
+    const iframe = getByTestId('editor-pane-iframe') as HTMLIFrameElement;
+    fireFromIframe(iframe, { kind: 'ready' });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(getByTestId('editor-pane-error').textContent).toContain('path denied');
+
+    setPath(SECOND_FILE);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(readFile).toHaveBeenCalledTimes(2);
+    expect(readFile).toHaveBeenLastCalledWith(SID, SECOND_FILE);
+    expect(queryByTestId('editor-pane-error')).not.toBeInTheDocument();
+    const openMsg = posted.find(
+      (m) =>
+        (m as { kind?: string }).kind === 'open' &&
+        (m as { uri?: string }).uri === `file://${SECOND_FILE}`,
+    );
+    expect(openMsg).toBeDefined();
   });
 });
 
