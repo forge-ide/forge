@@ -611,18 +611,14 @@ fn stop_rejects_oversize_instance_id_at_command_layer() {
 #[tokio::test(flavor = "multi_thread")]
 async fn stop_background_agent_transitions_instance_to_terminal_and_stops_sampling() {
     use forge_agents::Orchestrator as AgentOrchestrator;
-    use forge_session::{FakeSampler, ResourceMonitor, Sample};
+    use forge_session::{fake_sample, FakeSampler, ResourceMonitor};
 
     let app = make_app();
 
     // Fast-tick monitor with a scripted FakeSampler so we can observe the
     // `tracked_count` drop without waiting for the 1 s production cadence.
     let orchestrator = Arc::new(AgentOrchestrator::new());
-    let fake = Arc::new(FakeSampler::new(Sample {
-        cpu_seconds: Some(0.0),
-        rss_bytes: Some(0),
-        fd_count: Some(0),
-    }));
+    let fake = Arc::new(FakeSampler::new(fake_sample(0.0, Some(0), Some(0))));
     let monitor = Arc::new(ResourceMonitor::new(
         fake as Arc<dyn forge_session::Sampler>,
         Duration::from_millis(20),

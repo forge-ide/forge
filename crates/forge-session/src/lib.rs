@@ -18,5 +18,5 @@ pub use bg_agents::{BackgroundAgentRegistry, BgAgentError, BgAgentState, BgAgent
 pub use error::SessionError;
 pub use orchestrator::Orchestrator;
 pub use resource_monitor::{
-    default_sampler, FakeSampler, ResourceMonitor, Sample, Sampler, DEFAULT_TICK,
+    default_sampler, fake_sample, FakeSampler, ResourceMonitor, Sample, Sampler, DEFAULT_TICK,
 };

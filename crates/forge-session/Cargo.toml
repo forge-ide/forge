@@ -79,6 +79,19 @@ name = "tool_invoke"
 path = "benches/tool_invoke.rs"
 harness = false
 
+# F-575: resource-monitor concurrent-track + per-tick allocation bench.
+# `background_agents_start_100` proves the std-mutex switch removes the
+# `Mutex held across spawn` serialization (DoD: ≥10× speedup vs. an
+# in-bench shadow that re-introduces the prior `tokio::sync::Mutex`
+# pattern). `sampler_100_instances_60s` reports allocations/sec and
+# bytes/sec for the steady-state tick path so any future regression
+# (e.g. accidental tokio::fs::read_dir reintroduction) shows up as a
+# numeric spike.
+[[bench]]
+name = "resource_monitor"
+path = "benches/resource_monitor.rs"
+harness = false
+
 [[test]]
 name = "headless_session_basic"
 path = "tests/headless_session/basic.rs"
