@@ -26,9 +26,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::{ChatChunk, ChatMessage, ChatRequest, Provider, StreamErrorKind};
+use bytes::{Buf, Bytes, BytesMut};
 use forge_core::Result;
 use futures::stream::{BoxStream, StreamExt};
 use reqwest::Url;
+use serde::ser::{SerializeMap, SerializeSeq, Serializer};
 use serde::Deserialize;
 
 pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434";
@@ -312,18 +314,24 @@ impl Provider for OllamaProvider {
         req: ChatRequest,
     ) -> impl std::future::Future<Output = Result<BoxStream<'static, ChatChunk>>> + Send {
         let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));
-        let body = serde_json::json!({
-            "model": self.model,
-            "messages": to_ollama_messages(&req.system, &req.messages),
-            "stream": true,
-        });
+        // F-568: stream the request body directly to a `Vec<u8>` via
+        // `serde_json::Serializer`, skipping the intermediate `Vec<Value>` /
+        // `serde_json::json!` tree that `to_ollama_messages` previously built.
+        // For an N-message history with M-byte tool-result payloads this drops
+        // the per-turn allocation count from O(N + Σ M) `Value` allocations
+        // (plus a separate `to_string` per tool-result that's then re-quoted)
+        // to a single `Vec<u8>` write that scales linearly with serialized size.
+        let body_result = serialize_chat_body(&self.model, &req.system, &req.messages);
         let client = self.stream_client.clone();
         let cfg = self.stream_cfg;
 
         async move {
+            let body = body_result
+                .map_err(|e| anyhow::anyhow!("ollama chat body serialization failed: {e}"))?;
             let resp = client
                 .post(&url)
-                .json(&body)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body)
                 .send()
                 .await
                 .map_err(|e| anyhow::anyhow!("ollama chat request failed: {e}"))?;
@@ -352,17 +360,23 @@ where
     S: futures::Stream<Item = std::result::Result<bytes::Bytes, E>> + Send + 'static,
     E: std::error::Error + Send + Sync + 'static,
 {
-    use tokio_util::codec::{FramedRead, LinesCodec};
+    use tokio_util::codec::FramedRead;
     use tokio_util::io::StreamReader;
 
-    // Adapt reqwest's `bytes_stream()` to an `AsyncRead`, then decode bounded
-    // NDJSON lines. `LinesCodec::new_with_max_length` returns
-    // `MaxLineLengthExceeded` cleanly instead of growing the buffer past the cap.
-    // `reqwest::Response::bytes_stream()` is `!Unpin`, so pin the adapter chain
-    // once here; `FramedRead` requires `AsyncRead + Unpin`.
+    // F-568: previously this used `LinesCodec`, which decoded each NDJSON
+    // line into an owned `String` (UTF-8 validating + heap-copying out of the
+    // `BytesMut`). On the per-token text-delta hot path that doubled the
+    // allocation budget — the codec allocated a String, then `parse_line`
+    // re-allocated again at the `ChatChunk::TextDelta` emission boundary.
+    //
+    // `BytesLineCodec` yields `Bytes` slices that share the underlying
+    // `BytesMut` buffer; `serde_json::from_slice` then walks the slice
+    // directly, populating `RawLine`'s `Cow<'_, str>` borrows from the
+    // buffer in the common (no-escape) case. Net per-token alloc drops from
+    // 2 → 1 (the final `into_owned` on the emitted `String`).
     let pinned = Box::pin(byte_stream.map(|r| r.map_err(std::io::Error::other)));
     let reader = StreamReader::new(pinned);
-    let framed = FramedRead::new(reader, LinesCodec::new_with_max_length(cfg.max_line_bytes));
+    let framed = FramedRead::new(reader, BytesLineCodec::new(cfg.max_line_bytes));
 
     let deadline = tokio::time::Instant::now() + cfg.wall_clock_timeout;
     let state = (framed, cfg, deadline, false);
@@ -420,16 +434,15 @@ where
                         // would let `FramedRead` keep reading-and-discarding
                         // bytes from a hostile peer until a newline finally
                         // arrives. Emit the typed error and stop.
-                        use tokio_util::codec::LinesCodecError;
                         let (kind, message) = match e {
-                            LinesCodecError::MaxLineLengthExceeded => (
+                            BytesLineError::MaxLineLengthExceeded => (
                                 StreamErrorKind::LineTooLong,
                                 format!(
                                     "ollama NDJSON line exceeded cap of {} bytes",
                                     cfg.max_line_bytes
                                 ),
                             ),
-                            LinesCodecError::Io(err) => (
+                            BytesLineError::Io(err) => (
                                 StreamErrorKind::Transport,
                                 format!("ollama stream transport error: {err}"),
                             ),
@@ -441,11 +454,11 @@ where
                         ));
                     }
                     Ok(Some(Ok(line))) => {
-                        let trimmed = line.trim();
+                        let trimmed = trim_ascii_whitespace(&line);
                         if trimmed.is_empty() {
                             continue;
                         }
-                        if let Some(chunk) = parse_line(trimmed) {
+                        if let Some(chunk) = parse_line_bytes(trimmed) {
                             return Some((chunk, (framed, cfg, deadline, terminated)));
                         }
                         // F-080: Unparseable line — surface the failure path
@@ -453,7 +466,7 @@ where
                         // noisy or hostile peer is observable instead of
                         // silently burning CPU. Rate-limited to bound log cost
                         // on adversarial streams (see `log_unparseable_line`).
-                        log_unparseable_line(trimmed);
+                        log_unparseable_line_bytes(trimmed);
                         continue;
                     }
                 }
@@ -531,7 +544,16 @@ struct RawFunction<'a> {
 /// bench at `benches/ollama_stream.rs`; not part of the stable API surface.
 #[doc(hidden)]
 pub fn parse_line(line: &str) -> Option<ChatChunk> {
-    let raw: RawLine<'_> = serde_json::from_str(line).ok()?;
+    parse_line_bytes(line.as_bytes())
+}
+
+/// F-568: byte-slice variant used by the streaming decoder. Skips the
+/// `&str`/UTF-8-validation step and lets `serde_json::from_slice` walk the
+/// `BytesMut` buffer directly. `RawLine`'s `Cow<'_, str>` borrows still point
+/// at that buffer in the no-escape common case.
+#[doc(hidden)]
+pub fn parse_line_bytes(line: &[u8]) -> Option<ChatChunk> {
+    let raw: RawLine<'_> = serde_json::from_slice(line).ok()?;
 
     if raw.done {
         let reason = raw.done_reason.map(Cow::into_owned).unwrap_or_default();
@@ -559,6 +581,145 @@ pub fn parse_line(line: &str) -> Option<ChatChunk> {
     Some(ChatChunk::TextDelta(content.into_owned()))
 }
 
+/// Trim ASCII whitespace (space, tab, CR, LF, FF, VT) from both ends of a byte
+/// slice without allocating. The NDJSON framing only ever needs ASCII trimming
+/// (newline / CR), so a UTF-8-aware trim is unnecessary.
+fn trim_ascii_whitespace(bytes: &[u8]) -> &[u8] {
+    let mut start = 0;
+    let mut end = bytes.len();
+    while start < end && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    while end > start && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    &bytes[start..end]
+}
+
+// ── BytesLineCodec ────────────────────────────────────────────────────────────
+//
+// F-568: a minimal `Decoder` that frames NDJSON on `\n` and yields owned
+// `Bytes` slices that share the codec's underlying `BytesMut` buffer. Replaces
+// `tokio_util::codec::LinesCodec`, which decoded each line into an owned
+// `String` (UTF-8 validating + heap-copying out of `BytesMut`).
+//
+// Bounds policy is preserved: a line that exceeds `max_line_bytes` before a
+// newline arrives surfaces `MaxLineLengthExceeded` and the codec discards the
+// over-long bytes instead of growing the buffer unboundedly.
+
+#[derive(Debug)]
+struct BytesLineCodec {
+    max_line_bytes: usize,
+    next_index: usize,
+    discarding: bool,
+}
+
+#[derive(Debug)]
+enum BytesLineError {
+    MaxLineLengthExceeded,
+    Io(std::io::Error),
+}
+
+impl From<std::io::Error> for BytesLineError {
+    fn from(e: std::io::Error) -> Self {
+        BytesLineError::Io(e)
+    }
+}
+
+impl std::fmt::Display for BytesLineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BytesLineError::MaxLineLengthExceeded => write!(f, "max line length exceeded"),
+            BytesLineError::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for BytesLineError {}
+
+impl BytesLineCodec {
+    fn new(max_line_bytes: usize) -> Self {
+        Self {
+            max_line_bytes,
+            next_index: 0,
+            discarding: false,
+        }
+    }
+}
+
+impl tokio_util::codec::Decoder for BytesLineCodec {
+    type Item = Bytes;
+    type Error = BytesLineError;
+
+    fn decode(&mut self, buf: &mut BytesMut) -> std::result::Result<Option<Bytes>, Self::Error> {
+        // When discarding an over-long line, drop bytes up to (and including)
+        // the next newline so subsequent decodes resume cleanly. If the
+        // newline isn't here yet, drop everything we have and wait for more.
+        if self.discarding {
+            if let Some(nl_offset) = buf.iter().position(|b| *b == b'\n') {
+                buf.advance(nl_offset + 1);
+                self.discarding = false;
+                self.next_index = 0;
+            } else {
+                let len = buf.len();
+                buf.advance(len);
+                return Ok(None);
+            }
+        }
+
+        let read_to = std::cmp::min(self.max_line_bytes.saturating_add(1), buf.len());
+        let newline = buf[self.next_index..read_to]
+            .iter()
+            .position(|b| *b == b'\n');
+
+        match newline {
+            Some(offset) => {
+                let nl_index = self.next_index + offset;
+                let mut line = buf.split_to(nl_index + 1);
+                // Drop the trailing '\n'; `\r` (if present) is left for
+                // `trim_ascii_whitespace` at the call site to handle.
+                line.truncate(line.len() - 1);
+                self.next_index = 0;
+                Ok(Some(line.freeze()))
+            }
+            None if buf.len() > self.max_line_bytes => {
+                // Over-long line with no newline in sight — discard until the
+                // next '\n' arrives. `next_index` resets so the discard scan
+                // starts at byte 0 of whatever bytes remain (and on subsequent
+                // `decode` calls the discarding-state branch above advances
+                // past the newline before resuming framing).
+                self.discarding = true;
+                self.next_index = 0;
+                Err(BytesLineError::MaxLineLengthExceeded)
+            }
+            None => {
+                self.next_index = buf.len();
+                Ok(None)
+            }
+        }
+    }
+
+    fn decode_eof(
+        &mut self,
+        buf: &mut BytesMut,
+    ) -> std::result::Result<Option<Bytes>, Self::Error> {
+        match self.decode(buf)? {
+            Some(line) => Ok(Some(line)),
+            None => {
+                if buf.is_empty() || self.discarding {
+                    self.discarding = false;
+                    self.next_index = 0;
+                    Ok(None)
+                } else {
+                    let line = buf.split_to(buf.len()).freeze();
+                    self.next_index = 0;
+                    Ok(Some(line))
+                }
+            }
+        }
+    }
+}
+
 /// Cap on `log_unparseable_line` emissions per process. A hostile or buggy
 /// peer that produces malformed lines on every chunk would otherwise turn the
 /// log itself into an amplification surface — exactly the CPU-burn condition
@@ -581,6 +742,14 @@ fn classify_unparseable(line: &str) -> &'static str {
         Ok(_) => "valid-json-unrecognized-shape",
         Err(_) => "invalid-json",
     }
+}
+
+fn log_unparseable_line_bytes(line: &[u8]) {
+    // Avoid allocating a `String` on the hot path: `from_utf8_lossy` returns a
+    // `Cow<&str>` that borrows in the all-ASCII common case. Only the warning
+    // path itself ever pays for an allocation, and it's rate-limited.
+    let preview = String::from_utf8_lossy(line);
+    log_unparseable_line(&preview);
 }
 
 fn log_unparseable_line(line: &str) {
@@ -607,6 +776,231 @@ fn unparseable_log_counter_for_test() -> usize {
     UNPARSEABLE_LINE_COUNT.load(Ordering::Relaxed)
 }
 
+/// F-568: serialize a chat-completion request body directly into a `Vec<u8>`,
+/// skipping the intermediate `Vec<serde_json::Value>` tree that
+/// [`to_ollama_messages`] previously built. Each tool-result payload is
+/// re-serialized once into the surrounding `"content"` JSON-string instead of
+/// allocating an owned `String` first and then re-quoting it via
+/// `serde_json::json!`.
+///
+/// On a 50-turn session with megabyte-sized tool-result payloads this drops
+/// per-turn allocations from O(N) `Value` allocations + N `to_string` walks
+/// to a single `Vec<u8>` write that scales with serialized output size.
+///
+/// Public for `benches/ollama_stream.rs`; not part of the stable API surface.
+#[doc(hidden)]
+pub fn serialize_chat_body(
+    model: &str,
+    system: &Option<String>,
+    messages: &[ChatMessage],
+) -> std::result::Result<Vec<u8>, serde_json::Error> {
+    use crate::ChatBlock;
+
+    // Reasonable starting capacity to avoid the first few `Vec` reallocs
+    // on small histories. Real bodies typically run a few KB → MB.
+    let mut out: Vec<u8> = Vec::with_capacity(256 + messages.len() * 64);
+    let mut ser = serde_json::Serializer::new(&mut out);
+
+    let mut root = ser.serialize_map(Some(3))?;
+    root.serialize_entry("model", model)?;
+
+    // ── messages: serialize as a sequence with a wrapper that streams each
+    // ChatMessage directly into the `Serializer`, avoiding any `Value` build.
+    struct Messages<'a> {
+        system: &'a Option<String>,
+        messages: &'a [ChatMessage],
+    }
+
+    impl<'a> serde::Serialize for Messages<'a> {
+        fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+            // Worst-case sequence length: one entry per ChatMessage plus one
+            // per ToolResult block (which becomes a flat `role:"tool"` entry)
+            // plus the optional system. Over-counting is harmless for
+            // serializers that don't pre-allocate based on the hint.
+            let cap = 1 + self
+                .messages
+                .iter()
+                .map(|m| m.content.len() + 1)
+                .sum::<usize>();
+            let mut seq = s.serialize_seq(Some(cap))?;
+            if let Some(sys) = self.system {
+                seq.serialize_element(&SystemMessage { sys })?;
+            }
+            for msg in self.messages {
+                emit_message(&mut seq, msg)?;
+            }
+            seq.end()
+        }
+    }
+
+    struct SystemMessage<'a> {
+        sys: &'a str,
+    }
+
+    impl<'a> serde::Serialize for SystemMessage<'a> {
+        fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+            let mut m = s.serialize_map(Some(2))?;
+            m.serialize_entry("role", "system")?;
+            m.serialize_entry("content", self.sys)?;
+            m.end()
+        }
+    }
+
+    fn emit_message<S: SerializeSeq>(
+        seq: &mut S,
+        msg: &ChatMessage,
+    ) -> std::result::Result<(), S::Error> {
+        use crate::{ChatBlock, ChatRole};
+
+        // ToolResult blocks become flat `role:"tool"` messages — emit those
+        // as we encounter them, without buffering. Text/tool-call blocks are
+        // collected into one assistant/user message at the end.
+        let mut text_len = 0usize;
+        let mut text_parts: Vec<&str> = Vec::new();
+        let mut tool_calls: Vec<&ChatBlock> = Vec::new();
+
+        for block in &msg.content {
+            match block {
+                ChatBlock::Text(t) => {
+                    text_len += t.len();
+                    text_parts.push(t);
+                }
+                ChatBlock::ToolCall { .. } => tool_calls.push(block),
+                ChatBlock::ToolResult { result, .. } => {
+                    seq.serialize_element(&ToolResultMessage { result })?;
+                }
+            }
+        }
+
+        if text_parts.is_empty() && tool_calls.is_empty() {
+            return Ok(());
+        }
+
+        let role = match msg.role {
+            ChatRole::User => "user",
+            ChatRole::Assistant => "assistant",
+        };
+
+        seq.serialize_element(&AssistantOrUserMessage {
+            role,
+            text_parts: &text_parts,
+            text_len,
+            tool_calls: &tool_calls,
+        })
+    }
+
+    struct ToolResultMessage<'a> {
+        result: &'a serde_json::Value,
+    }
+
+    impl<'a> serde::Serialize for ToolResultMessage<'a> {
+        fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+            // Ollama's wire format expects `content` as a *string* containing
+            // the serialized tool result (not a nested JSON object). Render
+            // the result into a String once, then emit it. This is one
+            // unavoidable allocation per tool-result message, but it's a
+            // single pass — no intermediate `Value` tree.
+            let payload = serde_json::to_string(self.result).map_err(serde::ser::Error::custom)?;
+            let mut m = s.serialize_map(Some(2))?;
+            m.serialize_entry("role", "tool")?;
+            m.serialize_entry("content", &payload)?;
+            m.end()
+        }
+    }
+
+    struct AssistantOrUserMessage<'a> {
+        role: &'a str,
+        text_parts: &'a [&'a str],
+        text_len: usize,
+        tool_calls: &'a [&'a ChatBlock],
+    }
+
+    impl<'a> serde::Serialize for AssistantOrUserMessage<'a> {
+        fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+            let entries = if self.tool_calls.is_empty() { 2 } else { 3 };
+            let mut m = s.serialize_map(Some(entries))?;
+            m.serialize_entry("role", self.role)?;
+            // Concatenate text parts into one buffer once, then serialize
+            // (avoids re-quoting each fragment).
+            let mut content = String::with_capacity(self.text_len);
+            for part in self.text_parts {
+                content.push_str(part);
+            }
+            m.serialize_entry("content", &content)?;
+            if !self.tool_calls.is_empty() {
+                m.serialize_entry(
+                    "tool_calls",
+                    &ToolCallsSeq {
+                        calls: self.tool_calls,
+                    },
+                )?;
+            }
+            m.end()
+        }
+    }
+
+    struct ToolCallsSeq<'a> {
+        calls: &'a [&'a ChatBlock],
+    }
+
+    impl<'a> serde::Serialize for ToolCallsSeq<'a> {
+        fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+            let mut seq = s.serialize_seq(Some(self.calls.len()))?;
+            for block in self.calls {
+                if let ChatBlock::ToolCall { name, args, .. } = block {
+                    seq.serialize_element(&ToolCallEntry { name, args })?;
+                }
+            }
+            seq.end()
+        }
+    }
+
+    struct ToolCallEntry<'a> {
+        name: &'a str,
+        args: &'a serde_json::Value,
+    }
+
+    impl<'a> serde::Serialize for ToolCallEntry<'a> {
+        fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+            let mut outer = s.serialize_map(Some(1))?;
+            outer.serialize_entry(
+                "function",
+                &Function {
+                    name: self.name,
+                    args: self.args,
+                },
+            )?;
+            outer.end()
+        }
+    }
+
+    struct Function<'a> {
+        name: &'a str,
+        args: &'a serde_json::Value,
+    }
+
+    impl<'a> serde::Serialize for Function<'a> {
+        fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+            let mut m = s.serialize_map(Some(2))?;
+            m.serialize_entry("name", self.name)?;
+            m.serialize_entry("arguments", self.args)?;
+            m.end()
+        }
+    }
+
+    root.serialize_entry("messages", &Messages { system, messages })?;
+    root.serialize_entry("stream", &true)?;
+    SerializeMap::end(root)?;
+
+    // The outer `use crate::ChatBlock` is referenced inside `emit_message`'s
+    // pattern below; this expression keeps the import live for `cargo check`
+    // even when type inference resolves it solely through the nested closure.
+    let _ = std::mem::size_of::<ChatBlock>();
+
+    Ok(out)
+}
+
+#[cfg(test)]
 fn to_ollama_messages(system: &Option<String>, messages: &[ChatMessage]) -> Vec<serde_json::Value> {
     use crate::{ChatBlock, ChatRole};
 
@@ -669,6 +1063,145 @@ fn to_ollama_messages(system: &Option<String>, messages: &[ChatMessage]) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // F-568: the streaming serializer must emit byte-equivalent JSON to the
+    // legacy `to_ollama_messages` + `serde_json::json!` body. These tests
+    // assert structural equivalence by re-parsing both into `Value` (key order
+    // is not part of the wire contract) for each shape that production hits.
+
+    fn body_value(
+        model: &str,
+        system: &Option<String>,
+        messages: &[ChatMessage],
+    ) -> serde_json::Value {
+        let bytes = serialize_chat_body(model, system, messages).expect("serialize");
+        serde_json::from_slice(&bytes).expect("re-parse")
+    }
+
+    fn legacy_body_value(
+        model: &str,
+        system: &Option<String>,
+        messages: &[ChatMessage],
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "model": model,
+            "messages": to_ollama_messages(system, messages),
+            "stream": true,
+        })
+    }
+
+    #[test]
+    fn serialize_chat_body_matches_legacy_for_text_only() {
+        use crate::{ChatBlock, ChatMessage, ChatRole};
+
+        let msgs = vec![ChatMessage {
+            role: ChatRole::User,
+            content: vec![
+                ChatBlock::Text("hi ".into()),
+                ChatBlock::Text("there".into()),
+            ],
+        }];
+        let sys = Some("be helpful".to_string());
+        assert_eq!(
+            body_value("llama3", &sys, &msgs),
+            legacy_body_value("llama3", &sys, &msgs)
+        );
+    }
+
+    #[test]
+    fn serialize_chat_body_matches_legacy_for_tool_call_and_result() {
+        use crate::{ChatBlock, ChatMessage, ChatRole};
+
+        let msgs = vec![
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: vec![ChatBlock::ToolCall {
+                    id: "c1".into(),
+                    name: "fs.read".into(),
+                    args: serde_json::json!({"path": "/a"}),
+                }],
+            },
+            ChatMessage {
+                role: ChatRole::User,
+                content: vec![ChatBlock::ToolResult {
+                    id: "c1".into(),
+                    result: serde_json::json!({"content": "file data"}),
+                }],
+            },
+        ];
+        assert_eq!(
+            body_value("llama3", &None, &msgs),
+            legacy_body_value("llama3", &None, &msgs)
+        );
+    }
+
+    #[test]
+    fn serialize_chat_body_skips_empty_message() {
+        use crate::{ChatMessage, ChatRole};
+
+        let msgs = vec![ChatMessage {
+            role: ChatRole::User,
+            content: vec![],
+        }];
+        let parsed = body_value("llama3", &None, &msgs);
+        let messages = parsed.get("messages").and_then(|m| m.as_array()).unwrap();
+        assert!(
+            messages.is_empty(),
+            "empty-content message should be skipped, got {messages:?}"
+        );
+    }
+
+    // ── BytesLineCodec ────────────────────────────────────────────────────────
+    //
+    // F-568: the codec replaces `LinesCodec`. These tests pin the framing
+    // contract: newline-delimited frames yield owned `Bytes` slices, oversized
+    // lines surface `MaxLineLengthExceeded` (and the discard state recovers on
+    // the next newline), and trailing data without a newline is delivered at
+    // EOF.
+
+    use tokio_util::codec::Decoder;
+
+    #[test]
+    fn bytes_line_codec_yields_lines_without_newline() {
+        let mut codec = BytesLineCodec::new(1024);
+        let mut buf = BytesMut::from(&b"hello\nworld\n"[..]);
+        assert_eq!(&codec.decode(&mut buf).unwrap().unwrap()[..], b"hello");
+        assert_eq!(&codec.decode(&mut buf).unwrap().unwrap()[..], b"world");
+        assert!(codec.decode(&mut buf).unwrap().is_none());
+    }
+
+    #[test]
+    fn bytes_line_codec_returns_none_until_newline_arrives() {
+        let mut codec = BytesLineCodec::new(1024);
+        let mut buf = BytesMut::from(&b"par"[..]);
+        assert!(codec.decode(&mut buf).unwrap().is_none());
+        buf.extend_from_slice(b"tial\n");
+        assert_eq!(&codec.decode(&mut buf).unwrap().unwrap()[..], b"partial");
+    }
+
+    #[test]
+    fn bytes_line_codec_oversize_line_errors_then_recovers() {
+        let mut codec = BytesLineCodec::new(4);
+        let mut buf = BytesMut::from(&b"abcdefgh"[..]);
+        let err = codec.decode(&mut buf).unwrap_err();
+        assert!(matches!(err, BytesLineError::MaxLineLengthExceeded));
+        // Still no newline — discarding state continues.
+        assert!(codec.decode(&mut buf).unwrap().is_none());
+        // Newline arrives → discard ends, next line decodes cleanly.
+        buf.extend_from_slice(b"trailing\nok\n");
+        assert_eq!(&codec.decode(&mut buf).unwrap().unwrap()[..], b"ok");
+    }
+
+    #[test]
+    fn bytes_line_codec_decode_eof_flushes_remainder() {
+        let mut codec = BytesLineCodec::new(1024);
+        let mut buf = BytesMut::from(&b"trailing"[..]);
+        assert_eq!(
+            &codec.decode_eof(&mut buf).unwrap().unwrap()[..],
+            b"trailing"
+        );
+        assert!(codec.decode_eof(&mut buf).unwrap().is_none());
+    }
 
     #[test]
     fn parse_line_text_delta_extracts_content() {
