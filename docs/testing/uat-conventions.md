@@ -89,9 +89,9 @@ Rules:
 
 ## How the harness consumes the label
 
-> **Status:** documented here; not yet implemented. Implementation is part of F-326. Author UATs to this convention now so the harness has labels to extract once it lands.
+> **Status:** implemented in F-326. Each `docs/testing/phaseN-uat.sh` accepts `--contract-only`, and `docs/testing/smoke-uat.sh` aggregates them.
 
-The phase harness scripts (`docs/testing/phaseN-uat.sh`) gain a single new flag:
+The phase harness scripts (`docs/testing/phaseN-uat.sh`) accept a single flag:
 
 ```bash
 ./docs/testing/phase2-uat.sh --contract-only
@@ -103,6 +103,59 @@ Behaviour:
 - With `--contract-only`: filters to scenarios whose `**Type:**` line equals `contract-level`, regardless of phase.
 
 The persistent smoke-UAT runner (F-326) is conceptually `for each phaseN-uat.sh; phaseN-uat.sh --contract-only`. The runner does not duplicate scenarios into a separate file — the per-phase plan stays the canonical source. This avoids classification drift between two copies of the same scenario.
+
+Implementation note: the `**Type:**` line is the **specification** of which scenarios are contract-level. Each phase script encodes the same set as a `CONTRACT_LEVEL_UATS=(UAT-NN ...)` array near the top of the file; the array is the **executable** form of the same classification. When you change a label in the markdown, update the array in the matching phase script in the same PR. F-326's smoke runner relies on the two staying in sync.
+
+---
+
+## The persistent smoke-UAT suite (F-326)
+
+The persistent suite lives at `docs/testing/smoke-uat.sh`. It exists so that contract-level scenarios from older phases continue to be exercised on every release-cut and (eventually) every main-commit CI build, instead of going stale until someone re-runs the originating phase's full UAT.
+
+### How to run it
+
+```bash
+# Full sweep (Phases 0, 1, 2; bash + Playwright):
+./docs/testing/smoke-uat.sh --build
+
+# Without rebuilding (assumes binaries + web build already exist):
+./docs/testing/smoke-uat.sh
+
+# Only the bash-driven contract-level UATs (no Playwright):
+./docs/testing/smoke-uat.sh --cli-only
+
+# Only the Playwright-driven contract-level UATs (skips Phase 0):
+./docs/testing/smoke-uat.sh --gui-only
+
+# Subset of phases (e.g. skip Phase 1 until Ollama is wired):
+./docs/testing/smoke-uat.sh --phases 0,2
+```
+
+The runner forwards `--contract-only` to every selected `phaseN-uat.sh` and aggregates pass/fail/skip counts. It exits non-zero if any phase script exits non-zero.
+
+### What it covers
+
+The suite runs the union of all `contract-level` UATs across every existing phase plan. The current contents are sourced from the [migration tables](#migration-classifying-the-existing-phase-0--1--2-uats) above:
+
+- **Phase 0** — all 13 UATs (`UAT-01` .. `UAT-13`).
+- **Phase 1** — `UAT-01c`, `UAT-08`, `UAT-09`, `UAT-10`, `UAT-11`, `UAT-13`, `UAT-14`.
+- **Phase 2** — `UAT-04`, `UAT-05`, `UAT-10`, `UAT-12`.
+
+If you need the executable enumeration (e.g. for CI matrix logic), grep the `CONTRACT_LEVEL_UATS=` array in the matching `phaseN-uat.sh`.
+
+### When to run
+
+- Before every release-cut, in addition to the new milestone's full phase UAT.
+- Ideally on every `main` push in CI. (Wiring this into the GitHub Actions workflow is a follow-up — the suite is intentionally a single shell entry point so the CI step is one line.)
+
+### Adding new contract-level UATs
+
+When authoring a new milestone's UAT plan:
+
+1. Apply the `**Type:** contract-level` label per the [How to apply the label](#how-to-apply-the-label) section.
+2. Add the scenario's UAT-id to the matching `CONTRACT_LEVEL_UATS=(...)` array in the new `phaseN-uat.sh`. Include the scenario in `CONTRACT_LEVEL_GUI_FILTER` (a `|`-joined Playwright filename pattern) if it is a GUI scenario.
+3. The `smoke-uat.sh` runner will pick the scenario up automatically — no edits to the runner are required.
+4. The convention doc's [migration tables](#migration-classifying-the-existing-phase-0--1--2-uats) are a tentative starting point; the executable source of truth for any phase is its script's `CONTRACT_LEVEL_UATS` array.
 
 ---
 
