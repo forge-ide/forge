@@ -1,4 +1,5 @@
 import { type Component, For, Show, createMemo } from 'solid-js';
+import { Button } from '@forge/design';
 import { useFocusTrap } from '../lib/useFocusTrap';
 import './BranchMetadataPopover.css';
 
@@ -150,8 +151,9 @@ export const BranchMetadataPopover: Component<BranchMetadataPopoverProps> = (pro
                     &quot;{preview}&quot;
                   </span>
                 </button>
-                <button
-                  type="button"
+                <Button
+                  variant="danger"
+                  size="sm"
                   class="branch-popover__delete"
                   data-testid={`branch-popover-delete-${row.index}`}
                   aria-label={`Delete variant ${row.index}`}
@@ -159,21 +161,22 @@ export const BranchMetadataPopover: Component<BranchMetadataPopoverProps> = (pro
                   onClick={() => props.onDelete(row.index)}
                 >
                   DELETE VARIANT
-                </button>
+                </Button>
               </li>
             );
           }}
         </For>
       </ul>
       <footer class="branch-popover__footer">
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          size="sm"
           class="branch-popover__export"
           data-testid="branch-popover-export"
           onClick={props.onExportAll}
         >
           EXPORT ALL
-        </button>
+        </Button>
       </footer>
     </div>
   );

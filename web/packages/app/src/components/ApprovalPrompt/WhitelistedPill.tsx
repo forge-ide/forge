@@ -5,6 +5,7 @@ import {
   onCleanup,
   Show,
 } from 'solid-js';
+import { Button, MenuItem } from '@forge/design';
 import type { ApprovalLevel } from '@forge/ipc';
 import './WhitelistedPill.css';
 
@@ -76,8 +77,9 @@ export const WhitelistedPill: Component<WhitelistedPillProps> = (props) => {
 
   return (
     <div ref={wrapperRef} class="whitelisted-pill-wrapper">
-      <button
-        type="button"
+      <Button
+        variant="ghost"
+        size="sm"
         class="whitelisted-pill"
         data-testid="whitelisted-pill"
         aria-haspopup="true"
@@ -87,7 +89,7 @@ export const WhitelistedPill: Component<WhitelistedPillProps> = (props) => {
         <span class="whitelisted-pill__dot" aria-hidden="true" />
         whitelisted · {props.label}
         {provenanceSuffix(props.level)}
-      </button>
+      </Button>
 
       <Show when={popoverOpen()}>
         <div
@@ -96,18 +98,16 @@ export const WhitelistedPill: Component<WhitelistedPillProps> = (props) => {
           role="menu"
           aria-label="Revoke approval"
         >
-          <button
-            type="button"
+          <MenuItem
             class="whitelisted-pill__revoke-btn"
             data-testid="revoke-btn"
-            role="menuitem"
             onClick={() => {
               setPopoverOpen(false);
               props.onRevoke();
             }}
           >
             {revokeLabel(props.level)}
-          </button>
+          </MenuItem>
         </div>
       </Show>
     </div>

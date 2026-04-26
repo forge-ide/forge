@@ -1,4 +1,5 @@
 import { type Component, Show, createMemo } from 'solid-js';
+import { IconButton } from '@forge/design';
 import './BranchSelectorStrip.css';
 
 /**
@@ -73,15 +74,14 @@ export const BranchSelectorStrip: Component<BranchSelectorStripProps> = (props) 
       tabIndex={0}
       onKeyDown={handleKey}
     >
-      <button
-        type="button"
+      <IconButton
+        size="sm"
         class="branch-strip__arrow branch-strip__arrow--prev"
         data-testid="branch-strip-prev"
-        aria-label="Previous variant"
+        label="Previous variant"
         onClick={props.onPrev}
-      >
-        {'\u25c0'}
-      </button>
+        icon={'\u25c0'}
+      />
       <Show
         when={!isLoading()}
         fallback={
@@ -98,28 +98,28 @@ export const BranchSelectorStrip: Component<BranchSelectorStripProps> = (props) 
           variant {props.position} of {props.total}
         </span>
       </Show>
-      <button
-        type="button"
+      <IconButton
+        size="sm"
         class="branch-strip__arrow branch-strip__arrow--next"
         data-testid="branch-strip-next"
-        aria-label="Next variant"
+        label="Next variant"
         onClick={props.onNext}
-      >
-        {'\u25b6'}
-      </button>
+        icon={'\u25b6'}
+      />
       <span class="branch-strip__spacer" aria-hidden="true" />
-      <button
-        type="button"
+      <IconButton
+        size="sm"
         class="branch-strip__info"
         data-testid="branch-strip-info"
-        aria-label="Branch variant details"
+        label="Branch variant details"
         aria-expanded={props.infoOpen}
         onClick={props.onToggleInfo}
-      >
-        <Show when={props.infoOpen} fallback={<span aria-hidden="true">{'\u24d8'}</span>}>
-          <span aria-hidden="true">{'\u24d8'}</span>
-        </Show>
-      </button>
+        icon={
+          <Show when={props.infoOpen} fallback={<span aria-hidden="true">{'\u24d8'}</span>}>
+            <span aria-hidden="true">{'\u24d8'}</span>
+          </Show>
+        }
+      />
     </div>
   );
 };

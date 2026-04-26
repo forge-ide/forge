@@ -1,4 +1,5 @@
 import { type Component, createSignal, For, Show } from 'solid-js';
+import { Button } from '@forge/design';
 import type { ChatTurn, SubAgentStatus } from '../stores/messages';
 import { SubAgentDetailsPopover } from './SubAgentDetailsPopover';
 import './SubAgentBanner.css';
@@ -230,14 +231,15 @@ export const SubAgentBanner: Component<SubAgentBannerProps> = (props) => {
           <Show
             when={!beyondMaxDepth()}
             fallback={
-              <button
-                type="button"
+              <Button
+                variant="ghost"
+                size="sm"
                 class="sub-agent-banner__open-monitor"
                 data-testid={`sub-agent-banner-open-monitor-${props.turn.child_instance_id}`}
                 onClick={openInMonitor}
               >
                 OPEN MONITOR
-              </button>
+              </Button>
             }
           >
             <Show

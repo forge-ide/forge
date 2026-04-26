@@ -5,6 +5,7 @@ import {
   type SessionWireState,
   type SessionSummary,
 } from '../../ipc/dashboard';
+import { Button, Tab } from '@forge/design';
 import { useRovingTabindex } from '../../lib/useRovingTabindex';
 import './SessionsPanel.css';
 
@@ -121,13 +122,14 @@ export const SessionsPanel: Component = () => {
             <div class="sessions__list-error-body" role="alert">
               <p class="sessions__list-error-title">SESSIONS UNAVAILABLE</p>
               <p class="sessions__list-error-detail">{detail()}</p>
-              <button
-                type="button"
+              <Button
+                variant="ghost"
+                size="sm"
                 class="sessions__retry"
                 onClick={() => void refetch()}
               >
                 RETRY
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -173,19 +175,16 @@ interface TabButtonProps {
 const TabButton: Component<TabButtonProps> = (props) => {
   const selected = () => props.tab === props.current;
   return (
-    <button
-      type="button"
-      role="tab"
+    <Tab
       id={`sessions-tab-${props.tab}`}
       aria-controls={`sessions-panel-${props.tab}`}
-      class="sessions__tab"
-      classList={{ 'sessions__tab--active': selected() }}
-      aria-selected={selected()}
+      class={`sessions__tab${selected() ? ' sessions__tab--active' : ''}`}
+      selected={selected()}
       onClick={() => props.onSelect(props.tab)}
     >
       <span class="sessions__tab-label">{props.tab}</span>
       <span class="sessions__tab-count">{count(props.count)}</span>
-    </button>
+    </Tab>
   );
 };
 

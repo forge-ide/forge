@@ -7,6 +7,7 @@ import {
   onMount,
   onCleanup,
 } from 'solid-js';
+import { Tab } from '@forge/design';
 import './ContextPicker.css';
 
 // ---------------------------------------------------------------------------
@@ -334,14 +335,9 @@ export const ContextPicker: Component<ContextPickerProps> = (props) => {
       >
         <For each={CATEGORIES}>
           {(cat, i) => (
-            <button
-              type="button"
-              class="context-picker__tab"
-              classList={{
-                'context-picker__tab--active': i() === activeCategoryIndex(),
-              }}
-              role="tab"
-              aria-selected={i() === activeCategoryIndex()}
+            <Tab
+              selected={i() === activeCategoryIndex()}
+              class={`context-picker__tab${i() === activeCategoryIndex() ? ' context-picker__tab--active' : ''}`}
               data-testid={`context-picker-tab-${cat.id}`}
               onMouseDown={(e) => {
                 // onMouseDown so focus stays in the textarea.
@@ -353,7 +349,7 @@ export const ContextPicker: Component<ContextPickerProps> = (props) => {
                 {cat.icon}
               </span>
               <span class="context-picker__tab-label">{cat.label}</span>
-            </button>
+            </Tab>
           )}
         </For>
       </div>

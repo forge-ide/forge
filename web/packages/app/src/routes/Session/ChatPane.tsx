@@ -6,6 +6,7 @@ import {
   Show,
   createMemo,
 } from 'solid-js';
+import { Button } from '@forge/design';
 import { activeSessionId, activeWorkspaceRoot } from '../../stores/session';
 import {
   getMessagesState,
@@ -1244,27 +1245,27 @@ export const Composer: Component<ComposerProps> = (props) => {
           {/* F-391: Stop flips to primary/ember while streaming (spec §4.1) and
               fires `onCancel` — same path as Esc. */}
           <Show when={props.disabled}>
-            <button
-              type="button"
+            <Button
+              variant="primary"
               class="composer__btn composer__btn--primary"
               data-testid="composer-stop-btn"
               onClick={() => props.onCancel?.()}
             >
               STOP TURN
-            </button>
+            </Button>
           </Show>
           {/* F-391: Send is a real primary/ember button, UPPERCASE per
               voice-terminology.md, disabled while streaming, and shares the
               bare-Enter code path via `handleSend`. */}
-          <button
-            type="button"
+          <Button
+            variant="primary"
             class="composer__btn composer__btn--primary"
             data-testid="composer-send-btn"
             disabled={props.disabled}
             onClick={handleSend}
           >
             SEND <span class="composer__btn-kbd">↵</span>
-          </button>
+          </Button>
         </div>
       </div>
     </div>

@@ -24,6 +24,7 @@ import {
 } from 'solid-js';
 import { createMountedSubscription } from '../ipc/useEventListener';
 import { useParams, useSearchParams } from '@solidjs/router';
+import { Button, IconButton, Tab } from '@forge/design';
 import { useFocusTrap } from '../lib/useFocusTrap';
 import type { BgAgentSummary } from '@forge/ipc';
 import {
@@ -428,18 +429,15 @@ export const AgentList: Component<{
       <div role="tablist" class="agent-monitor__filters">
         <For each={FILTERS}>
           {(f) => (
-            <button
-              type="button"
-              role="tab"
+            <Tab
               id={filterTabId(f)}
               aria-controls={rowsPanelId}
-              aria-selected={props.filter === f}
-              class="agent-monitor__filter"
-              classList={{ 'agent-monitor__filter--active': props.filter === f }}
+              selected={props.filter === f}
+              class={`agent-monitor__filter${props.filter === f ? ' agent-monitor__filter--active' : ''}`}
               onClick={() => props.onFilter(f)}
             >
               {f}
-            </button>
+            </Tab>
           )}
         </For>
       </div>
@@ -466,13 +464,14 @@ export const AgentList: Component<{
               <div class="agent-monitor__error-body" role="alert">
                 <p class="agent-monitor__error-title">AGENT LIST UNAVAILABLE</p>
                 <p class="agent-monitor__error-detail">{err.detail}</p>
-                <button
-                  type="button"
+                <Button
+                  variant="ghost"
+                  size="sm"
                   class="agent-monitor__retry"
                   onClick={() => err.onRetry()}
                 >
                   RETRY
-                </button>
+                </Button>
               </div>
             </div>
           );
@@ -721,13 +720,13 @@ export const AgentInspector: Component<{
           </ul>
         </section>
         <section>
-          <button
-            type="button"
+          <Button
+            variant="danger"
             class="agent-monitor__stop"
             onClick={() => props.onStop(props.agent!.id)}
           >
             STOP AGENT
-          </button>
+          </Button>
         </section>
       </Show>
     </aside>
@@ -769,14 +768,13 @@ export const StepDrawer: Component<{
       >
         <header class="agent-monitor__drawer-head">
           <h3>{p.step.title}</h3>
-          <button
-            type="button"
+          <IconButton
+            size="sm"
             class="agent-monitor__drawer-close"
-            aria-label="Close step detail"
+            label="Close step detail"
             onClick={props.onClose}
-          >
-            ×
-          </button>
+            icon={'×'}
+          />
         </header>
         <dl class="agent-monitor__def">
           <dt>kind</dt>

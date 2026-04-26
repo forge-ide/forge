@@ -4,6 +4,7 @@ import {
   onCleanup,
   Show,
 } from 'solid-js';
+import { IconButton } from '@forge/design';
 import type { ContextCategory } from './ContextPicker';
 import './ContextChip.css';
 
@@ -126,15 +127,14 @@ export const ContextChip: Component<ContextChipProps> = (props) => {
         {iconFor(props.category)}
       </span>
       <span class="ctx-chip__label">{props.label}</span>
-      <button
-        type="button"
+      <IconButton
+        size="sm"
         class="ctx-chip__dismiss"
         data-testid="ctx-chip-dismiss"
-        aria-label={`Remove ${props.label}`}
+        label={`Remove ${props.label}`}
         onClick={() => props.onDismiss()}
-      >
-        ×
-      </button>
+        icon={'×'}
+      />
       <Show when={canPreview() && hovered()}>
         <div
           class="ctx-chip__preview"

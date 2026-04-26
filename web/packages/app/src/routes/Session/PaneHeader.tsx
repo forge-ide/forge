@@ -1,5 +1,6 @@
 import type { Component, JSX } from 'solid-js';
 import { Show } from 'solid-js';
+import { Button } from '@forge/design';
 import type { ProviderId } from '@forge/ipc';
 import { providerAccent } from './providerAccent';
 import './PaneHeader.css';
@@ -167,14 +168,15 @@ export const PaneHeader: Component<PaneHeaderProps> = (props) => {
           {props.costLabel}
         </span>
       </Show>
-      <button
-        type="button"
+      <Button
+        variant="ghost"
+        size="sm"
         class="pane-header__close"
         aria-label={props.closeAriaLabel ?? 'Close session window'}
         onClick={props.onClose}
       >
         {props.closeLabel ?? 'CLOSE SESSION'}
-      </button>
+      </Button>
     </header>
   );
 };
