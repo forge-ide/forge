@@ -257,20 +257,38 @@ export function applyEventToState(
   if (type === 'step_finished') {
     const stepId = ev['step_id'];
     if (typeof stepId !== 'string') return prev;
-    const out: Record<string, AgentStep[]> = {};
+    // F-573: scan once for the owning agent + step index instead of
+    // rebuilding every agent's array. Previously a single step_finished
+    // event allocated O(agents × steps) — at 1000 events/60Hz across 20
+    // agents that froze the route. Now an event allocates one new step
+    // object + one new array for the owning agent only; siblings keep
+    // identity, so `<For>`'s reference-keyed children don't re-render.
+    let ownerKey: string | null = null;
+    let ownerSteps: AgentStep[] | null = null;
+    let stepIndex = -1;
     for (const k of Object.keys(prev.stepsByAgent)) {
       const steps = prev.stepsByAgent[k];
       if (!steps) continue;
-      out[k] = steps.map((s) =>
-        s.id === stepId
-          ? {
-              ...s,
-              status: outcomeOf(ev['outcome']) === 'error' ? 'error' : 'done',
-            }
-          : s,
-      );
+      const idx = steps.findIndex((s) => s.id === stepId);
+      if (idx !== -1) {
+        ownerKey = k;
+        ownerSteps = steps;
+        stepIndex = idx;
+        break;
+      }
     }
-    return { ...prev, stepsByAgent: out };
+    if (ownerKey === null || ownerSteps === null) return prev;
+    const nextStatus: StepStatus =
+      outcomeOf(ev['outcome']) === 'error' ? 'error' : 'done';
+    const existing = ownerSteps[stepIndex];
+    if (!existing || existing.status === nextStatus) return prev;
+    const updated: AgentStep = { ...existing, status: nextStatus };
+    const nextSteps = ownerSteps.slice();
+    nextSteps[stepIndex] = updated;
+    return {
+      ...prev,
+      stepsByAgent: { ...prev.stepsByAgent, [ownerKey]: nextSteps },
+    };
   }
 
   if (type === 'background_agent_completed') {

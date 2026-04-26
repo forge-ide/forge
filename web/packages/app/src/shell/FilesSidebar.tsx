@@ -27,6 +27,7 @@ import {
   onCleanup,
   onMount,
 } from 'solid-js';
+import { createStore } from 'solid-js/store';
 import type { TreeNodeDto } from '@forge/ipc';
 import {
   tree as defaultTree,
@@ -72,7 +73,11 @@ export const FilesSidebar: Component<FilesSidebarProps> = (props) => {
   const [rootNode, setRootNode] = createSignal<TreeNodeDto | null>(null);
   const [error, setError] = createSignal<string | null>(null);
   const [isLoading, setIsLoading] = createSignal(false);
-  const [expanded, setExpanded] = createSignal<Set<string>>(new Set());
+  // F-573: keyed store so each TreeRow's `isExpanded(path)` access subscribes
+  // only to its own path key. A toggle invalidates one key, not the whole
+  // map — O(1) reactive cost instead of O(N) on 5–10k node trees.
+  const [expanded, setExpanded] = createStore<Record<string, boolean>>({});
+  const isExpanded = (path: string): boolean => expanded[path] === true;
   const [menu, setMenu] = createSignal<ContextMenuTarget | null>(null);
 
   const refresh = async (): Promise<void> => {
@@ -83,12 +88,7 @@ export const FilesSidebar: Component<FilesSidebarProps> = (props) => {
       const next = await load()(sid, props.workspaceRoot);
       setRootNode(next);
       // Auto-expand the root so the first level of children is visible.
-      const rootPath = next.path;
-      setExpanded((prev) => {
-        const copy = new Set(prev);
-        copy.add(rootPath);
-        return copy;
-      });
+      setExpanded(next.path, true);
       setError(null);
     } catch (err) {
       setError(errorToString(err));
@@ -129,12 +129,7 @@ export const FilesSidebar: Component<FilesSidebarProps> = (props) => {
   });
 
   const toggle = (path: string): void => {
-    setExpanded((prev) => {
-      const copy = new Set(prev);
-      if (copy.has(path)) copy.delete(path);
-      else copy.add(path);
-      return copy;
-    });
+    setExpanded(path, (prev) => !prev);
   };
 
   const handleContextMenu = (
@@ -263,7 +258,7 @@ export const FilesSidebar: Component<FilesSidebarProps> = (props) => {
             <TreeRow
               node={child}
               depth={0}
-              expanded={expanded()}
+              isExpanded={isExpanded}
               onToggle={toggle}
               onOpen={doOpen}
               onContext={handleContextMenu}
@@ -325,7 +320,12 @@ export const FilesSidebar: Component<FilesSidebarProps> = (props) => {
 interface TreeRowProps {
   node: TreeNodeDto;
   depth: number;
-  expanded: Set<string>;
+  /**
+   * F-573: per-path expansion accessor. Reading `isExpanded(path)` only
+   * subscribes the row to its own key in the expansion store, so toggling
+   * one row no longer invalidates every other row's `isOpen()` access.
+   */
+  isExpanded: (path: string) => boolean;
   onToggle: (path: string) => void;
   onOpen: (path: string) => void;
   onContext: (e: MouseEvent, node: TreeNodeDto) => void;
@@ -333,7 +333,7 @@ interface TreeRowProps {
 
 const TreeRow: Component<TreeRowProps> = (props) => {
   const isDir = (): boolean => props.node.kind === 'Dir';
-  const isOpen = (): boolean => props.expanded.has(props.node.path);
+  const isOpen = (): boolean => props.isExpanded(props.node.path);
   const indent = (): string => `${props.depth * 12}px`;
 
   const onClick = (): void => {
@@ -373,7 +373,7 @@ const TreeRow: Component<TreeRowProps> = (props) => {
             <TreeRow
               node={child}
               depth={props.depth + 1}
-              expanded={props.expanded}
+              isExpanded={props.isExpanded}
               onToggle={props.onToggle}
               onOpen={props.onOpen}
               onContext={props.onContext}

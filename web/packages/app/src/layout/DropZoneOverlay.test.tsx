@@ -52,7 +52,14 @@ describe('GridContainer — drag overlay threading', () => {
     expect(queryByTestId('drop-zone-overlay')).toBeNull();
   });
 
-  it('paints overlays on leaves during a drag and marks the target zone', () => {
+  it('paints the overlay only on the targeted leaf and marks the active zone', () => {
+    // F-573: previously the overlay mounted on every leaf during an
+    // active drag (O(N) DOM churn on drag-start/end). The overlay is now
+    // gated on `targetId === leaf.id`, so exactly one subtree mounts —
+    // the one whose leaf is under the pointer. Inactive zones on the
+    // overlay are `background: transparent` per drop-zone-overlay.css,
+    // so the user-visible result is identical: only the active zone
+    // renders the §3.6 ember tint.
     render(() => (
       <GridContainer
         tree={tree}
@@ -61,14 +68,13 @@ describe('GridContainer — drag overlay threading', () => {
         dragState={{ sourceId: 'a', targetId: 'b', zone: 'right' }}
       />
     ));
-    // Overlays appear on each leaf during an active drag.
     const overlays = document.querySelectorAll('[data-testid="drop-zone-overlay"]');
-    expect(overlays.length).toBe(2);
+    expect(overlays.length).toBe(1);
+    const overlayLeaf = overlays[0]?.closest('[data-leaf-id]');
+    expect(overlayLeaf?.getAttribute('data-leaf-id')).toBe('b');
     // Exactly one zone is active — on leaf `b`, the `right` zone.
     const active = document.querySelectorAll('[data-active="true"]');
     expect(active.length).toBe(1);
     expect(active[0]?.getAttribute('data-zone')).toBe('right');
-    const activeLeaf = active[0]?.closest('[data-leaf-id]');
-    expect(activeLeaf?.getAttribute('data-leaf-id')).toBe('b');
   });
 });

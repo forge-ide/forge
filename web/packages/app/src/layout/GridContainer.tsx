@@ -72,11 +72,21 @@ const GridNode: Component<{
     <Switch>
       <Match when={props.node.kind === 'leaf' && (props.node as LayoutLeaf)}>
         {(leaf) => {
+          // F-573: only the targeted leaf mounts a DropZoneOverlay subtree.
+          // Previously every leaf mounted/unmounted the overlay on
+          // drag-start/end (O(N) DOM churn for an N-pane grid). Gating the
+          // `<Show>` on `targetId === leaf().id` collapses that to O(1) —
+          // and `activeZone` only re-evaluates inside the targeted leaf's
+          // reactive scope, so non-target leaves don't react to pointermove
+          // at all.
+          const isTarget = () => {
+            const s = props.dragState();
+            return s !== null && s.targetId === leaf().id;
+          };
           const activeZone = () => {
             const s = props.dragState();
             return s !== null && s.targetId === leaf().id ? s.zone : null;
           };
-          const showOverlay = () => props.dragState() !== null;
           return (
             <div
               class="grid-leaf"
@@ -85,7 +95,7 @@ const GridNode: Component<{
               style={{ width: '100%', height: '100%', position: 'relative' }}
             >
               {props.renderLeaf(leaf())}
-              <Show when={showOverlay()}>
+              <Show when={isTarget()}>
                 <DropZoneOverlay activeZone={activeZone()} />
               </Show>
             </div>

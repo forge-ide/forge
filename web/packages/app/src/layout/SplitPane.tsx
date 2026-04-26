@@ -1,4 +1,4 @@
-import { type Component, type JSX, createSignal } from 'solid-js';
+import { type Component, type JSX, createSignal, onCleanup } from 'solid-js';
 import './SplitPane.css';
 
 /**
@@ -60,6 +60,18 @@ export interface SplitPaneProps {
 export const SplitPane: Component<SplitPaneProps> = (props) => {
   let containerRef: HTMLDivElement | undefined;
   const [dragging, setDragging] = createSignal(false);
+  // F-573: cache the container's bounding rect at pointerdown so the
+  // pointermove hot path no longer pays a forced-layout read on every
+  // event. The container can't resize mid-drag without disrupting the
+  // gesture (the user would have to release the pointer to interact with
+  // any other layout-mutating control), so the rect is stable for the
+  // lifetime of the drag.
+  let dragRect: DOMRect | null = null;
+  // F-573: rAF coalesces onRatioChange so heavy children (monaco / xterm)
+  // re-render at most once per frame instead of once per pointermove.
+  // Mirrors the throttling in `TerminalPane.handleResize`.
+  let pendingRatio: number | null = null;
+  let rafHandle: number | null = null;
 
   const clamp = (r: number): number => {
     if (r < MIN_RATIO) return MIN_RATIO;
@@ -67,12 +79,22 @@ export const SplitPane: Component<SplitPaneProps> = (props) => {
     return r;
   };
 
-  // Translate an absolute pointer position into a clamped ratio along the
-  // split axis. `getBoundingClientRect()` is the right primitive for this —
-  // tests stub it on the container to supply a non-zero size in jsdom.
-  const ratioFromPointer = (clientX: number, clientY: number): number | null => {
+  // Read the current container rect — preferring the drag-cached value when
+  // a drag is in progress, falling back to a live read for the keyboard /
+  // double-click paths that don't go through pointerdown.
+  const currentRect = (): DOMRect | null => {
+    if (dragRect !== null) return dragRect;
     if (!containerRef) return null;
-    const rect = containerRef.getBoundingClientRect();
+    return containerRef.getBoundingClientRect();
+  };
+
+  // Translate an absolute pointer position into a clamped ratio along the
+  // split axis. Reads the cached drag rect when present so jsdom tests that
+  // stub `getBoundingClientRect()` on the container still observe the
+  // expected dimensions on the first cache write.
+  const ratioFromPointer = (clientX: number, clientY: number): number | null => {
+    const rect = currentRect();
+    if (rect === null) return null;
     const extent = props.direction === 'v' ? rect.width : rect.height;
     if (extent <= 0) return null;
     const offset =
@@ -82,13 +104,33 @@ export const SplitPane: Component<SplitPaneProps> = (props) => {
 
   // 4px snap per §3.1. Alt+drag bypasses the snap.
   const applySnap = (raw: number, altPressed: boolean): number => {
-    if (altPressed || !containerRef) return raw;
-    const rect = containerRef.getBoundingClientRect();
+    if (altPressed) return raw;
+    const rect = currentRect();
+    if (rect === null) return raw;
     const extent = props.direction === 'v' ? rect.width : rect.height;
     if (extent <= 0) return raw;
     const px = raw * extent;
     const snapped = Math.round(px / SNAP_PX) * SNAP_PX;
     return clamp(snapped / extent);
+  };
+
+  const flushRatio = () => {
+    rafHandle = null;
+    if (pendingRatio === null) return;
+    const next = pendingRatio;
+    pendingRatio = null;
+    props.onRatioChange(next);
+  };
+
+  const scheduleRatioChange = (next: number) => {
+    pendingRatio = next;
+    if (rafHandle !== null) return;
+    if (typeof requestAnimationFrame === 'function') {
+      rafHandle = requestAnimationFrame(flushRatio);
+    } else {
+      // Fallback for environments without rAF (some test harnesses).
+      flushRatio();
+    }
   };
 
   const handlePointerDown = (e: PointerEvent) => {
@@ -97,6 +139,9 @@ export const SplitPane: Component<SplitPaneProps> = (props) => {
     if (e.button !== 0) return;
     const target = e.currentTarget as HTMLElement;
     target.setPointerCapture(e.pointerId);
+    // Cache the rect up-front so every pointermove uses a single rect read
+    // for the whole gesture instead of two per move.
+    dragRect = containerRef ? containerRef.getBoundingClientRect() : null;
     setDragging(true);
     e.preventDefault();
   };
@@ -105,7 +150,7 @@ export const SplitPane: Component<SplitPaneProps> = (props) => {
     if (!dragging()) return;
     const raw = ratioFromPointer(e.clientX, e.clientY);
     if (raw === null) return;
-    props.onRatioChange(applySnap(raw, e.altKey));
+    scheduleRatioChange(applySnap(raw, e.altKey));
   };
 
   const handlePointerUp = (e: PointerEvent) => {
@@ -115,7 +160,28 @@ export const SplitPane: Component<SplitPaneProps> = (props) => {
       target.releasePointerCapture(e.pointerId);
     }
     setDragging(false);
+    dragRect = null;
+    // Flush any pending rAF synchronously so the released ratio is the one
+    // the parent persists — no risk of the gesture ending on a stale value.
+    if (rafHandle !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(rafHandle);
+      rafHandle = null;
+    }
+    if (pendingRatio !== null) {
+      const next = pendingRatio;
+      pendingRatio = null;
+      props.onRatioChange(next);
+    }
   };
+
+  onCleanup(() => {
+    if (rafHandle !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(rafHandle);
+    }
+    rafHandle = null;
+    pendingRatio = null;
+    dragRect = null;
+  });
 
   // §3.1: "Double-clicking a gridline resets to balanced split."
   const handleDoubleClick = () => {
