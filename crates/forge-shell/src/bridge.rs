@@ -26,10 +26,10 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use forge_core::{ApprovalScope, RerunVariant};
 use forge_ipc::{
-    read_frame, write_frame, ClientInfo, DeleteBranch, Hello, HelloAck, ImportMcpConfig,
-    IpcMessage, ListMcpServers, McpImportResult, McpServersList, McpToggleResult, RerunMessage,
-    SelectBranch, SendUserMessage, Subscribe, ToggleMcpServer, ToolCallApproved, ToolCallRejected,
-    PROTO_VERSION,
+    read_frame, read_frame_into, write_frame, ClientInfo, DeleteBranch, Hello, HelloAck,
+    ImportMcpConfig, IpcMessage, ListMcpServers, McpImportResult, McpServersList, McpToggleResult,
+    RerunMessage, SelectBranch, SendUserMessage, Subscribe, ToggleMcpServer, ToolCallApproved,
+    ToolCallRejected, PROTO_VERSION,
 };
 use serde::Serialize;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -598,8 +598,13 @@ async fn pump_events(
     sink: Arc<dyn EventSink>,
     mcp_replies: Arc<McpReplySlots>,
 ) {
+    // F-565: hoist a per-pump-loop body buffer so each assistant-token
+    // frame reuses the same allocation instead of `vec![0u8; len]` per
+    // call. 4 KiB matches the typical realistic delta envelope; larger
+    // frames grow the buffer in place once and the capacity is retained.
+    let mut frame_buf: Vec<u8> = Vec::with_capacity(4096);
     loop {
-        match read_frame(&mut reader).await {
+        match read_frame_into(&mut reader, &mut frame_buf).await {
             Ok(IpcMessage::Event(event)) => {
                 sink.emit(SessionEventPayload {
                     session_id: session_id.clone(),
