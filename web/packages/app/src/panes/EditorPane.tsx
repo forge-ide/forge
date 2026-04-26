@@ -276,13 +276,33 @@ export const EditorPane: Component<EditorPaneProps> = (props) => {
   });
 
   // Re-open when the path changes mid-life.
+  //
+  // F-582: do NOT gate on `currentValue !== null`. The previous gate skipped
+  // re-opens whenever the prior load failed (currentValue stays null after a
+  // failed `read_file`), which trapped the pane in its error state — opening
+  // a different file in the same pane was silently ignored and recovery
+  // required close+reopen. We now re-issue `sendOpen()` on every path change
+  // once the iframe is ready, regardless of whether the previous attempt
+  // succeeded. The initial open is still driven by the iframe's `ready`
+  // message (see `handleMessage`), so we skip the first effect run when the
+  // iframe has not yet handshaked.
+  let lastPath: string | undefined;
   createEffect(() => {
-    // Tracked: props.path triggers a re-open. Use `void` to discard the
-    // promise — errors are already surfaced through the error signal.
-    void props.path;
-    if (currentValue !== null) {
-      void sendOpen();
-    }
+    const next = props.path;
+    const prev = lastPath;
+    lastPath = next;
+    // First run, or no actual change (memo invalidation w/ same value): the
+    // ready handler owns the initial open.
+    if (prev === undefined || prev === next) return;
+    // Reset stale error/dirty state up front so the new path's UI starts
+    // clean even if `sendOpen()` rejects early. `sendOpen()` will also clear
+    // the error on success.
+    setErrorMessage(null);
+    setIsDirty(false);
+    lastSavedValue = null;
+    currentValue = null;
+    if (!isReady()) return;
+    void sendOpen();
   });
 
   onCleanup(() => {
