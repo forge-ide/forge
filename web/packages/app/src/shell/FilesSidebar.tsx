@@ -28,6 +28,7 @@ import {
   onMount,
 } from 'solid-js';
 import { createStore } from 'solid-js/store';
+import { IconButton, MenuItem } from '@forge/design';
 import type { TreeNodeDto } from '@forge/ipc';
 import {
   tree as defaultTree,
@@ -216,21 +217,21 @@ export const FilesSidebar: Component<FilesSidebarProps> = (props) => {
     >
       <header class="files-sidebar__header">
         <span class="files-sidebar__title">EXPLORER</span>
-        <button
-          type="button"
+        <IconButton
           class="files-sidebar__refresh"
-          aria-label="Refresh file tree"
+          label="Refresh file tree"
           title="Refresh"
           onClick={() => {
             void refresh();
           }}
-        >
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M4 4v5h5" />
-            <path d="M20 20v-5h-5" />
-            <path d="M5 9a9 9 0 0 1 14-3l1 3M19 15a9 9 0 0 1-14 3l-1-3" />
-          </svg>
-        </button>
+          icon={
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M4 4v5h5" />
+              <path d="M20 20v-5h-5" />
+              <path d="M5 9a9 9 0 0 1 14-3l1 3M19 15a9 9 0 0 1-14 3l-1-3" />
+            </svg>
+          }
+        />
       </header>
       <Show when={isLoading()}>
         <div class="files-sidebar__loading" role="status" data-testid="files-sidebar-loading">
@@ -276,39 +277,34 @@ export const FilesSidebar: Component<FilesSidebarProps> = (props) => {
             onClick={(e) => e.stopPropagation()}
           >
             <li role="none">
-              <button
-                type="button"
-                role="menuitem"
+              <MenuItem
                 data-testid="files-sidebar-menu-open"
                 disabled={target().isDir}
                 onClick={() => doOpen(target().path)}
               >
                 OPEN
-              </button>
+              </MenuItem>
             </li>
             <li role="none">
-              <button
-                type="button"
-                role="menuitem"
+              <MenuItem
                 data-testid="files-sidebar-menu-rename"
                 onClick={() => {
                   void doRename();
                 }}
               >
                 RENAME
-              </button>
+              </MenuItem>
             </li>
             <li role="none">
-              <button
-                type="button"
-                role="menuitem"
+              <MenuItem
+                variant="danger"
                 data-testid="files-sidebar-menu-delete"
                 onClick={() => {
                   void doDelete();
                 }}
               >
                 DELETE
-              </button>
+              </MenuItem>
             </li>
           </ul>
         )}

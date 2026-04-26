@@ -13,6 +13,7 @@
 
 import type { Component } from 'solid-js';
 import { For } from 'solid-js';
+import { IconButton } from '@forge/design';
 import './ActivityBar.css';
 
 export type ActivityId = 'files' | 'search' | 'git';
@@ -74,30 +75,29 @@ export const ActivityBar: Component<ActivityBarProps> = (props) => {
           const title = () =>
             item.shortcut ? `${item.label} (${item.shortcut})` : item.label;
           return (
-            <button
-              type="button"
-              class="activity-bar__item"
-              classList={{ 'activity-bar__item--active': isActive() }}
-              aria-label={item.label}
-              aria-pressed={isActive()}
+            <IconButton
+              class={`activity-bar__item${isActive() ? ' activity-bar__item--active' : ''}`}
+              label={item.label}
               title={title()}
+              pressed={isActive()}
               disabled={item.disabled}
               data-testid={`activity-bar-${item.id}`}
               onClick={() => props.onSelect(item.id)}
-            >
-              <svg
-                class="activity-bar__icon"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.7"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-              >
-                <path d={item.svg} />
-              </svg>
-            </button>
+              icon={
+                <svg
+                  class="activity-bar__icon"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.7"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d={item.svg} />
+                </svg>
+              }
+            />
           );
         }}
       </For>

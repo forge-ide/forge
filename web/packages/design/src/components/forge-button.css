@@ -1,0 +1,322 @@
+/* ---------------------------------------------------------------------------
+ * @forge/design — button primitive baseline (F-450)
+ *
+ * Source-of-truth CSS for the four button archetypes shared by the app:
+ *
+ *   .forge-button        — primary / ghost / danger action button
+ *   .forge-icon-button   — icon-only square trigger
+ *   .forge-tab           — tab inside a tablist (or radio inside a radiogroup)
+ *   .forge-menu-item     — row inside a role="menu" container
+ *
+ * Spec: docs/design/component-principles.md §Buttons. All primitives are
+ * Barlow Condensed 700, uppercase, letter-spacing 0.1em; the active state
+ * always includes `transform: translateY(1px)`. Disabled buttons render with
+ * the iron-600 background — never opacity.
+ * ------------------------------------------------------------------------- */
+
+/* =============================================================================
+ * Button
+ * ============================================================================= */
+
+.forge-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--r-sm);
+  font-family: var(--font-display);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transition: var(--ease);
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--color-text-primary);
+}
+
+.forge-button:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
+}
+
+.forge-button:disabled,
+.forge-button[aria-disabled='true'] {
+  cursor: default;
+  background: var(--color-border-2);
+  border-color: var(--color-border-2);
+  color: var(--color-text-disabled);
+}
+
+.forge-button--sm {
+  padding: 0 var(--sp-2);
+  font-size: 10px;
+}
+
+.forge-button--md {
+  padding: var(--sp-1) var(--sp-3);
+  font-size: 11px;
+}
+
+/* Primary — the most important action; one per view. */
+.forge-button--primary {
+  background: var(--color-ember-400);
+  border-color: var(--color-ember-400);
+  color: var(--color-text-primary);
+}
+
+.forge-button--primary:hover:not(:disabled):not([aria-disabled='true']) {
+  background: var(--color-ember-300);
+  border-color: var(--color-ember-300);
+}
+
+.forge-button--primary:active:not(:disabled):not([aria-disabled='true']) {
+  background: var(--color-ember-500);
+  border-color: var(--color-ember-500);
+  transform: translateY(1px);
+}
+
+/* Ghost — neutral border. Cancel / skip / non-default secondary actions. */
+.forge-button--ghost {
+  background: transparent;
+  border-color: var(--color-border-2);
+  color: var(--color-text-secondary);
+}
+
+.forge-button--ghost:hover:not(:disabled):not([aria-disabled='true']) {
+  border-color: var(--color-text-secondary);
+  color: var(--color-text-primary);
+}
+
+.forge-button--ghost:active:not(:disabled):not([aria-disabled='true']) {
+  background: var(--color-surface-3);
+  transform: translateY(1px);
+}
+
+/* Danger — destructive primary. */
+.forge-button--danger {
+  background: transparent;
+  border-color: var(--color-error-border);
+  color: var(--color-error);
+}
+
+.forge-button--danger:hover:not(:disabled):not([aria-disabled='true']) {
+  background: var(--color-error-bg);
+  border-color: var(--color-error);
+}
+
+.forge-button--danger:active:not(:disabled):not([aria-disabled='true']) {
+  transform: translateY(1px);
+}
+
+/* Keyboard shortcut hint — shown at the trailing edge. */
+.forge-button__kbd {
+  display: inline-block;
+  padding: 0 var(--sp-1);
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  opacity: 0.6;
+  line-height: 1.4;
+}
+
+/* =============================================================================
+ * IconButton
+ * ============================================================================= */
+
+.forge-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--sp-6);
+  height: var(--sp-6);
+  padding: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: var(--ease);
+  line-height: 1;
+}
+
+.forge-icon-button:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
+}
+
+.forge-icon-button:disabled,
+.forge-icon-button[aria-disabled='true'] {
+  cursor: default;
+  color: var(--color-text-disabled);
+}
+
+.forge-icon-button--sm {
+  width: var(--sp-5);
+  height: var(--sp-5);
+}
+
+.forge-icon-button--md {
+  width: var(--sp-6);
+  height: var(--sp-6);
+}
+
+.forge-icon-button--ghost:hover:not(:disabled):not([aria-disabled='true']) {
+  border-color: var(--color-border-2);
+  color: var(--color-text-primary);
+}
+
+.forge-icon-button--ghost:active:not(:disabled):not([aria-disabled='true']) {
+  background: var(--color-surface-3);
+  transform: translateY(1px);
+}
+
+.forge-icon-button--danger {
+  color: var(--color-error);
+}
+
+.forge-icon-button--danger:hover:not(:disabled):not([aria-disabled='true']) {
+  background: var(--color-error-bg);
+  border-color: var(--color-error);
+}
+
+.forge-icon-button--danger:active:not(:disabled):not([aria-disabled='true']) {
+  transform: translateY(1px);
+}
+
+.forge-icon-button[aria-pressed='true'] {
+  background: var(--color-surface-3);
+  color: var(--color-text-primary);
+}
+
+/* =============================================================================
+ * Tab
+ * ============================================================================= */
+
+.forge-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  font-family: var(--font-display);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: var(--ease);
+}
+
+.forge-tab:hover:not(:disabled):not([aria-disabled='true']) {
+  color: var(--color-text-primary);
+}
+
+.forge-tab:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
+}
+
+.forge-tab:disabled,
+.forge-tab[aria-disabled='true'] {
+  cursor: default;
+  color: var(--color-text-disabled);
+}
+
+.forge-tab[aria-selected='true'],
+.forge-tab[aria-checked='true'] {
+  background: var(--color-surface-3);
+  border-color: var(--color-ember-400);
+  color: var(--color-ember-300);
+}
+
+.forge-tab__badge {
+  display: inline-block;
+  padding: 0 var(--sp-1);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--color-text-tertiary);
+}
+
+/* Tablist / radiogroup container — flex row by default. */
+.forge-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* =============================================================================
+ * MenuItem
+ * ============================================================================= */
+
+.forge-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  background: transparent;
+  border: none;
+  font-family: var(--font-display);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 11px;
+  color: var(--color-text-primary);
+  cursor: pointer;
+  text-align: left;
+  transition: var(--ease);
+  line-height: 1;
+}
+
+.forge-menu-item:hover:not(:disabled):not([aria-disabled='true']) {
+  background: var(--color-surface-3);
+  color: var(--color-ember-300);
+}
+
+.forge-menu-item:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
+}
+
+.forge-menu-item:disabled,
+.forge-menu-item[aria-disabled='true'] {
+  cursor: default;
+  color: var(--color-text-disabled);
+}
+
+.forge-menu-item--danger {
+  color: var(--color-error);
+}
+
+.forge-menu-item--danger:hover:not(:disabled):not([aria-disabled='true']) {
+  background: var(--color-error-bg);
+  color: var(--color-error);
+}
+
+.forge-menu-item__leading {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--color-text-tertiary);
+  margin-right: var(--sp-2);
+}
+
+.forge-menu-item__kbd {
+  display: inline-block;
+  padding: 0 var(--sp-1);
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  opacity: 0.6;
+  line-height: 1.4;
+  margin-left: var(--sp-2);
+}

@@ -5,6 +5,7 @@ import {
   onMount,
   onCleanup,
 } from 'solid-js';
+import { Button, MenuItem, Tab, Tabs } from '@forge/design';
 import type { ApprovalScope, ApprovalLevel } from '@forge/ipc';
 import type { ApprovalPreview } from '../../stores/messages';
 import { defaultPatternForPath } from '../../stores/approvals';
@@ -183,47 +184,41 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
       {/* F-036: persistence level toggle. Hidden in pattern-editor mode so
           tab order stays predictable and the label-line stays clean. */}
       <Show when={!patternMode()}>
-        <div
+        <Tabs
+          variant="radio"
           class="approval-prompt__level-toggle"
           data-testid="level-toggle"
-          role="radiogroup"
           aria-label="Persistence level"
         >
           <span class="approval-prompt__level-label">Persist:</span>
-          <button
-            type="button"
-            class="approval-prompt__level-btn"
-            classList={{ 'approval-prompt__level-btn--active': level() === 'session' }}
+          <Tab
+            variant="radio"
+            selected={level() === 'session'}
+            class={`approval-prompt__level-btn${level() === 'session' ? ' approval-prompt__level-btn--active' : ''}`}
             data-testid="level-session-btn"
-            role="radio"
-            aria-checked={level() === 'session'}
             onClick={() => setLevel('session')}
           >
             Session
-          </button>
-          <button
-            type="button"
-            class="approval-prompt__level-btn"
-            classList={{ 'approval-prompt__level-btn--active': level() === 'workspace' }}
+          </Tab>
+          <Tab
+            variant="radio"
+            selected={level() === 'workspace'}
+            class={`approval-prompt__level-btn${level() === 'workspace' ? ' approval-prompt__level-btn--active' : ''}`}
             data-testid="level-workspace-btn"
-            role="radio"
-            aria-checked={level() === 'workspace'}
             onClick={() => setLevel('workspace')}
           >
             Workspace
-          </button>
-          <button
-            type="button"
-            class="approval-prompt__level-btn"
-            classList={{ 'approval-prompt__level-btn--active': level() === 'user' }}
+          </Tab>
+          <Tab
+            variant="radio"
+            selected={level() === 'user'}
+            class={`approval-prompt__level-btn${level() === 'user' ? ' approval-prompt__level-btn--active' : ''}`}
             data-testid="level-user-btn"
-            role="radio"
-            aria-checked={level() === 'user'}
             onClick={() => setLevel('user')}
           >
             User
-          </button>
-        </div>
+          </Tab>
+        </Tabs>
       </Show>
 
       {/* Pattern editor */}
@@ -241,22 +236,22 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
               value={pattern()}
               onInput={(e) => setPattern(e.currentTarget.value)}
             />
-            <button
-              type="button"
+            <Button
+              variant="primary"
               class="approval-prompt__btn approval-prompt__btn--primary"
               data-testid="pattern-confirm-btn"
               onClick={() => approveWithScope('ThisPattern', pattern())}
             >
               Confirm
-            </button>
-            <button
-              type="button"
+            </Button>
+            <Button
+              variant="ghost"
               class="approval-prompt__btn approval-prompt__btn--ghost"
               data-testid="pattern-cancel-btn"
               onClick={() => setPatternMode(false)}
             >
               Cancel
-            </button>
+            </Button>
           </div>
         </div>
       </Show>
@@ -275,8 +270,8 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
       {/* Actions */}
       <Show when={!patternMode()}>
         <div class="approval-prompt__actions">
-          <button
-            type="button"
+          <Button
+            variant="ghost"
             class="approval-prompt__btn approval-prompt__btn--ghost"
             data-testid="reject-btn"
             disabled={persisting()}
@@ -284,12 +279,12 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
           >
             Reject
             <kbd class="approval-prompt__kbd">R</kbd>
-          </button>
+          </Button>
 
           <div class="approval-prompt__approve-group">
             {/* Primary approve button — Once (default) */}
-            <button
-              type="button"
+            <Button
+              variant="primary"
               class="approval-prompt__btn approval-prompt__btn--primary"
               data-testid="approve-once-btn"
               disabled={persisting()}
@@ -298,11 +293,11 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
               <Show when={persisting()} fallback={<>Approve<kbd class="approval-prompt__kbd">A</kbd></>}>
                 persisting…
               </Show>
-            </button>
+            </Button>
 
             {/* Dropdown toggle */}
-            <button
-              type="button"
+            <Button
+              variant="primary"
               class="approval-prompt__btn approval-prompt__btn--primary approval-prompt__dropdown-toggle"
               data-testid="approve-dropdown-btn"
               aria-label="More approval scopes"
@@ -311,56 +306,48 @@ export const ApprovalPrompt: Component<ApprovalPromptProps> = (props) => {
               onClick={() => setMenuOpen((v) => !v)}
             >
               ▾
-            </button>
+            </Button>
 
             {/* Scope menu */}
             <Show when={menuOpen()}>
               <div class="approval-prompt__menu" data-testid="scope-menu" role="menu">
-                <button
-                  type="button"
+                <MenuItem
                   class="approval-prompt__menu-item"
                   data-testid="scope-once-btn"
-                  role="menuitem"
                   onClick={() => approveWithScope('Once')}
                 >
                   Once
                   <kbd class="approval-prompt__kbd">A</kbd>
-                </button>
+                </MenuItem>
 
                 <Show when={showFileScopes()}>
-                  <button
-                    type="button"
+                  <MenuItem
                     class="approval-prompt__menu-item"
                     data-testid="scope-file-btn"
-                    role="menuitem"
                     onClick={() => approveWithScope('ThisFile')}
                   >
                     This file
                     <kbd class="approval-prompt__kbd">F</kbd>
-                  </button>
+                  </MenuItem>
 
-                  <button
-                    type="button"
+                  <MenuItem
                     class="approval-prompt__menu-item"
                     data-testid="scope-pattern-btn"
-                    role="menuitem"
                     onClick={openPatternEditor}
                   >
                     This pattern
                     <kbd class="approval-prompt__kbd">P</kbd>
-                  </button>
+                  </MenuItem>
                 </Show>
 
-                <button
-                  type="button"
+                <MenuItem
                   class="approval-prompt__menu-item"
                   data-testid="scope-tool-btn"
-                  role="menuitem"
                   onClick={() => approveWithScope('ThisTool')}
                 >
                   This tool
                   <kbd class="approval-prompt__kbd">T</kbd>
-                </button>
+                </MenuItem>
               </div>
             </Show>
           </div>

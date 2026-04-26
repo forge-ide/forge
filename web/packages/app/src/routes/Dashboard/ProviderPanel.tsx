@@ -1,4 +1,5 @@
 import { type Component, createResource, createSignal, For, Show } from 'solid-js';
+import { Button } from '@forge/design';
 import type { ProviderId } from '@forge/ipc';
 import { providerStatus, type ProviderStatus } from '../../ipc/dashboard';
 import { providerAccent } from '../Session/providerAccent';
@@ -30,9 +31,9 @@ export const ProviderPanel: Component = () => {
             <p class="provider-panel__error-title">PROVIDER UNAVAILABLE</p>
             <p class="provider-panel__error-detail">{String(status.error)}</p>
             <div class="provider-panel__actions">
-              <button type="button" class="provider-panel__btn" onClick={() => refetch()}>
+              <Button variant="ghost" size="sm" class="provider-panel__btn" onClick={() => refetch()}>
                 RETRY
-              </button>
+              </Button>
             </div>
           </div>
         }
@@ -57,9 +58,9 @@ export const ProviderPanel: Component = () => {
               </Show>
 
               <div class="provider-panel__actions">
-                <button type="button" class="provider-panel__btn" onClick={() => refetch()}>
+                <Button variant="ghost" size="sm" class="provider-panel__btn" onClick={() => refetch()}>
                   REFRESH
-                </button>
+                </Button>
               </div>
             </>
           )}
@@ -92,8 +93,9 @@ const ModelSection: Component<{
   onToggle: () => void;
 }> = (props) => (
   <div class="provider-panel__models">
-    <button
-      type="button"
+    <Button
+      variant="ghost"
+      size="sm"
       class="provider-panel__btn provider-panel__btn--ghost"
       aria-expanded={props.expanded}
       onClick={props.onToggle}
@@ -103,7 +105,7 @@ const ModelSection: Component<{
         {' '}
         — {props.models.length} {props.models.length === 1 ? 'model' : 'models'}
       </span>
-    </button>
+    </Button>
     <Show when={props.expanded}>
       <ul class="provider-panel__model-list">
         <For each={props.models}>

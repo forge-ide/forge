@@ -26,6 +26,7 @@ import {
   onMount,
 } from 'solid-js';
 import { useNavigate } from '@solidjs/router';
+import { Button } from '@forge/design';
 import type { BgAgentSummary } from '@forge/ipc';
 import {
   isPermissionGranted as pluginIsPermissionGranted,
@@ -381,8 +382,9 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
                   {row.agent_name}
                 </span>
                 <span class="status-bar__bg-row-id">{row.id.slice(0, 8)}</span>
-                <button
-                  type="button"
+                <Button
+                  variant="ghost"
+                  size="sm"
                   class="status-bar__bg-row-action"
                   data-testid={`bg-agents-promote-${row.id}`}
                   onClick={() => {
@@ -390,9 +392,10 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
                   }}
                 >
                   PROMOTE AGENT
-                </button>
-                <button
-                  type="button"
+                </Button>
+                <Button
+                  variant="danger"
+                  size="sm"
                   class="status-bar__bg-row-action status-bar__bg-row-action--stop"
                   data-testid={`bg-agents-stop-${row.id}`}
                   onClick={() => {
@@ -400,7 +403,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
                   }}
                 >
                   STOP AGENT
-                </button>
+                </Button>
               </div>
             )}
           </For>
