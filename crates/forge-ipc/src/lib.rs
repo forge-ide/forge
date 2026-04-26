@@ -244,14 +244,40 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// Read a single IPC frame, allocating a fresh body buffer per call.
+///
+/// Convenience wrapper over [`read_frame_into`] for the cold paths
+/// (handshake, tests, CLI tools) where the per-frame allocation is
+/// negligible. Hot pumping loops (assistant-token streaming) should
+/// hoist a `Vec<u8>` outside the loop and call [`read_frame_into`]
+/// directly to amortize the allocation across frames (F-565).
 pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Result<IpcMessage> {
+    let mut buf = Vec::new();
+    read_frame_into(reader, &mut buf).await
+}
+
+/// F-565: read a single IPC frame into the caller-owned `buf`, reusing
+/// its capacity across calls. The buffer is resized (without zero-fill
+/// of already-allocated capacity) to the frame body length, then filled
+/// with `read_exact`. Decoded `IpcMessage` borrows nothing from `buf`,
+/// so the caller may immediately reuse it for the next frame.
+///
+/// Replaces a `vec![0u8; len]` per call — at streaming-token rates that
+/// is one heap alloc + one zero-fill per token, both removed here.
+pub async fn read_frame_into<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+) -> anyhow::Result<IpcMessage> {
     let len = reader.read_u32().await? as usize;
     if len > MAX_FRAME_SIZE {
         bail!("frame too large: {} bytes", len);
     }
-    let mut buf = vec![0u8; len];
-    reader.read_exact(&mut buf).await?;
-    let msg = serde_json::from_slice(&buf)?;
+    // `resize` only zero-fills the *grown* slice; bytes within existing
+    // capacity are reused without re-zeroing, and `read_exact` overwrites
+    // every byte before `from_slice` observes them.
+    buf.resize(len, 0);
+    reader.read_exact(&mut buf[..len]).await?;
+    let msg = serde_json::from_slice(&buf[..len])?;
     Ok(msg)
 }
 
@@ -268,7 +294,18 @@ pub async fn read_frame_with_deadline<R: AsyncRead + Unpin>(
     reader: &mut R,
     deadline: Duration,
 ) -> anyhow::Result<IpcMessage> {
-    match tokio::time::timeout(deadline, read_frame(reader)).await {
+    let mut buf = Vec::new();
+    read_frame_into_with_deadline(reader, &mut buf, deadline).await
+}
+
+/// F-565: deadline-bounded variant of [`read_frame_into`]. See
+/// [`read_frame_with_deadline`] for the deadline semantics.
+pub async fn read_frame_into_with_deadline<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    deadline: Duration,
+) -> anyhow::Result<IpcMessage> {
+    match tokio::time::timeout(deadline, read_frame_into(reader, buf)).await {
         Ok(inner) => inner,
         Err(_) => bail!("ipc read timed out after {:?}", deadline),
     }
