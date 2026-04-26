@@ -34,8 +34,9 @@ describe('listCandidates', () => {
       skill: { listSkills: () => [{ name: 'ts-review' }] },
     });
     const items = await listCandidates(reg, '');
-    expect(items.file).toHaveLength(1);
-    expect(items.skill).toHaveLength(1);
+    expect(items.file?.status).toBe('success');
+    expect(items.file?.status === 'success' ? items.file.items : []).toHaveLength(1);
+    expect(items.skill?.status === 'success' ? items.skill.items : []).toHaveLength(1);
     // Categories without registered resolvers are absent
     expect(items.agent).toBeUndefined();
     expect(items.url).toBeUndefined();
@@ -47,6 +48,45 @@ describe('listCandidates', () => {
       file: { sessionId: SESSION, workspaceRoot: ROOT, tree: treeFn },
     });
     await expect(listCandidates(reg, '')).resolves.toEqual({});
+  });
+
+  // F-536: tree-backed resolvers thread the root TreeStatsDto through the
+  // CategoryState so the picker can render a truncation/error notice.
+  it('threads TreeStatsDto from tree-backed resolvers onto CategoryState.stats', async () => {
+    const treeFn = vi.fn().mockResolvedValue({
+      ...dir('/ws', 'ws', [file('/ws/a.ts', 'a.ts')]),
+      stats: { truncated: true, omitted_count: 42, error_count: 0 },
+    });
+    const reg = buildRegistry({
+      file: { sessionId: SESSION, workspaceRoot: ROOT, tree: treeFn },
+    });
+    const items = await listCandidates(reg, '');
+    expect(items.file?.status).toBe('success');
+    if (items.file?.status === 'success') {
+      expect(items.file.stats).toEqual({
+        truncated: true,
+        omitted_count: 42,
+        error_count: 0,
+      });
+    }
+  });
+
+  // F-536: keep a tab whose resolver returned no items but reported stats —
+  // otherwise the user filters every candidate out and loses the notice.
+  it('keeps a tab when items are empty but stats are present', async () => {
+    const treeFn = vi.fn().mockResolvedValue({
+      ...dir('/ws', 'ws', [file('/ws/a.ts', 'a.ts')]),
+      stats: { truncated: true, omitted_count: 1, error_count: 0 },
+    });
+    const reg = buildRegistry({
+      file: { sessionId: SESSION, workspaceRoot: ROOT, tree: treeFn },
+    });
+    const items = await listCandidates(reg, 'no-such-file-matches-this');
+    expect(items.file).toBeDefined();
+    if (items.file?.status === 'success') {
+      expect(items.file.items).toEqual([]);
+      expect(items.file.stats?.truncated).toBe(true);
+    }
   });
 });
 

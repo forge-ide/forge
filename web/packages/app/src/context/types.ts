@@ -13,7 +13,7 @@
 // Keeping this file dependency-light: no imports from the picker component
 // (avoids pulling solid-js into otherwise pure resolver modules).
 
-import type { ContextBlock } from '@forge/ipc';
+import type { ContextBlock, TreeStatsDto } from '@forge/ipc';
 import type { ContextCategory } from '../components/ContextPicker';
 
 export type { ContextBlock };
@@ -30,10 +30,19 @@ export interface Candidate {
  * resolver needs at send time. Each concrete resolver narrows this type —
  * callers typically go through the picker (`value: string`) and route to
  * the right resolver by chip category.
+ *
+ * F-536: tree-backed resolvers (file, directory) may also expose
+ * `listStats()` so the picker can render a "files not shown" /
+ * "tree truncated" / "N read errors" notice from the root [`TreeStatsDto`].
+ * The two methods are split so the existing `list()` callers stay untouched
+ * and resolvers without a tree backing don't have to fabricate a stats
+ * shape they don't own.
  */
 export interface Resolver<TRef = string> {
   list(query: string): Promise<Candidate[]>;
   resolve(ref: TRef): Promise<ContextBlock>;
+  /** Last-`list()` walk stats — present only on tree-backed resolvers. */
+  listStats?: () => TreeStatsDto | null;
 }
 
 /**

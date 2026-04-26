@@ -16,6 +16,7 @@ import {
   type TreeNodeDto,
   type FileContent,
 } from '../ipc/fs';
+import type { TreeStatsDto } from '@forge/ipc';
 import type { Candidate, ContextBlock, Resolver } from './types';
 import { fuzzyMatch } from './types';
 import { makeCandidateList, walkTree } from './helpers';
@@ -75,9 +76,14 @@ export function createFileResolver(deps: FileResolverDeps): Resolver<string> {
   const treeFn = deps.tree ?? defaultTree;
   const readFn = deps.readFile ?? defaultReadFile;
 
+  // F-536: cache the root TreeStatsDto from the most recent `list()` call
+  // so `listStats()` can hand it to the picker without re-walking the tree.
+  let lastStats: TreeStatsDto | null = null;
+
   return {
     async list(query: string): Promise<Candidate[]> {
       const node = await treeFn(deps.sessionId, deps.workspaceRoot);
+      lastStats = node.stats ?? null;
       return makeCandidateList({
         items: flattenFiles(node),
         match: (f) => fuzzyMatch(query, f.path),
@@ -85,6 +91,8 @@ export function createFileResolver(deps: FileResolverDeps): Resolver<string> {
         max: FILE_RESOLVER_MAX_RESULTS,
       });
     },
+
+    listStats: () => lastStats,
 
     async resolve(path: string): Promise<ContextBlock> {
       const file: FileContent = await readFn(deps.sessionId, path);

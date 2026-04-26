@@ -7,6 +7,7 @@ import {
   onMount,
   onCleanup,
 } from 'solid-js';
+import type { TreeStatsDto } from '@forge/ipc';
 import { Tab } from '@forge/design';
 import './ContextPicker.css';
 
@@ -143,11 +144,16 @@ export interface PickerResult {
 /**
  * Per-category async state for the results list (F-399).
  * Either a resolved list, a loading sentinel, or an error string.
+ *
+ * F-536: success carries optional `stats` from the underlying `tree` IPC so
+ * the picker can render a "files not shown" / "tree truncated" / "N read
+ * errors" notice for tree-backed categories (file, directory). Resolvers
+ * without a tree backing simply omit `stats`.
  */
 export type CategoryState =
   | { status: 'loading' }
   | { status: 'error'; message: string }
-  | { status: 'success'; items: PickerResult[] };
+  | { status: 'success'; items: PickerResult[]; stats?: TreeStatsDto | null };
 
 export interface ContextPickerProps {
   /** Current `@`-query (text after the `@`). */
@@ -205,6 +211,36 @@ export const ContextPicker: Component<ContextPickerProps> = (props) => {
   const activeItems = (): PickerResult[] => {
     const state = activeCategoryState();
     return state.status === 'success' ? state.items : [];
+  };
+
+  /**
+   * F-536: build the truncation/error notice string from the active
+   * category's `TreeStatsDto`. Mirrors `FilesSidebar`'s wording and rules
+   * verbatim so the two surfaces speak the same language:
+   *
+   *   - "N files not shown"  when the walk was capped with a counted overflow
+   *   - "tree truncated"     when truncated but `omitted_count` is the u64::MAX
+   *                          sentinel (per F-571 — "stopped counting")
+   *   - "N read errors"      when the walker swallowed per-entry errors
+   *
+   * Returns `null` when the active category has no stats or all-zero stats —
+   * the notice is suppressed and the panel renders unchanged.
+   */
+  const activeStatsNotice = (): string | null => {
+    const state = activeCategoryState();
+    if (state.status !== 'success') return null;
+    const s = state.stats;
+    if (!s) return null;
+    const parts: string[] = [];
+    if (s.truncated && s.omitted_count > 0) {
+      parts.push(`${s.omitted_count} file${s.omitted_count === 1 ? '' : 's'} not shown`);
+    } else if (s.truncated) {
+      parts.push('tree truncated');
+    }
+    if (s.error_count > 0) {
+      parts.push(`${s.error_count} read error${s.error_count === 1 ? '' : 's'}`);
+    }
+    return parts.length > 0 ? parts.join(' · ') : null;
   };
 
   // Recompute placement whenever anchorRect updates. In real DOM this runs
@@ -353,6 +389,20 @@ export const ContextPicker: Component<ContextPickerProps> = (props) => {
           )}
         </For>
       </div>
+
+      {/* F-536: inline truncation / read-error notice. Mirrors the
+          FilesSidebar's selector, role, and wording (see
+          `[data-testid="files-sidebar-stats-notice"]`). Rendered above the
+          listbox so screen readers announce it before the option list. */}
+      <Show when={activeStatsNotice() !== null}>
+        <div
+          class="context-picker__stats-notice"
+          role="status"
+          data-testid="picker-truncation-notice"
+        >
+          {activeStatsNotice()}
+        </div>
+      </Show>
 
       {/* Results list for the active category. F-141 renders empty — F-142
           will populate via the `items` prop. F-399 adds loading/error states. */}

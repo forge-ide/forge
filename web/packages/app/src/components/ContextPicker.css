@@ -142,6 +142,18 @@
   font-style: italic;
 }
 
+/* F-536: non-intrusive notice for truncated trees or walk errors on the
+ * tree-backed categories (file, directory). Mirrors the FilesSidebar's
+ * `.files-sidebar__stats-notice` styling so the two surfaces visually agree. */
+.context-picker__stats-notice {
+  padding: var(--sp-1) var(--sp-3);
+  font-family: var(--font-body);
+  font-size: 10px;
+  color: var(--color-text-tertiary);
+  font-style: italic;
+  border-bottom: 1px solid var(--color-border-1);
+}
+
 /* F-399: per-tab error — ember-400 border per ai-patterns.md §"error". */
 .context-picker__error {
   padding: var(--sp-2) var(--sp-3);

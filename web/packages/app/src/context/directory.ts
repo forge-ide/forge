@@ -9,6 +9,7 @@ import {
   tree as defaultTree,
   type TreeNodeDto,
 } from '../ipc/fs';
+import type { TreeStatsDto } from '@forge/ipc';
 import type { Candidate, ContextBlock, Resolver } from './types';
 import { fuzzyMatch } from './types';
 import { makeCandidateList, walkTree } from './helpers';
@@ -54,9 +55,14 @@ export function flattenAllPaths(
 export function createDirectoryResolver(deps: DirectoryResolverDeps): Resolver<string> {
   const treeFn = deps.tree ?? defaultTree;
 
+  // F-536: cache the root TreeStatsDto from the most recent `list()` call
+  // so `listStats()` can hand it to the picker without re-walking the tree.
+  let lastStats: TreeStatsDto | null = null;
+
   return {
     async list(query: string): Promise<Candidate[]> {
       const node = await treeFn(deps.sessionId, deps.workspaceRoot);
+      lastStats = node.stats ?? null;
       return makeCandidateList({
         items: flattenDirectories(node),
         match: (d) => fuzzyMatch(query, d.path),
@@ -68,6 +74,8 @@ export function createDirectoryResolver(deps: DirectoryResolverDeps): Resolver<s
         max: DIRECTORY_RESOLVER_MAX_RESULTS,
       });
     },
+
+    listStats: () => lastStats,
 
     async resolve(dirPath: string): Promise<ContextBlock> {
       // Walk from the picked directory specifically — not the workspace root —
