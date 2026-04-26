@@ -436,14 +436,10 @@ mod tests {
     /// Construct a registry with a fast-tick resource monitor so the
     /// end-to-end integration test below doesn't wait a full second.
     async fn fresh_with_fast_monitor() -> BackgroundAgentRegistry {
-        use crate::resource_monitor::{FakeSampler, ResourceMonitor, Sample};
+        use crate::resource_monitor::{fake_sample, FakeSampler, ResourceMonitor};
         let orch = Arc::new(Orchestrator::new());
         let defs = Arc::new(vec![def("writer"), def("reviewer")]);
-        let fake = Arc::new(FakeSampler::new(Sample {
-            cpu_seconds: Some(0.001),
-            rss_bytes: Some(4096),
-            fd_count: Some(3),
-        }));
+        let fake = Arc::new(FakeSampler::new(fake_sample(0.001, Some(4096), Some(3))));
         let monitor = Arc::new(ResourceMonitor::new(
             fake as Arc<dyn crate::resource_monitor::Sampler>,
             std::time::Duration::from_millis(20),

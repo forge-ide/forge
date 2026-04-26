@@ -39,14 +39,33 @@
 //! expressed at the `ResourceMonitor::drop` boundary — dropping the
 //! monitor aborts every task, so scoping the monitor to the session
 //! lifetime is sufficient to guarantee no leaks when the session ends.
+//!
+//! # F-575: synchronization & per-instance state
+//!
+//! The `tasks` map is guarded by [`std::sync::Mutex`] (not
+//! [`tokio::sync::Mutex`]) because the critical section is purely
+//! HashMap mutation — no `.await` ever runs while the lock is held.
+//! `track` reserves the slot, drops the guard, spawns the ticker
+//! outside the critical section, then re-acquires only to insert the
+//! `JoinHandle`. This eliminates the prior
+//! `mutex-held-across-spawn` serialization at the cost of a single extra
+//! map lookup. `Drop` becomes deterministic: a `std::sync::Mutex` cannot
+//! deadlock a single owner, so the `try_lock`-and-leak fallback path
+//! goes away — every outstanding task is aborted synchronously.
+//!
+//! Per-instance CPU baselines (`previous` cumulative ticks) move out of
+//! the `Sampler` and into the ticker task's stack. The platform probes
+//! become stateless: each call returns a *cumulative* `Sample` and the
+//! ticker computes the delta against the per-task baseline. This drops
+//! the per-instance HashMap mutex contention point entirely.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::Utc;
 use forge_core::{AgentInstanceId, Event};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 /// Default tick cadence. 1 Hz — the low end of the DoD's 1–5 Hz range.
@@ -72,25 +91,72 @@ const CPU_WINDOW: usize = 5;
 /// probes can fail on a single dimension while the rest succeed. The
 /// wire contract (`Event::ResourceSample`) preserves the `None`s
 /// verbatim so the UI never sees a value ghost between emissions.
+///
+/// `cpu_total` is the **cumulative** on-cpu time the OS reports for the
+/// process (units are platform-specific raw ticks; see
+/// [`Sample::cpu_total_per_sec`]). The ticker subtracts the previous cumulative
+/// reading from the same baseline to produce the per-tick delta the
+/// emitted `cpu_pct` is computed from. Returning the cumulative reading
+/// (rather than the delta) lets every probe stay stateless and removes
+/// the per-instance baseline mutex F-575 identified as a contention
+/// point.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Sample {
-    /// CPU-time the process has used since the previous sample, in
-    /// **seconds of on-cpu time**. A delta, not a total — the monitor
-    /// divides by the tick window to compute `cpu_pct`. `None` when the
-    /// probe cannot read a fresh cumulative total.
-    pub cpu_seconds: Option<f64>,
+    /// Cumulative on-cpu time for the process in **whatever units the
+    /// underlying probe uses** — Linux returns clock ticks
+    /// (`utime + stime`), macOS returns nanoseconds, Windows returns
+    /// 100ns FILETIME units. The probe also fills in
+    /// [`Sample::cpu_total_per_sec`] so the ticker can do unit-free
+    /// math: `seconds = (delta_ticks / per_sec)`.
+    /// `None` when the probe cannot read a fresh cumulative total.
+    pub cpu_total: Option<u64>,
+    /// Divisor that turns `cpu_total` into seconds. Linux: clock ticks
+    /// per second from `sysconf(_SC_CLK_TCK)`. macOS: 1_000_000_000
+    /// (nanoseconds). Windows: 10_000_000 (100ns FILETIME units per
+    /// second). Carried per-`Sample` so the public trait stays single-
+    /// method.
+    pub cpu_total_per_sec: u64,
     /// Resident set size in bytes. `None` when unreadable.
     pub rss_bytes: Option<u64>,
     /// Live file-descriptor count. `None` when unreadable.
     pub fd_count: Option<u64>,
 }
 
+/// Per-ticker CPU baseline. Owned by the ticker task on its stack — no
+/// shared mutex. The `Sampler` does not see it; the ticker uses it to
+/// turn the cumulative `Sample::cpu_total` into a delta.
+///
+/// Plain newtype around `Option<u64>` to make the "no previous reading
+/// yet" state explicit and impossible to confuse with `Some(0)`.
+#[derive(Debug, Default, Clone, Copy)]
+struct CpuBaseline(Option<u64>);
+
+impl CpuBaseline {
+    /// Update the baseline with a fresh cumulative reading and return
+    /// the per-tick delta. Returns `0` on the very first call — the
+    /// cumulative reading from the OS reflects the entire process
+    /// lifetime, not the last tick window, so the first emission's
+    /// `cpu_pct` is conservatively `0` until a second reading lands.
+    /// Same outcome on a cumulative reading going backwards (PID
+    /// reuse).
+    fn delta(&mut self, total: u64) -> u64 {
+        let delta = match self.0 {
+            Some(prev) if total >= prev => total - prev,
+            _ => 0,
+        };
+        self.0 = Some(total);
+        delta
+    }
+}
+
 /// Platform-agnostic resource probe.
 ///
-/// Implementations hold per-instance state across calls (the delta path
-/// for CPU needs the previous cumulative total). The trait is `async`
-/// so a real Linux probe can `tokio::fs::read` `/proc/<pid>/stat` without
-/// blocking the sampler task.
+/// Implementations are stateless across calls — the per-instance CPU
+/// baseline lives on the ticker task's stack so hundreds of concurrent
+/// samplers never contend on a shared mutex.
+/// The trait stays `async` so a real Linux probe can do its `/proc`
+/// reads on `tokio::task::spawn_blocking` without blocking the worker
+/// it's invoked from.
 #[async_trait::async_trait]
 pub trait Sampler: Send + Sync + 'static {
     /// Return a fresh [`Sample`] for the given PID. Called on every tick
@@ -105,6 +171,11 @@ pub struct ResourceMonitor {
     events: broadcast::Sender<Event>,
     sampler: Arc<dyn Sampler>,
     tick: Duration,
+    // F-575: synchronous mutex. The critical section is HashMap
+    // mutation only — no `.await` ever runs while the lock is held, so
+    // the futures-aware `tokio::sync::Mutex` is wasted overhead.
+    // Switching to `std::sync::Mutex` lets `Drop` abort tasks
+    // deterministically without the `try_lock` leak fallback.
     tasks: Arc<Mutex<HashMap<AgentInstanceId, JoinHandle<()>>>>,
 }
 
@@ -149,21 +220,43 @@ impl ResourceMonitor {
     /// that forks a provider sidecar), skipping emission lets the UI
     /// fall back to the `—` placeholder the pre-F-152 stub already
     /// rendered. Callers with a real child PID get full sampling.
+    ///
+    /// F-575: the previous-task abort and the new-task spawn run
+    /// **outside** the `tasks` mutex. A first lock pulls and aborts the
+    /// prior handle (if any); the lock is released; the ticker is
+    /// spawned; a second lock inserts the new handle. Concurrent
+    /// `track` calls on different ids no longer serialize behind a
+    /// task spawn.
+    ///
+    /// `async` is preserved for source-compat with existing
+    /// `.await`-style callers — every caller in the workspace already
+    /// awaits this. The body contains no `.await`.
     pub async fn track(&self, id: AgentInstanceId, pid: u32) {
         if pid == std::process::id() {
             // Drop any stale task already registered under this id so a
             // previous real-PID track doesn't keep sampling after a
             // "downgrade" to the daemon PID.
-            let mut tasks = self.tasks.lock().await;
-            if let Some(prev) = tasks.remove(&id) {
-                prev.abort();
+            let prior = {
+                let mut tasks = lock_tasks(&self.tasks);
+                tasks.remove(&id)
+            };
+            if let Some(handle) = prior {
+                handle.abort();
             }
             return;
         }
-        let mut tasks = self.tasks.lock().await;
-        if let Some(prev) = tasks.remove(&id) {
-            prev.abort();
+
+        // Phase 1: synchronously evict any prior task for this id, then
+        // drop the guard so we don't hold it across `tokio::spawn`.
+        let prior = {
+            let mut tasks = lock_tasks(&self.tasks);
+            tasks.remove(&id)
+        };
+        if let Some(handle) = prior {
+            handle.abort();
         }
+
+        // Phase 2: spawn the ticker task without holding the lock.
         let sampler = Arc::clone(&self.sampler);
         let tick = self.tick;
         let events = self.events.clone();
@@ -171,13 +264,26 @@ impl ResourceMonitor {
         let handle = tokio::spawn(async move {
             run_ticker(task_id, pid, sampler, tick, events).await;
         });
-        tasks.insert(id, handle);
+
+        // Phase 3: re-acquire the lock to insert the handle. If a
+        // second `track(id, ..)` raced us, prefer the most recent
+        // spawn — abort the loser to keep the no-leak invariant.
+        let displaced = {
+            let mut tasks = lock_tasks(&self.tasks);
+            tasks.insert(id, handle)
+        };
+        if let Some(prev) = displaced {
+            prev.abort();
+        }
     }
 
     /// Stop sampling `id`. Idempotent — unknown ids are a no-op.
     pub async fn untrack(&self, id: &AgentInstanceId) {
-        let mut tasks = self.tasks.lock().await;
-        if let Some(handle) = tasks.remove(id) {
+        let prior = {
+            let mut tasks = lock_tasks(&self.tasks);
+            tasks.remove(id)
+        };
+        if let Some(handle) = prior {
             handle.abort();
         }
     }
@@ -186,25 +292,37 @@ impl ResourceMonitor {
     /// want to pin the no-leak invariant without reaching into the
     /// `tasks` map.
     pub async fn tracked_count(&self) -> usize {
-        self.tasks.lock().await.len()
+        lock_tasks(&self.tasks).len()
     }
 }
 
+/// Lock the tasks map, transparently recovering from a poisoned mutex.
+/// A poisoned `std::sync::Mutex` only happens if a thread panicked
+/// while holding the guard; the data is still structurally valid (a
+/// `HashMap<AgentInstanceId, JoinHandle<()>>` has no broken-invariant
+/// states), so taking the inner value is the right move. Bubbling the
+/// poison out would break callers' best-effort cleanup.
+fn lock_tasks(
+    tasks: &Mutex<HashMap<AgentInstanceId, JoinHandle<()>>>,
+) -> std::sync::MutexGuard<'_, HashMap<AgentInstanceId, JoinHandle<()>>> {
+    tasks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 impl Drop for ResourceMonitor {
-    /// Aborts every outstanding tick task. This is the mechanical
-    /// implementation of the DoD's "no sampler thread leaks on instance
-    /// drop" invariant — callers scope the monitor to the session and
-    /// every task dies with the session.
+    /// F-575: deterministic shutdown — abort every outstanding tick
+    /// task synchronously. The std mutex cannot deadlock here (the
+    /// only callers ever holding it are `track`/`untrack`/
+    /// `tracked_count`, none of which can be running because they
+    /// borrow `&self` and we have `&mut self`), so the previous
+    /// `try_lock`-and-leak fallback is gone. If a prior holder
+    /// panicked the mutex is poisoned but the inner HashMap is still
+    /// safe to drain.
     fn drop(&mut self) {
-        // `try_lock` so a panicking subscriber somewhere down the stack
-        // that still holds the mutex doesn't turn drop-time abort into a
-        // deadlock. On contention we fall back to draining what we can
-        // see — the tokio runtime cancels the rest when the session's
-        // runtime shuts down.
-        if let Ok(mut tasks) = self.tasks.try_lock() {
-            for (_id, handle) in tasks.drain() {
-                handle.abort();
-            }
+        let mut tasks = lock_tasks(&self.tasks);
+        for (_id, handle) in tasks.drain() {
+            handle.abort();
         }
     }
 }
@@ -225,11 +343,23 @@ async fn run_ticker(
     interval.tick().await;
     let mut history: VecDeque<f64> = VecDeque::with_capacity(CPU_WINDOW);
     let tick_secs = tick.as_secs_f64().max(f64::EPSILON);
+    // F-575: per-task CPU baseline (previously a shared
+    // `Mutex<HashMap<u32, u64>>` inside each `Sampler`). Each ticker
+    // owns its own state — no contention across instances.
+    let mut baseline = CpuBaseline::default();
     loop {
         interval.tick().await;
         let sample = sampler.sample(pid).await;
-        if let Some(cpu_seconds) = sample.cpu_seconds {
-            let pct = (cpu_seconds / tick_secs) * 100.0;
+        let cpu_seconds = sample.cpu_total.and_then(|total| {
+            let per_sec = sample.cpu_total_per_sec;
+            if per_sec == 0 {
+                return None;
+            }
+            let delta_ticks = baseline.delta(total);
+            Some(delta_ticks as f64 / per_sec as f64)
+        });
+        if let Some(seconds) = cpu_seconds {
+            let pct = (seconds / tick_secs) * 100.0;
             if history.len() == CPU_WINDOW {
                 history.pop_front();
             }
@@ -257,13 +387,21 @@ async fn run_ticker(
 /// Linux `/proc/<pid>` probe. Parses `stat` for cumulative CPU ticks,
 /// `status` for RSS (kB), and counts entries in `fd/`.
 ///
-/// Per-instance delta state is kept in an async mutex keyed by PID so
-/// repeated `track`s for the same PID share a CPU baseline.
+/// F-575: probe is **stateless**. Per-instance CPU baselines live on
+/// the ticker task; this struct only carries the immutable
+/// `sysconf(_SC_CLK_TCK)` reading.
+///
+/// F-575: the three `/proc` reads run on a single
+/// [`tokio::task::spawn_blocking`] using [`std::fs`], collapsing 3
+/// per-tick `tokio::fs` futures (each of which schedules its own
+/// blocking IO sub-future) into one round-trip to the blocking pool.
+/// Allocation profile: one `String` per stat/status read plus a
+/// `read_dir` iterator that does not allocate per-entry on `std::fs`
+/// (unlike `tokio::fs::ReadDir::next_entry` which allocates a fresh
+/// `DirEntry` per await).
 #[cfg(target_os = "linux")]
 pub mod linux {
     use super::{Sample, Sampler};
-    use std::collections::HashMap;
-    use tokio::sync::Mutex;
 
     /// Clock ticks per second read from `sysconf(_SC_CLK_TCK)` once at
     /// probe construction. 100 on every Linux distro I've seen, but
@@ -280,17 +418,15 @@ pub mod linux {
         }
     }
 
-    /// `/proc/<pid>`-backed sampler.
+    /// `/proc/<pid>`-backed sampler. Stateless after construction (F-575).
     pub struct ProcSampler {
         clk_tck: u64,
-        previous: Mutex<HashMap<u32, u64>>, // pid -> utime+stime ticks
     }
 
     impl ProcSampler {
         pub fn new() -> Self {
             Self {
                 clk_tck: clock_ticks_per_sec(),
-                previous: Mutex::new(HashMap::new()),
             }
         }
     }
@@ -304,32 +440,31 @@ pub mod linux {
     #[async_trait::async_trait]
     impl Sampler for ProcSampler {
         async fn sample(&self, pid: u32) -> Sample {
-            let cpu_seconds = cpu_delta_seconds(self, pid).await;
-            let rss_bytes = read_rss_bytes(pid).await;
-            let fd_count = count_fds(pid).await;
-            Sample {
-                cpu_seconds,
-                rss_bytes,
-                fd_count,
-            }
+            let clk_tck = self.clk_tck;
+            // F-575: batch all three `/proc` reads onto a single
+            // `spawn_blocking` task. `std::fs` is fine here because
+            // we're already off the tokio worker. This collapses three
+            // separate `tokio::fs` futures (each of which dispatches
+            // its own blocking IO under the hood) into one cross-
+            // thread round-trip per tick.
+            tokio::task::spawn_blocking(move || sample_blocking(pid, clk_tck))
+                .await
+                .unwrap_or_default()
         }
     }
 
-    async fn cpu_delta_seconds(s: &ProcSampler, pid: u32) -> Option<f64> {
-        let text = tokio::fs::read_to_string(format!("/proc/{pid}/stat"))
-            .await
-            .ok()?;
-        let total_ticks = parse_stat_utime_stime(&text)?;
-        let mut prev = s.previous.lock().await;
-        let delta_ticks = match prev.get(&pid).copied() {
-            Some(previous) if total_ticks >= previous => total_ticks - previous,
-            _ => 0,
-        };
-        prev.insert(pid, total_ticks);
-        if s.clk_tck == 0 {
-            return None;
+    fn sample_blocking(pid: u32, clk_tck: u64) -> Sample {
+        Sample {
+            cpu_total: read_cpu_total_ticks(pid),
+            cpu_total_per_sec: clk_tck,
+            rss_bytes: read_rss_bytes(pid),
+            fd_count: count_fds(pid),
         }
-        Some(delta_ticks as f64 / s.clk_tck as f64)
+    }
+
+    fn read_cpu_total_ticks(pid: u32) -> Option<u64> {
+        let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        parse_stat_utime_stime(&text)
     }
 
     /// Parse columns 14 (`utime`) and 15 (`stime`) out of a
@@ -347,10 +482,8 @@ pub mod linux {
         Some(utime + stime)
     }
 
-    async fn read_rss_bytes(pid: u32) -> Option<u64> {
-        let text = tokio::fs::read_to_string(format!("/proc/{pid}/status"))
-            .await
-            .ok()?;
+    fn read_rss_bytes(pid: u32) -> Option<u64> {
+        let text = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
         parse_status_rss_bytes(&text)
     }
 
@@ -367,11 +500,19 @@ pub mod linux {
         None
     }
 
-    async fn count_fds(pid: u32) -> Option<u64> {
-        let mut dir = tokio::fs::read_dir(format!("/proc/{pid}/fd")).await.ok()?;
+    fn count_fds(pid: u32) -> Option<u64> {
+        // `std::fs::read_dir` returns an iterator that does not
+        // allocate per-entry on the heap — the per-tick allocation
+        // profile is a single `Result<DirEntry>` stack value per
+        // iteration. `tokio::fs::ReadDir::next_entry` allocates
+        // a `DirEntry` per call to keep the future `Send`, which was
+        // the F-575 dominant allocator on hundreds-of-fd processes.
+        let dir = std::fs::read_dir(format!("/proc/{pid}/fd")).ok()?;
         let mut n: u64 = 0;
-        while let Ok(Some(_)) = dir.next_entry().await {
-            n += 1;
+        for entry in dir {
+            if entry.is_ok() {
+                n += 1;
+            }
         }
         Some(n)
     }
@@ -412,10 +553,11 @@ Threads:   3
         #[tokio::test]
         async fn proc_sampler_returns_a_non_none_rss_for_self() {
             // The test's own PID is guaranteed to have a live /proc
-            // entry, so RSS must parse to Some(_). CPU is a delta, so
-            // the first call is expected to report 0.0s (no baseline).
-            // This is the live end-to-end hook — if /proc isn't mounted
-            // the test harness itself would have failed earlier.
+            // entry, so RSS must parse to Some(_). CPU is cumulative
+            // (post-F-575); the ticker computes the delta. Here we
+            // assert the cumulative reading is present and the
+            // divisor is non-zero so a downstream ticker can produce
+            // a meaningful seconds value.
             let s = ProcSampler::new();
             let sample = s.sample(std::process::id()).await;
             assert!(
@@ -426,6 +568,14 @@ Threads:   3
                 sample.fd_count.is_some(),
                 "live /proc/self/fd must be readable"
             );
+            assert!(
+                sample.cpu_total.is_some(),
+                "live /proc/self/stat must parse cumulative cpu"
+            );
+            assert!(
+                sample.cpu_total_per_sec > 0,
+                "clock ticks per second must be a positive divisor"
+            );
         }
     }
 }
@@ -435,36 +585,36 @@ Threads:   3
 /// descriptors via `listpidinfo::<ListFDs>`.
 ///
 /// `proc_taskinfo`'s `pti_total_user` / `pti_total_system` are in
-/// nanoseconds (see `<sys/proc_info.h>` in the macOS SDK). The Linux
-/// probe returns seconds, so we convert. `pti_resident_size` is already
-/// in bytes. `pbi_nfiles` on the BSD-info flavor gives the fd count
-/// without enumerating them — far cheaper than listing — but the listing
-/// path is the one the DoD names and it's the path that matches how the
-/// Linux probe physically counts entries in `/proc/<pid>/fd`, so we use
-/// it for behavioral parity.
+/// nanoseconds (see `<sys/proc_info.h>` in the macOS SDK).
+/// `pti_resident_size` is already in bytes. `pbi_nfiles` on the BSD-info
+/// flavor gives the fd count without enumerating them — far cheaper than
+/// listing — but the listing path is the one the DoD names and it's the
+/// path that matches how the Linux probe physically counts entries in
+/// `/proc/<pid>/fd`, so we use it for behavioral parity.
+///
+/// F-575: probe is **stateless** — the per-instance CPU baseline is
+/// owned by the ticker task. The probe returns the cumulative
+/// nanoseconds reading and the `1_000_000_000` divisor in every
+/// `Sample`.
 #[cfg(target_os = "macos")]
 pub mod macos {
     use super::{Sample, Sampler};
-    use std::collections::HashMap;
-    use tokio::sync::Mutex;
 
     use libproc::bsd_info::BSDInfo;
     use libproc::file_info::{ListFDs, ProcFDType};
     use libproc::proc_pid::{listpidinfo, pidinfo};
     use libproc::task_info::TaskInfo;
 
-    /// `libproc`-backed sampler. Holds a per-PID CPU-time baseline in
-    /// nanoseconds so the public `Sample::cpu_seconds` can report a
-    /// delta rather than a cumulative total — matching the Linux probe.
-    pub struct LibprocSampler {
-        previous_ns: Mutex<HashMap<u32, u64>>, // pid -> utime+stime ns
-    }
+    /// Nanoseconds per second — the divisor for `pti_total_user +
+    /// pti_total_system`.
+    const NS_PER_SEC: u64 = 1_000_000_000;
+
+    /// `libproc`-backed sampler. Stateless across calls (F-575).
+    pub struct LibprocSampler;
 
     impl LibprocSampler {
         pub fn new() -> Self {
-            Self {
-                previous_ns: Mutex::new(HashMap::new()),
-            }
+            Self
         }
     }
 
@@ -480,23 +630,17 @@ pub mod macos {
             // `libproc` is synchronous FFI. Calls resolve in microseconds
             // per the XNU syscall tables, so staying on the tokio worker
             // is preferable to the allocation cost of `spawn_blocking`.
-            let (cpu_seconds, rss_bytes) = match pidinfo::<TaskInfo>(pid as i32, 0) {
+            let (cpu_total, rss_bytes) = match pidinfo::<TaskInfo>(pid as i32, 0) {
                 Ok(ti) => {
                     let total_ns = ti.pti_total_user.saturating_add(ti.pti_total_system);
-                    let mut prev = self.previous_ns.lock().await;
-                    let delta_ns = match prev.get(&pid).copied() {
-                        Some(previous) if total_ns >= previous => total_ns - previous,
-                        _ => 0,
-                    };
-                    prev.insert(pid, total_ns);
-                    let seconds = delta_ns as f64 / 1_000_000_000.0;
-                    (Some(seconds), Some(ti.pti_resident_size))
+                    (Some(total_ns), Some(ti.pti_resident_size))
                 }
                 Err(_) => (None, None),
             };
             let fd_count = count_fds(pid);
             Sample {
-                cpu_seconds,
+                cpu_total,
+                cpu_total_per_sec: NS_PER_SEC,
                 rss_bytes,
                 fd_count,
             }
@@ -551,9 +695,9 @@ pub mod macos {
             // per-platform invariant is "monitor emits non-zero samples
             // for a self-process"; probing the real libproc sampler
             // against the test's own PID is the strongest live check we
-            // can run inside `cargo test`. `cpu_seconds` is a delta, so
-            // the first call reports 0.0 — hence only RSS and fd_count
-            // carry the "non-None" assertion, matching Linux.
+            // can run inside `cargo test`. F-575: the trait now reports
+            // cumulative cpu_total, not a delta, so the assertion shape
+            // matches the Linux sibling.
             //
             // This test ships live on macOS CI (F-158 added the
             // macos-latest runner that calls `just test-rust`) so a
@@ -568,6 +712,11 @@ pub mod macos {
                 sample.fd_count.is_some(),
                 "libproc must count live self fds"
             );
+            assert!(
+                sample.cpu_total.is_some(),
+                "libproc must report cumulative cpu time"
+            );
+            assert_eq!(sample.cpu_total_per_sec, NS_PER_SEC);
             let rss = sample.rss_bytes.unwrap();
             assert!(rss > 0, "test process must report non-zero RSS, got {rss}");
             let fds = sample.fd_count.unwrap();
@@ -588,11 +737,14 @@ pub mod macos {
 /// — they include window handles, event handles, mutex handles, etc. —
 /// but they're the closest off-the-shelf count and the DoD explicitly
 /// names `GetProcessHandleCount` as the probe, so we follow it.
+///
+/// F-575: probe is **stateless** — the per-instance CPU baseline is
+/// owned by the ticker task. The probe returns the cumulative
+/// 100ns FILETIME reading and the `10_000_000` divisor in every
+/// `Sample`.
 #[cfg(target_os = "windows")]
 pub mod windows {
     use super::{Sample, Sampler};
-    use std::collections::HashMap;
-    use tokio::sync::Mutex;
 
     use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
     use windows_sys::Win32::System::ProcessStatus::{
@@ -603,18 +755,15 @@ pub mod windows {
         PROCESS_VM_READ,
     };
 
-    /// `windows-sys`-backed sampler. Same delta-from-previous CPU pattern
-    /// as the Linux and macOS probes.
-    pub struct WindowsSampler {
-        /// pid -> cumulative (kernel + user) CPU in 100ns FILETIME units.
-        previous_100ns: Mutex<HashMap<u32, u64>>,
-    }
+    /// FILETIME ticks per second. Each tick is 100ns.
+    const FILETIME_PER_SEC: u64 = 10_000_000;
+
+    /// `windows-sys`-backed sampler. Stateless across calls (F-575).
+    pub struct WindowsSampler;
 
     impl WindowsSampler {
         pub fn new() -> Self {
-            Self {
-                previous_100ns: Mutex::new(HashMap::new()),
-            }
+            Self
         }
     }
 
@@ -658,15 +807,7 @@ pub mod windows {
             // GetProcessHandleCount; PROCESS_VM_READ is required by the
             // psapi memory probe. An AV/EDR can still deny this — callers
             // degrade gracefully (all-None Sample) in that case.
-            //
-            // `HANDLE` is `*mut c_void` and therefore `!Send`. To keep the
-            // `sample()` future `Send` (the `Sampler` trait requires it
-            // through `async_trait`'s `+ Send` bound), we do every syscall
-            // in a tight non-await scope, drop the handle at the end of
-            // it, and only then `.await` the mutex that stores previous
-            // CPU totals. Nothing in the sync block suspends, so there's
-            // no behavioral downside.
-            let (total_100ns_opt, rss_bytes, fd_count) = {
+            let (cpu_total, rss_bytes, fd_count) = {
                 let handle = unsafe {
                     OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid)
                 };
@@ -681,22 +822,9 @@ pub mod windows {
                 )
             };
 
-            let cpu_seconds = match total_100ns_opt {
-                Some(total_100ns) => {
-                    let mut prev = self.previous_100ns.lock().await;
-                    let delta = match prev.get(&pid).copied() {
-                        Some(previous) if total_100ns >= previous => total_100ns - previous,
-                        _ => 0,
-                    };
-                    prev.insert(pid, total_100ns);
-                    // FILETIME ticks are 100ns. 10_000_000 per second.
-                    Some(delta as f64 / 10_000_000.0)
-                }
-                None => None,
-            };
-
             Sample {
-                cpu_seconds,
+                cpu_total,
+                cpu_total_per_sec: FILETIME_PER_SEC,
                 rss_bytes,
                 fd_count,
             }
@@ -778,6 +906,11 @@ pub mod windows {
                 sample.fd_count.is_some(),
                 "GetProcessHandleCount must succeed for self"
             );
+            assert!(
+                sample.cpu_total.is_some(),
+                "GetProcessTimes must succeed for self"
+            );
+            assert_eq!(sample.cpu_total_per_sec, FILETIME_PER_SEC);
             let rss = sample.rss_bytes.unwrap();
             assert!(rss > 0, "test process must report non-zero RSS, got {rss}");
             let fds = sample.fd_count.unwrap();
@@ -826,25 +959,40 @@ pub fn default_sampler() -> std::sync::Arc<dyn Sampler> {
 /// Test sampler that returns a scripted sequence of samples and counts
 /// how many times it was called. Public so integration tests outside
 /// this crate can drive the monitor deterministically.
+///
+/// F-575: callers express a desired per-tick CPU-seconds delta via
+/// the [`fake_sample`] helper; the FakeSampler accumulates those
+/// deltas into the cumulative `Sample::cpu_total` stream the post-F-575
+/// ticker expects, so existing tests keep their "pass me a delta" call
+/// shape unchanged.
 pub struct FakeSampler {
     calls: std::sync::Mutex<u64>,
     queue: std::sync::Mutex<std::collections::VecDeque<Sample>>,
     fallback: Sample,
+    /// Per-PID running cumulative-tick total. Each scripted `Sample`
+    /// carries a *delta* (in `cpu_total`'s slot, with
+    /// `cpu_total_per_sec` set to a unit-free 1); the FakeSampler
+    /// turns that delta into the cumulative reading the post-F-575
+    /// ticker expects.
+    running_total: std::sync::Mutex<std::collections::HashMap<u32, u64>>,
 }
 
 impl FakeSampler {
     /// New sampler that returns `fallback` once the scripted queue is
     /// drained. Useful for tests that want "N scripted samples, then
-    /// steady state".
+    /// steady state". The `fallback`'s `cpu_total` is treated as a
+    /// per-tick delta against the FakeSampler's running total.
     pub fn new(fallback: Sample) -> Self {
         Self {
             calls: std::sync::Mutex::new(0),
             queue: std::sync::Mutex::new(std::collections::VecDeque::new()),
             fallback,
+            running_total: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
     /// Enqueue a specific sample to be returned on the next `sample()`.
+    /// Same delta semantics as [`FakeSampler::new`].
     pub fn enqueue(&self, s: Sample) {
         self.queue.lock().unwrap().push_back(s);
     }
@@ -859,13 +1007,53 @@ impl FakeSampler {
 
 #[async_trait::async_trait]
 impl Sampler for FakeSampler {
-    async fn sample(&self, _pid: u32) -> Sample {
+    async fn sample(&self, pid: u32) -> Sample {
         *self.calls.lock().unwrap() += 1;
-        self.queue
+        let mut delta_sample = self
+            .queue
             .lock()
             .unwrap()
             .pop_front()
-            .unwrap_or(self.fallback)
+            .unwrap_or(self.fallback);
+        // Treat `cpu_total` on the scripted sample as a per-tick delta;
+        // accumulate into per-PID running total so the ticker sees a
+        // monotonically increasing cumulative reading.
+        if let Some(delta) = delta_sample.cpu_total {
+            let mut totals = self.running_total.lock().unwrap();
+            let total = totals.entry(pid).or_insert(0);
+            *total = total.saturating_add(delta);
+            delta_sample.cpu_total = Some(*total);
+        }
+        delta_sample
+    }
+}
+
+/// Test-only convenience: build a `Sample` whose ticker-visible
+/// `cpu_seconds` will equal the given value at a 1Hz tick. Hides the
+/// `cpu_total + cpu_total_per_sec` plumbing so existing tests stay
+/// readable.
+///
+/// `cpu_seconds_per_tick` is the per-tick CPU-seconds delta you want
+/// the ticker to see; `cpu_total_per_sec` is set to `1` so the ticker's
+/// `delta_ticks / per_sec` produces `delta_ticks` directly. The
+/// FakeSampler turns the per-tick delta into a cumulative reading
+/// internally.
+pub fn fake_sample(
+    cpu_seconds_per_tick: f64,
+    rss_bytes: Option<u64>,
+    fd_count: Option<u64>,
+) -> Sample {
+    // Scale so `delta_u64 / 1` ≈ `cpu_seconds_per_tick`. Choose a
+    // resolution of 1e9 to match macOS-style nanosecond ticks; this is
+    // an arbitrary internal unit since the FakeSampler reports
+    // `cpu_total_per_sec = 1e9` to the ticker.
+    let ticks_per_sec: u64 = 1_000_000_000;
+    let delta = (cpu_seconds_per_tick * ticks_per_sec as f64) as u64;
+    Sample {
+        cpu_total: Some(delta),
+        cpu_total_per_sec: ticks_per_sec,
+        rss_bytes,
+        fd_count,
     }
 }
 
@@ -878,22 +1066,18 @@ mod tests {
     }
 
     fn sample(cpu: f64, rss: u64, fds: u64) -> Sample {
-        Sample {
-            cpu_seconds: Some(cpu),
-            rss_bytes: Some(rss),
-            fd_count: Some(fds),
-        }
+        fake_sample(cpu, Some(rss), Some(fds))
     }
 
     // Tests use a small real-time tick (20ms) so they complete quickly and
     // don't depend on paused-time cooperating with multi-task broadcast
-    // channels. `cpu_seconds` fields are scaled proportionally so the
+    // channels. `cpu_seconds` deltas are scaled proportionally so the
     // computed `cpu_pct` equals the pre-scale value. That is: with a 20ms
-    // tick, `cpu_seconds: 0.002` yields 10% — the same intent as 0.1 with
-    // a 1s tick, but without waiting a real second.
+    // tick, a 0.002s delta yields 10% — the same intent as 0.1s with a 1s
+    // tick, but without waiting a real second.
     const TEST_TICK: Duration = Duration::from_millis(20);
     /// Scale factor `tick / 1s`: multiply a "what cpu_pct do I want"
-    /// fraction by this to get the `cpu_seconds` delta that produces it.
+    /// fraction by this to get the per-tick cpu-seconds delta.
     const TICK_SCALE: f64 = 0.020;
     const RECV_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -908,31 +1092,51 @@ mod tests {
     async fn track_emits_a_resource_sample_after_one_tick() {
         // RED test for the core DoD item: "spawn a mock instance, advance
         // time, assert pill values update".
+        //
+        // F-575 note: the per-task `CpuBaseline` returns 0 on the first
+        // reading (the cumulative OS counter doesn't represent one
+        // tick's work), so we drain warm-up emissions and assert that
+        // the steady-state cpu_pct converges to the scripted 10% value.
         let fake = Arc::new(FakeSampler::new(sample(0.1 * TICK_SCALE, 4096, 7)));
         let mon = ResourceMonitor::new(Arc::clone(&fake) as Arc<dyn Sampler>, TEST_TICK);
         let mut rx = mon.events();
         let id = inst();
         mon.track(id.clone(), 12345).await;
 
-        let ev = recv_one(&mut rx).await;
-        match ev {
-            Event::ResourceSample {
+        // First emission is the warm-up (cpu_pct ≈ 0). Subsequent
+        // emissions fold the 10% scripted delta into the rolling
+        // average; after CPU_WINDOW (5) post-warmup ticks the average
+        // is exactly 10%.
+        let mut last_pct = None;
+        let mut last_rss = None;
+        let mut last_fds = None;
+        let mut last_id = None;
+        for _ in 0..(CPU_WINDOW + 1) {
+            let ev = recv_one(&mut rx).await;
+            if let Event::ResourceSample {
                 instance_id,
                 cpu_pct,
                 rss_bytes,
                 fd_count,
                 ..
-            } => {
-                assert_eq!(instance_id, id);
-                assert_eq!(rss_bytes, Some(4096));
-                assert_eq!(fd_count, Some(7));
-                // 0.1 * TICK_SCALE seconds on-cpu in a TEST_TICK window →
-                // 10% rolling avg (single sample in history).
-                let pct = cpu_pct.expect("cpu_pct populated when cpu_seconds is Some");
-                assert!((pct - 10.0).abs() < 0.5, "expected ~10% cpu_pct, got {pct}");
+            } = ev
+            {
+                last_id = Some(instance_id);
+                last_pct = cpu_pct;
+                last_rss = rss_bytes;
+                last_fds = fd_count;
+            } else {
+                panic!("expected ResourceSample, got {ev:?}");
             }
-            other => panic!("expected ResourceSample, got {other:?}"),
         }
+        assert_eq!(last_id.as_ref(), Some(&id));
+        assert_eq!(last_rss, Some(4096));
+        assert_eq!(last_fds, Some(7));
+        let pct = last_pct.expect("cpu_pct populated when cpu_seconds is Some");
+        assert!(
+            (pct - 10.0).abs() < 0.5,
+            "expected ~10% cpu_pct after warm-up, got {pct}"
+        );
     }
 
     #[tokio::test]
@@ -1115,44 +1319,57 @@ mod tests {
 
     #[tokio::test]
     async fn cpu_pct_is_rolling_average_over_recent_samples() {
-        // Two scripted samples so the first two emissions exercise the
-        // rolling-average fold, then fall through to the fallback.
+        // Two scripted samples so the first two non-warmup emissions
+        // exercise the rolling-average fold, then fall through to the
+        // fallback.
+        //
+        // F-575: the first emission is a warm-up (CpuBaseline returns 0
+        // on first reading because the cumulative OS counter spans the
+        // whole process lifetime, not a tick). Drain it and assert
+        // against the next two emissions.
         let fake = Arc::new(FakeSampler::new(sample(0.0, 1, 1)));
-        fake.enqueue(sample(0.1 * TICK_SCALE, 1, 1)); // 10% first tick
-        fake.enqueue(sample(0.3 * TICK_SCALE, 1, 1)); // 30% second tick
+        fake.enqueue(sample(0.0, 1, 1)); // warm-up tick — pct1 will be 0
+        fake.enqueue(sample(0.1 * TICK_SCALE, 1, 1)); // 10% first real tick
+        fake.enqueue(sample(0.3 * TICK_SCALE, 1, 1)); // 30% second real tick
         let mon = ResourceMonitor::new(Arc::clone(&fake) as Arc<dyn Sampler>, TEST_TICK);
         let mut rx = mon.events();
         let id = inst();
         mon.track(id, 1).await;
 
+        let _warmup = recv_one(&mut rx).await;
+
         let first = recv_one(&mut rx).await;
         let Event::ResourceSample { cpu_pct: pct1, .. } = first else {
             panic!("wrong variant")
         };
+        // History after warm-up has [0]; after first real tick it's
+        // [0, 10] → avg 5%.
         let pct1 = pct1.unwrap();
         assert!(
-            (pct1 - 10.0).abs() < 0.5,
-            "first tick → 10% only, got {pct1}"
+            (pct1 - 5.0).abs() < 0.5,
+            "first real tick → avg(0, 10) = 5%, got {pct1}"
         );
 
         let second = recv_one(&mut rx).await;
         let Event::ResourceSample { cpu_pct: pct2, .. } = second else {
             panic!("wrong variant")
         };
+        // History grows to [0, 10, 30] → avg 13.33%.
         let pct2 = pct2.unwrap();
         assert!(
-            (pct2 - 20.0).abs() < 0.5,
-            "second tick is avg(10, 30) = 20%, got {pct2}"
+            (pct2 - 13.333).abs() < 0.5,
+            "second real tick is avg(0, 10, 30) = 13.33%, got {pct2}"
         );
     }
 
     #[tokio::test]
     async fn missing_cpu_seconds_produces_none_cpu_pct_on_first_sample() {
-        // When the platform probe can't read CPU (all None), the rolling
-        // history stays empty and the emitted `cpu_pct` is None. RSS/fds
-        // are preserved verbatim.
+        // When the platform probe can't read CPU (cpu_total None), the
+        // rolling history stays empty and the emitted `cpu_pct` is None.
+        // RSS/fds are preserved verbatim.
         let fake = Arc::new(FakeSampler::new(Sample {
-            cpu_seconds: None,
+            cpu_total: None,
+            cpu_total_per_sec: 1,
             rss_bytes: Some(4096),
             fd_count: Some(3),
         }));
@@ -1174,6 +1391,62 @@ mod tests {
             }
             other => panic!("expected ResourceSample, got {other:?}"),
         }
+    }
+
+    // F-575: verify Drop is deterministic at scale. A hundred
+    // outstanding ticker tasks must all be aborted synchronously, and
+    // the fake sampler's call counter must stop advancing immediately
+    // (within a small grace window for in-flight ticks).
+    #[tokio::test]
+    async fn drop_aborts_one_hundred_tasks_deterministically() {
+        let fake = Arc::new(FakeSampler::new(sample(0.0, 1, 1)));
+        let calls_at_drop = {
+            let mon = ResourceMonitor::new(Arc::clone(&fake) as Arc<dyn Sampler>, TEST_TICK);
+            for pid in 0..100u32 {
+                mon.track(inst(), pid).await;
+            }
+            // Drive at least one tick from each task so they're all
+            // actively in their tick loop, not still waiting on the
+            // initial `interval.tick().await`.
+            tokio::time::sleep(TEST_TICK * 3).await;
+            fake.calls()
+            // Drop runs here — every JoinHandle must be aborted.
+        };
+
+        tokio::time::sleep(TEST_TICK * 10).await;
+        let calls_after_drop = fake.calls();
+        // Allow up to two extra calls per task as a tolerance for
+        // ticks racing the abort signal — the strong guarantee is
+        // "no continuous sampling" not "exact count match".
+        let tolerance = 200u64;
+        assert!(
+            calls_after_drop <= calls_at_drop + tolerance,
+            "drop must halt sampling: {calls_at_drop} -> {calls_after_drop}"
+        );
+    }
+
+    // F-575: under concurrent track() pressure on distinct ids the
+    // tasks map must not lose handles. Run 100 concurrent tracks and
+    // verify the map size matches.
+    #[tokio::test]
+    async fn concurrent_track_does_not_leak_handles() {
+        let fake = Arc::new(FakeSampler::new(sample(0.0, 1, 1)));
+        let mon = Arc::new(ResourceMonitor::new(
+            Arc::clone(&fake) as Arc<dyn Sampler>,
+            TEST_TICK,
+        ));
+        let ids: Vec<AgentInstanceId> = (0..100).map(|_| inst()).collect();
+        let mut joiners = Vec::with_capacity(ids.len());
+        for (i, id) in ids.iter().cloned().enumerate() {
+            let mon = Arc::clone(&mon);
+            joiners.push(tokio::spawn(async move {
+                mon.track(id, i as u32).await;
+            }));
+        }
+        for j in joiners {
+            j.await.unwrap();
+        }
+        assert_eq!(mon.tracked_count().await, 100, "all tracks must register");
     }
 
     // Small helper keeps the drop test readable.
