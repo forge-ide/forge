@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 
@@ -44,6 +44,35 @@ use crate::{ForgeError, Result};
 /// history) can call this same helper to walk a coherent, non-superseded
 /// transcript.
 pub fn apply_superseded(events: Vec<(u64, Event)>) -> Vec<(u64, Event)> {
+    // F-572: previously O(N×K) — each `BranchDeleted` marker scanned the
+    // entire events vector for a matching `AssistantMessage`. Replaced with
+    // a single O(N) pre-pass that builds an index keyed on the resolved
+    // `(parent, variant_index)` pair, so each `BranchDeleted` resolves in
+    // O(1). Also switched the final filter from
+    // `into_iter().filter().collect()` to `Vec::retain` to drop the second
+    // log-sized Vec allocation on session resume.
+    let mut branch_index: HashMap<(MessageId, u32), MessageId> = HashMap::new();
+    for (_, ev) in &events {
+        if let Event::AssistantMessage {
+            id,
+            branch_parent,
+            branch_variant_index: idx,
+            ..
+        } = ev
+        {
+            // variant 0 is the root: `(id, 0)` keys to `id` itself.
+            // N >= 1 is a sibling: `(branch_parent, idx)` keys to `id`.
+            // Same `MessageId` may appear multiple times (e.g. streaming
+            // delta finalisation); the first occurrence wins, matching the
+            // pre-F-572 `break`-on-first-match semantics.
+            let key = match branch_parent {
+                None => (id.clone(), 0u32),
+                Some(parent) => (parent.clone(), *idx),
+            };
+            branch_index.entry(key).or_insert_with(|| id.clone());
+        }
+    }
+
     let mut hidden_ids: HashSet<MessageId> = HashSet::new();
     for (_, ev) in &events {
         match ev {
@@ -54,32 +83,14 @@ pub fn apply_superseded(events: Vec<(u64, Event)>) -> Vec<(u64, Event)> {
                 parent,
                 variant_index,
             } => {
-                // Resolve parent+index to the underlying MessageId. variant 0
-                // is the root (`id == parent`); N >= 1 is the sibling whose
-                // (branch_parent, index) matches.
-                for (_, cand) in &events {
-                    if let Event::AssistantMessage {
-                        id,
-                        branch_parent,
-                        branch_variant_index: idx,
-                        ..
-                    } = cand
-                    {
-                        let is_target = if *variant_index == 0 {
-                            branch_parent.is_none() && id == parent
-                        } else {
-                            branch_parent.as_ref() == Some(parent) && idx == variant_index
-                        };
-                        if is_target {
-                            hidden_ids.insert(id.clone());
-                            break;
-                        }
-                    }
+                if let Some(target) = branch_index.get(&(parent.clone(), *variant_index)) {
+                    hidden_ids.insert(target.clone());
                 }
             }
             _ => {}
         }
     }
+
     if hidden_ids.is_empty() {
         // Still need to hide bare BranchDeleted markers that did not resolve
         // (client-side drift). Unresolved markers do nothing observable, so
@@ -87,10 +98,9 @@ pub fn apply_superseded(events: Vec<(u64, Event)>) -> Vec<(u64, Event)> {
         // keep that contract and let unresolved markers sit in the replay.
         return events;
     }
+    let mut events = events;
+    events.retain(|(_, ev)| !is_hidden_by(ev, &hidden_ids));
     events
-        .into_iter()
-        .filter(|(_, ev)| !is_hidden_by(ev, &hidden_ids))
-        .collect()
 }
 
 fn is_hidden_by(event: &Event, hidden_ids: &HashSet<MessageId>) -> bool {

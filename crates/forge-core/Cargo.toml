@@ -19,3 +19,8 @@ dirs = "5"
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "time"] }
+criterion = "0.5"
+
+[[bench]]
+name = "event_log_and_superseded"
+harness = false

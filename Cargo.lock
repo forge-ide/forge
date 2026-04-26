@@ -1401,6 +1401,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "criterion",
  "dirs 5.0.1",
  "rand 0.8.6",
  "serde",
