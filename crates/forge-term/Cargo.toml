@@ -19,6 +19,9 @@ path = "src/lib.rs"
 ghostty-vt = ["dep:libghostty-vt"]
 
 [dependencies]
+# F-570: refcounted byte payload so the ghostty-vt tee is a refcount bump
+# rather than a deep clone of every PTY chunk on the read hot path.
+bytes = "1"
 portable-pty = "0.9"
 thiserror = "1"
 tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
@@ -26,4 +29,13 @@ tracing = "0.1"
 libghostty-vt = { version = "0.1.1", optional = true }
 
 [dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time", "test-util"] }
+
+# F-570: throughput + allocation-count harness for the PTY reader hot path.
+# Counts heap allocations via a custom allocator wrapper so the proxy
+# metric is captured even when wall-time throughput is hard to compare on
+# loaded CI hardware.
+[[bench]]
+name = "throughput"
+harness = false

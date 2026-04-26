@@ -60,6 +60,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use bytes::Bytes;
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use tokio::sync::mpsc;
 
@@ -134,7 +135,13 @@ impl From<TerminalSize> for PtySize {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TerminalEvent {
     /// Raw PTY output bytes. Pass through to xterm.js unchanged.
-    Bytes(Vec<u8>),
+    ///
+    /// Carried as a [`bytes::Bytes`] so the ghostty-vt tee on the reader
+    /// hot path is a refcount bump rather than a deep copy of up to a
+    /// kernel-buffer's worth of bytes per chunk (F-570). Consumers that
+    /// need an owned `Vec<u8>` can call `to_vec()` on the payload;
+    /// consumers that only need to read can deref to `&[u8]` for free.
+    Bytes(Bytes),
     /// Process exit status. Always the final event before channel close.
     Exit(ExitStatus),
 }
@@ -377,18 +384,30 @@ impl Drop for TerminalSession {
     }
 }
 
+/// Size of the PTY read buffer. PTY kernel buffers on Linux/macOS are
+/// typically 16-64 KiB; matching the lower end keeps each `read(2)` close
+/// to one drained kernel buffer and cuts syscall + channel-send count by
+/// ~4× vs. the legacy 4 KiB sizing on bursty workloads (F-570).
+///
+/// Heap-allocated rather than stack-allocated so the thread stack stays
+/// small regardless of any future bump.
+const PTY_READ_BUFFER_BYTES: usize = 16 * 1024;
+
 fn spawn_reader_thread(
     mut reader: Box<dyn Read + Send>,
     tx: mpsc::Sender<TerminalEvent>,
     #[cfg(feature = "ghostty-vt")] vt_tx: std::sync::mpsc::SyncSender<vt::VtCommand>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
+        let mut buf = vec![0u8; PTY_READ_BUFFER_BYTES];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break, // EOF: PTY closed, child exited
                 Ok(n) => {
-                    let chunk = buf[..n].to_vec();
+                    // One heap copy off the read buffer into a refcounted
+                    // `Bytes`. The VT tee and the public-channel send then
+                    // both pass cheap `Arc`-style handles — no second copy.
+                    let chunk = Bytes::copy_from_slice(&buf[..n]);
 
                     // Tee to the VT driver *first*: the driver's job is to
                     // keep its state machine in sync with the stream, and
