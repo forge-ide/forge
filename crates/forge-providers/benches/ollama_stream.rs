@@ -427,8 +427,12 @@ fn bench_serialize_50_turn_body(c: &mut Criterion) {
     group.bench_function("typed (F-568, direct Serializer)", |b| {
         b.iter(|| {
             black_box(
-                serialize_chat_body(black_box(model), black_box(&sys), black_box(&history))
-                    .expect("serialize"),
+                serialize_chat_body(
+                    black_box(model),
+                    black_box(sys.as_deref()),
+                    black_box(&history),
+                )
+                .expect("serialize"),
             );
         });
     });
@@ -481,14 +485,16 @@ fn assert_f568_alloc_reductions(_c: &mut Criterion) {
     let sys: Option<String> = Some("be helpful".into());
 
     // Warm.
-    let _ = serialize_chat_body(model, &sys, &h10).unwrap();
-    let _ = serialize_chat_body(model, &sys, &h50).unwrap();
+    let _ = serialize_chat_body(model, sys.as_deref(), &h10).unwrap();
+    let _ = serialize_chat_body(model, sys.as_deref(), &h50).unwrap();
 
     let (typed_10_allocs, _) = record(|| {
-        let _ = serialize_chat_body(black_box(model), black_box(&sys), black_box(&h10)).unwrap();
+        let _ = serialize_chat_body(black_box(model), black_box(sys.as_deref()), black_box(&h10))
+            .unwrap();
     });
     let (typed_50_allocs, _) = record(|| {
-        let _ = serialize_chat_body(black_box(model), black_box(&sys), black_box(&h50)).unwrap();
+        let _ = serialize_chat_body(black_box(model), black_box(sys.as_deref()), black_box(&h50))
+            .unwrap();
     });
     let (legacy_10_allocs, _) = record(|| {
         let _ = legacy_serialize_chat_body(black_box(model), black_box(&sys), black_box(&h10));

@@ -47,7 +47,7 @@ async fn chat_streams_text_tool_call_and_done() {
     let provider = OllamaProvider::new(server.uri(), "llama3");
 
     let req = ChatRequest {
-        system: Some("be helpful".into()),
+        system: Some(std::sync::Arc::from("be helpful")),
         messages: vec![user_msg("hi")],
     };
     let mut stream = provider.chat(req).await.expect("chat call succeeds");
