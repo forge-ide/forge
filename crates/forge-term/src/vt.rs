@@ -23,6 +23,7 @@
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::thread::JoinHandle;
 
+use bytes::Bytes;
 use libghostty_vt::{Terminal, TerminalOptions};
 
 /// Default scrollback budget for sessions created via
@@ -83,8 +84,10 @@ pub(crate) enum QueryResponse {
 /// so answers reflect the latest parsed state.
 #[derive(Debug)]
 pub(crate) enum VtCommand {
-    /// A chunk of PTY output to feed into the parser.
-    Bytes(Vec<u8>),
+    /// A chunk of PTY output to feed into the parser. Refcounted so the
+    /// reader-thread tee never deep-copies the public-channel payload
+    /// (F-570).
+    Bytes(Bytes),
     /// New terminal dimensions in cells.
     Resize { cols: u16, rows: u16 },
     /// One-shot query. Reply arrives via the sender.
@@ -266,7 +269,7 @@ mod tests {
         let handle = spawn_vt_driver(80, 24);
         handle
             .tx
-            .send(VtCommand::Bytes(b"hello".to_vec()))
+            .send(VtCommand::Bytes(Bytes::from_static(b"hello")))
             .expect("send bytes");
         let pos = handle.cursor_position().expect("query cursor");
         assert_eq!(pos, CursorPosition { col: 5, row: 0 });
@@ -279,7 +282,7 @@ mod tests {
         // Write one character so the cursor is on the new grid.
         handle
             .tx
-            .send(VtCommand::Bytes(b"x".to_vec()))
+            .send(VtCommand::Bytes(Bytes::from_static(b"x")))
             .expect("send bytes");
         let pos = handle.cursor_position().expect("query cursor");
         assert_eq!(pos.col, 1);
@@ -303,7 +306,7 @@ mod tests {
         let handle = spawn_vt_driver(80, 24);
         handle
             .tx
-            .send(VtCommand::Bytes(b"ab\r\n".to_vec()))
+            .send(VtCommand::Bytes(Bytes::from_static(b"ab\r\n")))
             .expect("send bytes");
         let pos = handle.cursor_position().expect("query cursor");
         assert_eq!(pos, CursorPosition { col: 0, row: 1 });
@@ -342,7 +345,7 @@ mod tests {
             }
             handle
                 .tx
-                .send(VtCommand::Bytes(buf))
+                .send(VtCommand::Bytes(Bytes::from(buf)))
                 .expect("send bytes chunk");
             remaining -= n;
         }

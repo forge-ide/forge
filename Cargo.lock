@@ -1581,6 +1581,8 @@ dependencies = [
 name = "forge-term"
 version = "0.2.0"
 dependencies = [
+ "bytes",
+ "criterion",
  "libghostty-vt",
  "portable-pty",
  "thiserror 1.0.69",

@@ -1136,9 +1136,14 @@ fn spawn_event_forwarder<R: Runtime>(
         while let Some(event) = rx.recv().await {
             match event {
                 TerminalEvent::Bytes(data) => {
+                    // F-570: `forge-term` now ships `bytes::Bytes` so the
+                    // PTY-reader → VT-tee path is allocation-cheap. The
+                    // Tauri payload is still `Vec<u8>` (TS sees an
+                    // `Array<number>`) so the webview API is unchanged;
+                    // copy out once at the IPC boundary.
                     let payload = TerminalBytesEvent {
                         terminal_id: terminal_id.clone(),
-                        data,
+                        data: data.to_vec(),
                     };
                     let target = EventTarget::webview_window(&owner_label);
                     if let Err(e) = app.emit_to(target, TERMINAL_BYTES_EVENT, payload) {
