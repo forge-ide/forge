@@ -1447,6 +1447,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "criterion",
  "dirs 5.0.1",
  "hex",
  "reqwest 0.12.28",

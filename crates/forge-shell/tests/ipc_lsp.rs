@@ -59,7 +59,11 @@ fn mock_stdio_path() -> PathBuf {
 struct NoopDownloader;
 #[async_trait::async_trait]
 impl forge_lsp::Downloader for NoopDownloader {
-    async fn fetch(&self, _url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    async fn fetch_into(
+        &self,
+        _url: &str,
+        _sink: &mut (dyn tokio::io::AsyncWrite + Send + Unpin),
+    ) -> Result<[u8; 32], Box<dyn std::error::Error + Send + Sync>> {
         unreachable!("lsp_start must not hit the network in tests");
     }
 }

@@ -15,6 +15,7 @@
 use std::time::Duration;
 
 use forge_lsp::bootstrap::{Downloader, HttpClientOptions, HttpDownloader, OversizeBody};
+use tokio::io::sink;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -44,8 +45,9 @@ async fn slow_loris_trips_request_timeout() {
         .await;
 
     let d = HttpDownloader::with_options(test_options());
+    let mut s = sink();
     let err = d
-        .fetch(&format!("{}/archive.bin", server.uri()))
+        .fetch_into(&format!("{}/archive.bin", server.uri()), &mut s)
         .await
         .expect_err("slow-loris must be cut off by the request timeout");
     // Walk the `std::error::Error` source chain — reqwest's top-level
@@ -84,8 +86,9 @@ async fn oversize_body_surfaces_dedicated_error() {
         .await;
 
     let d = HttpDownloader::with_options(test_options());
+    let mut s = sink();
     let err = d
-        .fetch(&format!("{}/huge", server.uri()))
+        .fetch_into(&format!("{}/huge", server.uri()), &mut s)
         .await
         .expect_err("oversize body must be rejected");
     let oversize = err
@@ -106,8 +109,9 @@ async fn cross_scheme_redirect_is_refused() {
     // both the initial-URL check and the redirect-target check, since
     // reqwest applies `https_only` to both.
     let d = HttpDownloader::new();
+    let mut s = sink();
     let err = d
-        .fetch("http://example.invalid/anything")
+        .fetch_into("http://example.invalid/anything", &mut s)
         .await
         .expect_err("plain-HTTP fetch must be refused under https_only");
     let msg = err.to_string().to_ascii_lowercase();
@@ -134,8 +138,9 @@ async fn redirect_chain_is_capped() {
         .await;
 
     let d = HttpDownloader::with_options(test_options());
+    let mut s = sink();
     let err = d
-        .fetch(&format!("{}{loop_path}", server.uri()))
+        .fetch_into(&format!("{}{loop_path}", server.uri()), &mut s)
         .await
         .expect_err("infinite redirect loop must be refused");
     let msg = err.to_string().to_ascii_lowercase();
