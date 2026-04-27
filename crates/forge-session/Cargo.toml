@@ -39,6 +39,10 @@ thiserror = "1"
 # and MCP lifecycle. Emission only — no subscriber is installed in `forged`.
 tracing = "0.1"
 tokio = { version = "1", features = ["net", "io-util", "fs", "rt-multi-thread", "macros", "sync", "process", "time", "signal"] }
+# F-587: orchestrator-side credential pull. `SecretString` is the at-boundary
+# type for every credential value; `ExposeSecret` is the deliberate-exposure
+# call gate. We never stringify or log the value.
+secrecy = "0.10"
 
 # F-156: macOS resource sampler. `libproc` wraps the Apple
 # `proc_pidinfo` syscalls used to read task CPU time, resident-size, and
@@ -155,3 +159,7 @@ path = "tests/bg_agents_tracing.rs"
 [[test]]
 name = "eprintln_audit"
 path = "tests/eprintln_audit.rs"
+
+[[test]]
+name = "credentials_pull"
+path = "tests/credentials_pull.rs"

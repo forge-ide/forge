@@ -64,6 +64,7 @@ async fn session_hello_command_round_trips_via_tauri_invoke() {
             false,
             None,
             Some("tauri-hello".to_string()),
+            None, // F-587: keyless test wiring
         )
         .await
         .unwrap();

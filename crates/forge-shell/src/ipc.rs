@@ -559,6 +559,12 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         // F-359: server-side URL context fetch + allowlist setter.
         context_fetch_url,
         set_context_allowed_hosts,
+        // F-587: per-provider credential management. Dashboard-scoped — the
+        // `authz_check` inside each command rejects any window label other
+        // than `dashboard`.
+        crate::credentials_ipc::login_provider,
+        crate::credentials_ipc::logout_provider,
+        crate::credentials_ipc::has_credential,
     ])
 }
 

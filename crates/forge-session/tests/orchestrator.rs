@@ -99,6 +99,7 @@ async fn full_turn_with_tool_call_emits_correct_event_sequence() {
             false,
             None,
             None,
+            None, // F-587: keyless test wiring
         )
         .await
         .unwrap();
@@ -266,6 +267,7 @@ async fn approval_gate_fires_and_blocks_until_client_approves() {
             false,
             None,
             None,
+            None, // F-587: keyless test wiring
         )
         .await
         .unwrap();
@@ -355,6 +357,7 @@ async fn auto_approve_skips_approval_gate_and_emits_auto_approved() {
             false,
             None,
             None,
+            None, // F-587: keyless test wiring
         )
         .await
         .unwrap();
@@ -484,6 +487,7 @@ async fn tool_result_fed_back_to_provider_in_continuation() {
             false,
             None,
             None,
+            None, // F-587: keyless test wiring
         )
         .await
         .unwrap();
@@ -601,6 +605,7 @@ async fn approval_with_this_tool_scope_is_recorded_faithfully() {
             false,
             None,
             None,
+            None, // F-587: keyless test wiring
         )
         .await
         .unwrap();
@@ -683,6 +688,7 @@ async fn malformed_approval_scope_rejects_instead_of_silently_downgrading_to_onc
             false,
             None,
             None,
+            None, // F-587: keyless test wiring
         )
         .await
         .unwrap();
@@ -786,6 +792,7 @@ async fn unexpected_post_handshake_frame_is_logged_not_silently_dropped() {
             false,
             None,
             None,
+            None, // F-587: keyless test wiring
         )
         .await
         .unwrap();

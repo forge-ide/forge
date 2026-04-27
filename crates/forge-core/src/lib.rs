@@ -1,5 +1,6 @@
 pub mod approvals;
 pub mod config_file;
+pub mod credentials;
 mod error;
 mod event;
 mod event_log;
@@ -17,6 +18,7 @@ pub mod workspace;
 pub mod workspaces;
 
 pub use approvals::{ApprovalConfig, ApprovalEntry};
+pub use credentials::{Credentials, EnvFallbackStore, LayeredStore, MemoryStore};
 pub use error::{ForgeError, Result};
 pub use event::{ApprovalPreview, ApprovalSource, ContextRef, EndReason, Event};
 pub use event_log::{read_since, EventLog, MAX_LINE_BYTES};

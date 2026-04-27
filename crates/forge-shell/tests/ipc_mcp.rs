@@ -82,6 +82,7 @@ async fn spawn_daemon_with_workspace(
             false,
             Some(workspace),
             Some(sid),
+            None, // F-587: keyless test wiring
         )
         .await
         .unwrap();

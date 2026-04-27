@@ -132,6 +132,7 @@ async fn session_id_stable_across_handshakes() {
             false,
             None,
             Some(server_id),
+            None, // F-587: keyless test wiring
         )
         .await
         .unwrap();
@@ -174,6 +175,7 @@ async fn workspace_reported_as_absolute_path() {
             false,
             Some(server_workspace),
             None,
+            None, // F-587: keyless test wiring
         )
         .await
         .unwrap();

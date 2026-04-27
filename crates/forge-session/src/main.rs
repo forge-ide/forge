@@ -87,6 +87,8 @@ async fn main() -> Result<()> {
                     ephemeral,
                     workspace,
                     Some(session_id),
+                    // F-587: MockProvider is keyless; no credential pull.
+                    None,
                 )
                 .await
             }
@@ -130,6 +132,10 @@ async fn main() -> Result<()> {
                     ephemeral,
                     workspace,
                     Some(session_id),
+                    // F-587: OllamaProvider is keyless. Anthropic / OpenAI
+                    // providers will wire their LayeredStore + provider id
+                    // here when they land.
+                    None,
                 )
                 .await
             }
@@ -144,6 +150,8 @@ async fn main() -> Result<()> {
                 ephemeral,
                 workspace,
                 Some(session_id),
+                // F-587: MockProvider is keyless.
+                None,
             )
             .await
         }

@@ -6,12 +6,50 @@ use anyhow::{anyhow, Result};
 use chrono::Utc;
 use forge_core::{
     apply_superseded,
+    credentials::Credentials,
     ids::{MessageId, ProviderId, StepId, ToolCallId},
     read_since, ApprovalScope, ApprovalSource, Event, RerunVariant, StepKind, StepOutcome,
 };
 use forge_providers::{ChatBlock, ChatChunk, ChatMessage, ChatRequest, ChatRole, Provider};
 use futures::StreamExt;
 use tokio::sync::{oneshot, Mutex};
+
+/// F-587: per-turn credential pull binding.
+///
+/// `run_turn` consults `store.get(provider_id)` exactly once at turn start
+/// (before the request loop opens the model step). The result is **not**
+/// passed into the request loop — the [`Provider`] trait doesn't yet take
+/// per-turn auth (Phase 1 ships a keyless `OllamaProvider`; Anthropic /
+/// OpenAI providers are wiring this as their auth-injection seam).
+///
+/// What lands today:
+///
+/// * The orchestrator pulls the credential on every turn (DoD #5).
+/// * A `tracing::trace!` records hit / miss with `provider_id` only —
+///   never the value, never even at `debug` level.
+/// * Errors from the store propagate as `Err(_)` so a hostile or broken
+///   keyring backend fails the turn instead of silently downgrading to
+///   keyless.
+///
+/// When provider-level auth lands, the call site in `run_turn` will hand
+/// `credential` into the provider's per-turn auth shape; nothing else
+/// about this struct should need to change.
+#[derive(Clone)]
+pub struct CredentialContext {
+    pub store: Arc<dyn Credentials>,
+    pub provider_id: String,
+}
+
+impl std::fmt::Debug for CredentialContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Deliberately omits `store` (Box<dyn _> doesn't `Debug` well) and
+        // never prints the credential value. `provider_id` is non-secret
+        // by contract.
+        f.debug_struct("CredentialContext")
+            .field("provider_id", &self.provider_id)
+            .finish_non_exhaustive()
+    }
+}
 
 use crate::byte_budget::ByteBudget;
 use crate::dispatcher_cache::DispatcherCache;
@@ -101,7 +139,38 @@ pub async fn run_turn<P: Provider>(
     // `None` preserves the legacy "build a fresh dispatcher per turn"
     // behavior for tests and embedders without the cache wired up.
     dispatcher_cache: Option<Arc<DispatcherCache>>,
+    // F-587: optional per-turn credential binding. When `Some`, the
+    // orchestrator pulls the credential for `provider_id` from `store`
+    // exactly once before the request loop opens. The pulled value is
+    // never logged (trace-level only records hit/miss + provider_id), and
+    // backend errors fail the turn rather than silently downgrading to
+    // keyless. See [`CredentialContext`] for the seam contract.
+    credentials: Option<CredentialContext>,
 ) -> Result<()> {
+    // F-587: pull the credential for the active provider before any
+    // model-side work begins. Today the value is held briefly and then
+    // dropped — the Phase-3 Anthropic / OpenAI providers will plumb it
+    // into their per-request auth headers; for the keyless `OllamaProvider`
+    // shipping in Phase 1, the pull is a no-op-with-trace by design.
+    //
+    // Backend errors propagate. A misconfigured Secret Service daemon or a
+    // locked Keychain is more useful as a turn-level failure than a silent
+    // fall-through to "no auth" that the provider would later 401 on.
+    if let Some(ctx) = credentials.as_ref() {
+        let pulled = ctx.store.get(&ctx.provider_id).await?;
+        tracing::trace!(
+            target: "forge_session::orchestrator::credentials",
+            provider_id = %ctx.provider_id,
+            hit = pulled.is_some(),
+            "credential pull",
+        );
+        // Drop `pulled` here — the value is intentionally not held longer
+        // than necessary. When provider-level auth wiring lands, the value
+        // is handed directly to the provider's request-builder via
+        // `secrecy::ExposeSecret::expose_secret` at the network boundary.
+        drop(pulled);
+    }
+
     let msg_id = MessageId::new();
 
     session
@@ -1508,6 +1577,7 @@ mod tests {
             None,
             None,
             None,
+            None, // F-587: no credentials wired in this AGENTS.md test.
         )
         .await
         .unwrap();
@@ -1532,6 +1602,7 @@ mod tests {
             None,
             None,
             None,
+            None, // F-587
         )
         .await
         .unwrap();
@@ -1593,6 +1664,7 @@ mod tests {
             None,
             None,
             None,
+            None, // F-587
         )
         .await
         .unwrap();

@@ -19,7 +19,9 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{broadcast, Mutex};
 
 use crate::archive::archive_or_purge;
-use crate::orchestrator::{run_turn, ApprovalDecision, Orchestrator, PendingApprovals};
+use crate::orchestrator::{
+    run_turn, ApprovalDecision, CredentialContext, Orchestrator, PendingApprovals,
+};
 use crate::sandbox::ChildRegistry;
 use crate::session::Session;
 use crate::tools::AgentRuntime;
@@ -472,7 +474,17 @@ pub async fn serve(path: &Path, auto_approve: bool, ephemeral: bool) -> Result<(
     let log_path = event_log_path(&SessionId::new().to_string(), None);
     let session = Arc::new(Session::create(log_path).await?);
     let provider = Arc::new(MockProvider::with_default_path());
-    serve_with_session(path, session, provider, auto_approve, ephemeral, None, None).await
+    serve_with_session(
+        path,
+        session,
+        provider,
+        auto_approve,
+        ephemeral,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 /// Timeout for the post-`EADDRINUSE` liveness probe. Short enough that a
@@ -551,6 +563,7 @@ async fn bind_uds_safely(path: &Path) -> Result<UnixListener> {
 /// `session_id` is reported back to clients via `HelloAck.session_id` and identifies
 /// this daemon's persistent session; when `None`, a fresh id is generated for the lifetime
 /// of this server (so all connections to the same server still see the same value).
+#[allow(clippy::too_many_arguments)]
 pub async fn serve_with_session<P: Provider + 'static>(
     path: &Path,
     session: Arc<Session>,
@@ -559,6 +572,12 @@ pub async fn serve_with_session<P: Provider + 'static>(
     ephemeral: bool,
     workspace: Option<PathBuf>,
     session_id: Option<String>,
+    // F-587: optional per-turn credential pull. When `Some`, every
+    // `run_turn` invocation in this session reads the active provider's
+    // credential through this context (see `CredentialContext` for the
+    // contract). `None` keeps the keyless `OllamaProvider` / `MockProvider`
+    // path identical to pre-F-587 behaviour.
+    credentials: Option<CredentialContext>,
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -752,6 +771,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
             agent_runtime,
             mcp,
             dispatcher_cache,
+            credentials.clone(),
         )
         .await;
     }
@@ -810,6 +830,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
                 let mcp = mcp.clone();
                 let agent_runtime = Arc::clone(&agent_runtime);
                 let dispatcher_cache = Arc::clone(&dispatcher_cache);
+                let credentials_for_conn = credentials.clone();
                 tokio::spawn(async move {
                     // F-371: capture session_id for logging *before* the move
                     // into `handle_connection` consumes the Arc.
@@ -831,6 +852,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
                         agent_runtime,
                         mcp,
                         dispatcher_cache,
+                        credentials_for_conn,
                     )
                     .await
                     {
@@ -891,6 +913,8 @@ async fn handle_connection<P: Provider + 'static>(
     // F-567: shared dispatcher cache, refreshed only on MCP-tools-list epoch
     // bumps. Cloning the `Arc` per turn is the steady-state cost.
     dispatcher_cache: Arc<crate::dispatcher_cache::DispatcherCache>,
+    // F-587: per-turn credential pull binding. `None` for keyless providers.
+    credentials: Option<CredentialContext>,
 ) -> Result<()> {
     // ── Handshake ──────────────────────────────────────────────────────────────
     // F-354: both handshake reads are subject to a bounded deadline so a
@@ -1012,6 +1036,11 @@ async fn handle_connection<P: Provider + 'static>(
                         let agent_runtime = (*agent_runtime).clone();
                         let dispatcher_cache = Arc::clone(&dispatcher_cache);
                         let session_id_for_turn = Arc::clone(&session_id);
+                        // F-587: clone the per-session credential binding into
+                        // the turn task. `Clone` on `Arc<dyn Credentials>` +
+                        // `String` is a refcount bump; the actual store is
+                        // shared across every turn in the session.
+                        let credential_ctx_for_turn = credentials.clone();
                         tokio::spawn(async move {
                             let result = run_turn(
                                 Arc::clone(&session),
@@ -1027,6 +1056,17 @@ async fn handle_connection<P: Provider + 'static>(
                                 agent_runtime,
                                 mcp,
                                 Some(dispatcher_cache),
+                                // F-587: per-turn credential pull. Wired
+                                // when the daemon is constructed with a
+                                // provider that needs auth (Anthropic /
+                                // OpenAI in Phase 3); `None` for keyless
+                                // providers (current `OllamaProvider` /
+                                // `MockProvider`) so the orchestrator
+                                // skips the pull entirely. The keyring
+                                // store + active provider id flow in
+                                // through `credential_ctx_for_turn`
+                                // below, captured at session start.
+                                credential_ctx_for_turn.clone(),
                             ).await;
                             if let Err(e) = &result {
                                 tracing::warn!(

@@ -80,6 +80,12 @@ toml = "0.8"
 # production; emission sites only.
 tracing = "0.1"
 ts-rs = "12"
+# F-587: `SecretString` is used at the IPC boundary for `login_provider`
+# (`key` argument) and at the in-process boundary into the `Credentials`
+# trait. The wire shape is still a plain string — Tauri deserializes into
+# `String` and the command body wraps in `SecretString::from` immediately,
+# so the redaction window starts as soon as the IPC frame is decoded.
+secrecy = "0.10"
 
 [dev-dependencies]
 # `forge-session` moved to `[dependencies]` as part of F-137 so the shell can

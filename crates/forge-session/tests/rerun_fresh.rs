@@ -125,6 +125,7 @@ async fn rerun_fresh_regenerates_from_user_message_root_and_supersedes_original(
             false,
             None,
             None,
+            None, // F-587: keyless test wiring
         )
         .await
         .unwrap();
