@@ -7,6 +7,7 @@ import type {
   ApprovalScope,
   BgAgentSummary,
   PersistentApprovalEntry,
+  RerunVariant,
   SessionId,
   ToolCallId,
 } from '@forge/ipc';
@@ -203,6 +204,26 @@ export async function deleteBranch(
  */
 export async function compactTranscript(sessionId: SessionId): Promise<void> {
   await invoke('compact_transcript', { sessionId });
+}
+
+/**
+ * Re-run an assistant message with the chosen [`RerunVariant`] (F-143 /
+ * F-144 / F-600). The Rust orchestrator dispatches:
+ *
+ * - `Replace` — truncate the transcript at `msgId` and regenerate in place.
+ * - `Branch`  — keep the original; append a new variant under the same root.
+ * - `Fresh`   — truncate to the originating user message and regenerate from
+ *               there, producing a brand-new root.
+ *
+ * The shell binds this to `rerun_message`; backend dispatch error surfaces
+ * as a rejected promise with a string reason.
+ */
+export async function rerunMessage(
+  sessionId: SessionId,
+  msgId: string,
+  variant: RerunVariant,
+): Promise<void> {
+  await invoke('rerun_message', { sessionId, msgId, variant });
 }
 
 // ---------------------------------------------------------------------------

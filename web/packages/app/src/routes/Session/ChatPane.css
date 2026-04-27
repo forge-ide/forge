@@ -107,6 +107,39 @@
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--color-text-tertiary);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+/* F-600: per-turn action row (chat-pane.md §4 hover row).
+ * The actions container holds the Re-run trigger plus its anchored
+ * popover. Display is inline so the trigger sits flush with the author
+ * label; the popover-anchor is `position: relative` to place the menu
+ * below the trigger without disturbing the bubble's vertical rhythm.
+ */
+.turn__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  position: relative;
+}
+
+.turn__action--rerun {
+  /* The Button primitive renders display-caps already; this class only
+     scopes the size override so the action row stays compact next to the
+     `● assistant` label. */
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.turn__action-popover-anchor {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: var(--sp-1);
+  z-index: 10;
 }
 
 .turn--user .turn__author {

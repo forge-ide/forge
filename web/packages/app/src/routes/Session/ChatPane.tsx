@@ -26,7 +26,13 @@ import {
   BranchMetadataPopover,
   type VariantRow,
 } from '../../components/BranchMetadataPopover';
-import type { ApprovalLevel, ApprovalScope, SessionId } from '@forge/ipc';
+import { RerunPopover } from '../../components/RerunPopover';
+import type {
+  ApprovalLevel,
+  ApprovalScope,
+  RerunVariant,
+  SessionId,
+} from '@forge/ipc';
 import {
   getApprovalWhitelist,
   addWhitelistEntry,
@@ -42,6 +48,7 @@ import {
   sessionCancel,
   selectBranch,
   deleteBranch,
+  rerunMessage,
 } from '../../ipc/session';
 import { ApprovalPrompt } from '../../components/ApprovalPrompt/ApprovalPrompt';
 import { WhitelistedPill } from '../../components/ApprovalPrompt/WhitelistedPill';
@@ -698,21 +705,72 @@ const UserBubble: Component<{ turn: Extract<ChatTurn, { type: 'user' }> }> = (pr
   </article>
 );
 
-const AssistantBubble: Component<{ turn: Extract<ChatTurn, { type: 'assistant' }> }> = (
-  props,
-) => (
-  // F-405: aria-busy="true" while the turn is still streaming lets AT
-  // users know the content is live.
-  <article class="turn turn--assistant" aria-busy={props.turn.isStreaming ? 'true' : undefined}>
-    <header class="turn__author">● assistant</header>
-    <p class="turn__body">
-      {props.turn.text}
-      <Show when={props.turn.isStreaming}>
-        <span class="streaming-cursor" data-testid="streaming-cursor" aria-hidden="true" />
-      </Show>
-    </p>
-  </article>
-);
+const AssistantBubble: Component<{
+  turn: Extract<ChatTurn, { type: 'assistant' }>;
+  /**
+   * F-600: when present, the bubble renders the per-turn `Re-run ▾` action
+   * (chat-pane.md §4) wired to dispatch the picked variant. Omit on streaming
+   * turns so the action only appears on finalised assistant messages.
+   */
+  sessionId?: SessionId;
+}> = (props) => {
+  const [rerunOpen, setRerunOpen] = createSignal(false);
+
+  const handlePick = (variant: RerunVariant): void => {
+    setRerunOpen(false);
+    const sid = props.sessionId;
+    if (sid === undefined) return;
+    rerunMessage(sid, props.turn.message_id, variant).catch((err: unknown) =>
+      reportInvokeError(sid, 'rerun_message', err),
+    );
+  };
+
+  // F-600: hide the Re-run action while the turn is still streaming —
+  // there's nothing to re-run until the original turn has finalised.
+  const canRerun = (): boolean =>
+    !props.turn.isStreaming && props.sessionId !== undefined;
+
+  return (
+    <article
+      class="turn turn--assistant"
+      aria-busy={props.turn.isStreaming ? 'true' : undefined}
+      data-testid={`assistant-turn-${props.turn.message_id}`}
+    >
+      <header class="turn__author">
+        <span>{'●'} assistant</span>
+        <Show when={canRerun()}>
+          <span class="turn__actions">
+            <Button
+              variant="ghost"
+              size="sm"
+              class="turn__action turn__action--rerun"
+              data-testid={`rerun-trigger-${props.turn.message_id}`}
+              aria-haspopup="menu"
+              aria-expanded={rerunOpen()}
+              onClick={() => setRerunOpen((v) => !v)}
+            >
+              RE-RUN {'▾'}
+            </Button>
+            <Show when={rerunOpen()}>
+              <div class="turn__action-popover-anchor">
+                <RerunPopover
+                  onPick={handlePick}
+                  onDismiss={() => setRerunOpen(false)}
+                />
+              </div>
+            </Show>
+          </span>
+        </Show>
+      </header>
+      <p class="turn__body">
+        {props.turn.text}
+        <Show when={props.turn.isStreaming}>
+          <span class="streaming-cursor" data-testid="streaming-cursor" aria-hidden="true" />
+        </Show>
+      </p>
+    </article>
+  );
+};
 
 // ---------------------------------------------------------------------------
 // F-145 — branch-aware assistant turn wrapper
@@ -881,7 +939,7 @@ const BranchedAssistantTurn: Component<{
           />
         </div>
       </Show>
-      <AssistantBubble turn={props.turn} />
+      <AssistantBubble turn={props.turn} sessionId={props.sessionId} />
       <Show when={liveCount() > 1 && !popoverOpen()}>
         {/* Keep a stable placeholder so layout tests can measure the
             post-strip gap even when the popover is closed. Empty by design. */}
@@ -1529,7 +1587,14 @@ export const ChatPane: Component<ChatPaneProps> = (props) => {
                     );
                   }
                 }
-                return <AssistantBubble turn={turn} />;
+                {
+                  const sid = sessionId();
+                  return sid !== null ? (
+                    <AssistantBubble turn={turn} sessionId={sid} />
+                  ) : (
+                    <AssistantBubble turn={turn} />
+                  );
+                }
               }
               case 'tool_placeholder':
                 return <ToolCallCard turn={turn} />;

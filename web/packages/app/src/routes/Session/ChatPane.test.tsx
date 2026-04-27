@@ -1461,6 +1461,191 @@ describe('ChatPane — branch variants (F-145)', () => {
     expect(getByText('root answer')).toBeInTheDocument();
     expect(queryByText('variant one')).toBeNull();
   });
+
+  // F-600 DoD: "Switching branches in `BranchSelectorStrip` correctly swaps
+  // variant-specific child messages." When the user clicks the strip's prev
+  // arrow, the IPC fires AND the rendered variant content swaps in the same
+  // tick that the BranchSelected event lands. Combined with the gutter being
+  // mounted per-group, this is the round-trip the DoD describes.
+  it('strip prev-arrow swaps the rendered variant content on BranchSelected ack', () => {
+    seedBranchedTurn();
+    const { getByTestId, getByText, queryByText } = render(() => <ChatPane />);
+    // Start on var-1 (latest sibling).
+    expect(getByText('variant one')).toBeInTheDocument();
+    invokeMock.mockClear();
+
+    fireEvent.click(getByTestId('branch-strip-prev'));
+    // Strip dispatched select_branch back to the root.
+    expect(invokeMock).toHaveBeenCalledWith('select_branch', {
+      sessionId: SID,
+      parentId: 'root-1',
+      variantIndex: 0,
+    });
+
+    // Simulate the daemon's BranchSelected ack landing in the store.
+    pushEvent(SID, {
+      kind: 'BranchSelected',
+      parent: 'root-1',
+      selected: 'root-1',
+    });
+
+    // The transcript now renders the root variant; the previously-active
+    // sibling is hidden. The gutter (variant-specific child indicator) is
+    // still mounted because the group has 2 live variants.
+    expect(getByText('root answer')).toBeInTheDocument();
+    expect(queryByText('variant one')).toBeNull();
+    expect(getByTestId('branch-gutter')).toBeInTheDocument();
+  });
+
+  // F-600 DoD: "Delete-variant button in `BranchMetadataPopover` emits
+  // `BranchDeleted` and updates the gutter."
+  //
+  // The popover's delete fires `delete_branch` (asserted in another test);
+  // the daemon then emits `BranchDeleted`. When the deletion drops the live
+  // count to 1, the strip + gutter unmount per spec §15.2 (single-variant
+  // turns render without chrome). This test asserts that round-trip.
+  it('BranchDeleted unmounts the gutter when only one live variant remains', () => {
+    seedBranchedTurn();
+    const { queryByTestId } = render(() => <ChatPane />);
+    // Two variants — gutter visible.
+    expect(queryByTestId('branch-gutter')).toBeInTheDocument();
+
+    pushEvent(SID, {
+      kind: 'BranchDeleted',
+      parent: 'root-1',
+      variant_index: 1,
+    });
+
+    // After deletion the group has one live variant; spec §15.2 → no chrome.
+    expect(queryByTestId('branch-gutter')).toBeNull();
+    expect(queryByTestId('branch-selector-strip')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-600 — Re-run popover wiring on the assistant bubble
+// ---------------------------------------------------------------------------
+
+describe('ChatPane — re-run popover (F-600)', () => {
+  it('renders a re-run trigger on a finalised assistant turn', () => {
+    pushEvent(SID, {
+      kind: 'AssistantMessage',
+      text: 'finalised',
+      message_id: 'assist-rerun-1',
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    expect(getByTestId('rerun-trigger-assist-rerun-1')).toBeInTheDocument();
+  });
+
+  it('does not render the re-run trigger on a streaming turn', () => {
+    pushEvent(SID, {
+      kind: 'AssistantDelta',
+      delta: 'streaming',
+      message_id: 'assist-streaming-1',
+    });
+    const { queryByTestId } = render(() => <ChatPane />);
+    expect(queryByTestId('rerun-trigger-assist-streaming-1')).toBeNull();
+  });
+
+  it('clicking the re-run trigger opens the popover with all three variants', () => {
+    pushEvent(SID, {
+      kind: 'AssistantMessage',
+      text: 'pick a variant',
+      message_id: 'assist-rerun-2',
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('rerun-trigger-assist-rerun-2'));
+    expect(getByTestId('rerun-popover')).toBeInTheDocument();
+    expect(getByTestId('rerun-popover-replace')).toBeInTheDocument();
+    expect(getByTestId('rerun-popover-branch')).toBeInTheDocument();
+    expect(getByTestId('rerun-popover-fresh')).toBeInTheDocument();
+  });
+
+  it('Fresh button dispatches rerun_message with variant Fresh', () => {
+    pushEvent(SID, {
+      kind: 'AssistantMessage',
+      text: 'about to be re-run',
+      message_id: 'assist-rerun-3',
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('rerun-trigger-assist-rerun-3'));
+    invokeMock.mockClear();
+    fireEvent.click(getByTestId('rerun-popover-fresh'));
+    expect(invokeMock).toHaveBeenCalledWith('rerun_message', {
+      sessionId: SID,
+      msgId: 'assist-rerun-3',
+      variant: 'Fresh',
+    });
+  });
+
+  it('Replace button dispatches rerun_message with variant Replace', () => {
+    pushEvent(SID, {
+      kind: 'AssistantMessage',
+      text: 'about to be re-run',
+      message_id: 'assist-rerun-4',
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('rerun-trigger-assist-rerun-4'));
+    invokeMock.mockClear();
+    fireEvent.click(getByTestId('rerun-popover-replace'));
+    expect(invokeMock).toHaveBeenCalledWith('rerun_message', {
+      sessionId: SID,
+      msgId: 'assist-rerun-4',
+      variant: 'Replace',
+    });
+  });
+
+  it('Branch button dispatches rerun_message with variant Branch', () => {
+    pushEvent(SID, {
+      kind: 'AssistantMessage',
+      text: 'about to be re-run',
+      message_id: 'assist-rerun-5',
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('rerun-trigger-assist-rerun-5'));
+    invokeMock.mockClear();
+    fireEvent.click(getByTestId('rerun-popover-branch'));
+    expect(invokeMock).toHaveBeenCalledWith('rerun_message', {
+      sessionId: SID,
+      msgId: 'assist-rerun-5',
+      variant: 'Branch',
+    });
+  });
+
+  it('picking a variant closes the popover', () => {
+    pushEvent(SID, {
+      kind: 'AssistantMessage',
+      text: 'about to be re-run',
+      message_id: 'assist-rerun-6',
+    });
+    const { getByTestId, queryByTestId } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('rerun-trigger-assist-rerun-6'));
+    expect(getByTestId('rerun-popover')).toBeInTheDocument();
+    fireEvent.click(getByTestId('rerun-popover-fresh'));
+    expect(queryByTestId('rerun-popover')).toBeNull();
+  });
+
+  it('the re-run trigger is also rendered on a branched assistant turn', () => {
+    // Seed a branched turn so the BranchedAssistantTurn wrapper renders.
+    pushEvent(SID, { kind: 'UserMessage', text: 'ask', message_id: 'u1' });
+    pushEvent(SID, {
+      kind: 'AssistantMessage',
+      text: 'root answer',
+      message_id: 'br-root-1',
+      branch_parent: null,
+      branch_variant_index: 0,
+    });
+    pushEvent(SID, {
+      kind: 'AssistantMessage',
+      text: 'sibling',
+      message_id: 'br-var-1',
+      branch_parent: 'br-root-1',
+      branch_variant_index: 1,
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    // Active is br-var-1; its bubble must carry the trigger.
+    expect(getByTestId('rerun-trigger-br-var-1')).toBeInTheDocument();
+  });
 });
 
 // ---------------------------------------------------------------------------
