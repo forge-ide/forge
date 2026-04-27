@@ -576,7 +576,7 @@ fn usage_tick_wire_shape() {
             "tokens_in": 128,
             "tokens_out": 256,
             "cost_usd": 0.0125,
-            "scope": "SessionWide",
+            "scope": { "type": "SessionWide" },
         }),
     );
 }

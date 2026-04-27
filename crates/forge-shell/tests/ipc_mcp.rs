@@ -1,10 +1,14 @@
 //! F-155: integration tests for the unified shell+daemon MCP surface.
 //!
-//! F-132 shipped three shell-side Tauri commands (`list_mcp_servers`,
-//! `toggle_mcp_server`, `import_mcp_config`) backed by an independent
-//! `McpManager` that lived in the Tauri app. F-155 collapses that — the
-//! daemon now owns the authoritative manager and the Tauri commands
-//! dispatch through `SessionBridge` over UDS. This test file covers:
+//! F-132 shipped three shell-side Tauri commands (`session_list_mcp_servers`
+//! — renamed from `list_mcp_servers` in F-591 once the bare name was claimed
+//! by the roster command, `toggle_mcp_server`, `import_mcp_config`) backed by
+//! an independent `McpManager` that lived in the Tauri app. F-155 collapses
+//! that — the daemon now owns the authoritative manager and the Tauri commands
+//! dispatch through `SessionBridge` over UDS. This file exercises the
+//! `SessionBridge` Rust API directly (the `bridge.list_mcp_servers` method
+//! retains its original name; only the Tauri command was renamed). This test
+//! file covers:
 //!
 //! - End-to-end list / toggle / import round-trips (`SessionBridge` against
 //!   a real `forge-session` daemon — same `spawn_daemon` pattern as
@@ -158,14 +162,17 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// DoD: `list_mcp_servers` dispatches `IpcMessage::ListMcpServers` and
-// returns the daemon's authoritative snapshot. Seeded with a non-resolvable
+// DoD: `session_list_mcp_servers` (the F-132 Tauri command, renamed from
+// `list_mcp_servers` in F-591) dispatches `IpcMessage::ListMcpServers` and
+// returns the daemon's authoritative snapshot. Exercised here through the
+// `SessionBridge::list_mcp_servers` Rust method that backs the command —
+// the bridge method kept its original name. Seeded with a non-resolvable
 // stdio command so the server never reaches `Healthy` — we still get the
 // full `McpServerInfo { name, state, tools }` shape.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-async fn list_mcp_servers_round_trips_against_daemon() {
+async fn session_list_mcp_servers_round_trips_against_daemon() {
     let sock_dir = TempDir::new().unwrap();
     let sock = sock_dir.path().join("list.sock");
     let workspace = TempDir::new().unwrap();
@@ -327,7 +334,7 @@ async fn toggle_mcp_server_unknown_name_reports_error() {
 // `Healthy` before the toggle. We observe:
 //   - `Event::McpState(Starting → Healthy)` first
 //   - toggle-off yields `Disabled`
-//   - a subsequent `list_mcp_servers` reports `Disabled`
+//   - a subsequent `session_list_mcp_servers` reports `Disabled`
 // The "in-flight graceful error" semantic is exercised at the unit level
 // via `forge_mcp::manager` (the call() path returns the canonical string
 // when the server is `Disabled`). Covering it through the full

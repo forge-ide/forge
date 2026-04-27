@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use crate::ids::{AgentId, AgentInstanceId, MessageId, ProviderId, StepId, ToolCallId};
 use crate::mcp_state::McpStateEvent;
+use crate::roster::RosterScope;
 use crate::types::{
-    ApprovalScope, CompactTrigger, RosterScope, SessionPersistence, StepKind, StepOutcome,
-    TokenUsage,
+    ApprovalScope, CompactTrigger, SessionPersistence, StepKind, StepOutcome, TokenUsage,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

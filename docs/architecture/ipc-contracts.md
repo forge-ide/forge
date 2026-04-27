@@ -28,7 +28,7 @@ Forge has **two distinct IPC boundaries**. They must not be confused.
 
 ### 4.1 Boundary 1: Tauri ↔ webview
 
-> **Shipped coverage.** Phase 1 shipped `session_hello`, `session_subscribe`, `session_send_message`, `session_approve_tool`, `session_reject_tool`. Phase 2 extends that surface with 29 additional commands enumerated under **§4.1.1 Phase 2 additions — shipped** below. Anything that appears in the speculative block after §4.1.1 (e.g. `list_sessions`, `attach_session`, `list_providers`, `list_containers`, …) is reserved for Phase 3+ and is **not** wired today. The canonical registration list is `forge-shell/src/ipc.rs::build_invoke_handler`'s `tauri::generate_handler!` invocation. See ADR-001 §4 for the matching subset note on the UDS boundary.
+> **Shipped coverage.** Phase 1 shipped `session_hello`, `session_subscribe`, `session_send_message`, `session_approve_tool`, `session_reject_tool`. Phase 2 extends that surface with 29 additional commands enumerated under **§4.1.1 Phase 2 additions — shipped** below. F-591 added the four roster-discovery commands (`list_skills`, `list_mcp_servers`, `list_agents`, `list_providers`) — see the "Roster discovery" table in §4.1.1. Anything that appears in the speculative block after §4.1.1 (e.g. `list_sessions`, `attach_session`, `list_containers`, …) is reserved for Phase 3+ and is **not** wired today. The canonical registration list is `forge-shell/src/ipc.rs::build_invoke_handler`'s `tauri::generate_handler!` invocation. See ADR-001 §4 for the matching subset note on the UDS boundary.
 
 **Pattern.** Tauri `command` handlers for request/response (webview → host) and Tauri `events` for push (host → webview).
 
@@ -127,9 +127,22 @@ Output bytes flow back via the `terminal:bytes` Tauri event (see §4.1 events).
 
 | Command | Args | Response | Authz |
 |---------|------|----------|-------|
-| `list_mcp_servers` | `session_id: String` | `Vec<McpServerInfo { name, state, tools }>` | `session-{id}` |
+| `session_list_mcp_servers` | `session_id: String` | `Vec<McpServerInfo { name, state, tools }>` | `session-{id}` |
 | `toggle_mcp_server` | `session_id: String, name: String, enabled: bool` | `McpToggleResult { name, enabled_after, error }` | `session-{id}` |
 | `import_mcp_config` | `session_id: String, source: String, apply: bool` | `McpImportResult { source, imported, destination_path, error }` | `session-{id}` |
+
+> F-591 renamed the original `list_mcp_servers` to `session_list_mcp_servers` so the new roster command (next section) could take the bare `list_mcp_servers` name with the spec-mandated `(workspace_root, scope)` signature.
+
+**Roster discovery** (F-591) — read-only loaders that surface every discoverable resource (skills, MCP servers, agents, providers) and filter by [`RosterScope`](../../crates/forge-core/src/roster.rs). Distinct from F-132's session-scoped MCP commands: roster reads canonical sources (skill loader, agent loader, on-disk `.mcp.json`, hardcoded built-in providers + merged settings) and works without a live session.
+
+| Command | Args | Response | Authz |
+|---------|------|----------|-------|
+| `list_skills` | `workspace_root: String, scope: RosterScope` | `Vec<ScopedRosterEntry>` | `dashboard + session-*` |
+| `list_mcp_servers` | `workspace_root: String, scope: RosterScope` | `Vec<ScopedRosterEntry>` | `dashboard + session-*` |
+| `list_agents` | `workspace_root: String, scope: RosterScope` | `Vec<ScopedRosterEntry>` | `dashboard + session-*` |
+| `list_providers` | `workspace_root: String, scope: RosterScope` | `Vec<ScopedRosterEntry>` | `dashboard + session-*` |
+
+`RosterScope` is a tagged union: `{ type: "SessionWide" } | { type: "Agent", id: AgentId } | { type: "Provider", id: ProviderId }`. Filter semantics: `SessionWide` returns everything; `Agent(id)` narrows to entries bound to that agent (returns empty today for skills/agents/MCP since those surface as `SessionWide` until per-agent binding lands); `Provider(id)` narrows to that provider entry. Built-in providers (`anthropic`, `openai`, `ollama`) are hardcoded; `[providers.custom_openai.<name>]` entries from merged settings surface as `custom_openai:<name>`.
 
 ---
 
@@ -174,13 +187,11 @@ pub enum RerunVariant { Replace, Branch, Fresh }
 #[tauri::command] async fn tree(session: SessionId, path: PathBuf, depth: u32) -> Result<TreeNode, IpcError>;
 
 // Providers / skills / MCP / agents
-#[tauri::command] async fn list_providers() -> Result<Vec<ProviderSummary>, IpcError>;
-#[tauri::command] async fn login_provider(id: ProviderId, api_key: SecretString) -> Result<(), IpcError>;
-#[tauri::command] async fn list_mcp_servers(scope: Scope) -> Result<Vec<McpServerInfo>, IpcError>;
+// (`list_providers`, `list_mcp_servers`, `list_skills`, `list_agents` now
+// shipped under F-591 — see the "Roster discovery" table above. F-587 also
+// shipped `login_provider` / `logout_provider` / `has_credential`.)
 #[tauri::command] async fn toggle_mcp_server(id: McpId, enabled: bool) -> Result<(), IpcError>;
 #[tauri::command] async fn import_mcp_config(source: ImportSource, dest_scope: Scope) -> Result<ImportReport, IpcError>;
-#[tauri::command] async fn list_skills(scope: Scope) -> Result<Vec<SkillInfo>, IpcError>;
-#[tauri::command] async fn list_agents(scope: Scope) -> Result<Vec<AgentInfo>, IpcError>;
 
 // Background agents
 #[tauri::command] async fn start_background_agent(session: SessionId, agent: AgentId, initial_message: String) -> Result<AgentInstanceId, IpcError>;

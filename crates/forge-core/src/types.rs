@@ -18,14 +18,6 @@ pub enum SessionState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
-pub enum RosterScope {
-    SessionWide,
-    Agent,
-    Provider,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
 pub enum ApprovalScope {
     Once,
     ThisFile,
@@ -148,19 +140,6 @@ mod tests {
         ] {
             let json = serde_json::to_string(&v).unwrap();
             let decoded: SessionState = serde_json::from_str(&json).unwrap();
-            assert_eq!(v, decoded);
-        }
-    }
-
-    #[test]
-    fn roster_scope_serde_roundtrip() {
-        for v in [
-            RosterScope::SessionWide,
-            RosterScope::Agent,
-            RosterScope::Provider,
-        ] {
-            let json = serde_json::to_string(&v).unwrap();
-            let decoded: RosterScope = serde_json::from_str(&json).unwrap();
             assert_eq!(v, decoded);
         }
     }

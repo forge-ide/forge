@@ -100,7 +100,7 @@ describe('sessionTelemetry store (F-395)', () => {
         tokens_in: 1234,
         tokens_out: 5678,
         cost_usd: 0.042,
-        scope: 'SessionWide',
+        scope: { type: 'SessionWide' },
       });
       const t = getSessionTelemetry(SID);
       expect(t.tokensIn).toBe(1234);
