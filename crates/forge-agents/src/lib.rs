@@ -12,6 +12,7 @@
 mod def;
 mod error;
 mod orchestrator;
+pub mod skill_loader;
 
 use std::{fs, path::Path};
 
@@ -27,6 +28,9 @@ pub use def::{AgentDef, Isolation};
 pub use error::{Error, Result};
 pub use orchestrator::{
     AgentEvent, AgentInstance, AgentScope, InitialPrompt, InstanceState, Orchestrator, SpawnContext,
+};
+pub use skill_loader::{
+    load_skills, load_user_skills, load_workspace_skills, parse_skill_file, SKILL_FILENAME,
 };
 
 use def::load_from_dir;
