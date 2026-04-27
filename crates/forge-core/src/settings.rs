@@ -164,6 +164,18 @@ fn default_auth_shape() -> AuthShapeSettings {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
 pub struct ProvidersSettings {
+    /// F-586: id of the active provider (e.g. `"ollama"`, `"anthropic"`,
+    /// `"openai"`, `"custom_openai:vllm-local"`). `None` means "no
+    /// preference" — the orchestrator falls through to whatever the daemon
+    /// was started with (Phase-1 default: Ollama keyless).
+    ///
+    /// Stored as `Option<String>` rather than the random-hex `ProviderId`
+    /// id type from `ids.rs`: provider selection is keyed by stable, human-
+    /// readable slugs the user picks in the dashboard, not opaque ids.
+    /// Both the IPC command surface and the credential store key on this
+    /// same string shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<String>,
     /// One entry per user-named OpenAI-compatible server.
     #[serde(default)]
     pub custom_openai: BTreeMap<String, CustomOpenAiEntry>,
@@ -917,6 +929,7 @@ api_key = "sk-test"
             windows: WindowsSettings::default(),
             providers: ProvidersSettings {
                 custom_openai: entries,
+                ..Default::default()
             },
         };
         let serialized = toml::to_string(&cfg).unwrap();
@@ -954,8 +967,69 @@ api_key = "sk-test"
             windows: WindowsSettings::default(),
             providers: ProvidersSettings {
                 custom_openai: entries,
+                ..Default::default()
             },
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Active provider (F-586) — backwards-compat + round-trip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn providers_active_absent_yields_none() {
+        // Settings files written before F-586 have no `active` key. They must
+        // still load (the field is `#[serde(default)]`) and the merged value
+        // is `None` — meaning "no preference, fall through to the daemon's
+        // startup default".
+        let body = r#"
+[providers.custom_openai.together]
+base_url = "https://api.together.xyz"
+model = "mixtral"
+api_key = "sk-test"
+"#;
+        let parsed: AppSettings = toml::from_str(body).unwrap();
+        assert!(parsed.providers.active.is_none());
+        assert_eq!(parsed.providers.custom_openai.len(), 1);
+    }
+
+    #[test]
+    fn providers_active_round_trips_through_save_load() {
+        let cfg = AppSettings {
+            providers: ProvidersSettings {
+                active: Some("anthropic".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let serialized = toml::to_string(&cfg).unwrap();
+        let reparsed: AppSettings = toml::from_str(&serialized).unwrap();
+        assert_eq!(reparsed, cfg);
+        assert_eq!(reparsed.providers.active.as_deref(), Some("anthropic"));
+    }
+
+    #[test]
+    fn providers_active_skip_serializing_when_none() {
+        // None must NOT serialize — keeping the wire shape stable for older
+        // readers and never promoting an implicit absent to a present-but-null.
+        let cfg = AppSettings::default();
+        let s = toml::to_string(&cfg).unwrap();
+        assert!(
+            !s.contains("active"),
+            "default AppSettings must not emit `active`, got:\n{s}"
+        );
+    }
+
+    #[test]
+    fn providers_active_persists_through_apply_setting_update() {
+        // Mirror the IPC `set_setting` path: `apply_setting_update` should
+        // accept `providers.active = "openai"` and produce TOML that
+        // round-trips into the new `active` field.
+        let updated =
+            apply_setting_update("", "providers.active", toml::Value::String("openai".into()))
+                .unwrap();
+        let reparsed: AppSettings = toml::from_str(&updated).unwrap();
+        assert_eq!(reparsed.providers.active.as_deref(), Some("openai"));
     }
 
     #[test]

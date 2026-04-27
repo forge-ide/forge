@@ -51,3 +51,49 @@ export interface ProviderStatus {
 export async function providerStatus(): Promise<ProviderStatus> {
   return invoke<ProviderStatus>('provider_status');
 }
+
+// ---------------------------------------------------------------------------
+// Provider selection (F-586)
+// ---------------------------------------------------------------------------
+
+/**
+ * One row of `dashboard_list_providers`. Stable id (slug), display name,
+ * and the dashboard's three-state model:
+ *   - `credential_required && !has_credential` → warning glyph
+ *   - `model_available` false                  → secondary "no model" hint
+ *   - `model` populated                        → secondary line shows it
+ *
+ * Mirrors the Rust `ProviderEntry` shape one-for-one.
+ */
+export interface ProviderEntry {
+  id: string;
+  display_name: string;
+  credential_required: boolean;
+  has_credential: boolean;
+  model_available: boolean;
+  model?: string;
+}
+
+/**
+ * List the four built-in providers plus any user-configured custom_openai
+ * entries. Wraps the `dashboard_list_providers` Tauri command — the
+ * `dashboard_` prefix disambiguates from F-591's planned roster catalog
+ * `list_providers` command (Tauri rejects duplicate command names).
+ */
+export async function listProviders(): Promise<ProviderEntry[]> {
+  return invoke<ProviderEntry[]>('dashboard_list_providers');
+}
+
+/** Read the persisted `[providers.active]` setting (user-tier, global). */
+export async function getActiveProvider(): Promise<string | null> {
+  return invoke<string | null>('get_active_provider');
+}
+
+/**
+ * Persist the active provider id and emit `provider:changed` app-wide so
+ * any open session window's bridge can swap its inner Provider for the
+ * next turn.
+ */
+export async function setActiveProvider(providerId: string): Promise<void> {
+  await invoke('set_active_provider', { providerId });
+}

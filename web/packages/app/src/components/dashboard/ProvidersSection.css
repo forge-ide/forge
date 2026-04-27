@@ -1,0 +1,197 @@
+/* F-586: Dashboard providers section.
+ *
+ * Cards are `@forge/design` Tab primitives in `radio` variant — they
+ * already carry `role="radio"` + `aria-checked` + `forge-tab--selected`
+ * styling baked into `@forge/design/components.css`. The custom rules
+ * here only paint the card shape (multi-line, two-row body) and the
+ * credential / model hint pills. Every value comes from a design token.
+ */
+
+.providers {
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border-1);
+  border-radius: var(--r-sm);
+  padding: var(--sp-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  font-family: var(--font-body);
+  color: var(--color-text-primary);
+}
+
+.providers__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.providers__label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  color: var(--color-text-tertiary);
+  text-transform: uppercase;
+}
+
+.providers__loading {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  letter-spacing: 0.2em;
+  margin: 0;
+}
+
+.providers__error,
+.providers__action-error {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  background: var(--color-error-bg);
+  border-left: 3px solid var(--color-ember-400);
+  border-radius: var(--r-sm);
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--color-ember-300);
+}
+
+.providers__error-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 12px;
+  color: var(--color-ember-300);
+}
+
+.providers__error-detail {
+  margin: 0;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+/* Override the .forge-tabs flex-row default — provider cards stack as a
+ * grid so each can carry two rows of metadata.
+ */
+.providers__grid.forge-tabs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--sp-3);
+  align-items: stretch;
+}
+
+/* The Tab primitive's baseline is a single-line pill (.forge-tab in
+ * components.css). Cards expand to a stacked layout — same selected /
+ * focus / hover semantics, taller body.
+ */
+.provider-card.forge-tab {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  padding: var(--sp-3);
+  min-height: 72px;
+  text-align: left;
+  text-transform: none;
+  letter-spacing: 0;
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 400;
+  border: 1px solid var(--color-border-2);
+  background: var(--color-surface-2);
+}
+
+.provider-card.forge-tab[aria-checked='true'] {
+  background: var(--color-surface-3);
+  border-color: var(--color-ember-400);
+  color: var(--color-text-primary);
+}
+
+.provider-card.forge-tab:hover:not(:disabled) {
+  border-color: var(--color-border-2);
+  color: var(--color-text-primary);
+}
+
+/* F-586 review: visual feedback while a switch is in flight. The
+ * `aria-busy` attribute is the source of truth for screen readers; the
+ * `--pending` class signals "we heard your click" without letting a
+ * second click race the first.
+ */
+.provider-card.forge-tab[aria-busy='true'],
+.provider-card.forge-tab--pending {
+  border-color: var(--color-ember-300);
+}
+
+.provider-card.forge-tab:disabled {
+  cursor: progress;
+}
+
+.provider-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  width: 100%;
+}
+
+.provider-card__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.provider-card__row--meta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+.provider-card__name {
+  font-family: var(--font-display);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 14px;
+  color: var(--color-text-primary);
+}
+
+.provider-card__active-pip {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-ember-400);
+  box-shadow: 0 0 6px var(--color-ember-400);
+  flex-shrink: 0;
+}
+
+.provider-card__hint {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.provider-card__hint--missing {
+  color: var(--color-text-tertiary);
+  font-style: italic;
+}
+
+.provider-card__cred {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 0 var(--sp-1);
+  flex-shrink: 0;
+}
+
+.provider-card__cred--present {
+  color: var(--color-success);
+}
+
+.provider-card__cred--missing {
+  color: var(--color-ember-300);
+}

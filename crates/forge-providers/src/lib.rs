@@ -14,7 +14,13 @@ use serde::Deserialize;
 pub mod anthropic;
 pub mod ollama;
 pub mod openai;
+// F-586: hot-swappable [`Provider`] dispatcher used by the session daemon
+// when the dashboard's `set_active_provider` IPC command emits a
+// `ProviderChanged` event for the next turn.
+pub mod runtime;
 pub mod sse;
+
+pub use runtime::{RuntimeProvider, SwappableProvider};
 
 // ── Chat domain types ─────────────────────────────────────────────────────────
 

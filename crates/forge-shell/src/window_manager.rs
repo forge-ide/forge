@@ -131,6 +131,12 @@ pub fn run() -> Result<()> {
             crate::credentials_ipc::login_provider,
             crate::credentials_ipc::logout_provider,
             crate::credentials_ipc::has_credential,
+            // F-586: provider selection — dashboard list / get-active / set-active.
+            // `dashboard_list_providers` keeps the shorter `list_providers`
+            // wire-name free for F-591's roster catalog command.
+            crate::providers_ipc::dashboard_list_providers,
+            crate::providers_ipc::get_active_provider,
+            crate::providers_ipc::set_active_provider,
         ])
         .setup(|app| {
             crate::ipc::manage_bridge(&app.handle().clone());

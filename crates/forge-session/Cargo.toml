@@ -68,6 +68,9 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support", "async_tokio"] }
 forge-cli = { path = "../forge-cli" }
+# F-586: enable the `RuntimeProvider::Mock` variant for the
+# `provider_swap` integration test. Production binaries leave this off.
+forge-providers = { path = "../forge-providers", features = ["testing"] }
 libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 similar = "2"
@@ -166,3 +169,7 @@ path = "tests/eprintln_audit.rs"
 [[test]]
 name = "credentials_pull"
 path = "tests/credentials_pull.rs"
+
+[[test]]
+name = "provider_swap"
+path = "tests/provider_swap.rs"

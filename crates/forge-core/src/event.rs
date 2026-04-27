@@ -279,4 +279,19 @@ pub enum Event {
         /// `docs/architecture/event-conventions.md` as a pinned exception.
         sampled_at: DateTime<Utc>,
     },
+    /// F-586: dashboard-driven active-provider switch.
+    ///
+    /// Emitted by the shell's `set_active_provider` IPC command after the
+    /// new id has been validated and persisted to `[providers.active]`.
+    /// Subscribers (the orchestrator's per-session provider holder) swap
+    /// the active `Provider` for the **next** turn — the in-flight turn
+    /// (if any) finishes on the old provider. Mid-stream switching is out
+    /// of scope; this event is informational + the swap takes effect at
+    /// the next `run_turn` boundary.
+    ///
+    /// `provider_id` is the stable slug the dashboard selected (e.g.
+    /// `"ollama"`, `"anthropic"`, `"openai"`, `"custom_openai:<name>"`).
+    /// The same string is what `Credentials::has_credential` keys on, and
+    /// what `[providers.active]` now persists.
+    ProviderChanged { provider_id: String },
 }

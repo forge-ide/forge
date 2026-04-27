@@ -823,6 +823,23 @@ fn mcp_state_wire_shape_degraded_with_reason() {
     );
 }
 
+#[test]
+fn provider_changed_wire_shape() {
+    // F-586: dashboard-driven active-provider switch event. The wire shape
+    // is the snake_case discriminator plus a single `provider_id` string —
+    // matching the slug the dashboard selected and the key
+    // `Credentials::has_credential` accepts.
+    assert_wire_eq(
+        Event::ProviderChanged {
+            provider_id: "anthropic".into(),
+        },
+        json!({
+            "type": "provider_changed",
+            "provider_id": "anthropic",
+        }),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Compile-time guard: adding a new `Event` variant must also add its
 // wire-shape pin above. This is enforced by an exhaustive `match` here —
@@ -862,6 +879,7 @@ fn variant_label(e: &Event) -> &'static str {
         Event::ToolReturned { .. } => "tool_returned",
         Event::McpState(_) => "mcp_state",
         Event::ResourceSample { .. } => "resource_sample",
+        Event::ProviderChanged { .. } => "provider_changed",
     }
 }
 

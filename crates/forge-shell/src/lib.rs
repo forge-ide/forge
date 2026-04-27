@@ -38,6 +38,14 @@ pub mod context_fetch;
 pub mod credentials_ipc;
 pub mod dashboard;
 pub mod dashboard_sessions;
+// F-586: provider-selection commands (`dashboard_list_providers`,
+// `get_active_provider`, `set_active_provider`). Pure helpers
+// (`build_provider_list`, `is_known_provider_id`, `validate_provider_id`)
+// are always compiled so non-webview tests link without Tauri; the
+// `#[tauri::command]` wrappers are gated behind `webview`. The
+// `dashboard_` prefix on `list_providers` disambiguates from F-591's
+// roster-catalog command of the same short name.
+pub mod providers_ipc;
 pub mod window_spec;
 
 #[cfg(feature = "webview")]
