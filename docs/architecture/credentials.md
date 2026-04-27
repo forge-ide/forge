@@ -62,6 +62,19 @@ The lookup order is:
 
 `set` and `remove` always target the keyring. The environment is read-only by design — Forge never mutates the parent shell's environment.
 
+### Headless / CI deployments
+
+In an environment with no Secret Service daemon (Docker, headless SSH, CI runners), the keyring layer's first `get` call may return an `Err(_)` rather than `Ok(None)`. **`LayeredStore` only falls through to the env-var layer on `Ok(None)`; an `Err(_)` propagates and fails the turn.** This is intentional — see [§ Orchestrator integration](#orchestrator-integration) for the rationale on why a locked / offline keyring fails fast instead of silently downgrading.
+
+The intended pattern for these environments: don't reach for `KeyringStore` at all. Wire the env-var store directly:
+
+```rust
+// Headless wiring — env-only, no keyring layer.
+CredentialsState::new(Arc::new(EnvFallbackStore::default()))
+```
+
+`CredentialsState::production()` always builds the layered store; a deployment-specific entry point should substitute the env-only path. We deliberately do not auto-fallback on connect failure: an unexpected dbus disappearance on a workstation that previously had it is a real environmental drift the operator needs to notice, not a silent state we paper over.
+
 ## Environment-variable fallback
 
 | `provider_id` | Variable             |

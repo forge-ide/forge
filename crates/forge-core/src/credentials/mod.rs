@@ -109,9 +109,20 @@ impl<T: Credentials + ?Sized> Credentials for Arc<T> {
 /// Useful for tests and as a no-OS-keyring fallback in headless contexts
 /// (e.g. `forge-cli` over SSH where the Secret Service daemon is not
 /// running). Values vanish with the process — by design.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct MemoryStore {
     inner: Mutex<HashMap<String, SecretString>>,
+}
+
+// Manual `Debug`: never derive on a struct holding `SecretString`.
+// `secrecy` already redacts the value in its own `Debug` impl, but the
+// project rule is that the credential-holding container itself
+// `finish_non_exhaustive`s — same shape used for [`CredentialContext`]
+// in `forge-session::orchestrator` and [`KeyringStore`].
+impl std::fmt::Debug for MemoryStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryStore").finish_non_exhaustive()
+    }
 }
 
 impl MemoryStore {

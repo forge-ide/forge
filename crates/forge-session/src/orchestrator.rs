@@ -51,6 +51,34 @@ impl std::fmt::Debug for CredentialContext {
     }
 }
 
+/// F-587: pull the active provider's credential, exactly once, before a
+/// turn or rerun's request loop opens.
+///
+/// Shared between `run_turn`, `Orchestrator::rerun_replace`,
+/// `Orchestrator::rerun_branch`, and `Orchestrator::rerun_fresh` so the
+/// pull contract is identical on every turn-shaped path. The pulled value
+/// is dropped immediately on this Phase-1 keyless build; when Phase-3
+/// providers consume `CredentialContext`, the value is handed into
+/// per-request auth shape via `secrecy::ExposeSecret::expose_secret` at
+/// the network boundary, never logged or stringified.
+///
+/// Backend errors propagate. A misconfigured Secret Service daemon or a
+/// locked Keychain is more useful as a turn-level failure than a silent
+/// fall-through to "no auth" that the provider would later 401 on.
+async fn pull_active_credential(ctx: &Option<CredentialContext>) -> Result<()> {
+    if let Some(ctx) = ctx.as_ref() {
+        let pulled = ctx.store.get(&ctx.provider_id).await?;
+        tracing::trace!(
+            target: "forge_session::orchestrator::credentials",
+            provider_id = %ctx.provider_id,
+            hit = pulled.is_some(),
+            "credential pull",
+        );
+        drop(pulled);
+    }
+    Ok(())
+}
+
 use crate::byte_budget::ByteBudget;
 use crate::dispatcher_cache::DispatcherCache;
 use crate::sandbox::ChildRegistry;
@@ -148,28 +176,10 @@ pub async fn run_turn<P: Provider>(
     credentials: Option<CredentialContext>,
 ) -> Result<()> {
     // F-587: pull the credential for the active provider before any
-    // model-side work begins. Today the value is held briefly and then
-    // dropped — the Phase-3 Anthropic / OpenAI providers will plumb it
-    // into their per-request auth headers; for the keyless `OllamaProvider`
-    // shipping in Phase 1, the pull is a no-op-with-trace by design.
-    //
-    // Backend errors propagate. A misconfigured Secret Service daemon or a
-    // locked Keychain is more useful as a turn-level failure than a silent
-    // fall-through to "no auth" that the provider would later 401 on.
-    if let Some(ctx) = credentials.as_ref() {
-        let pulled = ctx.store.get(&ctx.provider_id).await?;
-        tracing::trace!(
-            target: "forge_session::orchestrator::credentials",
-            provider_id = %ctx.provider_id,
-            hit = pulled.is_some(),
-            "credential pull",
-        );
-        // Drop `pulled` here — the value is intentionally not held longer
-        // than necessary. When provider-level auth wiring lands, the value
-        // is handed directly to the provider's request-builder via
-        // `secrecy::ExposeSecret::expose_secret` at the network boundary.
-        drop(pulled);
-    }
+    // model-side work begins. Shared with the rerun paths via
+    // `pull_active_credential` so every turn-shaped entry point honors the
+    // same pull-once contract.
+    pull_active_credential(&credentials).await?;
 
     let msg_id = MessageId::new();
 
@@ -820,6 +830,11 @@ impl Orchestrator {
         child_registry: Option<crate::sandbox::ChildRegistry>,
         byte_budget: Option<Arc<crate::byte_budget::ByteBudget>>,
         agent_runtime: Option<AgentRuntime>,
+        // F-587: rerun is a turn — every variant must honor the same
+        // credential-pull contract `run_turn` does. Threaded through to
+        // each delegate so a missing or erroring keyring fails the rerun
+        // before it reaches the provider, identical to a fresh turn.
+        credentials: Option<CredentialContext>,
     ) -> Result<MessageId> {
         match variant {
             RerunVariant::Replace => {
@@ -834,6 +849,7 @@ impl Orchestrator {
                     child_registry,
                     byte_budget,
                     agent_runtime,
+                    credentials,
                 )
                 .await
             }
@@ -849,6 +865,7 @@ impl Orchestrator {
                     child_registry,
                     byte_budget,
                     agent_runtime,
+                    credentials,
                 )
                 .await
             }
@@ -864,6 +881,7 @@ impl Orchestrator {
                     child_registry,
                     byte_budget,
                     agent_runtime,
+                    credentials,
                 )
                 .await
             }
@@ -883,7 +901,13 @@ impl Orchestrator {
         child_registry: Option<crate::sandbox::ChildRegistry>,
         byte_budget: Option<Arc<crate::byte_budget::ByteBudget>>,
         agent_runtime: Option<AgentRuntime>,
+        // F-587: see `rerun_message`.
+        credentials: Option<CredentialContext>,
     ) -> Result<MessageId> {
+        // F-587: pull the active provider's credential before regeneration
+        // begins, identical to `run_turn`. Backend errors fail the rerun.
+        pull_active_credential(&credentials).await?;
+
         // Read the log up to the current tip; filter prior supersede markers
         // so a second rerun doesn't rebuild context from already-hidden
         // messages.
@@ -1009,7 +1033,12 @@ impl Orchestrator {
         child_registry: Option<crate::sandbox::ChildRegistry>,
         byte_budget: Option<Arc<crate::byte_budget::ByteBudget>>,
         agent_runtime: Option<AgentRuntime>,
+        // F-587: see `rerun_message`.
+        credentials: Option<CredentialContext>,
     ) -> Result<MessageId> {
+        // F-587: same pull-once contract as `run_turn` / `rerun_replace`.
+        pull_active_credential(&credentials).await?;
+
         let history = read_since(&session.log_path, 0)
             .await
             .map_err(|e| anyhow!("rerun_branch: read event log: {e}"))?;
@@ -1122,7 +1151,12 @@ impl Orchestrator {
         child_registry: Option<crate::sandbox::ChildRegistry>,
         byte_budget: Option<Arc<crate::byte_budget::ByteBudget>>,
         agent_runtime: Option<AgentRuntime>,
+        // F-587: see `rerun_message`.
+        credentials: Option<CredentialContext>,
     ) -> Result<MessageId> {
+        // F-587: same pull-once contract as `run_turn` / `rerun_replace`.
+        pull_active_credential(&credentials).await?;
+
         let history = read_since(&session.log_path, 0)
             .await
             .map_err(|e| anyhow!("rerun_fresh: read event log: {e}"))?;

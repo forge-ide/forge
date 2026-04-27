@@ -1152,6 +1152,10 @@ async fn handle_connection<P: Provider + 'static>(
                         let child_registry = child_registry.clone();
                         let byte_budget = Arc::clone(&byte_budget);
                         let agent_runtime = (*agent_runtime).clone();
+                        // F-587: rerun is a turn — clone the per-session
+                        // credential binding into the rerun task, identical
+                        // to the `SendUserMessage` branch above.
+                        let credential_ctx_for_rerun = credentials.clone();
                         // MessageId wraps an `Arc<str>` so any string is
                         // structurally a valid id (the log lookup later
                         // surfaces "not found" if the client fabricated
@@ -1174,6 +1178,7 @@ async fn handle_connection<P: Provider + 'static>(
                                     Some(child_registry),
                                     Some(byte_budget),
                                     agent_runtime,
+                                    credential_ctx_for_rerun,
                                 )
                                 .await
                             {

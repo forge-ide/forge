@@ -12,6 +12,9 @@
 //! 3. When the store has no entry (`Ok(None)`), the turn proceeds — the
 //!    keyless path stays available, the credential pull is just observed
 //!    to have missed.
+//! 4. **Rerun is a turn**. `Orchestrator::rerun_message` (and each variant
+//!    delegate) honors the same pull-once contract — backend failure
+//!    surfaces before any provider call, identical to a fresh turn.
 //!
 //! Together these pin the seam that the Phase-3 `AnthropicProvider` and
 //! `OpenAIProvider` will hook into.
@@ -20,9 +23,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use forge_core::{Credentials, ForgeError, MemoryStore};
+use chrono::Utc;
+use forge_core::{
+    ids::{MessageId, ProviderId},
+    Credentials, Event, ForgeError, MemoryStore, RerunVariant,
+};
 use forge_providers::MockProvider;
-use forge_session::orchestrator::{run_turn, CredentialContext, PendingApprovals};
+use forge_session::orchestrator::{run_turn, CredentialContext, Orchestrator, PendingApprovals};
 use forge_session::session::Session;
 use secrecy::{ExposeSecret, SecretString};
 use tempfile::TempDir;
@@ -249,5 +256,264 @@ async fn run_turn_skips_pull_when_no_context_supplied() {
         store.calls(),
         0,
         "no credential context means no store consultation"
+    );
+}
+
+// ── F-587: rerun paths honor the same pull contract ──────────────────────────
+
+/// Seed a session log with one user → assistant turn so a rerun has
+/// something to target. The returned `MessageId` is the assistant turn's
+/// id — i.e., the rerun target.
+async fn seed_one_turn(session: &Session) -> MessageId {
+    let user_id = MessageId::new();
+    session
+        .emit(Event::UserMessage {
+            id: user_id,
+            at: Utc::now(),
+            text: Arc::from("seed prompt"),
+            context: vec![],
+            branch_parent: None,
+        })
+        .await
+        .unwrap();
+
+    let assistant_id = MessageId::new();
+    session
+        .emit(Event::AssistantMessage {
+            id: assistant_id.clone(),
+            provider: ProviderId::new(),
+            model: "mock".into(),
+            at: Utc::now(),
+            stream_finalised: true,
+            text: Arc::from("seed response"),
+            branch_parent: None,
+            branch_variant_index: 0,
+        })
+        .await
+        .unwrap();
+
+    assistant_id
+}
+
+#[tokio::test]
+async fn rerun_replace_pulls_credential_when_context_supplied() {
+    let dir = TempDir::new().unwrap();
+    let log_path = dir.path().join("events.jsonl");
+    let session = Arc::new(Session::create(log_path).await.unwrap());
+
+    let target = seed_one_turn(&session).await;
+
+    let store = Arc::new(CountingStore::default());
+    store
+        .set("anthropic", SecretString::from("sk-ant-fake"))
+        .await
+        .unwrap();
+    let cred_store: Arc<dyn Credentials> = store.clone();
+
+    let provider = Arc::new(
+        MockProvider::from_responses(vec!["{\"done\":\"end_turn\"}\n".into()])
+            .expect("construct mock"),
+    );
+    let pending: PendingApprovals = Arc::new(Mutex::new(HashMap::new()));
+
+    Orchestrator::new()
+        .rerun_message(
+            Arc::clone(&session),
+            Arc::clone(&provider),
+            target,
+            RerunVariant::Replace,
+            pending,
+            vec![],
+            true,
+            None,
+            None,
+            None,
+            None,
+            Some(CredentialContext {
+                store: cred_store,
+                provider_id: "anthropic".to_string(),
+            }),
+        )
+        .await
+        .expect("rerun should complete");
+
+    assert_eq!(
+        store.calls(),
+        1,
+        "rerun_replace must pull the credential exactly once at entry"
+    );
+}
+
+#[tokio::test]
+async fn rerun_replace_fails_when_credential_backend_errors() {
+    // Backend failure must surface before any provider call — identical
+    // to the fresh-turn path. Without the pull on the rerun side the
+    // target message would be regenerated against a 401-bound Anthropic
+    // / OpenAI provider once those land in F-588.
+    let dir = TempDir::new().unwrap();
+    let log_path = dir.path().join("events.jsonl");
+    let session = Arc::new(Session::create(log_path).await.unwrap());
+
+    let target = seed_one_turn(&session).await;
+
+    let store: Arc<dyn Credentials> = Arc::new(FailingStore);
+    let provider = Arc::new(
+        MockProvider::from_responses(vec!["{\"done\":\"end_turn\"}\n".into()])
+            .expect("construct mock"),
+    );
+
+    let err = Orchestrator::new()
+        .rerun_message(
+            session,
+            provider,
+            target,
+            RerunVariant::Replace,
+            Arc::new(Mutex::new(HashMap::new())),
+            vec![],
+            true,
+            None,
+            None,
+            None,
+            None,
+            Some(CredentialContext {
+                store,
+                provider_id: "anthropic".to_string(),
+            }),
+        )
+        .await
+        .expect_err("backend failure must fail the rerun");
+
+    assert!(
+        err.to_string().contains("keyring backend offline"),
+        "rerun must surface the backend failure: {err}"
+    );
+}
+
+#[tokio::test]
+async fn rerun_branch_pulls_credential_when_context_supplied() {
+    let dir = TempDir::new().unwrap();
+    let log_path = dir.path().join("events.jsonl");
+    let session = Arc::new(Session::create(log_path).await.unwrap());
+
+    let target = seed_one_turn(&session).await;
+
+    let store = Arc::new(CountingStore::default());
+    let cred_store: Arc<dyn Credentials> = store.clone();
+
+    let provider = Arc::new(
+        MockProvider::from_responses(vec!["{\"done\":\"end_turn\"}\n".into()])
+            .expect("construct mock"),
+    );
+
+    Orchestrator::new()
+        .rerun_message(
+            Arc::clone(&session),
+            Arc::clone(&provider),
+            target,
+            RerunVariant::Branch,
+            Arc::new(Mutex::new(HashMap::new())),
+            vec![],
+            true,
+            None,
+            None,
+            None,
+            None,
+            Some(CredentialContext {
+                store: cred_store,
+                provider_id: "anthropic".to_string(),
+            }),
+        )
+        .await
+        .expect("rerun branch should complete");
+
+    assert_eq!(
+        store.calls(),
+        1,
+        "rerun_branch must pull the credential exactly once at entry"
+    );
+}
+
+#[tokio::test]
+async fn rerun_fresh_pulls_credential_when_context_supplied() {
+    let dir = TempDir::new().unwrap();
+    let log_path = dir.path().join("events.jsonl");
+    let session = Arc::new(Session::create(log_path).await.unwrap());
+
+    let target = seed_one_turn(&session).await;
+
+    let store = Arc::new(CountingStore::default());
+    let cred_store: Arc<dyn Credentials> = store.clone();
+
+    let provider = Arc::new(
+        MockProvider::from_responses(vec!["{\"done\":\"end_turn\"}\n".into()])
+            .expect("construct mock"),
+    );
+
+    Orchestrator::new()
+        .rerun_message(
+            Arc::clone(&session),
+            Arc::clone(&provider),
+            target,
+            RerunVariant::Fresh,
+            Arc::new(Mutex::new(HashMap::new())),
+            vec![],
+            true,
+            None,
+            None,
+            None,
+            None,
+            Some(CredentialContext {
+                store: cred_store,
+                provider_id: "anthropic".to_string(),
+            }),
+        )
+        .await
+        .expect("rerun fresh should complete");
+
+    assert_eq!(
+        store.calls(),
+        1,
+        "rerun_fresh must pull the credential exactly once at entry"
+    );
+}
+
+#[tokio::test]
+async fn rerun_skips_pull_when_no_context_supplied() {
+    // Mirrors `run_turn_skips_pull_when_no_context_supplied` — keyless
+    // path is preserved; no `Credentials::get` call when ctx is `None`.
+    let dir = TempDir::new().unwrap();
+    let log_path = dir.path().join("events.jsonl");
+    let session = Arc::new(Session::create(log_path).await.unwrap());
+
+    let target = seed_one_turn(&session).await;
+
+    let store = Arc::new(CountingStore::default());
+    let provider = Arc::new(
+        MockProvider::from_responses(vec!["{\"done\":\"end_turn\"}\n".into()])
+            .expect("construct mock"),
+    );
+
+    Orchestrator::new()
+        .rerun_message(
+            Arc::clone(&session),
+            Arc::clone(&provider),
+            target,
+            RerunVariant::Replace,
+            Arc::new(Mutex::new(HashMap::new())),
+            vec![],
+            true,
+            None,
+            None,
+            None,
+            None,
+            None, // no credential context — skip the pull.
+        )
+        .await
+        .expect("keyless rerun completes");
+
+    assert_eq!(
+        store.calls(),
+        0,
+        "no credential context means no store consultation on rerun either"
     );
 }
