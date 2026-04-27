@@ -85,7 +85,12 @@ pub struct WindowsSettings {
 /// Field validation (notably the SSRF guard on `base_url`) is deferred to
 /// the construction site in `forge-providers`; this struct is purely the
 /// on-disk wire shape.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+///
+/// `Debug` is hand-rolled (NOT derived) so the `api_key` field can never
+/// reach a tracing span, panic message, or test failure as plaintext. The
+/// formatter prints `Some("<redacted>")` when a key is configured and
+/// `None` otherwise — sufficient for diagnostics without leaking the key.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
 pub struct CustomOpenAiEntry {
     /// User-supplied OpenAI-compatible base URL (e.g.
@@ -109,6 +114,18 @@ pub struct CustomOpenAiEntry {
     /// site enforces the cross-field invariant.
     #[serde(default)]
     pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for CustomOpenAiEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CustomOpenAiEntry")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("model_list", &self.model_list)
+            .field("auth", &self.auth)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 /// On-disk auth-shape selector. Mirrors
@@ -905,5 +922,114 @@ api_key = "sk-test"
         let serialized = toml::to_string(&cfg).unwrap();
         let reparsed: AppSettings = toml::from_str(&serialized).unwrap();
         assert_eq!(reparsed, cfg);
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-variant TOML round-trip guards (F-585 review feedback).
+    //
+    // The internally-tagged `AuthShapeSettings` enum (`#[serde(tag = "shape")]`)
+    // is a known soft spot for the `toml` crate: unit variants (Bearer, None)
+    // and struct variants with extra fields (Header { name }) take different
+    // ser/deser paths. The single round-trip test above only covered `None`;
+    // these three tests pin every variant explicitly so a future serde or
+    // toml-rs upgrade that breaks one variant's repr surfaces here, not as a
+    // mysterious "settings file disappeared on next launch" report from a
+    // user.
+    // -----------------------------------------------------------------------
+
+    fn settings_with_auth(auth: AuthShapeSettings, api_key: Option<&str>) -> AppSettings {
+        let mut entries = std::collections::BTreeMap::new();
+        entries.insert(
+            "entry".to_string(),
+            CustomOpenAiEntry {
+                base_url: "https://api.example.com".into(),
+                model: "any-model".into(),
+                model_list: vec!["any-model".into()],
+                auth,
+                api_key: api_key.map(str::to_string),
+            },
+        );
+        AppSettings {
+            notifications: NotificationsSettings::default(),
+            windows: WindowsSettings::default(),
+            providers: ProvidersSettings {
+                custom_openai: entries,
+            },
+        }
+    }
+
+    #[test]
+    fn auth_shape_bearer_round_trips_through_toml() {
+        let cfg = settings_with_auth(AuthShapeSettings::Bearer, Some("sk-x"));
+        let s = toml::to_string(&cfg).expect("serialize bearer");
+        let reparsed: AppSettings = toml::from_str(&s).expect("re-parse bearer");
+        assert_eq!(reparsed, cfg);
+    }
+
+    #[test]
+    fn auth_shape_header_round_trips_through_toml() {
+        let cfg = settings_with_auth(
+            AuthShapeSettings::Header {
+                name: "X-API-Key".into(),
+            },
+            Some("sk-x"),
+        );
+        let s = toml::to_string(&cfg).expect("serialize header");
+        let reparsed: AppSettings = toml::from_str(&s).expect("re-parse header");
+        assert_eq!(reparsed, cfg);
+    }
+
+    #[test]
+    fn auth_shape_none_round_trips_through_toml() {
+        let cfg = settings_with_auth(AuthShapeSettings::None, None);
+        let s = toml::to_string(&cfg).expect("serialize none");
+        let reparsed: AppSettings = toml::from_str(&s).expect("re-parse none");
+        assert_eq!(reparsed, cfg);
+    }
+
+    // -----------------------------------------------------------------------
+    // CustomOpenAiEntry::Debug must redact api_key (F-585 review feedback).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn custom_openai_entry_debug_redacts_api_key() {
+        let entry = CustomOpenAiEntry {
+            base_url: "https://api.example.com".into(),
+            model: "any".into(),
+            model_list: vec![],
+            auth: AuthShapeSettings::Bearer,
+            api_key: Some("sk-VERY-SECRET-DO-NOT-LEAK".into()),
+        };
+        let dump = format!("{entry:?}");
+        assert!(
+            !dump.contains("sk-VERY-SECRET-DO-NOT-LEAK"),
+            "Debug output must not contain plaintext api_key: {dump}"
+        );
+        assert!(
+            dump.contains("<redacted>"),
+            "Debug output must signal redaction: {dump}"
+        );
+    }
+
+    #[test]
+    fn custom_openai_entry_debug_marks_absent_api_key_as_none() {
+        // For `auth = none`, the api_key is `None` and Debug should reflect
+        // that — `Some("<redacted>")` would falsely imply a configured key.
+        let entry = CustomOpenAiEntry {
+            base_url: "http://127.0.0.1:8000".into(),
+            model: "any".into(),
+            model_list: vec![],
+            auth: AuthShapeSettings::None,
+            api_key: None,
+        };
+        let dump = format!("{entry:?}");
+        assert!(
+            dump.contains("api_key: None"),
+            "absent key must show as None, got: {dump}"
+        );
+        assert!(
+            !dump.contains("<redacted>"),
+            "no redaction marker when key is absent: {dump}"
+        );
     }
 }

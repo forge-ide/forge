@@ -99,7 +99,13 @@ pub fn check_url(raw: &str) -> Result<()> {
 
 fn is_host_loopback(host: &url::Host<&str>) -> bool {
     match host {
-        url::Host::Domain(h) => *h == "localhost",
+        // `localhost6` is the standard hostname for `::1` on most Linux
+        // distributions (RHEL/Fedora/Debian ship it in `/etc/hosts` by
+        // default). Without it, `http://localhost6:8000` would fail the
+        // loopback exception and be rejected as a non-HTTPS remote in
+        // debug builds — surprising for Linux developers running a local
+        // OpenAI-compatible server bound to IPv6 loopback.
+        url::Host::Domain(h) => matches!(*h, "localhost" | "localhost6"),
         url::Host::Ipv4(addr) => addr.is_loopback(),
         url::Host::Ipv6(addr) => addr.is_loopback(),
     }
@@ -181,6 +187,19 @@ mod tests {
     fn allows_https_loopback_always() {
         check_url("https://localhost/x").expect("https://localhost must always be allowed");
         check_url("https://127.0.0.1/x").expect("https://127.0.0.1 must always be allowed");
+    }
+
+    #[test]
+    fn allows_localhost6_under_loopback_exception() {
+        // `localhost6` resolves to `::1` on Linux distros that ship it in
+        // /etc/hosts (RHEL/Fedora/Debian). Treating it as loopback aligns
+        // the guard with Linux's IPv6 loopback hostname convention.
+        check_url("https://localhost6/x").expect("https://localhost6 must be allowed");
+        let result = check_url("http://localhost6:8000/x");
+        #[cfg(debug_assertions)]
+        result.expect("http://localhost6 must be allowed in debug builds");
+        #[cfg(not(debug_assertions))]
+        result.expect_err("http://localhost6 must be blocked in release builds");
     }
 
     #[test]

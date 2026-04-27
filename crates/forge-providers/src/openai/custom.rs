@@ -118,6 +118,21 @@ impl CustomOpenAiProvider {
             anyhow::anyhow!("custom_openai provider {name:?}: invalid base_url {base_url:?}: {e}")
         })?;
 
+        // Validate the header name at construction time so a configuration
+        // like `auth = { shape = "header", name = "X-API Key" }` (with an
+        // invalid HTTP token character — the space) is rejected up-front
+        // with a diagnostic that names the offending value, rather than
+        // silently being skipped at chat() time and surfacing as an opaque
+        // 401/403 from the upstream server.
+        if let AuthShape::Header { name: hdr } = &auth_shape {
+            if hdr.parse::<reqwest::header::HeaderName>().is_err() {
+                return Err(anyhow::anyhow!(
+                    "custom_openai provider {name:?}: auth.name {hdr:?} is not a valid HTTP header name"
+                )
+                .into());
+            }
+        }
+
         match (&auth_shape, &api_key) {
             (AuthShape::None, _) => {}
             (_, Some(_)) => {}
@@ -212,24 +227,24 @@ impl CustomOpenAiProvider {
 
     /// Build the auth-header list for one outbound chat request.
     ///
-    /// `Bearer` and `Header` panic-safely fall through to no-auth when the
-    /// configured api_key is `None` — but that combination is rejected at
-    /// construction time, so this branch is unreachable in well-formed
-    /// configurations.
+    /// Both the `AuthShape::Header { name }` value and the
+    /// `AuthShape::Bearer | Header → api_key` requirement are validated at
+    /// construction time, so the only legal arms here are the two
+    /// authenticated shapes (with a guaranteed-valid header name and key)
+    /// or `None`. The `expect` is a structural assertion against the
+    /// `new()` invariants — it cannot fire on a `Self` produced through
+    /// the public API.
     fn auth_headers(&self) -> Vec<(reqwest::header::HeaderName, String)> {
         match (&self.auth_shape, &self.api_key) {
             (AuthShape::Bearer, Some(key)) => {
                 vec![(reqwest::header::AUTHORIZATION, format!("Bearer {key}"))]
             }
-            (AuthShape::Header { name }, Some(key)) => match name.parse() {
-                Ok(hname) => vec![(hname, key.to_string())],
-                // An invalid header name would have been caught at config
-                // load, but the `HeaderName::from_str` impl is the canonical
-                // validator — fall back to no auth if the name is malformed
-                // at runtime so the request can still surface a clean HTTP
-                // error rather than panicking.
-                Err(_) => Vec::new(),
-            },
+            (AuthShape::Header { name }, Some(key)) => {
+                let hname: reqwest::header::HeaderName = name
+                    .parse()
+                    .expect("auth.name validated at construction time");
+                vec![(hname, key.to_string())]
+            }
             _ => Vec::new(),
         }
     }
@@ -395,6 +410,65 @@ mod tests {
         )
         .expect_err("Header shape without api_key must error");
         assert!(format!("{err}").contains("requires an api_key"));
+    }
+
+    #[test]
+    fn new_rejects_header_name_with_space() {
+        // A space is not a valid HTTP token character; the previous
+        // implementation silently dropped this header at chat() time and
+        // surfaced as an opaque 401/403 from the upstream server. Now
+        // construction must fail with a diagnostic that names the
+        // offending value.
+        let err = CustomOpenAiProvider::new(
+            "bad-hdr",
+            "https://api.example.com",
+            "any",
+            vec![],
+            AuthShape::Header {
+                name: "X-API Key".into(),
+            },
+            Some("sk".into()),
+        )
+        .expect_err("header name with space must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("bad-hdr") && msg.contains("X-API Key"),
+            "error must name the offending entry and value: {msg}"
+        );
+        assert!(
+            msg.contains("not a valid HTTP header name"),
+            "error must explain the failure: {msg}"
+        );
+    }
+
+    #[test]
+    fn new_rejects_header_name_with_control_char() {
+        let err = CustomOpenAiProvider::new(
+            "bad-hdr",
+            "https://api.example.com",
+            "any",
+            vec![],
+            AuthShape::Header {
+                name: "X-Api\nKey".into(),
+            },
+            Some("sk".into()),
+        )
+        .expect_err("header name with newline must be rejected");
+        assert!(format!("{err}").contains("not a valid HTTP header name"));
+    }
+
+    #[test]
+    fn new_rejects_empty_header_name() {
+        let err = CustomOpenAiProvider::new(
+            "bad-hdr",
+            "https://api.example.com",
+            "any",
+            vec![],
+            AuthShape::Header { name: "".into() },
+            Some("sk".into()),
+        )
+        .expect_err("empty header name must be rejected");
+        assert!(format!("{err}").contains("not a valid HTTP header name"));
     }
 
     #[test]

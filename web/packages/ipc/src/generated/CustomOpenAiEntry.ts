@@ -10,6 +10,11 @@ import type { AuthShapeSettings } from "./AuthShapeSettings";
  * Field validation (notably the SSRF guard on `base_url`) is deferred to
  * the construction site in `forge-providers`; this struct is purely the
  * on-disk wire shape.
+ *
+ * `Debug` is hand-rolled (NOT derived) so the `api_key` field can never
+ * reach a tracing span, panic message, or test failure as plaintext. The
+ * formatter prints `Some("<redacted>")` when a key is configured and
+ * `None` otherwise — sufficient for diagnostics without leaking the key.
  */
 export type CustomOpenAiEntry = { 
 /**
