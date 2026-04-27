@@ -37,8 +37,11 @@ impl PodmanRuntime {
     /// - `Ok(())` if both probes succeed.
     /// - [`OciError::RuntimeMissing`] if the version probe failed to spawn or
     ///   exited non-zero (treat as "podman not installed").
-    /// - [`OciError::RootlessUnavailable`] if `podman info` ran but rootless
-    ///   mode is not reported as enabled.
+    /// - [`OciError::RuntimeBroken`] if `podman info` exited non-zero — podman
+    ///   is installed but its environment is misconfigured (cgroup delegation,
+    ///   missing newuidmap, SELinux, etc.).
+    /// - [`OciError::RootlessUnavailable`] if `podman info` JSON parsed and
+    ///   explicitly reports `host.security.rootless = false`.
     /// - [`OciError::InvalidJson`] if `podman info` JSON didn't parse.
     pub async fn detect(&self) -> Result<(), OciError> {
         let version = self
@@ -59,9 +62,13 @@ impl PodmanRuntime {
                 source,
             })?;
         if !info.success() {
-            return Err(OciError::RootlessUnavailable {
-                runtime: PODMAN,
-                reason: String::from_utf8_lossy(&info.stderr).to_string(),
+            // podman is installed but its runtime environment is broken.
+            // Do NOT collapse this into RootlessUnavailable — that would tell
+            // callers "configure rootless" when the real issue is podman
+            // itself can't function (cgroup delegation, newuidmap, SELinux).
+            return Err(OciError::RuntimeBroken {
+                tool: PODMAN,
+                stderr: String::from_utf8_lossy(&info.stderr).to_string(),
             });
         }
 
@@ -126,9 +133,15 @@ impl ContainerRuntime for PodmanRuntime {
 
     async fn create(&self, image: &ImageRef, argv: &[String]) -> Result<ContainerHandle, OciError> {
         let img = image.to_image_string();
-        // `podman create <image> [argv...]` prints the new container ID on
-        // stdout. We use structured args throughout — the trailing argv slice
-        // is appended without any quoting / shell interpretation.
+        // `podman create [options] IMAGE [COMMAND [ARG...]]` — podman's
+        // argument grammar terminates flag parsing at the IMAGE positional, so
+        // every element after `&img` is taken as the in-container command,
+        // even tokens beginning with `--`. We deliberately do NOT inject a
+        // `--` separator here: doing so makes podman pass the literal `--` to
+        // the OCI runtime as the command (crun then errors with
+        // "executable file `--` not found"). The flag-injection regression
+        // test in this module pins that behaviour by feeding `--privileged`
+        // through and asserting podman does not apply it as a runtime flag.
         let mut args: Vec<&str> = vec!["create", &img];
         args.extend(argv.iter().map(String::as_str));
         let outcome = self.run_or_fail(&args).await?;
@@ -154,6 +167,13 @@ impl ContainerRuntime for PodmanRuntime {
         handle: &ContainerHandle,
         argv: &[String],
     ) -> Result<ExecResult, OciError> {
+        // `podman exec [options] CONTAINER COMMAND [ARG...]` — same positional
+        // grammar as `create`: podman stops parsing flags at the CONTAINER
+        // positional, so caller-supplied argv elements that begin with `--`
+        // are passed straight to the in-container command. We deliberately do
+        // NOT inject a `--` separator here for the same reason as `create`:
+        // it would be passed verbatim to crun as the command. The
+        // flag-injection regression test pins this.
         let mut args: Vec<&str> = vec!["exec", &handle.id];
         args.extend(argv.iter().map(String::as_str));
         // exec captures the inner program's stdout/stderr/exit even on a
@@ -308,6 +328,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn detect_reports_runtime_broken_when_info_exits_nonzero() {
+        // podman --version succeeded, but `podman info` failed (cgroup
+        // delegation broken, missing newuidmap, etc.). That's not "rootless
+        // unavailable" — it's "podman itself is broken". The variant matters
+        // because callers render different first-run banners for each.
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"podman version 5.0\n".to_vec()));
+        runner.push(StubResponse::err(
+            b"Error: cannot setup namespace using newuidmap\n".to_vec(),
+        ));
+
+        let err = rt(runner).detect().await.unwrap_err();
+        assert!(
+            matches!(err, OciError::RuntimeBroken { tool: "podman", .. }),
+            "expected RuntimeBroken, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn pull_invokes_structured_args() {
         let runner = RecordingRunner::new();
         runner.push(StubResponse::ok_stdout(b"".to_vec()));
@@ -339,6 +378,51 @@ mod tests {
 
         let calls = calls.lock().unwrap();
         assert_eq!(calls[0].1, vec!["create", "alpine:3.19", "echo", "hi"]);
+    }
+
+    #[tokio::test]
+    async fn create_places_caller_argv_strictly_after_image_positional() {
+        // Flag-injection guard: caller argv must come *after* the IMAGE
+        // positional in podman's grammar (`podman create [options] IMAGE
+        // [COMMAND [ARG...]]`). podman stops parsing its own flags at IMAGE,
+        // so any `--privileged`-style token in caller argv is treated as the
+        // in-container command, not a podman runtime flag. The end-to-end
+        // proof of this lives in the `podman_integration` test
+        // `create_does_not_apply_caller_flags_as_runtime_flags`; this unit
+        // test pins the *positional* invariant the safety story rests on.
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"abc1234\n".to_vec()));
+        let calls = runner.calls.clone();
+
+        let runtime = rt(runner);
+        let img = ImageRef::parse("alpine:3.19").unwrap();
+        runtime
+            .create(&img, &["--privileged".into(), "sh".into()])
+            .await
+            .unwrap();
+
+        let argv = calls.lock().unwrap()[0].1.clone();
+        let image_idx = argv
+            .iter()
+            .position(|a| a == "alpine:3.19")
+            .expect("argv must contain image positional");
+        let first_caller_idx = argv
+            .iter()
+            .position(|a| a == "--privileged")
+            .expect("caller argv element should be present");
+        assert!(
+            image_idx < first_caller_idx,
+            "caller argv must come after IMAGE positional (got {argv:?})"
+        );
+        // No podman flag (anything starting with `-`) may appear after the
+        // IMAGE positional unless it came from caller argv — that's what
+        // protects us from accidentally smuggling a runtime flag in.
+        let suffix = &argv[image_idx + 1..];
+        assert_eq!(
+            suffix,
+            &["--privileged".to_string(), "sh".to_string()],
+            "nothing must be inserted between IMAGE and caller argv (got {argv:?})"
+        );
     }
 
     #[tokio::test]
@@ -390,6 +474,55 @@ mod tests {
         assert_eq!(
             calls.lock().unwrap()[0].1,
             vec!["exec", "xyz", "echo", "hello"]
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_places_caller_argv_strictly_after_container_positional() {
+        // Same positional-invariant story as `create`: `podman exec [options]
+        // CONTAINER COMMAND [ARG...]` — caller argv goes after CONTAINER, so
+        // tokens like `--user` are treated as the in-container command, not
+        // as `podman exec`'s `--user` flag. End-to-end proof lives in the
+        // `podman_integration` test
+        // `exec_does_not_apply_caller_flags_as_runtime_flags`.
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse {
+            matches_args: None,
+            outcome: CommandOutcome {
+                exit_code: Some(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            },
+        });
+        let calls = runner.calls.clone();
+
+        let runtime = rt(runner);
+        runtime
+            .exec(
+                &ContainerHandle::new("xyz"),
+                &["--user".into(), "root".into(), "id".into()],
+            )
+            .await
+            .unwrap();
+
+        let argv = calls.lock().unwrap()[0].1.clone();
+        let container_idx = argv
+            .iter()
+            .position(|a| a == "xyz")
+            .expect("argv must contain container id positional");
+        let first_caller_idx = argv
+            .iter()
+            .position(|a| a == "--user")
+            .expect("caller argv element should be present");
+        assert!(
+            container_idx < first_caller_idx,
+            "caller argv must come after CONTAINER positional (got {argv:?})"
+        );
+        let suffix = &argv[container_idx + 1..];
+        assert_eq!(
+            suffix,
+            &["--user".to_string(), "root".to_string(), "id".to_string()],
+            "nothing must be inserted between CONTAINER and caller argv (got {argv:?})"
         );
     }
 
@@ -496,5 +629,18 @@ mod tests {
         assert_eq!(parse_size_first("2.253MB / 67.31GB"), Some(2_253_000));
         assert_eq!(parse_size_first("512B / 1GB"), Some(512));
         assert_eq!(parse_size_first("1MiB / 1GiB"), Some(1_048_576));
+    }
+
+    #[test]
+    fn parse_size_first_returns_none_for_podman_placeholder() {
+        // Podman emits `"-- / --"` for `mem_usage` on a container that's mid-
+        // transition. We treat the metric as missing rather than failing the
+        // whole `stats` call.
+        assert_eq!(parse_size_first("-- / --"), None);
+    }
+
+    #[test]
+    fn parse_size_first_handles_zero_byte_value() {
+        assert_eq!(parse_size_first("0B / 67.31GB"), Some(0));
     }
 }

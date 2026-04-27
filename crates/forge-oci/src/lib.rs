@@ -171,7 +171,20 @@ pub enum OciError {
     #[error("container runtime '{0}' not found on PATH; install it to enable container isolation")]
     RuntimeMissing(&'static str),
 
-    /// `podman` is on PATH but rootless mode is unavailable.
+    /// `podman` is on PATH but the detection probe (e.g. `podman info`) failed
+    /// before we could read its output. Distinct from [`Self::RootlessUnavailable`]:
+    /// here the runtime is *broken* (cgroup delegation, missing newuidmap,
+    /// SELinux denial, etc.), not configured-rootful.
+    #[error("container runtime '{tool}' is installed but not functional: {stderr}")]
+    RuntimeBroken {
+        /// Runtime name (e.g. `"podman"`).
+        tool: &'static str,
+        /// Captured stderr from the failing probe.
+        stderr: String,
+    },
+
+    /// `podman` ran successfully but reports rootless mode is disabled. Only
+    /// returned when the probe's JSON parsed cleanly and explicitly said so.
     #[error("rootless mode unavailable for container runtime '{runtime}': {reason}")]
     RootlessUnavailable {
         /// Runtime name (e.g. `"podman"`).

@@ -14,13 +14,19 @@ Container lifecycle for agent isolation. Defines the [`ContainerRuntime`] trait 
 - `ContainerHandle` — opaque container ID returned by `create`.
 - `ExecResult { exit_code, stdout, stderr }` — captured exec output.
 - `Stats { cpu_percent, memory_bytes, pids }` — single-shot resource snapshot.
-- `OciError` — typed errors: `RuntimeMissing`, `RootlessUnavailable`, `CommandFailed`, `InvalidImageRef`, `Io`, `InvalidJson`.
+- `OciError` — typed errors: `RuntimeMissing` (binary absent), `RuntimeBroken` (binary present but `podman info` failed — cgroup delegation, newuidmap, SELinux), `RootlessUnavailable` (binary works but rootless explicitly disabled), `CommandFailed`, `InvalidImageRef`, `Io`, `InvalidJson`.
 - `PodmanRuntime::detect()` — first-run probe: confirms `podman --version` and parses `podman info` JSON for `host.security.rootless = true`.
 
 ## Testing
 
 - Unit tests cover argv-shaping for every method via the `RecordingRunner` mock — no `podman` binary required.
-- Integration test `tests/podman_integration.rs` is `cfg(target_os = "linux")` and auto-skips when `podman` is absent or rootless mode is unavailable. It pulls `docker.io/library/alpine:3.19`, runs `echo hello`, asserts stdout, and verifies cleanup via `podman inspect`.
+- Integration test `tests/podman_integration.rs` is `cfg(target_os = "linux")` and `#[ignore]`-gated, so CI's default `cargo test` skips it cleanly. Run locally with rootless podman configured:
+
+  ```sh
+  cargo test -p forge-oci -- --ignored
+  ```
+
+  It pulls `docker.io/library/alpine:3.19`, runs `echo hello`, asserts stdout, and verifies cleanup via `podman inspect`. The test fails loudly when podman is missing or misconfigured rather than auto-skipping (which would mask CI regressions).
 
 ## Further reading
 
