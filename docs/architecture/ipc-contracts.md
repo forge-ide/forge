@@ -202,8 +202,12 @@ pub enum RerunVariant { Replace, Branch, Fresh }
 #[tauri::command] async fn set_memory_enabled(enabled: bool) -> Result<(), IpcError>;
 #[tauri::command] async fn read_memory(agent: AgentId) -> Result<Option<String>, IpcError>;
 
-// Usage
-#[tauri::command] async fn usage_summary(range: UsageRange, group_by: GroupBy) -> Result<UsageReport, IpcError>;
+// Usage (F-593)
+//
+// `cross_workspace = false` filters to the dashboard's currently-active
+// workspace via `workspace_root`; `true` aggregates every monthly file
+// under `<config>/forge/usage/`. Restricted to the dashboard window.
+#[tauri::command] async fn usage_summary(range: UsageRange, group_by: GroupBy, cross_workspace: bool, workspace_root: Option<String>) -> Result<UsageSummary, IpcError>;
 
 // Containers
 #[tauri::command] async fn list_containers() -> Result<Vec<ContainerSummary>, IpcError>;

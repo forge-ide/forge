@@ -46,6 +46,12 @@ pub mod dashboard_sessions;
 // `dashboard_` prefix on `list_providers` disambiguates from F-591's
 // roster-catalog command of the same short name.
 pub mod providers_ipc;
+// F-593: `usage_summary` Tauri command, plus the cross-workspace toggle and
+// monthly-file walker that backs it. Gated behind `webview` because the
+// command itself depends on Tauri types; the helpers it ships are exercised
+// in-module under `#[cfg(test)]`.
+#[cfg(feature = "webview")]
+pub mod usage_ipc;
 pub mod window_spec;
 
 #[cfg(feature = "webview")]

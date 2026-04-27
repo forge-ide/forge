@@ -16,6 +16,7 @@ mod tool;
 mod transcript;
 pub mod types;
 pub mod url_safety;
+pub mod usage;
 pub mod workspace;
 pub mod workspaces;
 
@@ -40,4 +41,8 @@ pub use transcript::{apply_superseded, Transcript};
 pub use types::{
     ApprovalLevel, ApprovalScope, CompactTrigger, RerunVariant, SessionPersistence, SessionState,
     StepKind, StepOutcome, TokenUsage,
+};
+pub use usage::{
+    format_month, monthly_path_in, summarize, user_usage_dir, user_usage_dir_in, GroupBy, Money,
+    MonthlyAggregate, UsageBreakdown, UsageBucket, UsageRange, UsageSummary,
 };

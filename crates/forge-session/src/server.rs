@@ -25,7 +25,21 @@ use crate::orchestrator::{
 use crate::sandbox::ChildRegistry;
 use crate::session::Session;
 use crate::tools::AgentRuntime;
+use crate::usage_flush::flush_session_usage_to_user_dir;
 use forge_core::{ApprovalScope, MessageId};
+
+/// F-593: Stable per-workspace id used to tag rows in the usage aggregate
+/// (`<config>/forge/usage/<YYYY-MM>.json`). The canonical string form of the
+/// workspace path is the simplest stable identity available — it survives
+/// daemon restart, doesn't depend on a registry lookup, and is exactly what
+/// the dashboard already shows. When no workspace is bound, a synthetic
+/// `"<no-workspace>"` id is used so ephemeral runs still aggregate cleanly.
+fn derive_workspace_id(workspace_path: Option<&Path>) -> WorkspaceId {
+    match workspace_path {
+        Some(p) => WorkspaceId::from_string(p.to_string_lossy().into_owned()),
+        None => WorkspaceId::from_string("<no-workspace>".to_string()),
+    }
+}
 
 /// F-354: Maximum time the daemon will wait for a connecting peer to send
 /// the `Hello` frame and, once HelloAck is written, the `Subscribe` frame.
@@ -888,6 +902,21 @@ pub async fn serve_with_session<P: Provider + 'static>(
     // shutdown ever needs to await in-flight turns, replace the spawn with
     // a JoinSet drained here with a timeout.
     child_registry.kill_all();
+    // F-593: flush the persistent session's usage tally before archiving the
+    // session dir. Running before archive_or_purge is intentional — the
+    // archive step renames the session dir into the archive root and the
+    // event-log path the flush reads from must still be at its live location.
+    let workspace_id_for_flush = derive_workspace_id(workspace_path.as_deref());
+    if let Err(e) =
+        flush_session_usage_to_user_dir(&session.log_path, &workspace_id_for_flush).await
+    {
+        tracing::warn!(
+            target: "forge_session::server",
+            session_id = %session_id,
+            error = %e,
+            "usage flush failed at persistent shutdown",
+        );
+    }
     if let Some(session_dir) = session.log_path.parent() {
         archive_or_purge(session_dir, SessionPersistence::Persist, &socket_path).await?;
     }
@@ -1042,6 +1071,11 @@ async fn handle_connection<P: Provider + 'static>(
                         // `String` is a refcount bump; the actual store is
                         // shared across every turn in the session.
                         let credential_ctx_for_turn = credentials.clone();
+                        // F-593: capture the session log path + workspace path
+                        // *before* the move so the post-`SessionEnded` flush
+                        // can read its own log without re-borrowing `session`.
+                        let log_path_for_flush = session.log_path.clone();
+                        let workspace_path_for_flush = workspace_path.clone();
                         tokio::spawn(async move {
                             let result = run_turn(
                                 Arc::clone(&session),
@@ -1092,6 +1126,24 @@ async fn handle_connection<P: Provider + 'static>(
                                         session_id = %session_id_for_turn,
                                         error = %e,
                                         "failed to emit SessionEnded",
+                                    );
+                                }
+                                // F-593: flush per-session usage tally into the
+                                // monthly aggregate. Best-effort — a flush
+                                // failure must not surface to the client (the
+                                // session is already ending) but is logged so
+                                // operators see persistent corruption early.
+                                let workspace_id_for_flush =
+                                    derive_workspace_id(workspace_path_for_flush.as_deref());
+                                if let Err(e) = flush_session_usage_to_user_dir(
+                                    &log_path_for_flush,
+                                    &workspace_id_for_flush,
+                                ).await {
+                                    tracing::warn!(
+                                        target: "forge_session::server",
+                                        session_id = %session_id_for_turn,
+                                        error = %e,
+                                        "usage flush failed at session end",
                                     );
                                 }
                             }
