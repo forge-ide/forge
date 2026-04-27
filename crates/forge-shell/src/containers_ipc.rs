@@ -193,6 +193,17 @@ impl ContainerRegistryState {
     /// Snapshot all entries, sorted by `started_at` ascending so the
     /// dashboard renders the oldest container first (stable across
     /// refreshes).
+    ///
+    /// # Invariant: `started_at` is RFC-3339 with `+00:00` offset
+    ///
+    /// We sort `started_at` lexicographically as a `String`, which is
+    /// only safe because every value is produced by
+    /// [`make_container_info`], which calls `chrono::DateTime::<Utc>::to_rfc3339()`
+    /// — that always emits the `+00:00` form (never `Z`, never a non-UTC
+    /// offset). Mixed offset forms would break the lex-sort ordering.
+    /// Any future code path that registers a container MUST go through
+    /// `make_container_info` (or otherwise emit the same canonical form);
+    /// the `make_container_info_emits_rfc3339_timestamp` test pins this.
     pub async fn list(&self) -> Vec<ContainerInfo> {
         let g = self.inner.read().await;
         let mut out: Vec<ContainerInfo> = g.values().cloned().collect();
@@ -225,8 +236,15 @@ pub fn validate_container_id(container_id: &str) -> Result<(), String> {
             MAX_CONTAINER_ID_BYTES
         ));
     }
-    // Container IDs from podman are hex; allow alphanumerics + dashes
-    // (some runtimes return derived names instead of pure hex).
+    // Container IDs from podman are 64-char hex; podman container *names*
+    // accept `[a-zA-Z0-9][a-zA-Z0-9_.-]*`. Our allowlist is a deliberate
+    // superset of the hex-id form and a subset of the name form (we omit
+    // `.` because no live forge codepath produces dotted names and the
+    // looser charset would slacken the structured-argv guarantee for no
+    // benefit). Any non-matching id is rejected at the IPC boundary —
+    // not a security guarantee on its own (argv is structured), just a
+    // tight contract that catches accidental mis-routing and shaves an
+    // attacker's bug-search surface.
     if !container_id
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
