@@ -256,13 +256,21 @@ pub async fn run_turn<P: Provider>(
     // a potentially 256 KiB AGENTS.md.
     let system: Option<Arc<str>> = agents_md.clone();
 
+    // F-599: opt the provider into emitting parallel tool calls. The
+    // orchestrator only dispatches a batch concurrently when every tool
+    // in the batch is read-only (`group_tool_calls`); a mixed batch
+    // collapses to sequential singletons. So allowing the provider to
+    // emit parallel calls is always safe — the gating happens
+    // dispatcher-side. F-583/F-584 wired the flag into the Anthropic /
+    // OpenAI request bodies; this is the site the DoD pins as "flipped
+    // to true".
     let initial_req = ChatRequest {
         system,
         messages: vec![ChatMessage {
             role: ChatRole::User,
             content: vec![ChatBlock::Text(text)],
         }],
-        parallel_tool_calls_allowed: false,
+        parallel_tool_calls_allowed: true,
     };
 
     // F-567: pull the dispatcher from the session-scoped cache when one is
@@ -435,11 +443,14 @@ pub(crate) async fn run_request_loop<P: Provider>(
 
         let mut stream = provider.chat(req.clone()).await?;
         let mut assistant_text = String::new();
-        // Separate accumulators for the assistant's tool-call blocks (added to the
-        // assistant message) and tool-result blocks (added to the next user message).
-        let mut tc_blocks: Vec<ChatBlock> = vec![];
-        let mut tr_blocks: Vec<ChatBlock> = vec![];
-        let mut had_tool_calls = false;
+        // F-599: buffer every `ChatChunk::ToolCall` emitted in this stream
+        // pass and dispatch the buffered set as one batch after the stream
+        // closes. Buffering lets the dispatcher group consecutive
+        // read-only calls and run them concurrently via `JoinSet` while
+        // preserving original-call order on the wire (event log + chat
+        // continuation). Text deltas are still emitted live — only tool
+        // events are deferred.
+        let mut pending_calls: Vec<PendingToolCall> = vec![];
 
         while let Some(chunk) = stream.next().await {
             match chunk {
@@ -458,293 +469,29 @@ pub(crate) async fn run_request_loop<P: Provider>(
                 }
 
                 ChatChunk::ToolCall { name, args } => {
-                    had_tool_calls = true;
-                    let call_id = ToolCallId::new();
-
-                    // F-139: open a nested `Tool` step around this tool
-                    // invocation. Nests inside the enclosing Model step
-                    // and closes before we loop back to the next stream
-                    // chunk. `StepFinished` carries the same `step_id`;
-                    // `ToolInvoked` / `ToolReturned` reference it.
-                    let tool_step_id = StepId::new();
-                    let tool_step_started = Instant::now();
-                    session
-                        .emit(Event::StepStarted {
-                            step_id: tool_step_id.clone(),
-                            // F-140: same instance id as the enclosing Model
-                            // step, so a tool step nests cleanly inside its
-                            // parent step in the Agent Monitor timeline.
-                            instance_id: instance_id.clone(),
-                            kind: StepKind::Tool,
-                            started_at: Utc::now(),
-                        })
-                        .await?;
-
-                    session
-                        .emit(Event::ToolCallStarted {
-                            id: call_id.clone(),
-                            msg: msg_id.clone(),
-                            tool: name.clone(),
-                            args: args.clone(),
-                            at: Utc::now(),
-                            parallel_group: None,
-                        })
-                        .await?;
-
-                    let started = Instant::now();
-                    let tool = dispatcher.get(&name);
-
-                    let result = match tool {
-                        Ok(tool) => {
-                            // F-132: read-only tools (MCP tools whose
-                            // `readOnlyHint` is `true`) bypass the
-                            // user-approval prompt. We still emit a
-                            // `ToolCallApproved` with `ApprovalSource::Auto`
-                            // + `ApprovalScope::Once` so replay sees a
-                            // terminated approval event — the invariant
-                            // every `ToolCallStarted` eventually resolves
-                            // via either Approved or Rejected holds.
-                            if auto_approve || tool.read_only() {
-                                session
-                                    .emit(Event::ToolCallApproved {
-                                        id: call_id.clone(),
-                                        by: ApprovalSource::Auto,
-                                        scope: ApprovalScope::Once,
-                                        at: Utc::now(),
-                                    })
-                                    .await?;
-                            } else {
-                                let (tx, rx) = oneshot::channel::<ApprovalDecision>();
-                                pending_approvals
-                                    .lock()
-                                    .await
-                                    .insert(call_id.to_string(), tx);
-
-                                session
-                                    .emit(Event::ToolCallApprovalRequested {
-                                        id: call_id.clone(),
-                                        preview: tool.approval_preview(&args),
-                                    })
-                                    .await?;
-
-                                // If the client drops the channel we treat it as a
-                                // rejection — matches the pre-F-053 default.
-                                let decision = rx.await.unwrap_or(ApprovalDecision::Rejected);
-
-                                let scope = match decision {
-                                    ApprovalDecision::Approved(scope) => scope,
-                                    ApprovalDecision::Rejected => {
-                                        session
-                                            .emit(Event::ToolCallRejected {
-                                                id: call_id,
-                                                reason: Some("rejected by client".to_string()),
-                                            })
-                                            .await?;
-                                        // F-139: close the Tool step with
-                                        // an error outcome before unwinding.
-                                        // The enclosing Model step is
-                                        // closed just below, in the
-                                        // AssistantMessage(final) path.
-                                        session
-                                            .emit(Event::StepFinished {
-                                                step_id: tool_step_id.clone(),
-                                                outcome: StepOutcome::Error {
-                                                    reason: "rejected by client".to_string(),
-                                                },
-                                                duration_ms: tool_step_started.elapsed().as_millis()
-                                                    as u64,
-                                                token_usage: None,
-                                            })
-                                            .await?;
-                                        session
-                                            .emit(Event::AssistantMessage {
-                                                id: msg_id.clone(),
-                                                provider: provider_id.clone(),
-                                                model: model.clone(),
-                                                at: Utc::now(),
-                                                stream_finalised: true,
-                                                // F-112: wrap at boundary.
-                                                text: Arc::from(assistant_text.as_str()),
-                                                branch_parent: branch_parent.clone(),
-                                                branch_variant_index,
-                                            })
-                                            .await?;
-                                        // Close the Model step too so the
-                                        // LIFO invariant holds even on
-                                        // early return.
-                                        session
-                                            .emit(Event::StepFinished {
-                                                step_id: model_step_id.clone(),
-                                                outcome: StepOutcome::Ok,
-                                                duration_ms: model_step_started
-                                                    .elapsed()
-                                                    .as_millis()
-                                                    as u64,
-                                                token_usage: None,
-                                            })
-                                            .await?;
-                                        return Ok(());
-                                    }
-                                };
-
-                                session
-                                    .emit(Event::ToolCallApproved {
-                                        id: call_id.clone(),
-                                        by: ApprovalSource::User,
-                                        scope,
-                                        at: Utc::now(),
-                                    })
-                                    .await?;
-                            }
-
-                            // F-139: emit ToolInvoked at the approval→
-                            // execution boundary — after approval logged,
-                            // before the tool runs. `args_digest` is a
-                            // short SHA-256 prefix; downstream consumers
-                            // correlate with `ToolCallStarted.args`.
-                            session
-                                .emit(Event::ToolInvoked {
-                                    step_id: tool_step_id.clone(),
-                                    tool_call_id: call_id.clone(),
-                                    tool_id: name.clone(),
-                                    args_digest: args_digest(&args),
-                                })
-                                .await?;
-
-                            tool.invoke(&args, ctx).await
-                        }
-                        Err(ToolError::UnknownTool(n)) => {
-                            // Unknown / errored dispatcher lookups still
-                            // emit ToolInvoked so the step window is
-                            // bracketed even when no tool actually ran.
-                            // `ok` on the subsequent ToolReturned will
-                            // reflect the synthetic error payload.
-                            session
-                                .emit(Event::ToolInvoked {
-                                    step_id: tool_step_id.clone(),
-                                    tool_call_id: call_id.clone(),
-                                    tool_id: name.clone(),
-                                    args_digest: args_digest(&args),
-                                })
-                                .await?;
-                            serde_json::json!({ "error": format!("unknown tool '{n}'") })
-                        }
-                        Err(e) => {
-                            session
-                                .emit(Event::ToolInvoked {
-                                    step_id: tool_step_id.clone(),
-                                    tool_call_id: call_id.clone(),
-                                    tool_id: name.clone(),
-                                    args_digest: args_digest(&args),
-                                })
-                                .await?;
-                            serde_json::json!({ "error": e.to_string() })
-                        }
-                    };
-
-                    let duration_ms = started.elapsed().as_millis() as u64;
-
-                    // F-139: ToolReturned right after the invocation
-                    // settled. `ok` = absence of a top-level `error` key
-                    // on the result payload; `bytes_out` = byte length of
-                    // the serialized result.
-                    let result_bytes = serde_json::to_string(&result)
-                        .map(|s| s.len() as u64)
-                        .unwrap_or(0);
-                    let result_ok = result.get("error").is_none();
-                    session
-                        .emit(Event::ToolReturned {
-                            step_id: tool_step_id.clone(),
-                            tool_call_id: call_id.clone(),
-                            ok: result_ok,
-                            bytes_out: result_bytes,
-                        })
-                        .await?;
-
-                    session
-                        .emit(Event::ToolCallCompleted {
-                            id: call_id.clone(),
-                            result: result.clone(),
-                            duration_ms,
-                            at: Utc::now(),
-                        })
-                        .await?;
-
-                    // F-139: close the Tool step. `outcome` mirrors the
-                    // result's top-level `error` field so consumers can
-                    // filter failures without parsing the payload.
-                    session
-                        .emit(Event::StepFinished {
-                            step_id: tool_step_id.clone(),
-                            outcome: if result_ok {
-                                StepOutcome::Ok
-                            } else {
-                                StepOutcome::Error {
-                                    reason: result
-                                        .get("error")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("tool returned error")
-                                        .to_string(),
-                                }
-                            },
-                            duration_ms: tool_step_started.elapsed().as_millis() as u64,
-                            token_usage: None,
-                        })
-                        .await?;
-
-                    tc_blocks.push(ChatBlock::ToolCall {
-                        id: call_id.to_string(),
-                        name: name.clone(),
+                    pending_calls.push(PendingToolCall {
+                        name,
                         args,
-                    });
-                    tr_blocks.push(ChatBlock::ToolResult {
-                        id: call_id.to_string(),
-                        result,
+                        call_id: ToolCallId::new(),
                     });
                 }
 
                 ChatChunk::Done(_) => {
-                    // Always finalise the assistant message on Done, whether or not
-                    // tool calls occurred in this turn.
-                    session
-                        .emit(Event::AssistantMessage {
-                            id: msg_id.clone(),
-                            provider: provider_id.clone(),
-                            model: model.clone(),
-                            at: Utc::now(),
-                            stream_finalised: true,
-                            // F-112: wrap at boundary.
-                            text: Arc::from(assistant_text.as_str()),
-                            branch_parent: branch_parent.clone(),
-                            branch_variant_index,
-                        })
-                        .await?;
-
-                    // F-139: close the Model step before returning or
-                    // looping. We emit StepFinished *after* the final
-                    // AssistantMessage so the step window contains every
-                    // event it logically owns.
-                    session
-                        .emit(Event::StepFinished {
-                            step_id: model_step_id.clone(),
-                            outcome: StepOutcome::Ok,
-                            duration_ms: model_step_started.elapsed().as_millis() as u64,
-                            token_usage: None,
-                        })
-                        .await?;
-
-                    if !had_tool_calls {
-                        return Ok(());
-                    }
-                    // Tool calls happened — build continuation request and loop.
+                    // Stream closed cleanly. Tool dispatch (if any) and the
+                    // final AssistantMessage emission both happen below,
+                    // *after* the stream loop unwinds — that way buffered
+                    // tool calls get their event window inside the model
+                    // step, and `AssistantMessage(stream_finalised=true)`
+                    // still pins the end of the model step on the wire.
                     break;
                 }
 
                 ChatChunk::Error { kind, message } => {
                     // Stream aborted under a provider-layer bound (line cap,
                     // idle timeout, wall-clock timeout, transport error).
-                    // Finalise whatever assistant text we streamed so the UI
-                    // composer unwedges, then surface the failure.
+                    // Drop any buffered tool calls — they never reached
+                    // the dispatcher and emitting partial Tool* events
+                    // would leave a half-bracketed step window.
                     session
                         .emit(Event::AssistantMessage {
                             id: msg_id.clone(),
@@ -778,8 +525,33 @@ pub(crate) async fn run_request_loop<P: Provider>(
             }
         }
 
-        if !had_tool_calls {
-            // Stream ended without a Done chunk — finalise and complete.
+        // F-599: stream closed (Done or end-of-stream). Dispatch any
+        // buffered tool calls before finalising the assistant message so
+        // `AssistantMessage(stream_finalised=true)` pins the end of the
+        // model step *after* every Tool* event the model logically owns.
+        let had_tool_calls = !pending_calls.is_empty();
+        let DispatchOutcome {
+            tc_blocks,
+            tr_blocks,
+            rejected,
+        } = dispatch_tool_calls(
+            &session,
+            std::mem::take(&mut pending_calls),
+            &msg_id,
+            &instance_id,
+            &pending_approvals,
+            dispatcher,
+            ctx,
+            auto_approve,
+        )
+        .await?;
+
+        // If the user denied a singleton non-read-only call, every
+        // remaining call in `pending_calls` was already collapsed into
+        // a synthetic "rejected" tool result; surface the same early
+        // exit shape the pre-F-599 code did so the LIFO step invariant
+        // holds for embedders that pin on it.
+        if rejected {
             session
                 .emit(Event::AssistantMessage {
                     id: msg_id.clone(),
@@ -787,13 +559,11 @@ pub(crate) async fn run_request_loop<P: Provider>(
                     model: model.clone(),
                     at: Utc::now(),
                     stream_finalised: true,
-                    // F-112: wrap at boundary.
                     text: Arc::from(assistant_text.as_str()),
                     branch_parent: branch_parent.clone(),
                     branch_variant_index,
                 })
                 .await?;
-            // F-139: close Model step on the no-Done exit path too.
             session
                 .emit(Event::StepFinished {
                     step_id: model_step_id.clone(),
@@ -802,6 +572,33 @@ pub(crate) async fn run_request_loop<P: Provider>(
                     token_usage: None,
                 })
                 .await?;
+            return Ok(());
+        }
+
+        // Always finalise the assistant message — whether or not tool
+        // calls fired this turn.
+        session
+            .emit(Event::AssistantMessage {
+                id: msg_id.clone(),
+                provider: provider_id.clone(),
+                model: model.clone(),
+                at: Utc::now(),
+                stream_finalised: true,
+                text: Arc::from(assistant_text.as_str()),
+                branch_parent: branch_parent.clone(),
+                branch_variant_index,
+            })
+            .await?;
+        session
+            .emit(Event::StepFinished {
+                step_id: model_step_id.clone(),
+                outcome: StepOutcome::Ok,
+                duration_ms: model_step_started.elapsed().as_millis() as u64,
+                token_usage: None,
+            })
+            .await?;
+
+        if !had_tool_calls {
             return Ok(());
         }
 
@@ -819,6 +616,515 @@ pub(crate) async fn run_request_loop<P: Provider>(
             content: tr_blocks,
         });
     }
+}
+
+/// F-599: one tool call buffered between stream consumption and dispatch.
+struct PendingToolCall {
+    name: String,
+    args: serde_json::Value,
+    call_id: ToolCallId,
+}
+
+/// F-599: outcome of dispatching the buffered tool batch for one model
+/// pass. `rejected = true` means a non-read-only call was denied by the
+/// user — the request loop should bail without continuing the
+/// conversation. `tc_blocks` / `tr_blocks` are the assistant tool-call
+/// blocks and the matching tool-result blocks in original-call order;
+/// the caller appends them to the continuation request.
+struct DispatchOutcome {
+    tc_blocks: Vec<ChatBlock>,
+    tr_blocks: Vec<ChatBlock>,
+    rejected: bool,
+}
+
+/// F-599: a contiguous run of buffered tool calls that will be executed
+/// together. A run is parallel iff it contains 2+ calls and *every* tool
+/// is read-only; mixed and singleton runs collapse to sequential
+/// dispatch (preserving the pre-F-599 behaviour exactly).
+#[derive(Debug, PartialEq)]
+struct ToolBatch {
+    /// Indices into the buffered `pending_calls` slice. Non-empty.
+    indices: Vec<usize>,
+    /// `true` when the batch should run concurrently (length >= 2 AND
+    /// every member tool's `read_only()` is true).
+    parallel: bool,
+}
+
+/// F-599: partition a slice of buffered tool calls into [`ToolBatch`]es.
+///
+/// A `read_only_flags[i] == None` means the tool at index `i` was not
+/// found on the dispatcher (UnknownTool / lookup error). Unknown tools
+/// are treated as **non-read-only** for batching — we can't risk
+/// dispatching them in parallel with read-only siblings.
+///
+/// Grouping rule (mirrors the DoD): walk the slice in order; consecutive
+/// read-only calls coalesce into one parallel batch (`parallel = true`
+/// once length >= 2). Any non-read-only or unknown call breaks the run
+/// and dispatches as its own singleton (`parallel = false`).
+fn group_tool_calls(read_only_flags: &[Option<bool>]) -> Vec<ToolBatch> {
+    let mut batches: Vec<ToolBatch> = Vec::new();
+    let mut current: Vec<usize> = Vec::new();
+    let mut current_all_ro = true;
+    for (i, ro) in read_only_flags.iter().enumerate() {
+        let is_ro = matches!(ro, Some(true));
+        if is_ro {
+            if !current_all_ro && !current.is_empty() {
+                // `current` had a non-read-only entry — flush it as a
+                // sequence of singletons (never mix RO + non-RO in one
+                // parallel batch).
+                for idx in current.drain(..) {
+                    batches.push(ToolBatch {
+                        indices: vec![idx],
+                        parallel: false,
+                    });
+                }
+                current_all_ro = true;
+            }
+            current.push(i);
+        } else {
+            // Flush any in-flight RO run as one batch (parallel iff >= 2),
+            // then emit this non-RO call as its own singleton.
+            if !current.is_empty() {
+                let parallel = current_all_ro && current.len() >= 2;
+                batches.push(ToolBatch {
+                    indices: std::mem::take(&mut current),
+                    parallel,
+                });
+                current_all_ro = true;
+            }
+            batches.push(ToolBatch {
+                indices: vec![i],
+                parallel: false,
+            });
+        }
+    }
+    if !current.is_empty() {
+        let parallel = current_all_ro && current.len() >= 2;
+        batches.push(ToolBatch {
+            indices: current,
+            parallel,
+        });
+    }
+    batches
+}
+
+/// F-599: dispatch every buffered tool call for the current model pass.
+///
+/// * Parallel batches (>= 2 read-only calls) emit `ToolCallStarted` with
+///   `parallel_group: Some(g)` (one shared id per batch) and run on a
+///   `tokio::task::JoinSet`. Results are collected in original-call
+///   order so the wire shape (continuation request blocks + every Tool*
+///   event) is deterministic regardless of which task finishes first.
+/// * Singleton batches keep the pre-F-599 sequential shape exactly,
+///   including the user-approval prompt for non-read-only tools.
+/// * If a singleton's user approval is denied, dispatch stops; remaining
+///   buffered calls never reach the dispatcher and the caller bails the
+///   request loop. `tc_blocks` / `tr_blocks` returned at that point
+///   contain only the calls processed before the rejection.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_tool_calls(
+    session: &Arc<Session>,
+    pending: Vec<PendingToolCall>,
+    msg_id: &MessageId,
+    instance_id: &Option<forge_core::ids::AgentInstanceId>,
+    pending_approvals: &PendingApprovals,
+    dispatcher: &ToolDispatcher,
+    ctx: &ToolCtx,
+    auto_approve: bool,
+) -> Result<DispatchOutcome> {
+    if pending.is_empty() {
+        return Ok(DispatchOutcome {
+            tc_blocks: vec![],
+            tr_blocks: vec![],
+            rejected: false,
+        });
+    }
+
+    // Look up read-only flags for grouping. Unknown tools coerce to
+    // `None`, which `group_tool_calls` treats as non-read-only.
+    let read_only_flags: Vec<Option<bool>> = pending
+        .iter()
+        .map(|p| dispatcher.get(&p.name).ok().map(|t| t.read_only()))
+        .collect();
+    let batches = group_tool_calls(&read_only_flags);
+
+    let mut tc_blocks: Vec<ChatBlock> = Vec::with_capacity(pending.len());
+    let mut tr_blocks: Vec<ChatBlock> = Vec::with_capacity(pending.len());
+    let mut next_parallel_group: u32 = 1;
+
+    // Indexed slot for each buffered call's result so we can reassemble
+    // in original-call order after a parallel batch.
+    let mut results: Vec<Option<serde_json::Value>> = vec![None; pending.len()];
+    // Per-call `(tool_step_id, started_instant)` so a parallel batch's
+    // `ToolReturned`/`StepFinished(Tool)` events reference the same step
+    // id that the batch's `StepStarted(Tool)` opened.
+    let mut tool_steps: Vec<Option<(StepId, Instant)>> = pending.iter().map(|_| None).collect();
+
+    for batch in batches {
+        if batch.parallel {
+            let group_id = next_parallel_group;
+            next_parallel_group += 1;
+
+            // Open a Tool step + emit `ToolCallStarted` (with the shared
+            // `parallel_group`) for every member of the batch BEFORE
+            // spawning, so the event log shows the full batch starting
+            // before any task completes.
+            for &idx in &batch.indices {
+                let pc = &pending[idx];
+                let tool_step_id = StepId::new();
+                let started = Instant::now();
+                tool_steps[idx] = Some((tool_step_id.clone(), started));
+                session
+                    .emit(Event::StepStarted {
+                        step_id: tool_step_id.clone(),
+                        instance_id: instance_id.clone(),
+                        kind: StepKind::Tool,
+                        started_at: Utc::now(),
+                    })
+                    .await?;
+                session
+                    .emit(Event::ToolCallStarted {
+                        id: pc.call_id.clone(),
+                        msg: msg_id.clone(),
+                        tool: pc.name.clone(),
+                        args: pc.args.clone(),
+                        at: Utc::now(),
+                        parallel_group: Some(group_id),
+                    })
+                    .await?;
+            }
+
+            // F-599: parallel batches trigger only when every member is
+            // read-only — `ToolCallApproved(Auto)` is emitted for each
+            // call so replay sees a terminated approval event. The
+            // batched approval prompt the DoD references is a no-op
+            // here: read-only tools never raise a user prompt today.
+            for &idx in &batch.indices {
+                let pc = &pending[idx];
+                session
+                    .emit(Event::ToolCallApproved {
+                        id: pc.call_id.clone(),
+                        by: ApprovalSource::Auto,
+                        scope: ApprovalScope::Once,
+                        at: Utc::now(),
+                    })
+                    .await?;
+            }
+
+            // Emit `ToolInvoked` for each call before spawning so every
+            // step window's Invoked marker precedes its Returned marker
+            // even when tasks finish out of order.
+            for &idx in &batch.indices {
+                let pc = &pending[idx];
+                let (tool_step_id, _) = tool_steps[idx].as_ref().expect("tool step opened");
+                session
+                    .emit(Event::ToolInvoked {
+                        step_id: tool_step_id.clone(),
+                        tool_call_id: pc.call_id.clone(),
+                        tool_id: pc.name.clone(),
+                        args_digest: args_digest(&pc.args),
+                    })
+                    .await?;
+            }
+
+            // Spawn every call concurrently. Each task moves an
+            // `Arc<dyn Tool>` + cloned args + cloned `ToolCtx` so the
+            // future is `'static + Send`.
+            let mut joinset: tokio::task::JoinSet<(usize, serde_json::Value)> =
+                tokio::task::JoinSet::new();
+            for &idx in &batch.indices {
+                let pc = &pending[idx];
+                let tool = match dispatcher.get_arc(&pc.name) {
+                    Ok(t) => t,
+                    Err(ToolError::UnknownTool(n)) => {
+                        // Unknown tool — record a synthetic error inline
+                        // without spawning. The pre-F-599 code emitted
+                        // `ToolInvoked` here too; we already emitted it
+                        // above so just stash the result.
+                        results[idx] =
+                            Some(serde_json::json!({ "error": format!("unknown tool '{n}'") }));
+                        continue;
+                    }
+                    Err(e) => {
+                        results[idx] = Some(serde_json::json!({ "error": e.to_string() }));
+                        continue;
+                    }
+                };
+                let args = pc.args.clone();
+                let ctx_owned = ctx.clone();
+                joinset.spawn(async move {
+                    let r = tool.invoke(&args, &ctx_owned).await;
+                    (idx, r)
+                });
+            }
+
+            // Drain the JoinSet. A `JoinError` (panicking task) becomes a
+            // synthetic error result for that index — other tools in the
+            // batch still complete; we never short-circuit on one
+            // failure.
+            while let Some(joined) = joinset.join_next().await {
+                match joined {
+                    Ok((idx, result)) => {
+                        results[idx] = Some(result);
+                    }
+                    Err(join_err) => {
+                        // We don't know which `idx` panicked; mark the
+                        // first not-yet-set slot as the offender. This is
+                        // best-effort attribution — panicking tools are
+                        // a programmer error, not a user-facing case.
+                        if let Some(slot) = results.iter_mut().find(|r| r.is_none()) {
+                            *slot = Some(serde_json::json!({
+                                "error": format!("tool task panicked: {join_err}")
+                            }));
+                        }
+                    }
+                }
+            }
+
+            // Reassemble per-call events in original-call order so
+            // downstream consumers see deterministic Tool* sequencing.
+            for &idx in &batch.indices {
+                let pc = &pending[idx];
+                let (tool_step_id, started) = tool_steps[idx].as_ref().expect("tool step opened");
+                let result = results[idx]
+                    .take()
+                    .expect("every batch index must have a result");
+                let result_bytes = serde_json::to_string(&result)
+                    .map(|s| s.len() as u64)
+                    .unwrap_or(0);
+                let result_ok = result.get("error").is_none();
+                let duration_ms = started.elapsed().as_millis() as u64;
+
+                session
+                    .emit(Event::ToolReturned {
+                        step_id: tool_step_id.clone(),
+                        tool_call_id: pc.call_id.clone(),
+                        ok: result_ok,
+                        bytes_out: result_bytes,
+                    })
+                    .await?;
+                session
+                    .emit(Event::ToolCallCompleted {
+                        id: pc.call_id.clone(),
+                        result: result.clone(),
+                        duration_ms,
+                        at: Utc::now(),
+                    })
+                    .await?;
+                session
+                    .emit(Event::StepFinished {
+                        step_id: tool_step_id.clone(),
+                        outcome: if result_ok {
+                            StepOutcome::Ok
+                        } else {
+                            StepOutcome::Error {
+                                reason: result
+                                    .get("error")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("tool returned error")
+                                    .to_string(),
+                            }
+                        },
+                        duration_ms,
+                        token_usage: None,
+                    })
+                    .await?;
+
+                tc_blocks.push(ChatBlock::ToolCall {
+                    id: pc.call_id.to_string(),
+                    name: pc.name.clone(),
+                    args: pc.args.clone(),
+                });
+                tr_blocks.push(ChatBlock::ToolResult {
+                    id: pc.call_id.to_string(),
+                    result,
+                });
+            }
+        } else {
+            // Sequential path — one call. Mirrors the pre-F-599 inline
+            // body exactly so the wire shape on this path stays
+            // identical (including the user-approval prompt for
+            // non-read-only tools and the same rejection unwind).
+            for &idx in &batch.indices {
+                let pc = &pending[idx];
+                let tool_step_id = StepId::new();
+                let tool_step_started = Instant::now();
+                session
+                    .emit(Event::StepStarted {
+                        step_id: tool_step_id.clone(),
+                        instance_id: instance_id.clone(),
+                        kind: StepKind::Tool,
+                        started_at: Utc::now(),
+                    })
+                    .await?;
+                session
+                    .emit(Event::ToolCallStarted {
+                        id: pc.call_id.clone(),
+                        msg: msg_id.clone(),
+                        tool: pc.name.clone(),
+                        args: pc.args.clone(),
+                        at: Utc::now(),
+                        parallel_group: None,
+                    })
+                    .await?;
+
+                let started = Instant::now();
+                let tool_lookup = dispatcher.get(&pc.name);
+
+                let result = match tool_lookup {
+                    Ok(tool) => {
+                        if auto_approve || tool.read_only() {
+                            session
+                                .emit(Event::ToolCallApproved {
+                                    id: pc.call_id.clone(),
+                                    by: ApprovalSource::Auto,
+                                    scope: ApprovalScope::Once,
+                                    at: Utc::now(),
+                                })
+                                .await?;
+                        } else {
+                            let (tx, rx) = oneshot::channel::<ApprovalDecision>();
+                            pending_approvals
+                                .lock()
+                                .await
+                                .insert(pc.call_id.to_string(), tx);
+                            session
+                                .emit(Event::ToolCallApprovalRequested {
+                                    id: pc.call_id.clone(),
+                                    preview: tool.approval_preview(&pc.args),
+                                })
+                                .await?;
+                            let decision = rx.await.unwrap_or(ApprovalDecision::Rejected);
+                            let scope = match decision {
+                                ApprovalDecision::Approved(scope) => scope,
+                                ApprovalDecision::Rejected => {
+                                    session
+                                        .emit(Event::ToolCallRejected {
+                                            id: pc.call_id.clone(),
+                                            reason: Some("rejected by client".to_string()),
+                                        })
+                                        .await?;
+                                    session
+                                        .emit(Event::StepFinished {
+                                            step_id: tool_step_id.clone(),
+                                            outcome: StepOutcome::Error {
+                                                reason: "rejected by client".to_string(),
+                                            },
+                                            duration_ms: tool_step_started.elapsed().as_millis()
+                                                as u64,
+                                            token_usage: None,
+                                        })
+                                        .await?;
+                                    return Ok(DispatchOutcome {
+                                        tc_blocks,
+                                        tr_blocks,
+                                        rejected: true,
+                                    });
+                                }
+                            };
+                            session
+                                .emit(Event::ToolCallApproved {
+                                    id: pc.call_id.clone(),
+                                    by: ApprovalSource::User,
+                                    scope,
+                                    at: Utc::now(),
+                                })
+                                .await?;
+                        }
+
+                        session
+                            .emit(Event::ToolInvoked {
+                                step_id: tool_step_id.clone(),
+                                tool_call_id: pc.call_id.clone(),
+                                tool_id: pc.name.clone(),
+                                args_digest: args_digest(&pc.args),
+                            })
+                            .await?;
+
+                        tool.invoke(&pc.args, ctx).await
+                    }
+                    Err(ToolError::UnknownTool(n)) => {
+                        session
+                            .emit(Event::ToolInvoked {
+                                step_id: tool_step_id.clone(),
+                                tool_call_id: pc.call_id.clone(),
+                                tool_id: pc.name.clone(),
+                                args_digest: args_digest(&pc.args),
+                            })
+                            .await?;
+                        serde_json::json!({ "error": format!("unknown tool '{n}'") })
+                    }
+                    Err(e) => {
+                        session
+                            .emit(Event::ToolInvoked {
+                                step_id: tool_step_id.clone(),
+                                tool_call_id: pc.call_id.clone(),
+                                tool_id: pc.name.clone(),
+                                args_digest: args_digest(&pc.args),
+                            })
+                            .await?;
+                        serde_json::json!({ "error": e.to_string() })
+                    }
+                };
+
+                let duration_ms = started.elapsed().as_millis() as u64;
+                let result_bytes = serde_json::to_string(&result)
+                    .map(|s| s.len() as u64)
+                    .unwrap_or(0);
+                let result_ok = result.get("error").is_none();
+                session
+                    .emit(Event::ToolReturned {
+                        step_id: tool_step_id.clone(),
+                        tool_call_id: pc.call_id.clone(),
+                        ok: result_ok,
+                        bytes_out: result_bytes,
+                    })
+                    .await?;
+                session
+                    .emit(Event::ToolCallCompleted {
+                        id: pc.call_id.clone(),
+                        result: result.clone(),
+                        duration_ms,
+                        at: Utc::now(),
+                    })
+                    .await?;
+                session
+                    .emit(Event::StepFinished {
+                        step_id: tool_step_id.clone(),
+                        outcome: if result_ok {
+                            StepOutcome::Ok
+                        } else {
+                            StepOutcome::Error {
+                                reason: result
+                                    .get("error")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("tool returned error")
+                                    .to_string(),
+                            }
+                        },
+                        duration_ms: tool_step_started.elapsed().as_millis() as u64,
+                        token_usage: None,
+                    })
+                    .await?;
+
+                tc_blocks.push(ChatBlock::ToolCall {
+                    id: pc.call_id.to_string(),
+                    name: pc.name.clone(),
+                    args: pc.args.clone(),
+                });
+                tr_blocks.push(ChatBlock::ToolResult {
+                    id: pc.call_id.to_string(),
+                    result,
+                });
+            }
+        }
+    }
+
+    Ok(DispatchOutcome {
+        tc_blocks,
+        tr_blocks,
+        rejected: false,
+    })
 }
 
 // ── F-143: Orchestrator + rerun_message ────────────────────────────────────
@@ -1456,7 +1762,9 @@ fn finalise_request(messages: Vec<ChatMessage>) -> Result<ChatRequest> {
     Ok(ChatRequest {
         system: None,
         messages,
-        parallel_tool_calls_allowed: false,
+        // F-599: see `run_turn` — the orchestrator's per-batch grouping
+        // makes the wire flag safe to enable on every turn-shaped path.
+        parallel_tool_calls_allowed: true,
     })
 }
 
@@ -1553,7 +1861,8 @@ fn build_fresh_request_for(history: &[(u64, Event)], target: &MessageId) -> Resu
                         role: ChatRole::User,
                         content: vec![ChatBlock::Text(text)],
                     }],
-                    parallel_tool_calls_allowed: false,
+                    // F-599: see `run_turn` for the rationale.
+                    parallel_tool_calls_allowed: true,
                 });
             }
             _ => {}
@@ -2020,5 +2329,575 @@ mod tests {
                 "compaction must not fire below 98%"
             );
         }
+    }
+
+    // ── F-599: parallel read-only tool dispatch ────────────────────────────
+
+    use crate::tools::{Tool, ToolCtx, ToolDispatcher};
+    use forge_core::ApprovalPreview;
+
+    /// Test stub: a tool whose `read_only` flag is configurable and whose
+    /// `invoke` sleeps for a configurable duration before returning a
+    /// synthetic JSON payload. Used to drive the latency / ordering /
+    /// grouping assertions below.
+    struct SleepyTool {
+        name: String,
+        read_only: bool,
+        sleep_ms: u64,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for SleepyTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn approval_preview(&self, _args: &serde_json::Value) -> ApprovalPreview {
+            ApprovalPreview {
+                description: format!("sleepy {}", self.name),
+            }
+        }
+        fn read_only(&self) -> bool {
+            self.read_only
+        }
+        async fn invoke(&self, _args: &serde_json::Value, _ctx: &ToolCtx) -> serde_json::Value {
+            tokio::time::sleep(std::time::Duration::from_millis(self.sleep_ms)).await;
+            serde_json::json!({ "tool": self.name.clone() })
+        }
+    }
+
+    #[test]
+    fn group_tool_calls_singleton_read_only_is_one_sequential_batch() {
+        let groups = group_tool_calls(&[Some(true)]);
+        assert_eq!(
+            groups,
+            vec![ToolBatch {
+                indices: vec![0],
+                parallel: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn group_tool_calls_consecutive_read_only_coalesce_into_one_parallel_batch() {
+        let groups = group_tool_calls(&[Some(true), Some(true), Some(true)]);
+        assert_eq!(
+            groups,
+            vec![ToolBatch {
+                indices: vec![0, 1, 2],
+                parallel: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn group_tool_calls_non_read_only_breaks_run_into_singletons() {
+        // RO, RO, WRITE, RO  →  [RO RO] (parallel) | [WRITE] | [RO]
+        let groups = group_tool_calls(&[Some(true), Some(true), Some(false), Some(true)]);
+        assert_eq!(
+            groups,
+            vec![
+                ToolBatch {
+                    indices: vec![0, 1],
+                    parallel: true,
+                },
+                ToolBatch {
+                    indices: vec![2],
+                    parallel: false,
+                },
+                ToolBatch {
+                    indices: vec![3],
+                    parallel: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn group_tool_calls_unknown_tool_is_treated_as_non_read_only() {
+        // RO, ?, RO  →  [RO] | [?] | [RO]   (no parallel batch — unknown
+        // breaks the run because we can't be sure it's safe)
+        let groups = group_tool_calls(&[Some(true), None, Some(true)]);
+        assert_eq!(
+            groups,
+            vec![
+                ToolBatch {
+                    indices: vec![0],
+                    parallel: false,
+                },
+                ToolBatch {
+                    indices: vec![1],
+                    parallel: false,
+                },
+                ToolBatch {
+                    indices: vec![2],
+                    parallel: false,
+                },
+            ]
+        );
+    }
+
+    /// F-599 DoD: 3 read-only tool calls in one turn dispatch concurrently.
+    /// Wall-clock latency must be substantially less than the sequential
+    /// reference (3 × per-tool sleep). We sleep 100 ms per tool: sequential
+    /// would total ≥ 300 ms; parallel should finish in roughly the slowest
+    /// task (~100 ms) plus event-emission overhead. Asserts < 200 ms to
+    /// allow generous slack on a busy CI worker.
+    #[tokio::test]
+    async fn parallel_dispatch_3_read_only_tools_finishes_under_sequential_reference() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+        let session = Arc::new(Session::create(log_path).await.unwrap());
+
+        // Provider script: emit three tool calls then end the turn after
+        // we feed back results.
+        let initial = "{\"tool_call\":{\"name\":\"ro.a\",\"args\":{}}}\n\
+                       {\"tool_call\":{\"name\":\"ro.b\",\"args\":{}}}\n\
+                       {\"tool_call\":{\"name\":\"ro.c\",\"args\":{}}}\n\
+                       {\"done\":\"tool_use\"}\n";
+        let cont = "{\"done\":\"end_turn\"}\n";
+        let provider = Arc::new(
+            MockProvider::from_responses(vec![initial.into(), cont.into()])
+                .expect("construct mock"),
+        );
+
+        let mut dispatcher = ToolDispatcher::new();
+        for n in ["ro.a", "ro.b", "ro.c"] {
+            dispatcher
+                .register(Box::new(SleepyTool {
+                    name: n.into(),
+                    read_only: true,
+                    sleep_ms: 100,
+                }))
+                .unwrap();
+        }
+        let dispatcher = Arc::new(dispatcher);
+
+        let pending: PendingApprovals = Arc::new(Mutex::new(HashMap::new()));
+        let ctx = ToolCtx::default();
+
+        let req = ChatRequest {
+            system: None,
+            messages: vec![ChatMessage {
+                role: ChatRole::User,
+                content: vec![ChatBlock::Text("kick off".into())],
+            }],
+            parallel_tool_calls_allowed: true,
+        };
+
+        let started = std::time::Instant::now();
+        run_request_loop(
+            Arc::clone(&session),
+            Arc::clone(&provider),
+            req,
+            MessageId::new(),
+            None,
+            0,
+            pending,
+            dispatcher.as_ref(),
+            &ctx,
+            true,
+            None,
+        )
+        .await
+        .expect("turn completes");
+        let elapsed = started.elapsed();
+
+        // Generous upper bound — parallel must beat 3× sequential by a
+        // wide margin. Sequential reference would be ≥ 300 ms; parallel
+        // should land near 100 ms + overhead.
+        assert!(
+            elapsed < std::time::Duration::from_millis(220),
+            "expected parallel dispatch < 220 ms, got {:?}",
+            elapsed
+        );
+    }
+
+    /// F-599 DoD: every `ToolCallStarted` in the parallel batch carries
+    /// the same `Some(parallel_group)` id; results come back in
+    /// original-call order in the continuation request even if the
+    /// underlying tasks finish out of order (call B sleeps the longest
+    /// but is at index 1).
+    #[tokio::test]
+    async fn parallel_dispatch_emits_shared_group_and_reassembles_in_call_order() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+        let session = Arc::new(Session::create(log_path).await.unwrap());
+
+        let initial = "{\"tool_call\":{\"name\":\"ro.a\",\"args\":{}}}\n\
+                       {\"tool_call\":{\"name\":\"ro.b\",\"args\":{}}}\n\
+                       {\"tool_call\":{\"name\":\"ro.c\",\"args\":{}}}\n\
+                       {\"done\":\"tool_use\"}\n";
+        let cont = "{\"done\":\"end_turn\"}\n";
+        let provider = Arc::new(
+            MockProvider::from_responses(vec![initial.into(), cont.into()])
+                .expect("construct mock"),
+        );
+
+        let mut dispatcher = ToolDispatcher::new();
+        // Make B the slowest so its task finishes last — order must
+        // still be a, b, c on the continuation.
+        dispatcher
+            .register(Box::new(SleepyTool {
+                name: "ro.a".into(),
+                read_only: true,
+                sleep_ms: 30,
+            }))
+            .unwrap();
+        dispatcher
+            .register(Box::new(SleepyTool {
+                name: "ro.b".into(),
+                read_only: true,
+                sleep_ms: 120,
+            }))
+            .unwrap();
+        dispatcher
+            .register(Box::new(SleepyTool {
+                name: "ro.c".into(),
+                read_only: true,
+                sleep_ms: 60,
+            }))
+            .unwrap();
+        let dispatcher = Arc::new(dispatcher);
+
+        let pending: PendingApprovals = Arc::new(Mutex::new(HashMap::new()));
+        let ctx = ToolCtx::default();
+
+        let req = ChatRequest {
+            system: None,
+            messages: vec![ChatMessage {
+                role: ChatRole::User,
+                content: vec![ChatBlock::Text("kick off".into())],
+            }],
+            parallel_tool_calls_allowed: true,
+        };
+
+        let mut rx = session.event_tx.subscribe();
+
+        run_request_loop(
+            Arc::clone(&session),
+            Arc::clone(&provider),
+            req,
+            MessageId::new(),
+            None,
+            0,
+            pending,
+            dispatcher.as_ref(),
+            &ctx,
+            true,
+            None,
+        )
+        .await
+        .expect("turn completes");
+
+        // Drain events; collect ToolCallStarted parallel_group ids in
+        // original-call order. All three must share the same group.
+        let mut groups: Vec<Option<u32>> = vec![];
+        let mut completed_names: Vec<String> = vec![];
+        while let Ok((_, ev)) = rx.try_recv() {
+            match ev {
+                Event::ToolCallStarted { parallel_group, .. } => {
+                    groups.push(parallel_group);
+                }
+                Event::ToolCallCompleted { result, .. } => {
+                    if let Some(t) = result.get("tool").and_then(|v| v.as_str()) {
+                        completed_names.push(t.into());
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(groups.len(), 3, "three tool calls started");
+        assert!(
+            groups.iter().all(|g| g.is_some()),
+            "all three carry a parallel_group: got {:?}",
+            groups
+        );
+        let g0 = groups[0];
+        assert!(
+            groups.iter().all(|g| *g == g0),
+            "all three share the same parallel_group id: got {:?}",
+            groups
+        );
+        // Reassembly: ToolCallCompleted events must arrive in
+        // original-call order regardless of task completion order.
+        assert_eq!(
+            completed_names,
+            vec!["ro.a", "ro.b", "ro.c"],
+            "results re-emitted in original-call order"
+        );
+
+        // Continuation request must include tool-result blocks in
+        // original-call order — provider receives them as user blocks.
+        let reqs = provider.recorded_requests();
+        assert_eq!(reqs.len(), 2, "two provider passes");
+        let user_blocks: Vec<&ChatBlock> = reqs[1]
+            .messages
+            .iter()
+            .filter(|m| m.role == ChatRole::User)
+            .flat_map(|m| m.content.iter())
+            .collect();
+        let result_tools: Vec<&str> = user_blocks
+            .iter()
+            .filter_map(|b| match b {
+                ChatBlock::ToolResult { result, .. } => result.get("tool").and_then(|v| v.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            result_tools,
+            vec!["ro.a", "ro.b", "ro.c"],
+            "tool results in continuation are in original-call order"
+        );
+    }
+
+    /// F-599: a singleton tool call (one tool in the turn) does NOT
+    /// receive a `parallel_group` id — it stays `None` so existing
+    /// consumers that filter on `parallel_group.is_some()` keep working.
+    #[tokio::test]
+    async fn singleton_tool_call_has_no_parallel_group() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+        let session = Arc::new(Session::create(log_path).await.unwrap());
+
+        let initial = "{\"tool_call\":{\"name\":\"ro.solo\",\"args\":{}}}\n\
+                       {\"done\":\"tool_use\"}\n";
+        let cont = "{\"done\":\"end_turn\"}\n";
+        let provider = Arc::new(
+            MockProvider::from_responses(vec![initial.into(), cont.into()])
+                .expect("construct mock"),
+        );
+
+        let mut dispatcher = ToolDispatcher::new();
+        dispatcher
+            .register(Box::new(SleepyTool {
+                name: "ro.solo".into(),
+                read_only: true,
+                sleep_ms: 5,
+            }))
+            .unwrap();
+        let dispatcher = Arc::new(dispatcher);
+
+        let pending: PendingApprovals = Arc::new(Mutex::new(HashMap::new()));
+        let ctx = ToolCtx::default();
+        let mut rx = session.event_tx.subscribe();
+
+        run_request_loop(
+            Arc::clone(&session),
+            Arc::clone(&provider),
+            ChatRequest {
+                system: None,
+                messages: vec![ChatMessage {
+                    role: ChatRole::User,
+                    content: vec![ChatBlock::Text("kick off".into())],
+                }],
+                parallel_tool_calls_allowed: true,
+            },
+            MessageId::new(),
+            None,
+            0,
+            pending,
+            dispatcher.as_ref(),
+            &ctx,
+            true,
+            None,
+        )
+        .await
+        .expect("turn completes");
+
+        let mut groups: Vec<Option<u32>> = vec![];
+        while let Ok((_, ev)) = rx.try_recv() {
+            if let Event::ToolCallStarted { parallel_group, .. } = ev {
+                groups.push(parallel_group);
+            }
+        }
+        assert_eq!(groups, vec![None], "singleton stays parallel_group: None");
+    }
+
+    /// F-599: a mixed batch (read-only + non-read-only) collapses to
+    /// sequential singletons — `parallel_group` is `None` on every call,
+    /// preserving the pre-F-599 wire shape so any non-read-only tool is
+    /// still individually approvable.
+    #[tokio::test]
+    async fn mixed_batch_collapses_to_sequential_singletons() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+        let session = Arc::new(Session::create(log_path).await.unwrap());
+
+        // Two RO + one WRITE in the same turn.
+        let initial = "{\"tool_call\":{\"name\":\"ro.a\",\"args\":{}}}\n\
+                       {\"tool_call\":{\"name\":\"ro.b\",\"args\":{}}}\n\
+                       {\"tool_call\":{\"name\":\"write.x\",\"args\":{}}}\n\
+                       {\"done\":\"tool_use\"}\n";
+        let cont = "{\"done\":\"end_turn\"}\n";
+        let provider = Arc::new(
+            MockProvider::from_responses(vec![initial.into(), cont.into()])
+                .expect("construct mock"),
+        );
+
+        let mut dispatcher = ToolDispatcher::new();
+        dispatcher
+            .register(Box::new(SleepyTool {
+                name: "ro.a".into(),
+                read_only: true,
+                sleep_ms: 5,
+            }))
+            .unwrap();
+        dispatcher
+            .register(Box::new(SleepyTool {
+                name: "ro.b".into(),
+                read_only: true,
+                sleep_ms: 5,
+            }))
+            .unwrap();
+        dispatcher
+            .register(Box::new(SleepyTool {
+                name: "write.x".into(),
+                read_only: false,
+                sleep_ms: 5,
+            }))
+            .unwrap();
+        let dispatcher = Arc::new(dispatcher);
+
+        let pending: PendingApprovals = Arc::new(Mutex::new(HashMap::new()));
+        let ctx = ToolCtx::default();
+        let mut rx = session.event_tx.subscribe();
+
+        run_request_loop(
+            Arc::clone(&session),
+            Arc::clone(&provider),
+            ChatRequest {
+                system: None,
+                messages: vec![ChatMessage {
+                    role: ChatRole::User,
+                    content: vec![ChatBlock::Text("kick".into())],
+                }],
+                parallel_tool_calls_allowed: true,
+            },
+            MessageId::new(),
+            None,
+            0,
+            pending,
+            dispatcher.as_ref(),
+            &ctx,
+            true, // auto-approve so write.x doesn't block on a prompt
+            None,
+        )
+        .await
+        .expect("turn completes");
+
+        // Two RO calls coalesce into one parallel batch (Some(g)) — the
+        // write.x singleton breaks the run, so it's `None` and the prior
+        // RO pair completes as a single parallel group.
+        let mut groups: Vec<Option<u32>> = vec![];
+        while let Ok((_, ev)) = rx.try_recv() {
+            if let Event::ToolCallStarted { parallel_group, .. } = ev {
+                groups.push(parallel_group);
+            }
+        }
+        assert_eq!(groups.len(), 3);
+        assert!(groups[0].is_some(), "ro.a in parallel batch");
+        assert_eq!(groups[1], groups[0], "ro.b shares ro.a's group");
+        assert_eq!(groups[2], None, "write.x is its own singleton (None)");
+    }
+
+    /// F-599: errors from one tool in a parallel batch don't
+    /// short-circuit the others. Every call's `ToolCallCompleted` fires
+    /// and the error propagates back through `tool_call_id`-keyed
+    /// continuation blocks.
+    #[tokio::test]
+    async fn parallel_batch_one_tool_error_does_not_short_circuit_others() {
+        struct ErroringTool;
+        #[async_trait::async_trait]
+        impl Tool for ErroringTool {
+            fn name(&self) -> &str {
+                "ro.err"
+            }
+            fn approval_preview(&self, _args: &serde_json::Value) -> ApprovalPreview {
+                ApprovalPreview {
+                    description: "errs".into(),
+                }
+            }
+            fn read_only(&self) -> bool {
+                true
+            }
+            async fn invoke(&self, _args: &serde_json::Value, _ctx: &ToolCtx) -> serde_json::Value {
+                serde_json::json!({ "error": "synthetic failure" })
+            }
+        }
+
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+        let session = Arc::new(Session::create(log_path).await.unwrap());
+
+        let initial = "{\"tool_call\":{\"name\":\"ro.a\",\"args\":{}}}\n\
+                       {\"tool_call\":{\"name\":\"ro.err\",\"args\":{}}}\n\
+                       {\"tool_call\":{\"name\":\"ro.c\",\"args\":{}}}\n\
+                       {\"done\":\"tool_use\"}\n";
+        let cont = "{\"done\":\"end_turn\"}\n";
+        let provider = Arc::new(
+            MockProvider::from_responses(vec![initial.into(), cont.into()])
+                .expect("construct mock"),
+        );
+
+        let mut dispatcher = ToolDispatcher::new();
+        dispatcher
+            .register(Box::new(SleepyTool {
+                name: "ro.a".into(),
+                read_only: true,
+                sleep_ms: 5,
+            }))
+            .unwrap();
+        dispatcher.register(Box::new(ErroringTool)).unwrap();
+        dispatcher
+            .register(Box::new(SleepyTool {
+                name: "ro.c".into(),
+                read_only: true,
+                sleep_ms: 5,
+            }))
+            .unwrap();
+        let dispatcher = Arc::new(dispatcher);
+
+        let pending: PendingApprovals = Arc::new(Mutex::new(HashMap::new()));
+        let ctx = ToolCtx::default();
+        let mut rx = session.event_tx.subscribe();
+
+        run_request_loop(
+            Arc::clone(&session),
+            Arc::clone(&provider),
+            ChatRequest {
+                system: None,
+                messages: vec![ChatMessage {
+                    role: ChatRole::User,
+                    content: vec![ChatBlock::Text("kick".into())],
+                }],
+                parallel_tool_calls_allowed: true,
+            },
+            MessageId::new(),
+            None,
+            0,
+            pending,
+            dispatcher.as_ref(),
+            &ctx,
+            true,
+            None,
+        )
+        .await
+        .expect("turn completes");
+
+        let mut completed_count = 0;
+        let mut tool_returned_oks: Vec<bool> = vec![];
+        while let Ok((_, ev)) = rx.try_recv() {
+            match ev {
+                Event::ToolCallCompleted { .. } => completed_count += 1,
+                Event::ToolReturned { ok, .. } => tool_returned_oks.push(ok),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            completed_count, 3,
+            "every tool in the batch produces a Completed event"
+        );
+        // The middle tool errored; the other two reported ok.
+        assert_eq!(tool_returned_oks, vec![true, false, true]);
     }
 }

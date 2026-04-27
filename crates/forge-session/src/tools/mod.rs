@@ -26,7 +26,11 @@ pub use mcp::McpTool;
 pub use memory_write::MemoryWriteTool;
 pub use shell_exec::ShellExecTool;
 
-#[derive(Default)]
+/// F-599: `Clone` so the orchestrator can hand each call in a parallel
+/// read-only batch its own owned `ToolCtx` for the spawned `JoinSet` task.
+/// Every field is already cheap to clone (vec/optional Arc/optional
+/// Clone-able registry); no field carries non-Clone state.
+#[derive(Default, Clone)]
 pub struct ToolCtx {
     pub allowed_paths: Vec<String>,
     /// Workspace root for tools that spawn subprocesses (e.g. `shell.exec`).
@@ -154,7 +158,14 @@ pub enum ToolError {
 
 #[derive(Default)]
 pub struct ToolDispatcher {
-    tools: std::collections::HashMap<String, Box<dyn Tool>>,
+    /// F-599: `Arc<dyn Tool>` rather than `Box<dyn Tool>` so the orchestrator
+    /// can clone a handle into a `tokio::task::JoinSet` task and drive a
+    /// read-only batch concurrently without forcing the dispatcher to
+    /// outlive the spawned futures. `register` keeps its `Box<dyn Tool>`
+    /// shape on the public surface — `Arc::from(box)` is a cost-free
+    /// rewrap — so every existing call site (including embedders) keeps
+    /// compiling with no churn.
+    tools: std::collections::HashMap<String, Arc<dyn Tool>>,
 }
 
 impl ToolDispatcher {
@@ -167,14 +178,25 @@ impl ToolDispatcher {
         if self.tools.contains_key(&name) {
             return Err(ToolError::DuplicateName(name));
         }
-        self.tools.insert(name, tool);
+        self.tools.insert(name, Arc::from(tool));
         Ok(())
     }
 
     pub fn get(&self, name: &str) -> Result<&dyn Tool, ToolError> {
         self.tools
             .get(name)
-            .map(|b| b.as_ref())
+            .map(|t| t.as_ref())
+            .ok_or_else(|| ToolError::UnknownTool(name.to_string()))
+    }
+
+    /// F-599: hand out an owned [`Arc<dyn Tool>`] so a parallel-batch
+    /// dispatcher can move the handle into a `JoinSet` task with a
+    /// `'static` future. Returns the same error shape as [`Self::get`]
+    /// for an unknown name.
+    pub fn get_arc(&self, name: &str) -> Result<Arc<dyn Tool>, ToolError> {
+        self.tools
+            .get(name)
+            .cloned()
             .ok_or_else(|| ToolError::UnknownTool(name.to_string()))
     }
 

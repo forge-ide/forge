@@ -56,6 +56,14 @@ use serde_json::{json, Value};
 /// Serialize a [`ChatRequest`] into an OpenAI Chat Completions API request body.
 ///
 /// `max_tokens` is optional for OpenAI; `None` omits the field on the wire.
+///
+/// F-599: when `req.parallel_tool_calls_allowed` is `false` AND `tools` is
+/// non-empty, the body emits `parallel_tool_calls: false` to disable
+/// parallel tool calls. OpenAI's default behavior is parallel-enabled,
+/// so the `true` case omits the field and inherits that default. The
+/// flag is also omitted when `tools` is empty — OpenAI rejects the
+/// field without a tools array, mirroring the existing `tool_choice`
+/// gating.
 pub fn serialize_request(
     req: &ChatRequest,
     model: &str,
@@ -66,6 +74,14 @@ pub fn serialize_request(
     // schemas land, both fields stay omitted from the wire body.
     let tools: &[Value] = &[];
     let tool_choice: Option<&str> = if tools.is_empty() { None } else { Some("auto") };
+    // F-599: only meaningful (and only accepted by the API) when `tools`
+    // is non-empty. With tools empty the inversion is a no-op and the
+    // field stays absent.
+    let parallel_tool_calls = if !tools.is_empty() && !req.parallel_tool_calls_allowed {
+        Some(false)
+    } else {
+        None
+    };
     let body = OpenAiBody {
         model,
         stream: true,
@@ -76,6 +92,7 @@ pub fn serialize_request(
         },
         tools,
         tool_choice,
+        parallel_tool_calls,
     };
     serde_json::to_vec(&body)
 }
@@ -91,6 +108,8 @@ struct OpenAiBody<'a> {
     tools: &'a [Value],
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parallel_tool_calls: Option<bool>,
 }
 
 struct OpenAiMessages<'a> {
@@ -587,6 +606,31 @@ mod tests {
             v.get("tool_choice").is_none(),
             "tool_choice must be absent when tools is empty",
         );
+    }
+
+    /// F-599: while `tools` is empty (until tool schemas land), the
+    /// `parallel_tool_calls` field must be absent from the wire body
+    /// regardless of the `parallel_tool_calls_allowed` flag. OpenAI
+    /// rejects the field without a tools array, so this gate has the
+    /// same shape as the `tool_choice` gate above. Once non-empty
+    /// `tools` lands, the inversion (`allowed=false` → `false` on the
+    /// wire; `allowed=true` → field omitted, inheriting the default)
+    /// becomes observable; the inline branch in `serialize_request`
+    /// already encodes that policy.
+    #[test]
+    fn empty_tools_omits_parallel_tool_calls_field_regardless_of_flag() {
+        for flag in [true, false] {
+            let req = ChatRequest {
+                system: None,
+                messages: vec![user_text("hi")],
+                parallel_tool_calls_allowed: flag,
+            };
+            let v = parse(&req, "gpt-4o", None);
+            assert!(
+                v.get("parallel_tool_calls").is_none(),
+                "parallel_tool_calls must be absent when tools is empty (flag={flag})",
+            );
+        }
     }
 
     #[test]
