@@ -296,8 +296,9 @@ impl Level2Session {
     /// impl to shell out to a real `podman rm -f` for a fake
     /// container id. Production callers should use [`Self::teardown`]
     /// instead — `teardown` arms this same flag on success.
+    #[cfg(test)]
     #[doc(hidden)]
-    pub fn disable_drop_cleanup(&self) {
+    pub(crate) fn disable_drop_cleanup(&self) {
         self.teardown_done.store(true, Ordering::Release);
     }
 }
