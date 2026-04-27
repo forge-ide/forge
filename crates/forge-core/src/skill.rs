@@ -41,16 +41,19 @@ pub enum SkillIdError {
     PathSeparator(String),
     #[error("skill id must not start with '.': {0:?}")]
     LeadingDot(String),
+    #[error("skill id must not contain whitespace: {0:?}")]
+    Whitespace(String),
 }
 
 impl SkillId {
     /// Construct a [`SkillId`] from a string, validating shape.
     ///
-    /// Rejects empty strings, ids containing `/` or `\`, and ids starting
-    /// with `.`. These constraints exist because the id is the directory
-    /// name on disk under `.skills/` — accepting any of the rejected forms
-    /// would let a hostile or careless skill folder traverse out of the
-    /// scope root.
+    /// Rejects empty strings, ids containing `/` or `\`, ids starting with
+    /// `.`, and ids containing any ASCII whitespace. These constraints
+    /// exist because the id is the directory name on disk under `.skills/` —
+    /// accepting any of the rejected forms would let a hostile or careless
+    /// skill folder traverse out of the scope root, or render confusingly
+    /// in CLI/UI surfaces (a trailing space is invisible at a glance).
     pub fn new(s: impl Into<String>) -> Result<Self, SkillIdError> {
         let s = s.into();
         if s.is_empty() {
@@ -61,6 +64,9 @@ impl SkillId {
         }
         if s.starts_with('.') {
             return Err(SkillIdError::LeadingDot(s));
+        }
+        if s.chars().any(|c| c.is_ascii_whitespace()) {
+            return Err(SkillIdError::Whitespace(s));
         }
         Ok(Self(s))
     }
@@ -149,6 +155,17 @@ mod tests {
             SkillId::new(".hidden"),
             Err(SkillIdError::LeadingDot(_))
         ));
+    }
+
+    #[test]
+    fn skill_id_rejects_whitespace() {
+        // Trailing space, leading space, internal space, tab, newline.
+        for bad in ["planner ", " planner", "plan ner", "plan\tner", "plan\nner"] {
+            assert!(
+                matches!(SkillId::new(bad), Err(SkillIdError::Whitespace(_))),
+                "expected whitespace rejection for {bad:?}",
+            );
+        }
     }
 
     #[test]

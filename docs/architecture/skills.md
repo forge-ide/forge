@@ -16,7 +16,7 @@ Forge follows the [agentskills.io](https://agentskills.io) open standard. A skil
                                 /references/ (optional, not loaded by Forge)
 ```
 
-The folder name is the canonical `SkillId`. It must be non-empty, must not contain `/` or `\`, and must not start with `.`. These rules are enforced at parse time — folders that violate them are rejected with a typed error rather than silently mapped to a different id.
+The folder name is the canonical `SkillId`. It must be non-empty, must not contain `/` or `\`, must not start with `.`, and must not contain ASCII whitespace (space, tab, newline). These rules are enforced at parse time — folders that violate them are rejected with a typed error rather than silently mapped to a different id.
 
 Forge currently loads only `SKILL.md`. The companion `scripts/` and `references/` subdirectories are reserved for future phases (skill-as-tool execution, retrieval-augmented prompting); they are not parsed today.
 
@@ -75,12 +75,14 @@ The returned `Vec<Skill>` is sorted lexicographically by `SkillId`. Filesystem `
 
 ## 5. Errors
 
-Loader-side errors surface as `forge_agents::Error::Other(anyhow::Error)`. The two interesting cases:
+Loader-side errors surface as `forge_agents::Error::Other(anyhow::Error)`. The interesting cases:
 
-- **Invalid `SkillId`** (folder name with `/`, `\`, or leading `.`) — rejected with a clear message naming the offending folder.
-- **Malformed YAML frontmatter** — the underlying `gray_matter` error is wrapped with the offending file path. The skill is not loaded; other skills in the same scope continue to load.
+- **Invalid `SkillId`** (folder name with `/`, `\`, leading `.`, or whitespace) — rejected with a clear message naming the offending folder.
+- **Malformed YAML frontmatter** — the underlying `gray_matter` syntax / type error is wrapped with the offending file path. The skill is not loaded; the entire load aborts with that error so the caller sees the failure rather than a partial roster.
+- **Frontmatter present but un-deserializable** — when the YAML parses but produces a value that doesn't fit the expected shape (e.g. a frontmatter block containing only a comment, which `gray_matter` returns as `Ok` with `data: None`), the loader rejects it explicitly rather than falling back to defaults. Body-only `SKILL.md` files (no `---` block at all) remain valid.
+- **Unreadable directory entry** — a single broken `DirEntry` in `.skills/` (stale NFS, EACCES on one folder) is logged at `warn` and skipped; other skills in the same scope continue to load. This is the one case where the loader is intentionally fault-tolerant.
 
-Both cases also emit a `tracing::warn` event under target `forge_agents::skill_loader` so the Agent Monitor can surface them.
+All cases emit a `tracing::warn` event under target `forge_agents::skill_loader` so the Agent Monitor can surface them.
 
 ## 6. Public API
 
@@ -100,10 +102,12 @@ pub struct SkillId(/* String, validated */);
 
 // crates/forge-agents/src/skill_loader.rs
 pub fn parse_skill_file(path: &Path) -> Result<Skill>;
-pub fn load_workspace_skills(workspace_root: &Path) -> anyhow::Result<Vec<Skill>>;
-pub fn load_user_skills(user_home: &Path) -> anyhow::Result<Vec<Skill>>;
-pub fn load_skills(workspace_root: &Path, user_home: &Path) -> anyhow::Result<Vec<Skill>>;
+pub fn load_workspace_skills(workspace_root: &Path) -> Result<Vec<Skill>>;
+pub fn load_user_skills(user_home: &Path) -> Result<Vec<Skill>>;
+pub fn load_skills(workspace_root: &Path, user_home: &Path) -> Result<Vec<Skill>>;
 ```
+
+All four functions return `forge_agents::Result<_>` (the typed crate error). Callers can pattern-match on `Error::Other(anyhow::Error)` for parse / IO failures or fall through to the existing `IsolationViolation` / `AgentsMdTooLarge` variants if a future revision starts emitting them.
 
 `SkillId` round-trips as a JSON string on the wire (matching the existing id types in `crate::ids`) and exports to TypeScript as `export type SkillId = string`. Deserialization re-runs the validation rules so a malformed id from an IPC client is rejected at the boundary rather than at use.
 

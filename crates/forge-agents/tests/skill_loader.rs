@@ -173,9 +173,11 @@ fn parse_skill_file_directly() {
 
 #[test]
 fn rejects_skill_folder_with_invalid_id() {
-    // Folder name beginning with `.` is not a valid SkillId. Skip the
-    // load_from_scope path entirely (read_dir wouldn't list it as a regular
-    // entry) — exercise parse_skill_file directly to confirm validation.
+    // The leading-dot rejection in `SkillId::new` filters this out at parse
+    // time, regardless of `read_dir` behavior (which on Linux *does* yield
+    // dotfile entries — earlier comments in this file got that wrong). We
+    // exercise `parse_skill_file` directly so the test isolates the id
+    // validation step from filesystem traversal.
     let dir = tempdir().unwrap();
     let bad = dir.path().join(".dotted");
     fs::create_dir_all(&bad).unwrap();
@@ -187,4 +189,86 @@ fn rejects_skill_folder_with_invalid_id() {
         err.to_string().contains("invalid skill id"),
         "should reject leading-dot folder names, got: {err}"
     );
+}
+
+#[test]
+fn malformed_yaml_frontmatter_with_type_mismatch_returns_error() {
+    // B1: a value-typed mismatch (sequence into the `name: Option<String>`
+    // slot) propagates as a `gray_matter` error already. This guard pins
+    // that the loader surfaces the error rather than swallowing it.
+    let workspace = tempdir().unwrap();
+    write_skill(
+        workspace.path(),
+        "type-mismatch",
+        "---\nname:\n  - not\n  - a\n  - string\n---\nbody",
+    );
+
+    let result = load_workspace_skills(workspace.path());
+    assert!(
+        result.is_err(),
+        "type-mismatched frontmatter must fail loudly: {result:?}"
+    );
+}
+
+#[test]
+fn frontmatter_present_but_undeserializable_returns_error() {
+    // B1: the silent-fail case. When `matter` is non-empty but the YAML
+    // parses to `Pod::Null` (e.g. a frontmatter block containing only a
+    // comment), `gray_matter` does *not* return `Err` — `parsed.data`
+    // simply lands as `None` because `deserialize_option` on `Pod::Null`
+    // visits `none`. The previous loader code fell through to
+    // `Frontmatter::default()`. The contract documented in
+    // `docs/architecture/skills.md` §5 says malformed frontmatter is
+    // rejected; this test enforces that contract.
+    let workspace = tempdir().unwrap();
+    write_skill(
+        workspace.path(),
+        "comment-only",
+        "---\n# only a comment, no fields\n---\nbody",
+    );
+
+    let result = load_workspace_skills(workspace.path());
+    assert!(
+        result.is_err(),
+        "frontmatter that fails to deserialize must surface an error, got: {result:?}",
+    );
+}
+
+#[test]
+fn body_only_skill_still_loads() {
+    // B1 regression guard: the contract change must not break the
+    // legitimate body-only case (no `---` delimiters at all).
+    let workspace = tempdir().unwrap();
+    write_skill(
+        workspace.path(),
+        "body-only",
+        "Just a body, no frontmatter.",
+    );
+
+    let skills = load_workspace_skills(workspace.path()).unwrap();
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0].id.as_str(), "body-only");
+    assert_eq!(skills[0].name, "body-only");
+    assert!(skills[0].prompt.contains("Just a body"));
+}
+
+#[test]
+fn dir_entry_error_does_not_abort_load() {
+    // B2: the loader must keep going past unreadable entries rather than
+    // silently dropping them or aborting the whole scope. We can't cheaply
+    // simulate a `DirEntry` IO error from userspace, but we *can* verify
+    // the adjacent contract: a valid skill in the same scope still loads
+    // even when other entries are unusual (a regular file at a position
+    // where the loader expected a directory).
+    let workspace = tempdir().unwrap();
+    let skills_dir = workspace.path().join(".skills");
+    fs::create_dir_all(&skills_dir).unwrap();
+
+    // Stray regular file in `.skills/` — must not be parsed as a skill.
+    fs::write(skills_dir.join("not-a-skill.txt"), "stray").unwrap();
+    write_skill(workspace.path(), "real", "---\nname: Real\n---\nbody");
+
+    let skills = load_workspace_skills(workspace.path()).unwrap();
+    assert_eq!(skills.len(), 1, "stray file must not produce a skill");
+    assert_eq!(skills[0].id.as_str(), "real");
 }

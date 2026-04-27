@@ -101,7 +101,30 @@ pub fn parse_skill_file(path: &Path) -> Result<Skill> {
         }
     };
 
-    let fm = parsed.data.unwrap_or_default();
+    // Distinguish "no frontmatter at all" (legitimate body-only) from
+    // "frontmatter present but failed to deserialize". `gray_matter`'s
+    // `Matter::parse` returns `Ok` with `data: None` in the latter case
+    // when the YAML parses to `Pod::Null` (e.g. a frontmatter block that
+    // contains only a comment) — `deserialize_option` on `Pod::Null` visits
+    // `None` rather than erroring. Falling through to `Frontmatter::default()`
+    // would silently swallow that, violating the contract in
+    // `docs/architecture/skills.md` §5.
+    let fm = match parsed.data {
+        Some(fm) => fm,
+        None if parsed.matter.is_empty() => Frontmatter::default(),
+        None => {
+            tracing::warn!(
+                target: "forge_agents::skill_loader",
+                path = %path.display(),
+                raw_matter = %parsed.matter,
+                "frontmatter present but did not deserialize into a known shape",
+            );
+            return Err(Error::Other(anyhow::anyhow!(
+                "frontmatter in {} did not deserialize into the expected shape",
+                path.display()
+            )));
+        }
+    };
     let name = fm.name.unwrap_or_else(|| id.as_str().to_string());
 
     Ok(Skill {
@@ -133,7 +156,23 @@ fn load_from_scope(scope_root: &Path) -> Result<Vec<Skill>> {
         .map_err(Error::Other)?;
 
     let mut skills: Vec<Skill> = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(err) => {
+                // Don't abort the whole scope on a single broken entry —
+                // a stale NFS mount or a permission glitch on one folder
+                // shouldn't make every other skill in the scope vanish.
+                // We log loudly so the failure is observable.
+                tracing::warn!(
+                    target: "forge_agents::skill_loader",
+                    dir = %skills_dir.display(),
+                    error = %err,
+                    "skipping unreadable directory entry",
+                );
+                continue;
+            }
+        };
         let path = entry.path();
         if !path.is_dir() {
             continue;
@@ -156,14 +195,14 @@ fn load_from_scope(scope_root: &Path) -> Result<Vec<Skill>> {
 
 /// Load skills from `<workspace_root>/.skills/`, returning an empty vec if
 /// the directory is absent.
-pub fn load_workspace_skills(workspace_root: &Path) -> anyhow::Result<Vec<Skill>> {
-    load_from_scope(workspace_root).map_err(anyhow::Error::from)
+pub fn load_workspace_skills(workspace_root: &Path) -> Result<Vec<Skill>> {
+    load_from_scope(workspace_root)
 }
 
 /// Load skills from `<user_home>/.skills/`, returning an empty vec if the
 /// directory is absent.
-pub fn load_user_skills(user_home: &Path) -> anyhow::Result<Vec<Skill>> {
-    load_from_scope(user_home).map_err(anyhow::Error::from)
+pub fn load_user_skills(user_home: &Path) -> Result<Vec<Skill>> {
+    load_from_scope(user_home)
 }
 
 /// Load and merge user-home and workspace-local skills.
@@ -172,7 +211,7 @@ pub fn load_user_skills(user_home: &Path) -> anyhow::Result<Vec<Skill>> {
 /// returned `Vec` is sorted by id so successive calls over the same disk
 /// state return identical ordering. This matches the precedence used by
 /// [`crate::load_agents`] and is documented in `docs/architecture/skills.md`.
-pub fn load_skills(workspace_root: &Path, user_home: &Path) -> anyhow::Result<Vec<Skill>> {
+pub fn load_skills(workspace_root: &Path, user_home: &Path) -> Result<Vec<Skill>> {
     let user = load_user_skills(user_home)?;
     let workspace = load_workspace_skills(workspace_root)?;
 
