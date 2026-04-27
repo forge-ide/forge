@@ -531,7 +531,8 @@ fn oversize_message_is_rejected_at_command_layer() {
 // ---------------------------------------------------------------------------
 // F-374: current-state surface — `lsp_list` IPC
 //
-// Parity with `list_mcp_servers`. A session webview can introspect its own
+// Parity with `session_list_mcp_servers` (F-132; renamed from
+// `list_mcp_servers` in F-591). A session webview can introspect its own
 // live LSP servers in one `invoke` instead of reconstructing state from
 // `lsp_message` history. Authz mirrors `lsp_send`: a caller only sees the
 // servers its own window label owns.
@@ -560,7 +561,7 @@ fn lsp_list_reflects_started_servers_with_id_and_state() {
     // The state is non-deterministic vs. wall-clock (`Starting` → `Running`
     // as the child spawns), so assert on `id` exactly and on `state.state`
     // being one of the valid variants. The MCP equivalent
-    // (`list_mcp_servers`) has the same contract.
+    // (`session_list_mcp_servers`) has the same contract.
     let app = make_app_with_bootstrap(&["list-srv"]);
     let window = make_window(&app.app, "session-lsp-listed");
 
