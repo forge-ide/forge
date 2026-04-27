@@ -202,6 +202,20 @@ pub struct CatalogSettings {
     pub enabled: HashMap<String, HashMap<String, bool>>,
 }
 
+/// `[dashboard]` section. Per-user UI preferences for the Dashboard
+/// window (F-597). Backwards-compatible: settings files without
+/// `[dashboard]` continue to deserialize with all defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct DashboardSettings {
+    /// F-597: when `true`, the first-run container-runtime banner is
+    /// suppressed even if `detect_container_runtime` reports the runtime
+    /// is missing or broken. The Dashboard exposes a "Don't show again"
+    /// button that flips this flag.
+    #[serde(default)]
+    pub container_banner_dismissed: bool,
+}
+
 /// Top-level settings shape persisted to `settings.toml`.
 ///
 /// Intentionally does **not** carry `#[serde(deny_unknown_fields)]` — the
@@ -225,6 +239,9 @@ pub struct AppSettings {
     /// enabled.
     #[serde(default)]
     pub catalog: CatalogSettings,
+    /// Dashboard UI preferences (F-597). Optional and backwards-compatible.
+    #[serde(default)]
+    pub dashboard: DashboardSettings,
 }
 
 // ---------------------------------------------------------------------------
@@ -475,6 +492,7 @@ mod tests {
             },
             providers: ProvidersSettings::default(),
             catalog: CatalogSettings::default(),
+            dashboard: DashboardSettings::default(),
         };
         let body = toml::to_string(&cfg).unwrap();
         let decoded: AppSettings = toml::from_str(&body).unwrap();
@@ -594,6 +612,7 @@ x = 1
             },
             providers: ProvidersSettings::default(),
             catalog: CatalogSettings::default(),
+            dashboard: DashboardSettings::default(),
         };
         save_workspace_settings(dir.path(), &cfg).await.unwrap();
         let loaded = load_workspace_settings(dir.path()).await.unwrap();
@@ -610,6 +629,7 @@ x = 1
             windows: WindowsSettings::default(),
             providers: ProvidersSettings::default(),
             catalog: CatalogSettings::default(),
+            dashboard: DashboardSettings::default(),
         };
         save_user_settings_in(dir.path(), &cfg).await.unwrap();
         let loaded = load_user_settings_in(dir.path()).await.unwrap();
@@ -636,6 +656,7 @@ x = 1
             windows: WindowsSettings::default(),
             providers: ProvidersSettings::default(),
             catalog: CatalogSettings::default(),
+            dashboard: DashboardSettings::default(),
         };
         save_workspace_settings(dir.path(), &cfg).await.unwrap();
 
@@ -671,6 +692,7 @@ x = 1
                 },
                 providers: ProvidersSettings::default(),
                 catalog: CatalogSettings::default(),
+                dashboard: DashboardSettings::default(),
             },
         )
         .await
@@ -717,6 +739,7 @@ x = 1
             },
             providers: ProvidersSettings::default(),
             catalog: CatalogSettings::default(),
+            dashboard: DashboardSettings::default(),
         };
         save_user_settings_in(user_dir.path(), &user_cfg)
             .await
@@ -963,6 +986,7 @@ api_key = "sk-test"
                 ..Default::default()
             },
             catalog: CatalogSettings::default(),
+            dashboard: DashboardSettings::default(),
         };
         let serialized = toml::to_string(&cfg).unwrap();
         let reparsed: AppSettings = toml::from_str(&serialized).unwrap();
@@ -1002,6 +1026,7 @@ api_key = "sk-test"
                 ..Default::default()
             },
             catalog: CatalogSettings::default(),
+            dashboard: DashboardSettings::default(),
         }
     }
 
@@ -1024,6 +1049,39 @@ api_key = "sk-test"
         let parsed: AppSettings = toml::from_str(body).unwrap();
         assert!(parsed.providers.active.is_none());
         assert_eq!(parsed.providers.custom_openai.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Dashboard settings (F-597)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dashboard_section_absent_yields_default() {
+        // Settings files written before F-597 have no `[dashboard]` table.
+        // They must still load with `container_banner_dismissed = false`.
+        let parsed: AppSettings = toml::from_str("").unwrap();
+        assert!(!parsed.dashboard.container_banner_dismissed);
+    }
+
+    #[test]
+    fn dashboard_container_banner_dismissed_round_trips() {
+        let cfg = AppSettings {
+            dashboard: DashboardSettings {
+                container_banner_dismissed: true,
+            },
+            ..Default::default()
+        };
+        let body = toml::to_string(&cfg).unwrap();
+        let reparsed: AppSettings = toml::from_str(&body).unwrap();
+        assert!(reparsed.dashboard.container_banner_dismissed);
+    }
+
+    #[test]
+    fn dashboard_container_banner_apply_setting_update() {
+        let updated =
+            apply_setting_update("", "dashboard.container_banner_dismissed", true.into()).unwrap();
+        let parsed: AppSettings = toml::from_str(&updated).unwrap();
+        assert!(parsed.dashboard.container_banner_dismissed);
     }
 
     #[test]

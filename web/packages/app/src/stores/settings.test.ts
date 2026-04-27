@@ -38,6 +38,7 @@ describe('settings store (F-151)', () => {
         windows: { session_mode: 'split' },
         providers: { custom_openai: {} },
         catalog: { enabled: {} },
+        dashboard: { container_banner_dismissed: false },
       });
       expect(settings.notifications.bg_agents).toBe('both');
       expect(settings.windows.session_mode).toBe('split');
@@ -49,12 +50,14 @@ describe('settings store (F-151)', () => {
         windows: { session_mode: 'split' },
         providers: { custom_openai: {} },
         catalog: { enabled: {} },
+        dashboard: { container_banner_dismissed: false },
       });
       seedSettings({
         notifications: { bg_agents: 'os' },
         windows: { session_mode: 'single' },
         providers: { custom_openai: {} },
         catalog: { enabled: {} },
+        dashboard: { container_banner_dismissed: false },
       });
       expect(settings.notifications.bg_agents).toBe('os');
       expect(settings.windows.session_mode).toBe('single');

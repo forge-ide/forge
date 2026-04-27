@@ -38,6 +38,12 @@ pub mod context_fetch;
 pub mod credentials_ipc;
 pub mod dashboard;
 pub mod dashboard_sessions;
+// F-597: container lifecycle UI on the Dashboard. Pure helpers
+// (`validate_container_id`, `classify_runtime_status`,
+// `ContainerRegistryState`) are always compiled so non-webview unit
+// tests link without Tauri; the `#[tauri::command]` wrappers are gated
+// behind `webview`.
+pub mod containers_ipc;
 // F-586: provider-selection commands (`dashboard_list_providers`,
 // `get_active_provider`, `set_active_provider`). Pure helpers
 // (`build_provider_list`, `is_known_provider_id`, `validate_provider_id`)

@@ -144,6 +144,14 @@ pub fn run() -> Result<()> {
             // command; cross-workspace flag aggregates across every
             // monthly file under `<config>/forge/usage/`.
             crate::usage_ipc::usage_summary,
+            // F-597: container lifecycle UI. Detect probes the runtime;
+            // list / stop / remove / logs operate against the in-memory
+            // ContainerRegistryState shared with sessions.
+            crate::containers_ipc::detect_container_runtime,
+            crate::containers_ipc::list_active_containers,
+            crate::containers_ipc::stop_container,
+            crate::containers_ipc::remove_container,
+            crate::containers_ipc::container_logs,
         ])
         .setup(|app| {
             crate::ipc::manage_bridge(&app.handle().clone());
@@ -152,6 +160,11 @@ pub fn run() -> Result<()> {
             // F-587: production credential store (`KeyringStore` + env-var
             // fallback). Idempotent like the rest of the `manage_*` family.
             crate::credentials_ipc::manage_credentials(&app.handle().clone());
+            // F-597: container registry state — sessions register here
+            // when their Level-2 sandbox container is created; the
+            // dashboard's `<ContainersSection>` reads via
+            // `list_active_containers`. Idempotent.
+            crate::containers_ipc::manage_containers(&app.handle().clone());
             // F-137 / F-138: background-agent lifecycle state. Each session's
             // `BackgroundAgentRegistry` is lazily populated by
             // `resolve_bg_session` on first invoke; the state container has

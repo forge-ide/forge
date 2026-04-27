@@ -585,6 +585,15 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         crate::providers_ipc::dashboard_list_providers,
         crate::providers_ipc::get_active_provider,
         crate::providers_ipc::set_active_provider,
+        // F-597: container lifecycle UI on the Dashboard. Five commands
+        // share the `dashboard` window-label gate: detect probes the
+        // runtime, list/stop/remove/logs operate on the registry +
+        // PodmanRuntime impl from forge-oci.
+        crate::containers_ipc::detect_container_runtime,
+        crate::containers_ipc::list_active_containers,
+        crate::containers_ipc::stop_container,
+        crate::containers_ipc::remove_container,
+        crate::containers_ipc::container_logs,
     ])
 }
 

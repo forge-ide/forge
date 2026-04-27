@@ -6,7 +6,10 @@
 //! logic without a real binary.
 
 use crate::runner::{CommandOutcome, CommandRunner, TokioCommandRunner};
-use crate::{ContainerHandle, ContainerRuntime, ExecResult, ImageRef, OciError, Stats};
+use crate::{
+    ContainerHandle, ContainerLogs, ContainerRuntime, ExecResult, ImageRef, LogLine, OciError,
+    Stats,
+};
 use async_trait::async_trait;
 
 /// Default binary name. Resolved via `PATH`.
@@ -236,6 +239,100 @@ impl ContainerRuntime for PodmanRuntime {
                 _ => None,
             }),
         })
+    }
+}
+
+#[async_trait]
+impl ContainerLogs for PodmanRuntime {
+    /// Fetch recent stdout+stderr lines from a running container. Shells
+    /// out to `podman logs --timestamps [--since <since>] [--tail <n>]
+    /// <id>`. Stderr is parsed from the captured stderr pipe; stdout from
+    /// the captured stdout pipe. Each pipe is split on newlines into
+    /// [`LogLine`] entries with `stream = "stdout"` or `stream = "stderr"`
+    /// respectively.
+    ///
+    /// Order within each pipe is preserved; cross-pipe ordering follows
+    /// the timestamp prefix podman emits with `--timestamps` so the UI
+    /// can render a single chronological feed.
+    async fn logs(
+        &self,
+        handle: &ContainerHandle,
+        since: Option<&str>,
+        tail: Option<usize>,
+    ) -> Result<Vec<LogLine>, OciError> {
+        let mut args: Vec<String> = vec!["logs".to_string(), "--timestamps".to_string()];
+        if let Some(s) = since {
+            args.push("--since".to_string());
+            args.push(s.to_string());
+        }
+        if let Some(n) = tail {
+            args.push("--tail".to_string());
+            args.push(n.to_string());
+        }
+        args.push(handle.id.clone());
+
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let outcome = self
+            .runner
+            .run(PODMAN, &arg_refs)
+            .await
+            .map_err(|source| OciError::Io {
+                tool: PODMAN,
+                source,
+            })?;
+        if !outcome.success() {
+            return Err(OciError::CommandFailed {
+                tool: PODMAN,
+                args,
+                exit_code: outcome.exit_code,
+                stderr: String::from_utf8_lossy(&outcome.stderr).to_string(),
+            });
+        }
+        let mut lines: Vec<LogLine> = Vec::new();
+        for raw in String::from_utf8_lossy(&outcome.stdout).lines() {
+            lines.push(parse_podman_log_line("stdout", raw));
+        }
+        // KNOWN LIMITATION: `podman logs` writes container stderr AND its
+        // own internal diagnostics (deprecation notices, conmon warnings,
+        // etc.) to the same stderr pipe. We can't cheaply tell them apart
+        // without a dedicated journald / k8s-file path, so podman-internal
+        // lines surface here as `stream = "stderr"` log entries. The UI
+        // renders them styled like container stderr — visible noise, but
+        // not data loss. Revisit if/when a structured log API lands.
+        for raw in String::from_utf8_lossy(&outcome.stderr).lines() {
+            lines.push(parse_podman_log_line("stderr", raw));
+        }
+        // Best-effort chronological merge: sort by timestamp when present,
+        // preserving original order within ties (Vec::sort is stable).
+        lines.sort_by(|a, b| match (&a.timestamp, &b.timestamp) {
+            (Some(at), Some(bt)) => at.cmp(bt),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+        Ok(lines)
+    }
+}
+
+/// Parse one `podman logs --timestamps` line into a [`LogLine`]. Podman's
+/// timestamp prefix is RFC-3339 followed by a single space; everything
+/// after the first space is the original line text. Lines without a
+/// recognisable timestamp prefix are returned with `timestamp = None` so
+/// the caller never silently drops them.
+fn parse_podman_log_line(stream: &str, raw: &str) -> LogLine {
+    if let Some((maybe_ts, rest)) = raw.split_once(' ') {
+        if maybe_ts.contains('T') && maybe_ts.contains('-') {
+            return LogLine {
+                stream: stream.to_string(),
+                line: rest.to_string(),
+                timestamp: Some(maybe_ts.to_string()),
+            };
+        }
+    }
+    LogLine {
+        stream: stream.to_string(),
+        line: raw.to_string(),
+        timestamp: None,
     }
 }
 
@@ -642,5 +739,110 @@ mod tests {
     #[test]
     fn parse_size_first_handles_zero_byte_value() {
         assert_eq!(parse_size_first("0B / 67.31GB"), Some(0));
+    }
+
+    // ── F-597: ContainerLogs for PodmanRuntime ────────────────────────
+
+    #[tokio::test]
+    async fn logs_invokes_structured_args_with_timestamps() {
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(
+            b"2025-04-26T10:00:00Z hello\n2025-04-26T10:00:01Z world\n".to_vec(),
+        ));
+        let calls = runner.calls.clone();
+        let runtime = rt(runner);
+        let h = ContainerHandle::new("abc123");
+        let lines = runtime.logs(&h, None, None).await.unwrap();
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "podman");
+        assert_eq!(
+            calls[0].1,
+            vec![
+                "logs".to_string(),
+                "--timestamps".to_string(),
+                "abc123".to_string()
+            ]
+        );
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].stream, "stdout");
+        assert_eq!(lines[0].line, "hello");
+        assert_eq!(lines[0].timestamp.as_deref(), Some("2025-04-26T10:00:00Z"));
+        assert_eq!(lines[1].line, "world");
+    }
+
+    #[tokio::test]
+    async fn logs_passes_since_and_tail_flags() {
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"".to_vec()));
+        let calls = runner.calls.clone();
+        let runtime = rt(runner);
+        let h = ContainerHandle::new("abc123");
+        runtime
+            .logs(&h, Some("2025-04-26T10:00:00Z"), Some(50))
+            .await
+            .unwrap();
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls[0].1,
+            vec![
+                "logs".to_string(),
+                "--timestamps".to_string(),
+                "--since".to_string(),
+                "2025-04-26T10:00:00Z".to_string(),
+                "--tail".to_string(),
+                "50".to_string(),
+                "abc123".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn logs_separates_stdout_and_stderr_streams() {
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse {
+            matches_args: None,
+            outcome: CommandOutcome {
+                exit_code: Some(0),
+                stdout: b"2025-04-26T10:00:00Z out-line\n".to_vec(),
+                stderr: b"2025-04-26T10:00:01Z err-line\n".to_vec(),
+            },
+        });
+        let runtime = rt(runner);
+        let h = ContainerHandle::new("abc123");
+        let lines = runtime.logs(&h, None, None).await.unwrap();
+        assert_eq!(lines.len(), 2);
+        // sorted by timestamp; out < err
+        assert_eq!(lines[0].stream, "stdout");
+        assert_eq!(lines[0].line, "out-line");
+        assert_eq!(lines[1].stream, "stderr");
+        assert_eq!(lines[1].line, "err-line");
+    }
+
+    #[tokio::test]
+    async fn logs_surfaces_command_failure() {
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::err(b"no such container\n".to_vec()));
+        let runtime = rt(runner);
+        let h = ContainerHandle::new("ghost");
+        let err = runtime.logs(&h, None, None).await.unwrap_err();
+        assert!(matches!(err, OciError::CommandFailed { .. }));
+    }
+
+    #[test]
+    fn parse_podman_log_line_extracts_timestamp() {
+        let l = parse_podman_log_line("stdout", "2025-04-26T10:00:00Z hello world");
+        assert_eq!(l.stream, "stdout");
+        assert_eq!(l.line, "hello world");
+        assert_eq!(l.timestamp.as_deref(), Some("2025-04-26T10:00:00Z"));
+    }
+
+    #[test]
+    fn parse_podman_log_line_handles_no_timestamp() {
+        let l = parse_podman_log_line("stderr", "plain output");
+        assert_eq!(l.stream, "stderr");
+        assert_eq!(l.line, "plain output");
+        assert_eq!(l.timestamp, None);
     }
 }
