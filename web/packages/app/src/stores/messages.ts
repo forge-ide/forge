@@ -95,6 +95,16 @@ export type SessionEvent =
   | {
       kind: 'BackgroundAgentCompleted';
       instance_id: string;
+    }
+  // F-598: orchestrator collapsed `summarized_turns` older turns into the
+  // privileged summary message at `summary_msg_id`. The store mounts an
+  // inline marker turn at the summary's position so the user sees a
+  // visible boundary between compacted history and live context.
+  | {
+      kind: 'ContextCompacted';
+      summary_msg_id: string;
+      summarized_turns: number;
+      trigger: 'AutoAt98Pct' | 'UserRequested';
     };
 
 // ---------------------------------------------------------------------------
@@ -168,7 +178,16 @@ export type ChatTurn =
        */
       error_detail?: string;
     }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  // F-598: marker turn rendered inline at the position of the summary
+  // message. Anchors the UI to the summary so a click-through can scroll
+  // the user back to the (collapsed) summary content.
+  | {
+      type: 'context_compacted';
+      summary_msg_id: string;
+      summarized_turns: number;
+      trigger: 'AutoAt98Pct' | 'UserRequested';
+    };
 
 // ---------------------------------------------------------------------------
 // F-145 — branch groups
@@ -655,6 +674,35 @@ export function pushEvent(sessionId: SessionId, event: SessionEvent): void {
             >;
             turn.status = 'done';
           }
+        }),
+      );
+      break;
+    }
+
+    case 'ContextCompacted': {
+      // F-598: append a single inline marker so the user sees a clear
+      // boundary between summarized history and live context. The event
+      // arrives AFTER the AssistantMessage with `summary_msg_id` (the
+      // daemon's emission ordering is load-bearing — see
+      // `forge_session::compaction::compact`), so the summary turn is
+      // already in `state.turns` when this case runs.
+      setMessagesStore(
+        produce((s) => {
+          const state = s[sessionId]!;
+          // Idempotency: a replayed event for the same summary should
+          // not stack a second marker.
+          const existing = state.turns.find(
+            (t) =>
+              t.type === 'context_compacted' &&
+              t.summary_msg_id === event.summary_msg_id,
+          );
+          if (existing) return;
+          state.turns.push({
+            type: 'context_compacted',
+            summary_msg_id: event.summary_msg_id,
+            summarized_turns: event.summarized_turns,
+            trigger: event.trigger,
+          });
         }),
       );
       break;

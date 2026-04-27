@@ -63,13 +63,8 @@ describe('fromRustEvent — non-rendering variants return null', () => {
       cost_usd: 0,
       scope: 'SessionWide',
     },
-    {
-      type: 'context_compacted',
-      at: '2026-04-18T10:00:00Z',
-      summarized_turns: 3,
-      summary_msg_id: 's',
-      trigger: 'AutoAt98Pct',
-    },
+    // F-598: context_compacted now maps to a real SessionEvent — see the
+    // positive describe below.
     {
       type: 'tool_call_approved',
       id: 'tc-x',
@@ -626,6 +621,72 @@ describe('fromRustEvent — background_agent_completed (F-136)', () => {
   it('drops payloads missing the id', () => {
     expect(
       fromRustEvent({ type: 'background_agent_completed', at: '2026-04-20T10:00:00Z' }),
+    ).toBeNull();
+  });
+});
+
+describe('fromRustEvent — context_compacted (F-598)', () => {
+  it('maps required fields and trigger variants', () => {
+    expect(
+      fromRustEvent({
+        type: 'context_compacted',
+        at: '2026-04-26T10:00:00Z',
+        summarized_turns: 4,
+        summary_msg_id: 'sum-1',
+        trigger: 'AutoAt98Pct',
+      }),
+    ).toEqual({
+      kind: 'ContextCompacted',
+      summary_msg_id: 'sum-1',
+      summarized_turns: 4,
+      trigger: 'AutoAt98Pct',
+    });
+
+    expect(
+      fromRustEvent({
+        type: 'context_compacted',
+        at: '2026-04-26T10:00:00Z',
+        summarized_turns: 1,
+        summary_msg_id: 'sum-2',
+        trigger: 'UserRequested',
+      }),
+    ).toEqual({
+      kind: 'ContextCompacted',
+      summary_msg_id: 'sum-2',
+      summarized_turns: 1,
+      trigger: 'UserRequested',
+    });
+  });
+
+  it('drops payloads with malformed fields', () => {
+    // missing summary_msg_id
+    expect(
+      fromRustEvent({
+        type: 'context_compacted',
+        at: '2026-04-26T10:00:00Z',
+        summarized_turns: 4,
+        trigger: 'AutoAt98Pct',
+      }),
+    ).toBeNull();
+    // bad trigger
+    expect(
+      fromRustEvent({
+        type: 'context_compacted',
+        at: '2026-04-26T10:00:00Z',
+        summarized_turns: 4,
+        summary_msg_id: 'sum-3',
+        trigger: 'NotARealTrigger',
+      }),
+    ).toBeNull();
+    // non-numeric count
+    expect(
+      fromRustEvent({
+        type: 'context_compacted',
+        at: '2026-04-26T10:00:00Z',
+        summarized_turns: 'four',
+        summary_msg_id: 'sum-4',
+        trigger: 'AutoAt98Pct',
+      }),
     ).toBeNull();
   });
 });

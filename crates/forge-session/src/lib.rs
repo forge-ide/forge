@@ -1,6 +1,7 @@
 pub mod archive;
 pub mod bg_agents;
 pub mod byte_budget;
+pub mod compaction;
 pub mod dispatcher_cache;
 pub mod error;
 pub mod log_fields;
