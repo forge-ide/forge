@@ -7,7 +7,9 @@ import {
   CredentialBanner,
   CredentialsSection,
 } from '../components/dashboard/CredentialsSection';
+import { MemorySection } from '../components/dashboard/MemorySection';
 import { hasCredential } from '../ipc/credentials';
+import { activeWorkspaceRoot } from '../stores/session';
 import './Dashboard.css';
 
 /**
@@ -47,6 +49,9 @@ export const Dashboard: Component = () => {
       <ProviderPanel />
       <ProvidersSection />
       <CredentialsSection />
+      <Show when={activeWorkspaceRoot()}>
+        {(root) => <MemorySection workspaceRoot={root()} />}
+      </Show>
       <SessionsPanel />
     </main>
   );
