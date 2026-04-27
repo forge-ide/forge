@@ -170,6 +170,30 @@ describe('<CatalogPane> (F-592)', () => {
     });
   });
 
+  it('toggle round-trip: store mirror reflects the new value on next render', async () => {
+    // After a successful set_setting, the settings store mirror must update so
+    // a subsequent read of `catalog.enabled.<kind>.<id>` returns the persisted
+    // value. This is the round-trip the DoD requires: the toggle persists
+    // *and* the in-memory state stays in sync, so a reload (or a re-mount)
+    // preserves the user's choice rather than silently reverting it.
+    setupInvoke({ skills: [skill('typescript-review')] });
+    const { findByRole } = render(() => <CatalogPane workspaceRoot="/ws" />);
+    await flush();
+
+    const toggle = await findByRole('switch') as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+
+    fireEvent.click(toggle);
+    await flush();
+
+    // The set_setting IPC fired (resolved by the default mock), and the
+    // store's `applyLocalUpdate` must have walked the dotted key into
+    // `catalog.enabled.skills.typescript-review = false`. The Solid render
+    // then re-reads `isEnabled` and reflects the new state.
+    const refreshed = await findByRole('switch') as HTMLInputElement;
+    expect(refreshed.checked).toBe(false);
+  });
+
   it('badge count on the Skills tab matches the post-filter row count', async () => {
     setupInvoke({
       skills: [skill('alpha'), skill('beta'), skill('gamma')],

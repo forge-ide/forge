@@ -155,22 +155,17 @@ function groupByScope(rows: CatalogRow[]): ScopeGroup[] {
 }
 
 /**
- * Read the persisted enable flag for `(kind, id)`. The settings store seeds
- * an open-shape catalog table — when no entry exists the default is enabled,
- * matching the spec's "default true" requirement. Solid's fine-grained store
- * reactivity re-runs the accessor on every store write, so toggle clicks
- * paint immediately.
+ * Read the persisted enable flag for `(kind, id)`. The settings store carries
+ * a typed `catalog.enabled` map (F-592 schema in `AppSettings`); absent entries
+ * default to `true`, matching the spec's "default enabled" requirement. Solid's
+ * fine-grained store reactivity re-runs the accessor on every store write, so
+ * toggle clicks paint immediately.
  */
 function isEnabled(kind: CatalogKind, id: string): boolean {
-  const root = (settings as unknown as Record<string, unknown>).catalog;
-  if (!root || typeof root !== 'object') return true;
-  const enabled = (root as Record<string, unknown>).enabled;
-  if (!enabled || typeof enabled !== 'object') return true;
-  const kindMap = (enabled as Record<string, unknown>)[kind];
-  if (!kindMap || typeof kindMap !== 'object') return true;
-  const value = (kindMap as Record<string, unknown>)[id];
-  if (typeof value === 'boolean') return value;
-  return true;
+  const kindMap = settings.catalog.enabled[kind];
+  if (!kindMap) return true;
+  const value = kindMap[id];
+  return typeof value === 'boolean' ? value : true;
 }
 
 export const CatalogPane: Component<CatalogPaneProps> = (props) => {
