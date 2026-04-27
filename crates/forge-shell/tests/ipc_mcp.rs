@@ -87,6 +87,7 @@ async fn spawn_daemon_with_workspace(
             Some(workspace),
             Some(sid),
             None, // F-587: keyless test wiring
+            None, // F-601: no active agent — memory off in this test
         )
         .await
         .unwrap();

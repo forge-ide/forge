@@ -126,6 +126,7 @@ async fn rerun_fresh_regenerates_from_user_message_root_and_supersedes_original(
             None,
             None,
             None, // F-587: keyless test wiring
+            None, // F-601: no active agent — memory off in this test
         )
         .await
         .unwrap();

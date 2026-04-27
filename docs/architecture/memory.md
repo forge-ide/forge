@@ -115,11 +115,19 @@ result as `Arc<str>` so per-turn cost stays at the existing refcount bump.
 
 ## Active-agent selection
 
-`serve_with_session` reads `FORGE_ACTIVE_AGENT` to decide which agent's
-memory backs the session. The named agent is looked up in the loaded
-`AgentDef` set:
+`serve_with_session` accepts an `active_agent: Option<String>` parameter
+that names which agent's memory backs the session. The Tauri shell knows
+which agent each window targets and passes it in explicitly; the daemon
+binary (`forged`) reads `FORGE_ACTIVE_AGENT` once at process start and
+forwards it as the typed parameter. **The server itself does not read the
+environment for this concern** — that distinction matters in
+persistent-mode operation, where one daemon serves multiple connections
+and a process-global mutable env var would let one window silently see
+another agent's memory.
 
-- Unset / empty → memory off.
+The named agent is looked up in the loaded `AgentDef` set:
+
+- `None` / empty / whitespace → memory off.
 - Names an agent that is not loaded → memory off, logged at WARN.
 - Names a loaded agent with `memory_enabled: false` → memory off.
 - Names a loaded agent with `memory_enabled: true` → memory on; body is

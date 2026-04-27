@@ -133,6 +133,7 @@ async fn session_id_stable_across_handshakes() {
             None,
             Some(server_id),
             None, // F-587: keyless test wiring
+            None, // F-601: no active agent — memory off in this test
         )
         .await
         .unwrap();
@@ -176,6 +177,7 @@ async fn workspace_reported_as_absolute_path() {
             Some(server_workspace),
             None,
             None, // F-587: keyless test wiring
+            None, // F-601: no active agent — memory off in this test
         )
         .await
         .unwrap();

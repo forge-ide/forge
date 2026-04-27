@@ -592,10 +592,7 @@ mod tests {
     fn from_home_uses_platform_config_dir() {
         match (MemoryStore::from_home(), dirs::config_dir()) {
             (Some(store), Some(expected_root)) => {
-                let expected = expected_root
-                    .join("forge")
-                    .join("memory")
-                    .join("scribe.md");
+                let expected = expected_root.join("forge").join("memory").join("scribe.md");
                 assert_eq!(store.path_for("scribe"), expected);
             }
             (None, None) => {
