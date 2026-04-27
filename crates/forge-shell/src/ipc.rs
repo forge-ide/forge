@@ -585,6 +585,13 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         crate::providers_ipc::dashboard_list_providers,
         crate::providers_ipc::get_active_provider,
         crate::providers_ipc::set_active_provider,
+        // F-602: Dashboard Memory section commands. Dashboard-scoped — the
+        // `require_window_label_in` inside each rejects every window label
+        // other than `dashboard`.
+        crate::memory_ipc::list_agent_memory,
+        crate::memory_ipc::read_agent_memory,
+        crate::memory_ipc::save_agent_memory,
+        crate::memory_ipc::clear_agent_memory,
     ])
 }
 

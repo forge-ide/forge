@@ -202,6 +202,31 @@ pub struct CatalogSettings {
     pub enabled: HashMap<String, HashMap<String, bool>>,
 }
 
+/// `[memory]` section (F-602): per-agent enable flags for cross-session
+/// memory.
+///
+/// Wire shape mirrors the dotted-key path the frontend writes via
+/// `set_setting`: `memory.enabled.<agent> = <bool>`. The frontend Dashboard
+/// surfaces a per-agent toggle that flips this flag; `serve_with_session`
+/// consults the merged settings at session start to decide whether memory
+/// injection + the `memory.write` tool are active for the active agent.
+///
+/// Absent entries fall back to the agent's frontmatter `memory_enabled`
+/// flag (F-601 semantics) — settings here are *user overrides*, not the
+/// authoritative source.
+///
+/// `HashMap` (rather than `BTreeMap`) parallels `CatalogSettings` —
+/// dotted-key writes insert arbitrary string keys and we never need a
+/// stable enumeration order on the wire.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct MemorySettings {
+    /// `enabled.<agent> = <bool>`. Absent agents fall back to the def-level
+    /// `memory_enabled` frontmatter flag.
+    #[serde(default)]
+    pub enabled: HashMap<String, bool>,
+}
+
 /// Top-level settings shape persisted to `settings.toml`.
 ///
 /// Intentionally does **not** carry `#[serde(deny_unknown_fields)]` — the
@@ -225,6 +250,10 @@ pub struct AppSettings {
     /// enabled.
     #[serde(default)]
     pub catalog: CatalogSettings,
+    /// Per-agent cross-session memory toggles (F-602). Absent agents fall
+    /// back to the def-level `memory_enabled` frontmatter flag.
+    #[serde(default)]
+    pub memory: MemorySettings,
 }
 
 // ---------------------------------------------------------------------------
@@ -475,6 +504,7 @@ mod tests {
             },
             providers: ProvidersSettings::default(),
             catalog: CatalogSettings::default(),
+            memory: MemorySettings::default(),
         };
         let body = toml::to_string(&cfg).unwrap();
         let decoded: AppSettings = toml::from_str(&body).unwrap();
@@ -594,6 +624,7 @@ x = 1
             },
             providers: ProvidersSettings::default(),
             catalog: CatalogSettings::default(),
+            memory: MemorySettings::default(),
         };
         save_workspace_settings(dir.path(), &cfg).await.unwrap();
         let loaded = load_workspace_settings(dir.path()).await.unwrap();
@@ -610,6 +641,7 @@ x = 1
             windows: WindowsSettings::default(),
             providers: ProvidersSettings::default(),
             catalog: CatalogSettings::default(),
+            memory: MemorySettings::default(),
         };
         save_user_settings_in(dir.path(), &cfg).await.unwrap();
         let loaded = load_user_settings_in(dir.path()).await.unwrap();
@@ -636,6 +668,7 @@ x = 1
             windows: WindowsSettings::default(),
             providers: ProvidersSettings::default(),
             catalog: CatalogSettings::default(),
+            memory: MemorySettings::default(),
         };
         save_workspace_settings(dir.path(), &cfg).await.unwrap();
 
@@ -671,6 +704,7 @@ x = 1
                 },
                 providers: ProvidersSettings::default(),
                 catalog: CatalogSettings::default(),
+                memory: MemorySettings::default(),
             },
         )
         .await
@@ -717,6 +751,7 @@ x = 1
             },
             providers: ProvidersSettings::default(),
             catalog: CatalogSettings::default(),
+            memory: MemorySettings::default(),
         };
         save_user_settings_in(user_dir.path(), &user_cfg)
             .await
@@ -963,6 +998,7 @@ api_key = "sk-test"
                 ..Default::default()
             },
             catalog: CatalogSettings::default(),
+            memory: MemorySettings::default(),
         };
         let serialized = toml::to_string(&cfg).unwrap();
         let reparsed: AppSettings = toml::from_str(&serialized).unwrap();
@@ -1002,6 +1038,7 @@ api_key = "sk-test"
                 ..Default::default()
             },
             catalog: CatalogSettings::default(),
+            memory: MemorySettings::default(),
         }
     }
 
@@ -1255,5 +1292,82 @@ bg_agents = "os"
             !dump.contains("<redacted>"),
             "no redaction marker when key is absent: {dump}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Memory (F-602) — round-trip + apply_setting_update path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn memory_section_absent_yields_empty_map() {
+        // Backwards-compat: pre-F-602 settings files have no `[memory]`
+        // section; they must continue to load and produce an empty enabled
+        // map.
+        let body = r#"
+[notifications]
+bg_agents = "os"
+"#;
+        let parsed: AppSettings = toml::from_str(body).unwrap();
+        assert!(parsed.memory.enabled.is_empty());
+    }
+
+    #[test]
+    fn memory_enable_persists_through_apply_setting_update() {
+        // The exact dotted-key path the F-602 frontend writes:
+        // `memory.enabled.<agent>`. apply_setting_update must accept the
+        // boolean leaf, validate it against the schema, and round-trip the
+        // value through to the parsed `AppSettings`.
+        let updated =
+            apply_setting_update("", "memory.enabled.scribe", toml::Value::Boolean(true)).unwrap();
+        let reparsed: AppSettings = toml::from_str(&updated).unwrap();
+        assert_eq!(reparsed.memory.enabled.get("scribe"), Some(&true));
+    }
+
+    #[test]
+    fn memory_multiple_agents_round_trip() {
+        let mut s = String::new();
+        s = apply_setting_update(&s, "memory.enabled.scribe", toml::Value::Boolean(true)).unwrap();
+        s = apply_setting_update(&s, "memory.enabled.researcher", toml::Value::Boolean(false))
+            .unwrap();
+        let reparsed: AppSettings = toml::from_str(&s).unwrap();
+        assert_eq!(reparsed.memory.enabled.get("scribe"), Some(&true));
+        assert_eq!(reparsed.memory.enabled.get("researcher"), Some(&false));
+    }
+
+    #[test]
+    fn memory_rejects_non_boolean_leaf() {
+        let err = apply_setting_update(
+            "",
+            "memory.enabled.scribe",
+            toml::Value::String("yes".into()),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err}").contains("invalid setting value"),
+            "expected validation failure, got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_set_then_load_merged_round_trips() {
+        let user_dir = TempDir::new().unwrap();
+        let workspace_dir = TempDir::new().unwrap();
+
+        tokio::fs::create_dir_all(workspace_dir.path().join(".forge"))
+            .await
+            .unwrap();
+        let body =
+            apply_setting_update("", "memory.enabled.scribe", toml::Value::Boolean(true)).unwrap();
+        tokio::fs::write(
+            workspace_dir.path().join(".forge").join("settings.toml"),
+            body,
+        )
+        .await
+        .unwrap();
+
+        let merged = load_merged_in(Some(user_dir.path()), workspace_dir.path())
+            .await
+            .unwrap();
+        assert_eq!(merged.memory.enabled.get("scribe"), Some(&true));
     }
 }
