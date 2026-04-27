@@ -1,0 +1,860 @@
+//! `forge skill` subcommands (F-590): install, list, remove.
+//!
+//! Installs skills from external sources into Forge's on-disk skill scopes,
+//! using [`forge_agents::skill_loader::parse_skill_file`] (F-589) as the
+//! gatekeeper. Refuses to install if the source `SKILL.md` does not parse.
+//!
+//! # Sources
+//!
+//! Two resolver shapes are supported, distinguished by URL prefix at the CLI:
+//!
+//! - **Local path** (relative or absolute) — copied into the target scope.
+//! - **Git URL** (HTTPS or SSH) — cloned to `~/.cache/forge/skills/<sha256>/`,
+//!   then copied into the target scope.
+//!
+//! # Scopes
+//!
+//! - `user` (default): `<home>/.skills/<id>/` — cross-workspace.
+//! - `workspace`: `<cwd>/.skills/<id>/` — per-project, checked into git.
+//!
+//! Scopes match the layout in `docs/architecture/skills.md`.
+//!
+//! # Validation
+//!
+//! Every install runs `parse_skill_file` on the resolved `SKILL.md` *before*
+//! anything is written to the target scope. A parse failure aborts the
+//! install with the loader error verbatim, so the user sees which field is
+//! malformed.
+//!
+//! # Cache
+//!
+//! Git resolves clone (or fetch + reset) into `~/.cache/forge/skills/<hash>/`
+//! where `<hash>` is the lowercase hex sha256 of the source URL. The cache is
+//! the *source*; the install copies a fresh tree out of it. Re-installing the
+//! same URL re-uses the cache and runs `git fetch + reset --hard origin/HEAD`
+//! to pull the latest commit.
+
+use std::{
+    fmt, fs,
+    io::Write,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+use anyhow::{anyhow, bail, Context, Result};
+use sha2::{Digest, Sha256};
+
+use forge_agents::skill_loader::{parse_skill_file, SKILL_FILENAME};
+use forge_core::Skill;
+
+/// Where an installed skill should land.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillScope {
+    /// `<home>/.skills/<id>/` — visible across every workspace.
+    User,
+    /// `<cwd>/.skills/<id>/` — per-project, checked into git.
+    Workspace,
+}
+
+impl SkillScope {
+    /// Resolve the on-disk scope root (`.skills/` lives directly under it).
+    fn scope_root(&self, workspace_root: &Path, home: &Path) -> PathBuf {
+        match self {
+            SkillScope::User => home.to_path_buf(),
+            SkillScope::Workspace => workspace_root.to_path_buf(),
+        }
+    }
+
+    fn skills_dir(&self, workspace_root: &Path, home: &Path) -> PathBuf {
+        self.scope_root(workspace_root, home).join(".skills")
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            SkillScope::User => "user",
+            SkillScope::Workspace => "workspace",
+        }
+    }
+}
+
+impl fmt::Display for SkillScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// What [`Resolver::resolve`] hands back: a fully-parsed [`Skill`] together
+/// with the on-disk directory containing the `SKILL.md` and any side files.
+///
+/// `source_dir` is what the install step copies; `skill` is the validated
+/// shape used to derive the target folder name (`skill.id`).
+#[derive(Debug)]
+pub struct ResolvedSkill {
+    /// Parsed skill (validated via F-589).
+    pub skill: Skill,
+    /// Folder containing the `SKILL.md` file. Whatever sits next to it
+    /// (`scripts/`, `references/`, etc.) is copied along.
+    pub source_dir: PathBuf,
+}
+
+/// Anything that produces a [`ResolvedSkill`] from a CLI-supplied source.
+///
+/// Resolvers own validation: by the time `resolve` returns `Ok`, the skill
+/// has parsed cleanly and the install step can run without further checks.
+pub trait Resolver {
+    fn resolve(&self) -> Result<ResolvedSkill>;
+}
+
+/// Resolves a local-path source — relative paths are anchored at the
+/// caller-supplied CWD; absolute paths are taken as-is.
+///
+/// Path canonicalization runs through [`fs::canonicalize`] which resolves
+/// symlinks and normalizes `..` segments. Symlink loops surface as a
+/// canonicalize IO error and are treated as a refusal.
+pub struct LocalPathResolver {
+    pub source: PathBuf,
+    pub cwd: PathBuf,
+}
+
+impl LocalPathResolver {
+    pub fn new(source: impl Into<PathBuf>, cwd: impl Into<PathBuf>) -> Self {
+        Self {
+            source: source.into(),
+            cwd: cwd.into(),
+        }
+    }
+}
+
+impl Resolver for LocalPathResolver {
+    fn resolve(&self) -> Result<ResolvedSkill> {
+        let raw = if self.source.is_absolute() {
+            self.source.clone()
+        } else {
+            self.cwd.join(&self.source)
+        };
+
+        let canonical = fs::canonicalize(&raw)
+            .with_context(|| format!("resolving local skill path {}", raw.display()))?;
+
+        let metadata = fs::metadata(&canonical)
+            .with_context(|| format!("statting {}", canonical.display()))?;
+        if !metadata.is_dir() {
+            bail!(
+                "local skill source must be a directory containing {SKILL_FILENAME}: {}",
+                canonical.display()
+            );
+        }
+
+        let skill_md = canonical.join(SKILL_FILENAME);
+        if !skill_md.exists() {
+            bail!("no {SKILL_FILENAME} found in {}", canonical.display());
+        }
+
+        // F-589 is the gatekeeper — refuse on parse failure.
+        let skill = parse_skill_file(&skill_md)
+            .map_err(|e| anyhow!("skill at {} failed validation: {e}", skill_md.display()))?;
+
+        Ok(ResolvedSkill {
+            skill,
+            source_dir: canonical,
+        })
+    }
+}
+
+/// Abstraction over `git` invocation so unit tests can supply a fake
+/// runner. Mirrors the `CommandRunner` pattern used in F-595 (forge-oci).
+pub trait CommandRunner {
+    /// Run `program` with `args` in `cwd`. Returns Ok on exit-status success;
+    /// otherwise an error describing the failed command.
+    fn run(&self, program: &str, args: &[&str], cwd: Option<&Path>) -> Result<()>;
+}
+
+/// Default [`CommandRunner`] that shells out via `std::process::Command`.
+pub struct StdCommandRunner;
+
+impl CommandRunner for StdCommandRunner {
+    fn run(&self, program: &str, args: &[&str], cwd: Option<&Path>) -> Result<()> {
+        let mut cmd = Command::new(program);
+        cmd.args(args);
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        let status = cmd
+            .status()
+            .with_context(|| format!("spawning {program} {}", args.join(" ")))?;
+        if !status.success() {
+            bail!("{program} {} failed with status {status}", args.join(" "));
+        }
+        Ok(())
+    }
+}
+
+/// Resolves a git source: clones (or fetch + reset) into the cache, then
+/// returns the cached working tree as the source for install.
+///
+/// The cache directory is `<cache_root>/<sha256(url)>/`. Re-using the same
+/// URL is idempotent: a cache hit triggers `git fetch origin` followed by
+/// `git reset --hard origin/HEAD`, so the next install reflects the latest
+/// remote commit without re-cloning.
+pub struct GitResolver<'a> {
+    pub url: String,
+    pub cache_root: PathBuf,
+    pub runner: &'a dyn CommandRunner,
+}
+
+impl<'a> GitResolver<'a> {
+    pub fn new(
+        url: impl Into<String>,
+        cache_root: impl Into<PathBuf>,
+        runner: &'a dyn CommandRunner,
+    ) -> Self {
+        Self {
+            url: url.into(),
+            cache_root: cache_root.into(),
+            runner,
+        }
+    }
+
+    /// Lower-cased hex sha256 of `url` — used as the cache subdirectory.
+    pub fn cache_subdir(url: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(url.as_bytes());
+        let digest = hasher.finalize();
+        digest.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn cache_dir(&self) -> PathBuf {
+        self.cache_root.join(Self::cache_subdir(&self.url))
+    }
+}
+
+impl Resolver for GitResolver<'_> {
+    fn resolve(&self) -> Result<ResolvedSkill> {
+        let cache_dir = self.cache_dir();
+
+        if cache_dir.join(".git").exists() {
+            // Cache hit — refresh.
+            self.runner
+                .run("git", &["fetch", "--quiet", "origin"], Some(&cache_dir))
+                .context("refreshing cached skill clone")?;
+            self.runner
+                .run(
+                    "git",
+                    &["reset", "--quiet", "--hard", "origin/HEAD"],
+                    Some(&cache_dir),
+                )
+                .context("resetting cached skill clone to origin/HEAD")?;
+        } else {
+            // Cache miss — clone fresh.
+            if cache_dir.exists() {
+                fs::remove_dir_all(&cache_dir).with_context(|| {
+                    format!("removing stale cache directory {}", cache_dir.display())
+                })?;
+            }
+            if let Some(parent) = cache_dir.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("creating cache parent {}", parent.display()))?;
+            }
+            let cache_dir_str = cache_dir
+                .to_str()
+                .ok_or_else(|| anyhow!("cache path is not valid UTF-8"))?;
+            self.runner
+                .run(
+                    "git",
+                    &["clone", "--quiet", "--depth=1", &self.url, cache_dir_str],
+                    None,
+                )
+                .with_context(|| format!("cloning {}", self.url))?;
+        }
+
+        let skill_md = cache_dir.join(SKILL_FILENAME);
+        if !skill_md.exists() {
+            bail!(
+                "cloned repository at {} does not contain {SKILL_FILENAME} at its root",
+                cache_dir.display()
+            );
+        }
+
+        let skill = parse_skill_file(&skill_md)
+            .map_err(|e| anyhow!("cloned skill failed validation: {e}"))?;
+
+        Ok(ResolvedSkill {
+            skill,
+            source_dir: cache_dir,
+        })
+    }
+}
+
+/// Default cache root: `~/.cache/forge/skills/`.
+pub fn default_cache_root(home: &Path) -> PathBuf {
+    home.join(".cache").join("forge").join("skills")
+}
+
+/// Treat a CLI source string as a git URL when it looks like one.
+///
+/// The set of recognized prefixes is intentionally narrow — `https://`,
+/// `http://`, `git://`, `ssh://`, plus the `user@host:path` SCP-style form.
+/// Anything else is a local path. We deliberately do not heuristically treat
+/// `<owner>/<repo>` as GitHub shorthand; the user must spell out the full URL.
+pub fn looks_like_git_url(source: &str) -> bool {
+    if source.starts_with("https://")
+        || source.starts_with("http://")
+        || source.starts_with("git://")
+        || source.starts_with("ssh://")
+        || source.starts_with("git@")
+    {
+        return true;
+    }
+    // SCP-style: `user@host:owner/repo`. The colon must come *before* any
+    // slash or path separator and the prefix must contain `@`.
+    if let Some(colon) = source.find(':') {
+        let head = &source[..colon];
+        if head.contains('@') && !head.contains('/') && !head.contains('\\') {
+            return true;
+        }
+    }
+    false
+}
+
+/// Install a resolved skill into `target`. Returns the destination directory
+/// it landed in.
+///
+/// Refuses to overwrite an existing skill with the same id in the same
+/// scope. Callers that want force-replace must first call [`remove_skill`].
+pub fn install_resolved(
+    resolved: &ResolvedSkill,
+    scope: SkillScope,
+    workspace_root: &Path,
+    home: &Path,
+) -> Result<PathBuf> {
+    let target_root = scope.skills_dir(workspace_root, home);
+    fs::create_dir_all(&target_root)
+        .with_context(|| format!("creating {}", target_root.display()))?;
+
+    let target = target_root.join(resolved.skill.id.as_str());
+    if target.exists() {
+        bail!(
+            "skill {} already installed at {} (run `forge skill remove {} --scope {}` first)",
+            resolved.skill.id,
+            target.display(),
+            resolved.skill.id,
+            scope
+        );
+    }
+
+    copy_dir_recursive(&resolved.source_dir, &target).with_context(|| {
+        format!(
+            "copying {} -> {}",
+            resolved.source_dir.display(),
+            target.display()
+        )
+    })?;
+
+    Ok(target)
+}
+
+/// Remove an installed skill from the given scope.
+///
+/// Returns `Ok(true)` if a directory was removed, `Ok(false)` if no skill
+/// with that id was installed in that scope.
+pub fn remove_skill(
+    id: &str,
+    scope: SkillScope,
+    workspace_root: &Path,
+    home: &Path,
+) -> Result<bool> {
+    let target = scope.skills_dir(workspace_root, home).join(id);
+    if !target.exists() {
+        return Ok(false);
+    }
+    fs::remove_dir_all(&target).with_context(|| format!("removing {}", target.display()))?;
+    Ok(true)
+}
+
+/// One row of `forge skill list` output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledSkillRow {
+    pub id: String,
+    pub name: String,
+    pub version: Option<String>,
+    pub scope: SkillScope,
+    pub source_path: PathBuf,
+}
+
+/// Enumerate every installed skill across both scopes.
+///
+/// Each scope is listed independently (no precedence merging) — users want
+/// to see what is installed where, including shadowed entries.
+pub fn list_installed(workspace_root: &Path, home: &Path) -> Result<Vec<InstalledSkillRow>> {
+    let mut rows = Vec::new();
+    for scope in [SkillScope::User, SkillScope::Workspace] {
+        let scope_root = scope.scope_root(workspace_root, home);
+        let scope_skills = match scope {
+            SkillScope::User => forge_agents::skill_loader::load_user_skills(&scope_root),
+            SkillScope::Workspace => forge_agents::skill_loader::load_workspace_skills(&scope_root),
+        }
+        .map_err(|e| anyhow!("listing {} scope: {e}", scope))?;
+        for s in scope_skills {
+            rows.push(InstalledSkillRow {
+                id: s.id.as_str().to_string(),
+                name: s.name,
+                version: s.version,
+                scope,
+                source_path: s.source_path,
+            });
+        }
+    }
+    rows.sort_by(|a, b| a.scope.label().cmp(b.scope.label()).then(a.id.cmp(&b.id)));
+    Ok(rows)
+}
+
+/// Print [`list_installed`] output as a fixed-column table.
+pub fn render_list(rows: &[InstalledSkillRow], out: &mut impl Write) -> Result<()> {
+    if rows.is_empty() {
+        writeln!(out, "no skills installed")?;
+        return Ok(());
+    }
+
+    let id_w = rows.iter().map(|r| r.id.len()).max().unwrap_or(2).max(2);
+    let scope_w = rows
+        .iter()
+        .map(|r| r.scope.label().len())
+        .max()
+        .unwrap_or(5)
+        .max(5);
+    let ver_w = rows
+        .iter()
+        .map(|r| r.version.as_deref().unwrap_or("-").len())
+        .max()
+        .unwrap_or(7)
+        .max(7);
+
+    writeln!(
+        out,
+        "{:<id_w$}  {:<scope_w$}  {:<ver_w$}  SOURCE",
+        "ID", "SCOPE", "VERSION",
+    )?;
+    for r in rows {
+        writeln!(
+            out,
+            "{:<id_w$}  {:<scope_w$}  {:<ver_w$}  {}",
+            r.id,
+            r.scope.label(),
+            r.version.as_deref().unwrap_or("-"),
+            r.source_path.display(),
+        )?;
+    }
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+
+        // Skip the `.git` directory if we ever copy out of a clone — Forge
+        // doesn't need the history and committing a nested `.git` into a
+        // workspace would confuse the surrounding repo.
+        if entry.file_name() == ".git" {
+            continue;
+        }
+
+        if file_type.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else if file_type.is_symlink() {
+            // Resolve symlinks at copy time. A skill source that uses a
+            // symlink should land as a regular file in the target so the
+            // installed copy is self-contained.
+            let resolved = fs::canonicalize(&from)
+                .with_context(|| format!("resolving symlink {}", from.display()))?;
+            let resolved_meta = fs::metadata(&resolved)?;
+            if resolved_meta.is_dir() {
+                copy_dir_recursive(&resolved, &to)?;
+            } else {
+                fs::copy(&resolved, &to)?;
+            }
+        } else {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use tempfile::tempdir;
+
+    fn write_skill_md(dir: &Path, body: &str) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join(SKILL_FILENAME), body).unwrap();
+    }
+
+    fn good_frontmatter() -> &'static str {
+        "---\nname: Tester\nversion: 0.1.0\ndescription: t\n---\nbody"
+    }
+
+    #[test]
+    fn looks_like_git_url_detects_https() {
+        assert!(looks_like_git_url("https://github.com/x/y.git"));
+        assert!(looks_like_git_url("http://example.com/x.git"));
+        assert!(looks_like_git_url("ssh://git@github.com/x/y"));
+        assert!(looks_like_git_url("git@github.com:x/y.git"));
+        assert!(looks_like_git_url("git://github.com/x/y.git"));
+    }
+
+    #[test]
+    fn looks_like_git_url_rejects_local_paths() {
+        assert!(!looks_like_git_url("./fixtures/skill"));
+        assert!(!looks_like_git_url("/abs/path/to/skill"));
+        assert!(!looks_like_git_url("relative/path"));
+        assert!(!looks_like_git_url("C:\\windows\\path"));
+        assert!(!looks_like_git_url(""));
+    }
+
+    #[test]
+    fn cache_subdir_is_deterministic_hex() {
+        let h1 = GitResolver::cache_subdir("https://example.com/x.git");
+        let h2 = GitResolver::cache_subdir("https://example.com/x.git");
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 64);
+        assert!(h1.chars().all(|c| c.is_ascii_hexdigit()));
+        // Different urls -> different hashes.
+        assert_ne!(h1, GitResolver::cache_subdir("https://example.com/y.git"));
+    }
+
+    #[test]
+    fn local_resolver_accepts_directory_with_skill_md() {
+        let dir = tempdir().unwrap();
+        let skill_dir = dir.path().join("planner");
+        write_skill_md(&skill_dir, good_frontmatter());
+
+        let r = LocalPathResolver::new(&skill_dir, dir.path());
+        let resolved = r.resolve().unwrap();
+        assert_eq!(resolved.skill.id.as_str(), "planner");
+        assert_eq!(resolved.skill.name, "Tester");
+        assert_eq!(resolved.source_dir, fs::canonicalize(&skill_dir).unwrap());
+    }
+
+    #[test]
+    fn local_resolver_resolves_relative_paths_against_cwd() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path();
+        let skill_dir = cwd.join("subdir").join("relskill");
+        write_skill_md(&skill_dir, good_frontmatter());
+
+        let r = LocalPathResolver::new("subdir/relskill", cwd);
+        let resolved = r.resolve().unwrap();
+        assert_eq!(resolved.skill.id.as_str(), "relskill");
+    }
+
+    #[test]
+    fn local_resolver_rejects_when_skill_md_missing() {
+        let dir = tempdir().unwrap();
+        let empty = dir.path().join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        let r = LocalPathResolver::new(&empty, dir.path());
+        let err = r.resolve().unwrap_err();
+        assert!(
+            err.to_string().contains("SKILL.md"),
+            "expected SKILL.md mention, got: {err}",
+        );
+    }
+
+    #[test]
+    fn local_resolver_rejects_invalid_frontmatter() {
+        let dir = tempdir().unwrap();
+        let skill_dir = dir.path().join("bad");
+        // Type-mismatched name (sequence into Option<String>).
+        write_skill_md(&skill_dir, "---\nname:\n  - a\n  - b\n---\nbody");
+        let r = LocalPathResolver::new(&skill_dir, dir.path());
+        let err = r.resolve().unwrap_err();
+        assert!(
+            err.to_string().contains("validation")
+                || err.to_string().to_lowercase().contains("frontmatter"),
+            "expected validation error, got: {err}",
+        );
+    }
+
+    #[test]
+    fn local_resolver_rejects_file_source() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("not-a-dir");
+        fs::write(&file, "x").unwrap();
+        let r = LocalPathResolver::new(&file, dir.path());
+        let err = r.resolve().unwrap_err();
+        assert!(
+            err.to_string().contains("must be a directory"),
+            "expected directory check, got: {err}",
+        );
+    }
+
+    #[test]
+    fn install_copies_resolved_skill_into_workspace_scope() {
+        let src = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let home = tempdir().unwrap();
+
+        let skill_dir = src.path().join("planner");
+        write_skill_md(&skill_dir, good_frontmatter());
+        // Side file alongside SKILL.md should be copied.
+        fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+        fs::write(skill_dir.join("scripts").join("helper.sh"), "echo hi").unwrap();
+
+        let resolved = LocalPathResolver::new(&skill_dir, src.path())
+            .resolve()
+            .unwrap();
+        let installed = install_resolved(
+            &resolved,
+            SkillScope::Workspace,
+            workspace.path(),
+            home.path(),
+        )
+        .unwrap();
+
+        assert!(installed.join("SKILL.md").exists());
+        assert!(installed.join("scripts").join("helper.sh").exists());
+        // Workspace scope went under workspace_root, not home.
+        assert!(installed.starts_with(workspace.path()));
+    }
+
+    #[test]
+    fn install_defaults_to_user_scope_under_home() {
+        let src = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let home = tempdir().unwrap();
+
+        let skill_dir = src.path().join("home-skill");
+        write_skill_md(&skill_dir, good_frontmatter());
+
+        let resolved = LocalPathResolver::new(&skill_dir, src.path())
+            .resolve()
+            .unwrap();
+        let installed =
+            install_resolved(&resolved, SkillScope::User, workspace.path(), home.path()).unwrap();
+        assert!(installed.starts_with(home.path()));
+    }
+
+    #[test]
+    fn install_refuses_to_overwrite_existing_skill() {
+        let src = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let home = tempdir().unwrap();
+
+        let skill_dir = src.path().join("dup");
+        write_skill_md(&skill_dir, good_frontmatter());
+        let resolved = LocalPathResolver::new(&skill_dir, src.path())
+            .resolve()
+            .unwrap();
+        install_resolved(
+            &resolved,
+            SkillScope::Workspace,
+            workspace.path(),
+            home.path(),
+        )
+        .unwrap();
+        let err = install_resolved(
+            &resolved,
+            SkillScope::Workspace,
+            workspace.path(),
+            home.path(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("already installed"),
+            "expected already-installed error, got: {err}",
+        );
+    }
+
+    #[test]
+    fn remove_skill_succeeds_when_present_and_returns_false_when_absent() {
+        let src = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let home = tempdir().unwrap();
+
+        let skill_dir = src.path().join("removable");
+        write_skill_md(&skill_dir, good_frontmatter());
+        let resolved = LocalPathResolver::new(&skill_dir, src.path())
+            .resolve()
+            .unwrap();
+        install_resolved(
+            &resolved,
+            SkillScope::Workspace,
+            workspace.path(),
+            home.path(),
+        )
+        .unwrap();
+
+        assert!(remove_skill(
+            "removable",
+            SkillScope::Workspace,
+            workspace.path(),
+            home.path()
+        )
+        .unwrap());
+        assert!(!remove_skill(
+            "removable",
+            SkillScope::Workspace,
+            workspace.path(),
+            home.path()
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn list_installed_reports_both_scopes() {
+        let src = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let home = tempdir().unwrap();
+
+        let ws_skill = src.path().join("ws-only");
+        write_skill_md(&ws_skill, good_frontmatter());
+        let user_skill = src.path().join("user-only");
+        write_skill_md(&user_skill, good_frontmatter());
+
+        install_resolved(
+            &LocalPathResolver::new(&ws_skill, src.path())
+                .resolve()
+                .unwrap(),
+            SkillScope::Workspace,
+            workspace.path(),
+            home.path(),
+        )
+        .unwrap();
+        install_resolved(
+            &LocalPathResolver::new(&user_skill, src.path())
+                .resolve()
+                .unwrap(),
+            SkillScope::User,
+            workspace.path(),
+            home.path(),
+        )
+        .unwrap();
+
+        let rows = list_installed(workspace.path(), home.path()).unwrap();
+        let labels: Vec<(String, &'static str)> = rows
+            .iter()
+            .map(|r| (r.id.clone(), r.scope.label()))
+            .collect();
+        assert!(labels.contains(&("ws-only".into(), "workspace")));
+        assert!(labels.contains(&("user-only".into(), "user")));
+    }
+
+    #[test]
+    fn render_list_emits_no_skills_message_when_empty() {
+        let mut out = Vec::new();
+        render_list(&[], &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("no skills"));
+    }
+
+    #[test]
+    fn render_list_emits_columns() {
+        let rows = vec![
+            InstalledSkillRow {
+                id: "alpha".into(),
+                name: "Alpha".into(),
+                version: Some("0.1.0".into()),
+                scope: SkillScope::User,
+                source_path: PathBuf::from("/u/.skills/alpha/SKILL.md"),
+            },
+            InstalledSkillRow {
+                id: "beta".into(),
+                name: "Beta".into(),
+                version: None,
+                scope: SkillScope::Workspace,
+                source_path: PathBuf::from("/w/.skills/beta/SKILL.md"),
+            },
+        ];
+        let mut out = Vec::new();
+        render_list(&rows, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("ID"));
+        assert!(s.contains("alpha"));
+        assert!(s.contains("user"));
+        assert!(s.contains("0.1.0"));
+        assert!(s.contains("beta"));
+        assert!(s.contains("workspace"));
+    }
+
+    /// Records every command the runner sees so tests can assert the exact
+    /// `git` invocation sequence without spawning a real process.
+    #[derive(Default)]
+    struct RecordingRunner {
+        log: RefCell<Vec<String>>,
+        // Hooks that prep the cache dir as if `git` had run, so the resolver
+        // can find a `.git` and a `SKILL.md`.
+        clone_writes_skill: bool,
+    }
+
+    impl CommandRunner for RecordingRunner {
+        fn run(&self, program: &str, args: &[&str], cwd: Option<&Path>) -> Result<()> {
+            let line = format!(
+                "{} {} (cwd={:?})",
+                program,
+                args.join(" "),
+                cwd.map(|p| p.display().to_string())
+            );
+            self.log.borrow_mut().push(line);
+            if self.clone_writes_skill && program == "git" && args.first() == Some(&"clone") {
+                let target = PathBuf::from(args.last().unwrap());
+                fs::create_dir_all(target.join(".git")).unwrap();
+                fs::write(target.join(SKILL_FILENAME), good_frontmatter()).unwrap();
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn git_resolver_clones_on_cache_miss_and_returns_parsed_skill() {
+        let cache = tempdir().unwrap();
+        let runner = RecordingRunner {
+            clone_writes_skill: true,
+            ..Default::default()
+        };
+        let url = "https://example.com/skills/planner.git";
+        let resolver = GitResolver::new(url, cache.path(), &runner);
+
+        let resolved = resolver.resolve().unwrap();
+        assert_eq!(resolved.skill.name, "Tester");
+        let log = runner.log.borrow();
+        assert_eq!(log.len(), 1);
+        assert!(log[0].starts_with("git clone --quiet --depth=1 "));
+        assert!(log[0].contains(url));
+        // Cache directory was hashed.
+        assert!(resolved
+            .source_dir
+            .starts_with(cache.path().join(GitResolver::cache_subdir(url))));
+    }
+
+    #[test]
+    fn git_resolver_refreshes_on_cache_hit() {
+        let cache = tempdir().unwrap();
+        let url = "https://example.com/skills/planner.git";
+        let cache_dir = cache.path().join(GitResolver::cache_subdir(url));
+        fs::create_dir_all(cache_dir.join(".git")).unwrap();
+        fs::write(cache_dir.join(SKILL_FILENAME), good_frontmatter()).unwrap();
+
+        let runner = RecordingRunner::default();
+        let resolver = GitResolver::new(url, cache.path(), &runner);
+
+        let _resolved = resolver.resolve().unwrap();
+        let log = runner.log.borrow();
+        assert_eq!(log.len(), 2, "expected fetch + reset, got: {log:?}");
+        assert!(log[0].contains("fetch"));
+        assert!(log[1].contains("reset --quiet --hard origin/HEAD"));
+    }
+
+    #[test]
+    fn default_cache_root_is_under_dot_cache_forge_skills() {
+        let home = PathBuf::from("/home/test");
+        assert_eq!(
+            default_cache_root(&home),
+            PathBuf::from("/home/test/.cache/forge/skills")
+        );
+    }
+}

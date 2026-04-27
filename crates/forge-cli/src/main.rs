@@ -1,7 +1,9 @@
 use anyhow::Result;
 use clap::Parser;
 use forge_cli::{
+    skill::{self as skill_mod, Resolver, SkillScope},
     Cli, Commands, ImportSourceFlag, McpCommands, RunCommands, SessionCommands, SessionNewKind,
+    SkillCommands, SkillScopeFlag,
 };
 use std::path::PathBuf;
 
@@ -25,7 +27,92 @@ async fn main() -> Result<()> {
                 workspace,
             } => mcp_import(source, apply, workspace).await,
         },
+        Commands::Skill { cmd } => match cmd {
+            SkillCommands::Install { source, target } => skill_install(source, target).await,
+            SkillCommands::List { workspace } => skill_list(workspace).await,
+            SkillCommands::Remove {
+                id,
+                scope,
+                workspace,
+            } => skill_remove(id, scope, workspace).await,
+        },
     }
+}
+
+fn home_dir() -> Result<PathBuf> {
+    dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve user home directory"))
+}
+
+async fn skill_install(source: String, target: SkillScopeFlag) -> Result<()> {
+    let workspace_root = std::env::current_dir().unwrap_or_default();
+    let home = home_dir()?;
+    let scope: SkillScope = target.into();
+
+    let resolved = if skill_mod::looks_like_git_url(&source) {
+        let cache_root = skill_mod::default_cache_root(&home);
+        let runner = skill_mod::StdCommandRunner;
+        let resolver = skill_mod::GitResolver::new(source.clone(), cache_root, &runner);
+        resolver.resolve()?
+    } else {
+        let resolver = skill_mod::LocalPathResolver::new(&source, &workspace_root);
+        resolver.resolve()?
+    };
+
+    let installed = skill_mod::install_resolved(&resolved, scope, &workspace_root, &home)?;
+    println!(
+        "installed skill {} ({}) at {}",
+        resolved.skill.id,
+        scope,
+        installed.display()
+    );
+    Ok(())
+}
+
+async fn skill_list(workspace: Option<PathBuf>) -> Result<()> {
+    let workspace_root = workspace.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let home = home_dir()?;
+    let rows = skill_mod::list_installed(&workspace_root, &home)?;
+    let mut stdout = std::io::stdout();
+    skill_mod::render_list(&rows, &mut stdout)?;
+    Ok(())
+}
+
+async fn skill_remove(
+    id: String,
+    scope: Option<SkillScopeFlag>,
+    workspace: Option<PathBuf>,
+) -> Result<()> {
+    let workspace_root = workspace.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let home = home_dir()?;
+
+    let resolved_scope: SkillScope = match scope {
+        Some(s) => s.into(),
+        None => {
+            // Pick a default by checking which scopes contain the id.
+            let rows = skill_mod::list_installed(&workspace_root, &home)?;
+            let workspace_has = rows
+                .iter()
+                .any(|r| r.id == id && r.scope == SkillScope::Workspace);
+            let user_has = rows
+                .iter()
+                .any(|r| r.id == id && r.scope == SkillScope::User);
+            match (workspace_has, user_has) {
+                (true, _) => SkillScope::Workspace,
+                (false, true) => SkillScope::User,
+                (false, false) => {
+                    anyhow::bail!("no installed skill with id {id:?}");
+                }
+            }
+        }
+    };
+
+    let removed = skill_mod::remove_skill(&id, resolved_scope, &workspace_root, &home)?;
+    if removed {
+        println!("removed skill {id} from {resolved_scope} scope");
+    } else {
+        anyhow::bail!("skill {id:?} not installed in {resolved_scope} scope");
+    }
+    Ok(())
 }
 
 async fn mcp_import(
