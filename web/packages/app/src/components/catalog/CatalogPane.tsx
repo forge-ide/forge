@@ -293,7 +293,8 @@ export const CatalogPane: Component<CatalogPaneProps> = (props) => {
               <div
                 class="catalog__panel"
                 role="tabpanel"
-                aria-label={`${kind.label} catalog`}
+                id={`catalog-panel-${kind.id}`}
+                aria-labelledby={`catalog-tab-${kind.id}`}
               >
                 <Show when={resource.loading}>
                   <p class="catalog__loading">{kind.label} · loading</p>
@@ -379,6 +380,7 @@ interface CatalogTabProps {
 
 const CatalogTab: Component<CatalogTabProps> = (props) => (
   <Tab
+    id={`catalog-tab-${props.kind}`}
     selected={props.active}
     badgeCount={props.count}
     aria-controls={`catalog-panel-${props.kind}`}

@@ -251,6 +251,43 @@ describe('<CatalogPane> (F-592)', () => {
     expect(await findByText('SKILLS UNAVAILABLE')).toBeTruthy();
   });
 
+  it('wires aria-controls/id and aria-labelledby/id between tabs and panels', async () => {
+    // Each tab's aria-controls must point at the matching panel's id, and
+    // each panel's aria-labelledby must point at the matching tab's id.
+    // Without both, screen readers cannot follow the tab→panel relationship.
+    setupInvoke({ skills: [skill('only')], mcp: [], agents: [] });
+    const { findAllByRole, container } = render(() => (
+      <CatalogPane workspaceRoot="/ws" />
+    ));
+    await flush();
+
+    const tabs = await findAllByRole('tab');
+    for (const tab of tabs) {
+      const id = tab.getAttribute('id');
+      const controls = tab.getAttribute('aria-controls');
+      expect(id).toMatch(/^catalog-tab-(skills|mcp|agents)$/);
+      expect(controls).toMatch(/^catalog-panel-(skills|mcp|agents)$/);
+      // The kind suffix on tab id and panel reference must match.
+      const tabKind = id!.replace('catalog-tab-', '');
+      const panelKind = controls!.replace('catalog-panel-', '');
+      expect(tabKind).toBe(panelKind);
+    }
+
+    // The visible panel must exist with the matching id and aria-labelledby.
+    const panel = container.querySelector('[role="tabpanel"]') as HTMLElement | null;
+    expect(panel).not.toBeNull();
+    const panelId = panel!.getAttribute('id');
+    const labelledBy = panel!.getAttribute('aria-labelledby');
+    expect(panelId).toMatch(/^catalog-panel-(skills|mcp|agents)$/);
+    expect(labelledBy).toMatch(/^catalog-tab-(skills|mcp|agents)$/);
+    // Confirm the back-reference resolves to a real DOM node.
+    expect(container.querySelector(`#${labelledBy}`)).not.toBeNull();
+    // And the panel id is reachable from the active tab's aria-controls.
+    const activeTab = tabs.find((t) => t.getAttribute('aria-selected') === 'true');
+    expect(activeTab).toBeTruthy();
+    expect(activeTab!.getAttribute('aria-controls')).toBe(panelId);
+  });
+
   it('surfaces a set_setting rejection without disabling the toggle UI', async () => {
     setupInvoke({
       skills: [skill('typescript-review')],
