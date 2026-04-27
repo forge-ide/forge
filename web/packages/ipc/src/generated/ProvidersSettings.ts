@@ -13,6 +13,19 @@ import type { CustomOpenAiEntry } from "./CustomOpenAiEntry";
  */
 export type ProvidersSettings = { 
 /**
+ * F-586: id of the active provider (e.g. `"ollama"`, `"anthropic"`,
+ * `"openai"`, `"custom_openai:vllm-local"`). `None` means "no
+ * preference" — the orchestrator falls through to whatever the daemon
+ * was started with (Phase-1 default: Ollama keyless).
+ *
+ * Stored as `Option<String>` rather than the random-hex `ProviderId`
+ * id type from `ids.rs`: provider selection is keyed by stable, human-
+ * readable slugs the user picks in the dashboard, not opaque ids.
+ * Both the IPC command surface and the credential store key on this
+ * same string shape.
+ */
+active?: string | null, 
+/**
  * One entry per user-named OpenAI-compatible server.
  */
 custom_openai: { [key in string]: CustomOpenAiEntry }, };

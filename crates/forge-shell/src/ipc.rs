@@ -567,6 +567,15 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         crate::credentials_ipc::login_provider,
         crate::credentials_ipc::logout_provider,
         crate::credentials_ipc::has_credential,
+        // F-586: provider selection. Dashboard-scoped — `set_active_provider`
+        // emits a `provider:changed` Tauri event app-wide so session
+        // windows / orchestrator subscribers swap on the next turn. The
+        // listing command is named `dashboard_list_providers` so the
+        // shorter `list_providers` slot stays free for F-591's catalog
+        // roster command.
+        crate::providers_ipc::dashboard_list_providers,
+        crate::providers_ipc::get_active_provider,
+        crate::providers_ipc::set_active_provider,
     ])
 }
 
@@ -712,7 +721,7 @@ impl PersistentApprovalEntry {
 /// when present. Returns `Ok(None)` when neither the override nor the
 /// platform resolution yields a path (extremely unusual — no `$HOME`, no
 /// Known Folder). Callers should treat `Ok(None)` as "empty user config."
-fn resolve_user_config_dir(state: &BridgeState) -> Option<PathBuf> {
+pub(crate) fn resolve_user_config_dir(state: &BridgeState) -> Option<PathBuf> {
     #[cfg(feature = "webview-test")]
     {
         if let Some(override_dir) = state.test_user_config_dir_override.as_ref() {
@@ -748,7 +757,7 @@ fn resolve_workspaces_toml(state: &BridgeState) -> PathBuf {
 /// - **`dashboard` callers**: the supplied `workspace_root` is validated
 ///   against the workspaces registry (`workspaces.toml`). A path not present
 ///   in the registry is rejected.
-async fn resolve_workspace_root_for_command(
+pub(crate) async fn resolve_workspace_root_for_command(
     webview_label: &str,
     webview_supplied: &str,
     state: &BridgeState,

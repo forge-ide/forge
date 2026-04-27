@@ -4,6 +4,15 @@ version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
+[features]
+# F-586: enable the `RuntimeProvider::Mock` variant for callers outside the
+# `forge-providers` test target (e.g. `forge-session::tests::provider_swap`,
+# any future cross-crate integration suite). Production binaries leave this
+# off; the `Mock` arm vanishes from the enum, so the dashboard's IPC layer
+# cannot dispatch to it even via direct `SwappableProvider::swap` from
+# another crate.
+testing = []
+
 [dependencies]
 anyhow = "1"
 bytes = "1"

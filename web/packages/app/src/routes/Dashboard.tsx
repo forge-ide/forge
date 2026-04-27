@@ -1,5 +1,6 @@
 import { type Component, createResource, Show } from 'solid-js';
 import { ProviderPanel } from './Dashboard/ProviderPanel';
+import { ProvidersSection } from '../components/dashboard/ProvidersSection';
 import { SessionsPanel } from './Dashboard/SessionsPanel';
 import {
   CREDENTIAL_PROVIDERS,
@@ -44,6 +45,7 @@ export const Dashboard: Component = () => {
         {(m) => <CredentialBanner providerLabel={m().label} />}
       </Show>
       <ProviderPanel />
+      <ProvidersSection />
       <CredentialsSection />
       <SessionsPanel />
     </main>
