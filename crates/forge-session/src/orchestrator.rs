@@ -765,7 +765,6 @@ async fn dispatch_tool_calls(
 
     let mut tc_blocks: Vec<ChatBlock> = Vec::with_capacity(pending.len());
     let mut tr_blocks: Vec<ChatBlock> = Vec::with_capacity(pending.len());
-    let mut next_parallel_group: u32 = 1;
 
     // Indexed slot for each buffered call's result so we can reassemble
     // in original-call order after a parallel batch.
@@ -777,8 +776,10 @@ async fn dispatch_tool_calls(
 
     for batch in batches {
         if batch.parallel {
-            let group_id = next_parallel_group;
-            next_parallel_group += 1;
+            // F-599: pull from the session-scoped counter so the id is
+            // unique across model passes (UI can key on
+            // `(session_id, parallel_group)` as a stable batch id).
+            let group_id = session.next_parallel_group();
 
             // Open a Tool step + emit `ToolCallStarted` (with the shared
             // `parallel_group`) for every member of the batch BEFORE
@@ -2480,77 +2481,114 @@ mod tests {
 
     /// F-599 DoD: 3 read-only tool calls in one turn dispatch concurrently.
     /// Wall-clock latency must be substantially less than the sequential
-    /// reference (3 × per-tool sleep). We sleep 100 ms per tool: sequential
-    /// would total ≥ 300 ms; parallel should finish in roughly the slowest
-    /// task (~100 ms) plus event-emission overhead. Asserts < 200 ms to
-    /// allow generous slack on a busy CI worker.
+    /// reference (3 × per-tool sleep). We measure both:
+    ///   * a sequential baseline by running 3 RO tools as a *mixed* batch
+    ///     (interleaved with non-RO singletons so they don't coalesce into
+    ///     a parallel batch), then
+    ///   * the parallel run with the same per-tool sleep.
+    ///
+    /// Asserts the parallel run finishes in under 2/3 of the sequential
+    /// run. That ratio is the theoretical lower bound for "any
+    /// concurrency at all" with three equal-cost tools — a serial
+    /// bypass would sit at ~1.0 — and is independent of the absolute
+    /// per-tool sleep, so the test is robust on slow CI workers.
     #[tokio::test]
     async fn parallel_dispatch_3_read_only_tools_finishes_under_sequential_reference() {
-        let dir = TempDir::new().unwrap();
-        let log_path = dir.path().join("events.jsonl");
-        let session = Arc::new(Session::create(log_path).await.unwrap());
+        const SLEEP_MS: u64 = 100;
 
-        // Provider script: emit three tool calls then end the turn after
-        // we feed back results.
-        let initial = "{\"tool_call\":{\"name\":\"ro.a\",\"args\":{}}}\n\
-                       {\"tool_call\":{\"name\":\"ro.b\",\"args\":{}}}\n\
-                       {\"tool_call\":{\"name\":\"ro.c\",\"args\":{}}}\n\
-                       {\"done\":\"tool_use\"}\n";
-        let cont = "{\"done\":\"end_turn\"}\n";
-        let provider = Arc::new(
-            MockProvider::from_responses(vec![initial.into(), cont.into()])
-                .expect("construct mock"),
-        );
+        async fn measure_run(parallel: bool) -> std::time::Duration {
+            let dir = TempDir::new().unwrap();
+            let log_path = dir.path().join("events.jsonl");
+            let session = Arc::new(Session::create(log_path).await.unwrap());
 
-        let mut dispatcher = ToolDispatcher::new();
-        for n in ["ro.a", "ro.b", "ro.c"] {
-            dispatcher
-                .register(Box::new(SleepyTool {
-                    name: n.into(),
-                    read_only: true,
-                    sleep_ms: 100,
-                }))
-                .unwrap();
+            // Sequential reference: interleave each RO tool with a
+            // non-RO singleton so `group_tool_calls` breaks the run
+            // and the orchestrator falls onto the sequential branch.
+            // The non-RO tools are zero-cost so the only meaningful
+            // contribution to elapsed time is the three SLEEP_MS RO
+            // tools.
+            let initial = if parallel {
+                "{\"tool_call\":{\"name\":\"ro.a\",\"args\":{}}}\n\
+                 {\"tool_call\":{\"name\":\"ro.b\",\"args\":{}}}\n\
+                 {\"tool_call\":{\"name\":\"ro.c\",\"args\":{}}}\n\
+                 {\"done\":\"tool_use\"}\n"
+            } else {
+                "{\"tool_call\":{\"name\":\"ro.a\",\"args\":{}}}\n\
+                 {\"tool_call\":{\"name\":\"breaker\",\"args\":{}}}\n\
+                 {\"tool_call\":{\"name\":\"ro.b\",\"args\":{}}}\n\
+                 {\"tool_call\":{\"name\":\"breaker\",\"args\":{}}}\n\
+                 {\"tool_call\":{\"name\":\"ro.c\",\"args\":{}}}\n\
+                 {\"done\":\"tool_use\"}\n"
+            };
+            let cont = "{\"done\":\"end_turn\"}\n";
+            let provider = Arc::new(
+                MockProvider::from_responses(vec![initial.into(), cont.into()])
+                    .expect("construct mock"),
+            );
+
+            let mut dispatcher = ToolDispatcher::new();
+            for n in ["ro.a", "ro.b", "ro.c"] {
+                dispatcher
+                    .register(Box::new(SleepyTool {
+                        name: n.into(),
+                        read_only: true,
+                        sleep_ms: SLEEP_MS,
+                    }))
+                    .unwrap();
+            }
+            if !parallel {
+                dispatcher
+                    .register(Box::new(SleepyTool {
+                        name: "breaker".into(),
+                        read_only: false,
+                        sleep_ms: 0,
+                    }))
+                    .unwrap();
+            }
+            let dispatcher = Arc::new(dispatcher);
+
+            let pending: PendingApprovals = Arc::new(Mutex::new(HashMap::new()));
+            let ctx = ToolCtx::default();
+            let req = ChatRequest {
+                system: None,
+                messages: vec![ChatMessage {
+                    role: ChatRole::User,
+                    content: vec![ChatBlock::Text("kick off".into())],
+                }],
+                parallel_tool_calls_allowed: true,
+            };
+
+            let started = std::time::Instant::now();
+            run_request_loop(
+                Arc::clone(&session),
+                Arc::clone(&provider),
+                req,
+                MessageId::new(),
+                None,
+                0,
+                pending,
+                dispatcher.as_ref(),
+                &ctx,
+                true,
+                None,
+            )
+            .await
+            .expect("turn completes");
+            started.elapsed()
         }
-        let dispatcher = Arc::new(dispatcher);
 
-        let pending: PendingApprovals = Arc::new(Mutex::new(HashMap::new()));
-        let ctx = ToolCtx::default();
+        let sequential = measure_run(false).await;
+        let parallel = measure_run(true).await;
 
-        let req = ChatRequest {
-            system: None,
-            messages: vec![ChatMessage {
-                role: ChatRole::User,
-                content: vec![ChatBlock::Text("kick off".into())],
-            }],
-            parallel_tool_calls_allowed: true,
-        };
-
-        let started = std::time::Instant::now();
-        run_request_loop(
-            Arc::clone(&session),
-            Arc::clone(&provider),
-            req,
-            MessageId::new(),
-            None,
-            0,
-            pending,
-            dispatcher.as_ref(),
-            &ctx,
-            true,
-            None,
-        )
-        .await
-        .expect("turn completes");
-        let elapsed = started.elapsed();
-
-        // Generous upper bound — parallel must beat 3× sequential by a
-        // wide margin. Sequential reference would be ≥ 300 ms; parallel
-        // should land near 100 ms + overhead.
+        // Parallel must beat 2/3 of the sequential reference. With three
+        // equal-cost tools any real concurrency lands near 1/3; 2/3 is
+        // the slop boundary that catches a regression to fully-sequential
+        // dispatch even on a heavily-loaded CI worker.
+        let threshold = sequential.mul_f64(2.0 / 3.0);
         assert!(
-            elapsed < std::time::Duration::from_millis(220),
-            "expected parallel dispatch < 220 ms, got {:?}",
-            elapsed
+            parallel < threshold,
+            "parallel dispatch did not beat 2/3 of sequential reference: \
+             sequential={sequential:?}, parallel={parallel:?}, threshold={threshold:?}"
         );
     }
 

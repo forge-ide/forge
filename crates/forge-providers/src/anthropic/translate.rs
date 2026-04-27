@@ -52,6 +52,15 @@ use serde_json::{json, Value};
 /// `parallel_tool_calls_allowed` controls the `tool_choice.disable_parallel_tool_use`
 /// flag: when `false`, parallel tool use is disabled (the F-583 default until
 /// F-599 lands).
+///
+/// Wire-shape note (F-599): `disable_parallel_tool_use` only appears on
+/// the request body once tool schemas land — until then `tools` is
+/// empty and we omit `tool_choice` entirely (Anthropic rejects the
+/// field with no tools attached). Once tools are wired, the flag will
+/// reach the model for any model that supports it; pre-claude-3.5
+/// vintages may silently ignore the field rather than honour it, which
+/// is acceptable degradation (parallel tools are an opt-in optimisation,
+/// not a correctness requirement).
 pub fn serialize_request(
     req: &ChatRequest,
     model: &str,
