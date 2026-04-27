@@ -192,7 +192,14 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max])
+        // Walk char boundaries so we never split a multi-byte codepoint.
+        let cut = s
+            .char_indices()
+            .take_while(|(i, _)| *i < max)
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        format!("{}…", &s[..cut])
     }
 }
 
@@ -212,6 +219,19 @@ mod tests {
     #[test]
     fn anthropic_version_pinned() {
         assert_eq!(ANTHROPIC_VERSION, "2023-06-01");
+    }
+
+    #[test]
+    fn truncate_does_not_panic_on_utf8_boundary() {
+        // 'é' is two UTF-8 bytes; byte index 2 falls inside the codepoint, so a
+        // naive `&s[..2]` slice panics. Should produce a valid prefix.
+        let s = "héllo";
+        let _ = truncate(s, 2);
+    }
+
+    #[test]
+    fn truncate_short_input_returns_as_is() {
+        assert_eq!(truncate("hi", 100), "hi");
     }
 
     #[test]

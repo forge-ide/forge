@@ -58,6 +58,19 @@ pub fn serialize_request(
     max_tokens: u32,
     parallel_tool_calls_allowed: bool,
 ) -> std::result::Result<Vec<u8>, serde_json::Error> {
+    // Anthropic's Messages API rejects (HTTP 400) any request that sends a
+    // `tool_choice` field without a non-empty `tools` array. Until tool
+    // schemas land, both fields stay omitted and the inversion encoded by
+    // `parallel_tool_calls_allowed` is a no-op on the wire.
+    let tools: &[Value] = &[];
+    let tool_choice = if tools.is_empty() {
+        None
+    } else {
+        Some(ToolChoice {
+            kind: "auto",
+            disable_parallel_tool_use: !parallel_tool_calls_allowed,
+        })
+    };
     let body = AnthropicBody {
         model,
         max_tokens,
@@ -65,11 +78,8 @@ pub fn serialize_request(
         messages: AnthropicMessages {
             messages: &req.messages,
         },
-        tools: &[],
-        tool_choice: ToolChoice {
-            kind: "auto",
-            disable_parallel_tool_use: !parallel_tool_calls_allowed,
-        },
+        tools,
+        tool_choice,
         stream: true,
     };
     serde_json::to_vec(&body)
@@ -82,8 +92,10 @@ struct AnthropicBody<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<&'a str>,
     messages: AnthropicMessages<'a>,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
     tools: &'a [Value],
-    tool_choice: ToolChoice<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<ToolChoice<'a>>,
     stream: bool,
 }
 
@@ -445,8 +457,6 @@ mod tests {
                 "messages": [
                     {"role": "user", "content": [{"type": "text", "text": "hi"}]}
                 ],
-                "tools": [],
-                "tool_choice": {"type": "auto", "disable_parallel_tool_use": true},
                 "stream": true
             })
         );
@@ -532,18 +542,30 @@ mod tests {
     }
 
     #[test]
-    fn parallel_tool_calls_allowed_true_flips_disable_to_false() {
+    fn empty_tools_omits_tool_choice_and_tools() {
+        // Anthropic's Messages API rejects (HTTP 400) any request that sends a
+        // `tool_choice` field without a non-empty `tools` array. Until tool
+        // schemas land, both fields must be absent from the wire body.
         let req = ChatRequest {
             system: None,
             messages: vec![user_text("hi")],
-            parallel_tool_calls_allowed: true,
+            parallel_tool_calls_allowed: false,
         };
-        let v = parse(&req, "claude-3-5-sonnet", 4096, true);
-        assert_eq!(
-            v.get("tool_choice").unwrap(),
-            &json!({"type": "auto", "disable_parallel_tool_use": false})
+        let v = parse(&req, "claude-3-5-sonnet", 4096, false);
+        assert!(v.get("tools").is_none(), "tools must be absent when empty");
+        assert!(
+            v.get("tool_choice").is_none(),
+            "tool_choice must be absent when tools is empty",
         );
     }
+
+    // The wire-level inversion of `parallel_tool_calls_allowed` →
+    // `tool_choice.disable_parallel_tool_use` is unobservable while `tools`
+    // is empty (both fields are correctly omitted; see
+    // `empty_tools_omits_tool_choice_and_tools`). When tool schemas land in a
+    // follow-up task, re-introduce a wire-level test that passes a non-empty
+    // tools array and asserts on `disable_parallel_tool_use` for both
+    // `parallel_tool_calls_allowed = true` and `false`.
 
     #[test]
     fn multiple_text_blocks_preserve_order() {
