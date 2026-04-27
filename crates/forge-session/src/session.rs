@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use forge_core::{Event, EventLog};
@@ -19,6 +19,12 @@ pub struct Session {
     /// provider that drives the byte budget over the threshold mid-summary
     /// could fire a second compaction concurrently.
     compacting: Arc<AtomicBool>,
+    /// F-599: monotonic counter for `parallel_group` ids assigned to
+    /// concurrent tool batches. Lifted to session scope so ids stay
+    /// unique across model passes — pre-fix the counter reset on every
+    /// `dispatch_tool_calls` call, so any UI consumer that keys on
+    /// `(session_id, parallel_group)` saw collisions across passes.
+    parallel_group_seq: Arc<AtomicU32>,
 }
 
 impl Session {
@@ -36,7 +42,16 @@ impl Session {
             log: Arc::new(Mutex::new(log)),
             seq: Arc::new(Mutex::new(0)),
             compacting: Arc::new(AtomicBool::new(false)),
+            parallel_group_seq: Arc::new(AtomicU32::new(1)),
         })
+    }
+
+    /// F-599: allocate a fresh `parallel_group` id for a concurrent tool
+    /// batch. Monotonic across the session lifetime so `(session_id,
+    /// parallel_group)` is unique even across model passes — UI consumers
+    /// can key on it as a stable batch identifier.
+    pub fn next_parallel_group(&self) -> u32 {
+        self.parallel_group_seq.fetch_add(1, Ordering::Relaxed)
     }
 
     /// F-598: returns `true` if a [`crate::compaction::compact`] pass has
