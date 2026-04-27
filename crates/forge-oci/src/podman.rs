@@ -292,6 +292,13 @@ impl ContainerLogs for PodmanRuntime {
         for raw in String::from_utf8_lossy(&outcome.stdout).lines() {
             lines.push(parse_podman_log_line("stdout", raw));
         }
+        // KNOWN LIMITATION: `podman logs` writes container stderr AND its
+        // own internal diagnostics (deprecation notices, conmon warnings,
+        // etc.) to the same stderr pipe. We can't cheaply tell them apart
+        // without a dedicated journald / k8s-file path, so podman-internal
+        // lines surface here as `stream = "stderr"` log entries. The UI
+        // renders them styled like container stderr — visible noise, but
+        // not data loss. Revisit if/when a structured log API lands.
         for raw in String::from_utf8_lossy(&outcome.stderr).lines() {
             lines.push(parse_podman_log_line("stderr", raw));
         }

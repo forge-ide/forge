@@ -275,7 +275,25 @@ const LogsFlyout: Component<LogsFlyoutProps> = (props) => {
       const newest = got[got.length - 1];
       if (newest?.timestamp) sinceCursor = newest.timestamp;
       setLines((cur) => {
-        const merged = cur.concat(got);
+        // `podman logs --since <ts>` is inclusive: if the boundary line
+        // shares the cursor's timestamp, it'll come back on the next
+        // poll. De-dup by `(timestamp, stream, line)` against the tail
+        // of the buffer so identical adjacent entries don't double-print.
+        // We only scan the recently-buffered tail (bounded by `got.length`)
+        // to keep the merge O(n + m) rather than O(n*m).
+        const seen = new Set<string>();
+        const tailStart = Math.max(0, cur.length - got.length);
+        for (let i = tailStart; i < cur.length; i++) {
+          const l = cur[i]!;
+          seen.add(`${l.timestamp ?? ''} ${l.stream} ${l.line}`);
+        }
+        const fresh = got.filter((l) => {
+          const key = `${l.timestamp ?? ''} ${l.stream} ${l.line}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        const merged = cur.concat(fresh);
         return merged.length > LOGS_BUFFER_CAP
           ? merged.slice(merged.length - LOGS_BUFFER_CAP)
           : merged;
