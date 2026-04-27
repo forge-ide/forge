@@ -94,6 +94,7 @@ async fn rerun_branch_keeps_both_variants_and_branch_selected_gates_display() {
             false,
             None,
             None,
+            None, // F-587: keyless test wiring
         )
         .await
         .unwrap();
@@ -285,6 +286,7 @@ async fn select_branch_with_variant_zero_resolves_to_parent() {
             false,
             None,
             None,
+            None, // F-587: keyless test wiring
         )
         .await
         .unwrap();

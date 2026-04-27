@@ -16,6 +16,25 @@ tokio = { version = "1", features = ["io-util", "fs", "time", "sync", "rt", "pro
 toml = "0.8"
 dirs = "5"
 tracing = "0.1"
+async-trait = "0.1"
+# F-587: `secrecy::SecretString` is the at-boundary type for credential
+# values. `SecretBox<str>` zeroes its backing buffer on drop and refuses to
+# `Debug`-print the value; we lean on both. v0.10 is the current line.
+secrecy = "0.10"
+
+# F-587: Platform-gated keyring backends. Linux uses Secret Service over
+# DBus directly; macOS uses the system Keychain via `security-framework`;
+# Windows falls back to the cross-platform `keyring` crate (which wraps
+# DPAPI / Credential Manager). Each is only pulled on its target so the
+# build dependency footprint stays minimal per host.
+[target.'cfg(target_os = "linux")'.dependencies]
+secret-service = { version = "5", features = ["rt-tokio-crypto-rust"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = "3"
 
 [dev-dependencies]
 tempfile = "3"

@@ -39,9 +39,18 @@ async fn spawn_daemon(path: &Path, session_id: &str) -> TempDir {
     let sock = path.to_path_buf();
     let sid = session_id.to_string();
     tokio::spawn(async move {
-        serve_with_session(&sock, session, provider, true, false, None, Some(sid))
-            .await
-            .unwrap();
+        serve_with_session(
+            &sock,
+            session,
+            provider,
+            true,
+            false,
+            None,
+            Some(sid),
+            None, // F-587: keyless test wiring
+        )
+        .await
+        .unwrap();
     });
     // Wait for the server to bind its socket.
     for _ in 0..50 {

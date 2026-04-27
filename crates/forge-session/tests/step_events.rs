@@ -105,6 +105,7 @@ async fn capture_turn_events(auto_approve: bool) -> Vec<Event> {
             false,
             None,
             None,
+            None, // F-587: keyless test wiring
         )
         .await
         .unwrap();

@@ -91,6 +91,7 @@ async fn rerun_replace_supersedes_original_message_in_fresh_replay() {
             false,
             None,
             None,
+            None, // F-587: keyless test wiring
         )
         .await
         .unwrap();

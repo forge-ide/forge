@@ -30,6 +30,12 @@
 
 pub mod bridge;
 pub mod context_fetch;
+// F-587: per-provider credential management commands (`login_provider`,
+// `logout_provider`, `has_credential`). Pure validators, the `CredentialsState`
+// container, and the production wiring (`KeyringStore` + env-var fallback)
+// are always compiled — only the `#[tauri::command]` wrappers are gated
+// behind `webview` so non-webview unit tests link without Tauri.
+pub mod credentials_ipc;
 pub mod dashboard;
 pub mod dashboard_sessions;
 pub mod window_spec;

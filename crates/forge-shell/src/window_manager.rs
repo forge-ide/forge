@@ -117,11 +117,20 @@ pub fn run() -> Result<()> {
             crate::ipc::list_mcp_servers,
             crate::ipc::toggle_mcp_server,
             crate::ipc::import_mcp_config,
+            // F-587: per-provider credential management. The Dashboard's
+            // settings panel is the only call site; `authz_check` enforces
+            // the `dashboard` window label inside each command.
+            crate::credentials_ipc::login_provider,
+            crate::credentials_ipc::logout_provider,
+            crate::credentials_ipc::has_credential,
         ])
         .setup(|app| {
             crate::ipc::manage_bridge(&app.handle().clone());
             crate::ipc::manage_terminals(&app.handle().clone());
             crate::ipc::manage_lsp(&app.handle().clone());
+            // F-587: production credential store (`KeyringStore` + env-var
+            // fallback). Idempotent like the rest of the `manage_*` family.
+            crate::credentials_ipc::manage_credentials(&app.handle().clone());
             // F-137 / F-138: background-agent lifecycle state. Each session's
             // `BackgroundAgentRegistry` is lazily populated by
             // `resolve_bg_session` on first invoke; the state container has
