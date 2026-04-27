@@ -11,6 +11,7 @@
 
 mod def;
 mod error;
+pub mod memory;
 mod orchestrator;
 pub mod skill_loader;
 
@@ -26,6 +27,9 @@ pub const AGENTS_MD_SIZE_CAP: u64 = 256 * 1024; // 256 KiB
 
 pub use def::{AgentDef, Isolation};
 pub use error::{Error, Result};
+pub use memory::{
+    assemble_system_prompt, Memory, MemoryFrontmatter, MemoryStore, WriteMode, MEMORY_HEADING,
+};
 pub use orchestrator::{
     AgentEvent, AgentInstance, AgentScope, InitialPrompt, InstanceState, Orchestrator, SpawnContext,
 };

@@ -21,6 +21,7 @@ fn process_def(name: &str) -> AgentDef {
         body: String::new(),
         allowed_paths: vec![],
         isolation: Isolation::Process,
+        memory_enabled: false,
     }
 }
 
@@ -31,6 +32,7 @@ fn trusted_def(name: &str) -> AgentDef {
         body: String::new(),
         allowed_paths: vec![],
         isolation: Isolation::Trusted,
+        memory_enabled: false,
     }
 }
 
@@ -238,6 +240,7 @@ async fn scope_marker_is_independent_of_parse_time_check() {
         body: String::new(),
         allowed_paths: vec![],
         isolation: Isolation::Trusted,
+        memory_enabled: false,
     };
     let result = orch
         .spawn(

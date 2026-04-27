@@ -46,6 +46,19 @@ pub struct AgentDef {
     pub allowed_paths: Vec<String>,
     /// Runtime isolation policy applied when this def is spawned.
     pub isolation: Isolation,
+    /// F-601: opt-in cross-session memory.
+    ///
+    /// Defaults to `false`. When `true`, the loader gates two behaviors:
+    ///
+    /// 1. The agent's `~/.config/forge/memory/<name>.md` body is appended to
+    ///    the system prompt under a `## Memory` heading after `AGENTS.md`.
+    /// 2. The `memory.write` tool is exposed to the agent so it can update
+    ///    its own memory.
+    ///
+    /// Both default OFF; the agent author opts in by setting `memory: true`
+    /// (or the explicit `memory_enabled: true`) in the agent's YAML
+    /// frontmatter.
+    pub memory_enabled: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -54,6 +67,9 @@ struct Frontmatter {
     description: Option<String>,
     isolation: Option<String>,
     allowed_paths: Option<Vec<String>>,
+    /// F-601: terse alias `memory: true` accepted alongside `memory_enabled: true`.
+    memory: Option<bool>,
+    memory_enabled: Option<bool>,
 }
 
 pub(crate) fn parse_agent_file(path: &Path) -> Result<AgentDef> {
@@ -125,12 +141,14 @@ pub(crate) fn parse_agent_file(path: &Path) -> Result<AgentDef> {
                     )));
                 }
             };
+            let memory_enabled = fm.memory_enabled.or(fm.memory).unwrap_or(false);
             Ok(AgentDef {
                 name,
                 description: fm.description,
                 body: parsed.content,
                 allowed_paths: fm.allowed_paths.unwrap_or_default(),
                 isolation,
+                memory_enabled,
             })
         }
         None => Ok(AgentDef {
@@ -139,6 +157,7 @@ pub(crate) fn parse_agent_file(path: &Path) -> Result<AgentDef> {
             body: parsed.content,
             allowed_paths: vec![],
             isolation: Isolation::Process,
+            memory_enabled: false,
         }),
     }
 }

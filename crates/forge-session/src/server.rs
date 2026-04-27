@@ -106,6 +106,7 @@ async fn build_agent_runtime(workspace_path: Option<&Path>) -> Option<AgentRunti
         body: String::new(),
         allowed_paths: vec![],
         isolation: forge_agents::Isolation::Process,
+        memory_enabled: false,
     };
     let root_instance = match orchestrator
         .spawn(root_def, forge_agents::SpawnContext::user())
@@ -127,6 +128,86 @@ async fn build_agent_runtime(workspace_path: Option<&Path>) -> Option<AgentRunti
         agent_defs: Arc::new(defs),
         parent_instance_id: root_instance.id,
     })
+}
+
+/// F-601: resolve the active agent's cross-session memory.
+///
+/// Returns `(memory_body, memory_binding)`:
+///
+/// - `memory_body`: the markdown body to append under `## Memory` after
+///   `AGENTS.md`, or `None` if memory is disabled / unavailable.
+/// - `memory_binding`: the [`MemoryWriteBinding`] used by the dispatcher
+///   cache to register `memory.write`, or `None` if memory is disabled.
+///
+/// Selection rules:
+///
+/// 1. The active agent name comes from `FORGE_ACTIVE_AGENT`. Unset → memory
+///    off (returns `(None, None)`); the session behaves exactly as before
+///    F-601.
+/// 2. If the named agent is not found among loaded defs, memory stays off
+///    and we log at WARN.
+/// 3. If the agent def has `memory_enabled: false`, memory stays off — the
+///    per-agent flag defaults OFF as documented.
+/// 4. Otherwise, build a [`MemoryStore`] anchored at `~/.config` and try to
+///    load the existing file. A missing file yields an empty body but the
+///    binding is still produced so `memory.write` can create the file on
+///    the agent's first write.
+///
+/// Reads are best-effort: a corrupted memory file logs a warning inside
+/// [`MemoryStore::load`] and surfaces as `None` body — the session stays
+/// up.
+async fn resolve_session_memory(
+    runtime: Option<&AgentRuntime>,
+) -> (
+    Option<String>,
+    Option<crate::dispatcher_cache::MemoryWriteBinding>,
+) {
+    let Some(rt) = runtime else {
+        return (None, None);
+    };
+    let Ok(active_agent) = std::env::var("FORGE_ACTIVE_AGENT") else {
+        return (None, None);
+    };
+    let active_agent = active_agent.trim();
+    if active_agent.is_empty() {
+        return (None, None);
+    }
+    let Some(def) = rt.agent_defs.iter().find(|a| a.name == active_agent) else {
+        tracing::warn!(
+            target: "forge_session::server",
+            requested = %active_agent,
+            "FORGE_ACTIVE_AGENT names an agent that is not loaded; memory disabled",
+        );
+        return (None, None);
+    };
+    if !def.memory_enabled {
+        return (None, None);
+    }
+    let Some(store) = forge_agents::MemoryStore::from_home() else {
+        tracing::warn!(
+            target: "forge_session::server",
+            "could not resolve home directory for cross-session memory; disabling",
+        );
+        return (None, None);
+    };
+    let store = std::sync::Arc::new(store);
+    let body = match store.load(active_agent) {
+        Ok(Some(memory)) => Some(memory.body),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(
+                target: "forge_session::server",
+                error = %e,
+                "memory load failed; injection skipped, write tool stays available",
+            );
+            None
+        }
+    };
+    let binding = crate::dispatcher_cache::MemoryWriteBinding {
+        store,
+        agent_id: active_agent.to_string(),
+    };
+    (body, Some(binding))
 }
 
 /// Static name for an `IpcMessage` discriminant — used for diagnostic logging
@@ -625,7 +706,13 @@ pub async fn serve_with_session<P: Provider + 'static>(
     // `ChatRequest.system` (refcount bump), and per-iteration `req.clone()`
     // inside `run_request_loop` is now refcount-only on the prefix even when
     // the prefix is hundreds of KiB.
-    let agents_md: Option<Arc<str>> = match workspace_path.as_deref() {
+    //
+    // F-601: when an active agent is selected via `FORGE_ACTIVE_AGENT` and
+    // that agent's def has `memory_enabled: true`, the cross-session memory
+    // body is appended after the AGENTS.md prefix under a `## Memory`
+    // heading; both the load and the assembly run once here so per-turn
+    // cost stays at the existing `Arc::clone`.
+    let agents_md_prefix: Option<String> = match workspace_path.as_deref() {
         Some(ws) => match forge_agents::load_agents_md(ws) {
             Ok(Some(content)) => {
                 tracing::warn!(
@@ -633,9 +720,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
                     "AGENTS.md injected into session system prompt; \
                      review the file if this workspace is not fully trusted"
                 );
-                Some(Arc::from(format!(
-                    "\n\n---\nAGENTS.md (workspace):\n{content}"
-                )))
+                Some(format!("\n\n---\nAGENTS.md (workspace):\n{content}"))
             }
             Ok(None) => None,
             Err(e) => {
@@ -712,11 +797,6 @@ pub async fn serve_with_session<P: Provider + 'static>(
         });
     }
 
-    // F-567: the per-session dispatcher cache. Lives across every turn so
-    // the builtins register exactly once and MCP adapters rebuild only
-    // when `mcp_tools_epoch` advances.
-    let dispatcher_cache = crate::dispatcher_cache::DispatcherCache::new(mcp_tools_epoch);
-
     // F-140: session-scoped agent runtime so live turns can actually spawn
     // sub-agents via `agent.spawn`.
     //
@@ -729,8 +809,43 @@ pub async fn serve_with_session<P: Provider + 'static>(
     // + `<home>/.agents` — a failed load downgrades the runtime to
     // `None` so a filesystem blip never kills the whole session, it just
     // reverts to the pre-F-140 "agent runtime not configured" behaviour.
+    //
+    // F-601: built before the dispatcher cache so the active agent's
+    // `memory_enabled` flag can decide whether `memory.write` registers
+    // and whether the memory body is appended to the system prompt.
     let agent_runtime: Option<AgentRuntime> = build_agent_runtime(workspace_path.as_deref()).await;
+
+    // F-601: resolve the active agent + load its memory once per session.
+    //
+    // The active agent is selected via `FORGE_ACTIVE_AGENT`. When set and
+    // matching a loaded def, the def's `memory_enabled` flag controls both
+    // memory injection and `memory.write` registration. When unset,
+    // unmatched, or set against a `memory_enabled: false` def, memory is
+    // off — the session behaves exactly as before F-601.
+    let (memory_body, memory_binding) = resolve_session_memory(agent_runtime.as_ref()).await;
+
+    // F-601: assemble the final per-turn system prompt by appending the
+    // optional memory body under a `## Memory` heading after AGENTS.md.
+    // Stored as `Arc<str>` so each turn clones the refcount, never the
+    // bytes.
+    let agents_md: Option<Arc<str>> =
+        forge_agents::assemble_system_prompt(agents_md_prefix.as_deref(), memory_body.as_deref())
+            .map(Arc::from);
+
     let agent_runtime = Arc::new(agent_runtime);
+
+    // F-567: the per-session dispatcher cache. Lives across every turn so
+    // the builtins register exactly once and MCP adapters rebuild only
+    // when `mcp_tools_epoch` advances.
+    //
+    // F-601: when the active agent has `memory_enabled: true`,
+    // `memory.write` registers alongside the other built-ins so the agent
+    // can update its own cross-session memory file. Without the binding,
+    // the tool stays unregistered.
+    let dispatcher_cache = match memory_binding {
+        Some(b) => crate::dispatcher_cache::DispatcherCache::with_memory(mcp_tools_epoch, b),
+        None => crate::dispatcher_cache::DispatcherCache::new(mcp_tools_epoch),
+    };
     let workspace = Arc::new(
         workspace
             .map(|w| w.display().to_string())

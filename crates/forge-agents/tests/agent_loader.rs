@@ -268,3 +268,50 @@ fn agent_loader_holds_parsed_agents() {
     assert_eq!(loader.agents().len(), 1);
     assert_eq!(loader.agents()[0].name, "bot");
 }
+
+#[test]
+fn memory_enabled_defaults_to_false_when_frontmatter_omits_it() {
+    // F-601: per-agent memory is OFF by default. An agent that does not
+    // set the flag must not silently opt into cross-session memory.
+    let workspace = tempdir().unwrap();
+    let agents_dir = workspace.path().join(".agents");
+    write_agent(
+        &agents_dir,
+        "quiet.md",
+        "---\nname: quiet\n---\n\nNo memory.",
+    );
+    let agents = load_workspace_agents(workspace.path()).unwrap();
+    assert_eq!(agents.len(), 1);
+    assert!(!agents[0].memory_enabled);
+}
+
+#[test]
+fn memory_enabled_explicit_alias_takes_effect() {
+    // F-601: `memory_enabled: true` opts the agent in.
+    let workspace = tempdir().unwrap();
+    let agents_dir = workspace.path().join(".agents");
+    write_agent(
+        &agents_dir,
+        "scribe.md",
+        "---\nname: scribe\nmemory_enabled: true\n---\n\nNotes.",
+    );
+    let agents = load_workspace_agents(workspace.path()).unwrap();
+    assert_eq!(agents.len(), 1);
+    assert!(agents[0].memory_enabled);
+}
+
+#[test]
+fn memory_terse_alias_takes_effect() {
+    // F-601: terse `memory: true` is a documented synonym so a single-key
+    // opt-in is also legal.
+    let workspace = tempdir().unwrap();
+    let agents_dir = workspace.path().join(".agents");
+    write_agent(
+        &agents_dir,
+        "scribe.md",
+        "---\nname: scribe\nmemory: true\n---\n\nNotes.",
+    );
+    let agents = load_workspace_agents(workspace.path()).unwrap();
+    assert_eq!(agents.len(), 1);
+    assert!(agents[0].memory_enabled);
+}

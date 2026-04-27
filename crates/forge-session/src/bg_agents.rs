@@ -424,6 +424,7 @@ mod tests {
             body: String::new(),
             allowed_paths: vec![],
             isolation: Isolation::Process,
+            memory_enabled: false,
         }
     }
 

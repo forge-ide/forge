@@ -14,6 +14,7 @@ pub mod fs_edit;
 pub mod fs_read;
 pub mod fs_write;
 pub mod mcp;
+pub mod memory_write;
 pub mod shell_exec;
 
 pub use agent_spawn::AgentSpawnTool;
@@ -22,6 +23,7 @@ pub use fs_edit::FsEditTool;
 pub use fs_read::FsReadTool;
 pub use fs_write::FsWriteTool;
 pub use mcp::McpTool;
+pub use memory_write::MemoryWriteTool;
 pub use shell_exec::ShellExecTool;
 
 #[derive(Default)]
