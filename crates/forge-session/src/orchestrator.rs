@@ -853,7 +853,12 @@ async fn dispatch_tool_calls(
                 let args = pc.args.clone();
                 let ctx_owned = ctx.clone();
                 joinset.spawn(async move {
-                    let r = tool.invoke(&args, &ctx_owned).await;
+                    // F-077 / F-599: route through the shared budget
+                    // gate. Bypassing it (calling `tool.invoke`
+                    // directly) would lose the per-session aggregate
+                    // cap on the parallel path.
+                    let r =
+                        crate::tools::invoke_with_budget(tool.as_ref(), &args, &ctx_owned).await;
                     (idx, r)
                 });
             }
@@ -1041,7 +1046,12 @@ async fn dispatch_tool_calls(
                             })
                             .await?;
 
-                        tool.invoke(&pc.args, ctx).await
+                        // F-077 / F-599: route through the shared budget
+                        // gate. Bypassing it (calling `tool.invoke`
+                        // directly) would lose the per-session aggregate
+                        // cap on the sequential path, mirroring the
+                        // pre-F-599 dispatcher behaviour.
+                        crate::tools::invoke_with_budget(tool, &pc.args, ctx).await
                     }
                     Err(ToolError::UnknownTool(n)) => {
                         session
@@ -2899,5 +2909,161 @@ mod tests {
         );
         // The middle tool errored; the other two reported ok.
         assert_eq!(tool_returned_oks, vec![true, false, true]);
+    }
+
+    /// F-599 regression: the byte budget must apply on the parallel
+    /// dispatch path. Prior to this fix the parallel branch called
+    /// `tool.invoke` directly, bypassing the dispatcher's budget gate —
+    /// a session could read unbounded data through a parallel batch
+    /// after the per-call cap would have refused further calls.
+    ///
+    /// This test charges the budget close to its limit, then runs a
+    /// parallel batch of three RO tools whose results push the counter
+    /// past the limit mid-batch. After the batch the budget must be
+    /// exhausted, and a *follow-up* call (sequential singleton) must
+    /// see the synthetic "session byte budget exceeded" error rather
+    /// than executing the tool.
+    #[tokio::test]
+    async fn parallel_batch_respects_session_byte_budget_and_blocks_followups() {
+        struct PayloadTool {
+            name: String,
+            // Each call returns a {"content": "<n bytes>"} so the
+            // dispatcher charges the budget by `n` bytes (matches the
+            // `result_byte_cost` `fs.read` shape).
+            payload_bytes: usize,
+        }
+        #[async_trait::async_trait]
+        impl Tool for PayloadTool {
+            fn name(&self) -> &str {
+                &self.name
+            }
+            fn approval_preview(&self, _args: &serde_json::Value) -> ApprovalPreview {
+                ApprovalPreview {
+                    description: "payload".into(),
+                }
+            }
+            fn read_only(&self) -> bool {
+                true
+            }
+            async fn invoke(&self, _args: &serde_json::Value, _ctx: &ToolCtx) -> serde_json::Value {
+                serde_json::json!({ "content": "x".repeat(self.payload_bytes) })
+            }
+        }
+
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+        let session = Arc::new(Session::create(log_path).await.unwrap());
+
+        let initial = "{\"tool_call\":{\"name\":\"ro.a\",\"args\":{}}}\n\
+                       {\"tool_call\":{\"name\":\"ro.b\",\"args\":{}}}\n\
+                       {\"tool_call\":{\"name\":\"ro.c\",\"args\":{}}}\n\
+                       {\"done\":\"tool_use\"}\n";
+        let followup_initial = "{\"tool_call\":{\"name\":\"ro.a\",\"args\":{}}}\n\
+                                {\"done\":\"tool_use\"}\n";
+        let cont = "{\"done\":\"end_turn\"}\n";
+        let provider = Arc::new(
+            MockProvider::from_responses(vec![
+                initial.into(),
+                cont.into(),
+                followup_initial.into(),
+                cont.into(),
+            ])
+            .expect("construct mock"),
+        );
+
+        let mut dispatcher = ToolDispatcher::new();
+        for n in ["ro.a", "ro.b", "ro.c"] {
+            dispatcher
+                .register(Box::new(PayloadTool {
+                    name: n.into(),
+                    payload_bytes: 100,
+                }))
+                .unwrap();
+        }
+        let dispatcher = Arc::new(dispatcher);
+
+        let budget = Arc::new(crate::byte_budget::ByteBudget::new(200));
+        let ctx = ToolCtx {
+            byte_budget: Some(Arc::clone(&budget)),
+            ..ToolCtx::default()
+        };
+        let pending: PendingApprovals = Arc::new(Mutex::new(HashMap::new()));
+
+        run_request_loop(
+            Arc::clone(&session),
+            Arc::clone(&provider),
+            ChatRequest {
+                system: None,
+                messages: vec![ChatMessage {
+                    role: ChatRole::User,
+                    content: vec![ChatBlock::Text("first".into())],
+                }],
+                parallel_tool_calls_allowed: true,
+            },
+            MessageId::new(),
+            None,
+            0,
+            Arc::clone(&pending),
+            dispatcher.as_ref(),
+            &ctx,
+            true,
+            None,
+        )
+        .await
+        .expect("first turn completes");
+
+        // Budget is exhausted: at least 2 of 3 tools landed (parallel
+        // tasks observe the same atomic counter; the third may either
+        // see the exhaustion pre-check or land a charge that pushes the
+        // counter past the limit). Either way a follow-up call must be
+        // refused.
+        assert!(
+            budget.is_exhausted(),
+            "budget should be exhausted after parallel batch: consumed={}/{}",
+            budget.consumed(),
+            budget.limit()
+        );
+
+        let mut rx = session.event_tx.subscribe();
+        run_request_loop(
+            Arc::clone(&session),
+            Arc::clone(&provider),
+            ChatRequest {
+                system: None,
+                messages: vec![ChatMessage {
+                    role: ChatRole::User,
+                    content: vec![ChatBlock::Text("second".into())],
+                }],
+                parallel_tool_calls_allowed: true,
+            },
+            MessageId::new(),
+            None,
+            0,
+            pending,
+            dispatcher.as_ref(),
+            &ctx,
+            true,
+            None,
+        )
+        .await
+        .expect("follow-up turn completes");
+
+        // The follow-up tool result must carry the budget-exceeded
+        // error — proving the *sequential* path also routes through
+        // `invoke_with_budget`.
+        let mut saw_exceeded = false;
+        while let Ok((_, ev)) = rx.try_recv() {
+            if let Event::ToolCallCompleted { result, .. } = ev {
+                if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
+                    if err.contains("session byte budget exceeded") {
+                        saw_exceeded = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            saw_exceeded,
+            "follow-up tool call after budget exhaustion must surface the budget error"
+        );
     }
 }

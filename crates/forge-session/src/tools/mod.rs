@@ -208,33 +208,51 @@ impl ToolDispatcher {
     ) -> Result<serde_json::Value, ToolError> {
         let tool = self.get(name)?;
 
-        // F-077: pre-check the per-session aggregate byte budget. The
-        // tool itself never runs after exhaustion — short-circuiting at
-        // the dispatcher is what makes the cap meaningful (an attacker
-        // who can drive the tool past the cap, even with no payload
-        // returned, defeats the budget). On a success, post-charge the
-        // budget by the bytes the result occupies so the *next* call
-        // sees the updated counter.
-        if let Some(budget) = ctx.byte_budget.as_ref() {
-            if budget.is_exhausted() {
-                return Ok(serde_json::json!({
-                    "error": format!(
-                        "session byte budget exceeded: {}/{} bytes",
-                        budget.consumed(),
-                        budget.limit(),
-                    )
-                }));
-            }
-        }
-
-        let result = tool.invoke(args, ctx).await;
-
-        if let Some(budget) = ctx.byte_budget.as_ref() {
-            budget.charge(result_byte_cost(&result));
-        }
-
-        Ok(result)
+        // F-077 / F-599: route the budget pre-check + invoke + post-charge
+        // through the shared helper so the orchestrator's parallel and
+        // sequential paths (which call `Tool::invoke` directly on an
+        // `Arc<dyn Tool>` they spawn into a `JoinSet`) get the same
+        // enforcement without round-tripping the dispatcher.
+        Ok(invoke_with_budget(tool, args, ctx).await)
     }
+}
+
+/// F-599 budget gate: pre-check the per-session aggregate byte budget,
+/// invoke the tool, then post-charge by the bytes the result occupies.
+///
+/// This is the single source of truth for budget enforcement. Both
+/// `ToolDispatcher::dispatch` and the orchestrator's parallel /
+/// sequential dispatch paths route through here; bypassing it (calling
+/// `tool.invoke` directly) loses the cap and is a regression.
+///
+/// On exhaustion the tool is **not** invoked — the helper returns a
+/// synthetic `{"error": "session byte budget exceeded: …"}` object and
+/// the budget counter is unchanged. This matches the pre-F-599 behaviour
+/// and the byte-budget module preamble.
+pub(crate) async fn invoke_with_budget(
+    tool: &dyn Tool,
+    args: &serde_json::Value,
+    ctx: &ToolCtx,
+) -> serde_json::Value {
+    if let Some(budget) = ctx.byte_budget.as_ref() {
+        if budget.is_exhausted() {
+            return serde_json::json!({
+                "error": format!(
+                    "session byte budget exceeded: {}/{} bytes",
+                    budget.consumed(),
+                    budget.limit(),
+                )
+            });
+        }
+    }
+
+    let result = tool.invoke(args, ctx).await;
+
+    if let Some(budget) = ctx.byte_budget.as_ref() {
+        budget.charge(result_byte_cost(&result));
+    }
+
+    result
 }
 
 /// F-077: cost a tool result for budget accounting. The intent is to
