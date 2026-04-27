@@ -40,8 +40,8 @@
 //!   `partial_json` from `input_json_delta` events; on `content_block_stop`
 //!   parse the accumulated string and emit [`ChatChunk::ToolCall`].
 //! - `message_delta` carries the upcoming `stop_reason`; remember it.
-//! - `message_stop` → [`ChatChunk::Done(stop_reason)`], defaulting to
-//!   `"end_turn"` if the prior `message_delta` did not carry one.
+//! - `message_stop` → [`ChatChunk::Done`] carrying the upcoming `stop_reason`,
+//!   defaulting to `"end_turn"` if the prior `message_delta` did not carry one.
 
 use crate::{ChatBlock, ChatChunk, ChatMessage, ChatRequest, ChatRole};
 use serde::Serialize;
