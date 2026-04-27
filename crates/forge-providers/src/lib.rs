@@ -13,6 +13,7 @@ use serde::Deserialize;
 
 pub mod anthropic;
 pub mod ollama;
+pub mod openai;
 pub mod sse;
 
 // ── Chat domain types ─────────────────────────────────────────────────────────
