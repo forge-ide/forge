@@ -121,6 +121,21 @@ fn args_digest(args: &serde_json::Value) -> String {
     s
 }
 
+/// F-599: extract a printable message from the boxed payload returned by
+/// [`std::panic::catch_unwind`] / `FuturesExt::catch_unwind`. Tools that
+/// `panic!("…")` produce a `&'static str`; `panic!("{}", x)` produces a
+/// `String`. Anything else falls back to a generic marker — callers
+/// surface it inside the tool result's `error` field.
+fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = panic.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = panic.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
+}
+
 /// Run a complete turn for the given user text. Emits all session events for:
 /// UserMessage → StepStarted(Model) → AssistantMessage(open) → AssistantDelta* →
 /// [StepStarted(Tool) → ToolCallStarted → ToolCallApprovalRequested →
@@ -857,29 +872,46 @@ async fn dispatch_tool_calls(
                     // gate. Bypassing it (calling `tool.invoke`
                     // directly) would lose the per-session aggregate
                     // cap on the parallel path.
-                    let r =
-                        crate::tools::invoke_with_budget(tool.as_ref(), &args, &ctx_owned).await;
+                    //
+                    // F-599 panic attribution: wrap the invocation in
+                    // `AssertUnwindSafe(...).catch_unwind()` so a
+                    // panicking tool (programmer error) becomes a
+                    // typed error result attributed to *this* `idx`
+                    // rather than surfacing as an opaque `JoinError`
+                    // we'd have to misattribute by walking the empty
+                    // result slots.
+                    use futures::FutureExt;
+                    let invoke_fut = std::panic::AssertUnwindSafe(
+                        crate::tools::invoke_with_budget(tool.as_ref(), &args, &ctx_owned),
+                    )
+                    .catch_unwind();
+                    let r = match invoke_fut.await {
+                        Ok(v) => v,
+                        Err(panic) => {
+                            let msg = panic_message(panic);
+                            serde_json::json!({
+                                "error": format!("tool task panicked: {msg}")
+                            })
+                        }
+                    };
                     (idx, r)
                 });
             }
 
-            // Drain the JoinSet. A `JoinError` (panicking task) becomes a
-            // synthetic error result for that index — other tools in the
-            // batch still complete; we never short-circuit on one
-            // failure.
+            // Drain the JoinSet. Spawned futures `catch_unwind` their
+            // own panics, so `JoinError` here only fires on cancellation
+            // / abort — which we don't trigger. If it does fire we
+            // mark the first empty slot, but in practice this branch
+            // is unreachable.
             while let Some(joined) = joinset.join_next().await {
                 match joined {
                     Ok((idx, result)) => {
                         results[idx] = Some(result);
                     }
                     Err(join_err) => {
-                        // We don't know which `idx` panicked; mark the
-                        // first not-yet-set slot as the offender. This is
-                        // best-effort attribution — panicking tools are
-                        // a programmer error, not a user-facing case.
                         if let Some(slot) = results.iter_mut().find(|r| r.is_none()) {
                             *slot = Some(serde_json::json!({
-                                "error": format!("tool task panicked: {join_err}")
+                                "error": format!("tool task aborted: {join_err}")
                             }));
                         }
                     }
@@ -3064,6 +3096,142 @@ mod tests {
         assert!(
             saw_exceeded,
             "follow-up tool call after budget exhaustion must surface the budget error"
+        );
+    }
+
+    /// F-599 regression: a panicking tool in a parallel batch is
+    /// attributed to the *correct* index, the orchestrator does not
+    /// itself panic, and the other batch members complete normally.
+    ///
+    /// Pre-fix the spawned task panicked out of the future, the
+    /// JoinSet returned a `JoinError` with no idx, and the recovery
+    /// code mis-attributed the error to the first empty slot — or
+    /// triggered the unconditional `.expect("every batch index must
+    /// have a result")` later in the reassembly loop.
+    #[tokio::test]
+    async fn parallel_batch_panicking_tool_is_attributed_to_correct_index() {
+        struct PanickingTool;
+        #[async_trait::async_trait]
+        impl Tool for PanickingTool {
+            fn name(&self) -> &str {
+                "ro.panic"
+            }
+            fn approval_preview(&self, _args: &serde_json::Value) -> ApprovalPreview {
+                ApprovalPreview {
+                    description: "panics".into(),
+                }
+            }
+            fn read_only(&self) -> bool {
+                true
+            }
+            async fn invoke(&self, _args: &serde_json::Value, _ctx: &ToolCtx) -> serde_json::Value {
+                panic!("synthetic panic for index attribution test");
+            }
+        }
+
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+        let session = Arc::new(Session::create(log_path).await.unwrap());
+
+        // Order: ro.a (ok) → ro.panic (panics) → ro.c (ok). Without
+        // the catch_unwind fix the JoinError arrives last (after the
+        // OK siblings finish) and the "first empty slot" recovery
+        // would either misattribute it or have nowhere to put it
+        // (panicking the orchestrator on the .expect).
+        let initial = "{\"tool_call\":{\"name\":\"ro.a\",\"args\":{}}}\n\
+                       {\"tool_call\":{\"name\":\"ro.panic\",\"args\":{}}}\n\
+                       {\"tool_call\":{\"name\":\"ro.c\",\"args\":{}}}\n\
+                       {\"done\":\"tool_use\"}\n";
+        let cont = "{\"done\":\"end_turn\"}\n";
+        let provider = Arc::new(
+            MockProvider::from_responses(vec![initial.into(), cont.into()])
+                .expect("construct mock"),
+        );
+
+        let mut dispatcher = ToolDispatcher::new();
+        dispatcher
+            .register(Box::new(SleepyTool {
+                name: "ro.a".into(),
+                read_only: true,
+                sleep_ms: 5,
+            }))
+            .unwrap();
+        dispatcher.register(Box::new(PanickingTool)).unwrap();
+        dispatcher
+            .register(Box::new(SleepyTool {
+                name: "ro.c".into(),
+                read_only: true,
+                sleep_ms: 5,
+            }))
+            .unwrap();
+        let dispatcher = Arc::new(dispatcher);
+
+        let pending: PendingApprovals = Arc::new(Mutex::new(HashMap::new()));
+        let ctx = ToolCtx::default();
+        let mut rx = session.event_tx.subscribe();
+
+        run_request_loop(
+            Arc::clone(&session),
+            Arc::clone(&provider),
+            ChatRequest {
+                system: None,
+                messages: vec![ChatMessage {
+                    role: ChatRole::User,
+                    content: vec![ChatBlock::Text("kick".into())],
+                }],
+                parallel_tool_calls_allowed: true,
+            },
+            MessageId::new(),
+            None,
+            0,
+            pending,
+            dispatcher.as_ref(),
+            &ctx,
+            true,
+            None,
+        )
+        .await
+        .expect("turn completes despite tool panic");
+
+        // Reassemble (tool_id → result.error?) tuples in event order.
+        let mut tool_results: Vec<(String, Option<String>)> = vec![];
+        while let Ok((_, ev)) = rx.try_recv() {
+            if let Event::ToolCallStarted { tool, .. } = &ev {
+                tool_results.push((tool.clone(), None));
+            }
+            if let Event::ToolCallCompleted { result, .. } = &ev {
+                if let Some(slot) = tool_results.iter_mut().rev().find(|(_, e)| e.is_none()) {
+                    slot.1 = Some(
+                        result
+                            .get("error")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("<ok>")
+                            .to_string(),
+                    );
+                }
+            }
+        }
+
+        let by_name: std::collections::HashMap<&str, &str> = tool_results
+            .iter()
+            .map(|(name, err)| (name.as_str(), err.as_deref().unwrap_or("<no result>")))
+            .collect();
+
+        assert_eq!(
+            by_name.get("ro.a"),
+            Some(&"<ok>"),
+            "ro.a completed normally"
+        );
+        assert_eq!(
+            by_name.get("ro.c"),
+            Some(&"<ok>"),
+            "ro.c completed normally"
+        );
+        let panic_err = by_name.get("ro.panic").copied().unwrap_or("");
+        assert!(
+            panic_err.contains("tool task panicked")
+                && panic_err.contains("synthetic panic for index attribution test"),
+            "ro.panic must carry a panic-attributed error; got: {panic_err}"
         );
     }
 }
