@@ -107,7 +107,12 @@ for the duration of the session. The lifecycle, owned by
 2. **Pull** — `runtime.pull(image)`. Idempotent; layers cached.
 3. **Create** — `runtime.create(image, ["sleep", "infinity"])`. The
    `sleep infinity` init keeps the container alive between `exec`
-   calls. Resource limits attach at this step (see below).
+   calls. Resource limits attach at this step in the long-term
+   design (see below) — **deferred to follow-up #631**; containers
+   currently run with the host slice's default limits, and
+   `Level2Session::create` emits a `tracing::warn!` whenever a
+   non-default `ContainerLimits` is passed so operators are not
+   surprised at runtime.
 4. **Start** — `runtime.start(handle)`. Container is now ready for
    `exec`.
 5. **Exec, repeated** — every step in the session runs through
@@ -182,6 +187,49 @@ reason as structured fields so operators can filter on them
 without re-running the probe. Variant names are pinned strings
 (`RuntimeMissing`, `RuntimeBroken`, `RootlessUnavailable`) so log
 queries don't break on Rust enum renames.
+
+> **Fallback runs at session start, not mid-session.**
+> `detect_or_fall_back` is intended to be invoked once, before the
+> session commits to a level. The branching inside
+> `SandboxedCommand::execute` does *not* re-attempt fallback when a
+> mid-session `runtime.exec` returns `OciError`: those errors
+> propagate as `Err(io::Error)` to the caller. Mid-session demotion
+> Level 2 → Level 1 would silently relax the user-visible
+> isolation guarantee partway through a session, which is exactly
+> the surprise the isolation model is supposed to prevent.
+> Operators see one consistent level for the whole session.
+
+#### Container teardown and panic safety
+
+`Level2Session` ships two teardown paths:
+
+- **Async, preferred:** `Level2Session::teardown()` runs `stop`
+  then `remove(-f)` through the `ContainerRuntime` trait. Callers
+  on the clean shutdown path should always reach for this.
+- **Sync, panic-safety net:** `Level2Session`'s `Drop` impl
+  fire-and-forgets `podman rm -f <id>` via
+  `std::process::Command::spawn` whenever `teardown()` did not
+  complete. This protects against panic, early `?`, and task
+  cancellation. The Drop is detached (no `wait()`), so a slow or
+  hung `podman` cannot block the panicking thread. A successful
+  async `teardown()` arms a flag that disarms the Drop net so the
+  cleanup does not run twice.
+
+The Drop path hard-codes `podman` because `PodmanRuntime` is the
+only `ContainerRuntime` implementation today; introducing a second
+runtime should add a tiny per-impl teardown-argv abstraction.
+
+#### Level guard on `SandboxedCommand::spawn()`
+
+`SandboxedCommand::spawn()` is **Level 1 only**. Calling it on a
+command configured for Level 2 returns
+`io::Error::other("SandboxedCommand::spawn() is Level 1 only; use
+execute() for Level 2")` rather than silently bypassing the
+container — without this guard, a caller who reached for
+`spawn()` (perhaps because they want a `SandboxedChild` handle for
+streaming) would unintentionally run the work on the host with
+no isolation. Use `execute()` for any path that may run at either
+level.
 
 #### Image strategy (future work)
 

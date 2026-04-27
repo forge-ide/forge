@@ -58,8 +58,8 @@ pub use level2::{
 ///
 /// `Level1` is the historical default — Process isolation via
 /// `setrlimit` + cgroup v2 (see this module's docs for the full
-/// implementation). `Level2` carries an [`Arc<dyn ContainerRuntime>`]
-/// shared across every [`SandboxedCommand`] in a session, and routes
+/// implementation). `Level2` carries an `Arc<dyn ContainerRuntime>`
+/// shared across every `SandboxedCommand` in a session, and routes
 /// execution through `runtime.exec(handle, argv)` against the
 /// pre-warmed container described by [`Level2Session`].
 ///
@@ -67,8 +67,8 @@ pub use level2::{
 ///
 /// The DoD spelled the variant as
 /// `Level2 { runtime: Box<dyn ContainerRuntime> }`. We use
-/// [`Arc<dyn ContainerRuntime>`] because a single session typically
-/// constructs many [`SandboxedCommand`] instances per turn that all
+/// `Arc<dyn ContainerRuntime>` because a single session typically
+/// constructs many `SandboxedCommand` instances per turn that all
 /// share the same pre-warmed container; `Box` cannot be cloned across
 /// those handles, while `Arc` clones cheaply and preserves the same
 /// dyn-trait surface. The deviation is documented in
@@ -107,7 +107,7 @@ impl SandboxLevel {
     }
 
     /// Borrow the [`Level2Session`] when this level is `Level2`. Used
-    /// by [`SandboxedCommand::execute`] to dispatch to
+    /// by `SandboxedCommand::execute` to dispatch to
     /// [`Level2Session::exec_step`].
     pub fn level2_session(&self) -> Option<&Arc<Level2Session>> {
         match self {
@@ -593,7 +593,22 @@ mod imp {
         /// parent-side enrollment can race with the child forking its own
         /// descendants before enrollment lands. Child-side, pre-exec, is
         /// the atomic barrier.
+        ///
+        /// # Level 2 guard
+        ///
+        /// `spawn()` is **Level 1 only**. Calling it on a
+        /// [`SandboxedCommand`] configured with [`SandboxLevel::Level2`]
+        /// would silently bypass the container — the work would run on
+        /// the host with no isolation. We hard-fail with a clear
+        /// `io::Error` instead. Use [`SandboxedCommand::execute`] for
+        /// commands that may run at either level; it dispatches based
+        /// on the configured [`SandboxLevel`].
         pub fn spawn(mut self) -> io::Result<SandboxedChild> {
+            if matches!(self.level, SandboxLevel::Level2 { .. }) {
+                return Err(io::Error::other(
+                    "SandboxedCommand::spawn() is Level 1 only; use execute() for Level 2",
+                ));
+            }
             let cgroup = CgroupLeaf::create(self.config.max_processes)?;
 
             // Install a pre_exec hook that writes `getpid()` into
@@ -1521,6 +1536,7 @@ mod tests {
             .await
             .unwrap(),
         );
+        session.disable_drop_cleanup();
         let level = SandboxLevel::Level2 { session };
         assert!(level.is_level2());
         assert!(level.level2_session().is_some());
@@ -1549,6 +1565,7 @@ mod tests {
             .await
             .unwrap(),
         );
+        session.disable_drop_cleanup();
 
         let tmp = tempfile::tempdir().unwrap();
         let mut sb = SandboxedCommand::new("echo", tmp.path()).with_level(SandboxLevel::Level2 {
@@ -1581,5 +1598,49 @@ mod tests {
         let outcome = sb.execute().await.expect("execute level 1");
         assert_eq!(outcome.exit_code, Some(0));
         assert_eq!(outcome.stdout.trim(), "forge-596");
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_level2_to_avoid_silent_isolation_bypass() {
+        // Load-bearing safety property: `spawn()` is Level-1-only.
+        // A caller who builds a Level 2 command and reaches for
+        // `spawn()` would otherwise silently run the work on the
+        // host with no container isolation. The guard turns that
+        // foot-gun into a clear error.
+        let log = Arc::new(CallLog::default());
+        let runtime: Arc<dyn ContainerRuntime> = Arc::new(LoggingRuntime::new(
+            log,
+            ExecResult {
+                exit_code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        ));
+        let session = Arc::new(
+            Level2Session::create(
+                runtime,
+                OciImageRef::parse("alpine:3.19").unwrap(),
+                ContainerLimits::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        session.disable_drop_cleanup();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut sb =
+            SandboxedCommand::new("/bin/echo", tmp.path()).with_level(SandboxLevel::Level2 {
+                session: session.clone(),
+            });
+        sb.push_args(["should-not-run"]);
+
+        let err = match sb.spawn() {
+            Ok(_) => panic!("Level 2 + spawn must error"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("Level 1 only"),
+            "expected explicit Level 1 only message, got: {err}"
+        );
     }
 }

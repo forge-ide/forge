@@ -39,9 +39,17 @@
 //! those handles. The `Arc` carries the same dyn-trait surface area and is
 //! cheaper than re-detecting / re-warming per step.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use forge_oci::{ContainerHandle, ContainerRuntime, ImageRef, OciError};
+
+/// Binary used by [`Level2Session::drop`]'s panic-safety net to reap
+/// a leaked container. Hardcoded because the only `ContainerRuntime`
+/// impl in the workspace today is `PodmanRuntime`; if a second
+/// implementation is added the safety net would need a small
+/// abstraction (e.g. each impl supplies its own teardown argv).
+const DROP_CLEANUP_BINARY: &str = "podman";
 
 /// Per-step resource limits enforced via the container's cgroup v2 leaf.
 ///
@@ -154,7 +162,7 @@ pub fn classify_detect_error(err: OciError) -> Result<Level2Unavailable, OciErro
     }
 }
 
-/// Pre-warmed container shared across every [`super::SandboxedCommand`]
+/// Pre-warmed container shared across every `SandboxedCommand`
 /// in a session.
 ///
 /// One per session, not per step. `pull` runs once, `create` + `start`
@@ -166,6 +174,10 @@ pub struct Level2Session {
     image: ImageRef,
     handle: ContainerHandle,
     limits: ContainerLimits,
+    /// Set by [`Level2Session::teardown`]; checked by
+    /// [`Level2Session::drop`] so an explicit clean shutdown skips the
+    /// `podman rm -f` panic-safety fire-and-forget.
+    teardown_done: AtomicBool,
 }
 
 impl Level2Session {
@@ -191,11 +203,29 @@ impl Level2Session {
         runtime.pull(&image).await?;
         let handle = runtime.create(&image, &Self::default_init_argv()).await?;
         runtime.start(&handle).await?;
+        // Operator-facing notice when limits are configured but not
+        // yet enforced. Until follow-up #631 lands, the container
+        // inherits whatever limits its parent slice applies — which
+        // for rootless podman is "the user's slice", not the values
+        // captured here. Logging at runtime catches accidental
+        // reliance on the not-yet-wired path.
+        if limits != ContainerLimits::default() {
+            tracing::warn!(
+                cpus = ?limits.cpus,
+                memory_bytes = ?limits.memory_bytes,
+                pids_max = ?limits.pids_max,
+                container_id = %handle.id,
+                "Level 2 ContainerLimits captured but not enforced; \
+                 cgroup wiring deferred to follow-up #631 — container \
+                 will run with host-slice default limits"
+            );
+        }
         Ok(Self {
             runtime,
             image,
             handle,
             limits,
+            teardown_done: AtomicBool::new(false),
         })
     }
 
@@ -221,13 +251,21 @@ impl Level2Session {
     /// Tear the container down. Idempotent — calling twice is harmless
     /// because podman's `rm -f` accepts an already-removed id, but
     /// callers should still only call this once.
+    ///
+    /// Successful teardown disarms the [`Drop`] panic-safety net so
+    /// the synchronous `podman rm -f` fire-and-forget does not run on
+    /// a container that no longer exists.
     pub async fn teardown(&self) -> Result<(), OciError> {
         // `stop` first so the container's processes get a chance to
         // exit gracefully; `remove(-f)` then cleans up the storage.
         // We swallow stop errors because `remove(-f)` will force-stop
         // anyway and surfacing both errors hides the more useful one.
         let _ = self.runtime.stop(&self.handle).await;
-        self.runtime.remove(&self.handle).await
+        let res = self.runtime.remove(&self.handle).await;
+        if res.is_ok() {
+            self.teardown_done.store(true, Ordering::Release);
+        }
+        res
     }
 
     /// Image this session was created against.
@@ -252,10 +290,82 @@ impl Level2Session {
     pub fn runtime(&self) -> &Arc<dyn ContainerRuntime> {
         &self.runtime
     }
+
+    /// Disarm the [`Drop`] panic-safety net. Used by tests that drive
+    /// the session against a `MockRuntime` and don't want the Drop
+    /// impl to shell out to a real `podman rm -f` for a fake
+    /// container id. Production callers should use [`Self::teardown`]
+    /// instead — `teardown` arms this same flag on success.
+    #[doc(hidden)]
+    pub fn disable_drop_cleanup(&self) {
+        self.teardown_done.store(true, Ordering::Release);
+    }
+}
+
+/// Argv passed to `podman` by [`Level2Session::drop`]'s panic-safety
+/// net. Pinned by unit test so the eventual flag changes (or future
+/// runtime abstraction) cannot silently regress the cleanup shape.
+pub(crate) fn drop_cleanup_argv(handle: &ContainerHandle) -> [String; 3] {
+    ["rm".to_string(), "-f".to_string(), handle.id.clone()]
+}
+
+impl Drop for Level2Session {
+    /// Best-effort synchronous safety net for crash / panic / early-
+    /// return paths.
+    ///
+    /// Drop runs in synchronous context, so we cannot await
+    /// [`ContainerRuntime::remove`] (it is `async`) and we cannot
+    /// re-enter the tokio runtime that owns the trait object. Instead
+    /// we shell out directly to `podman rm -f <id>` and detach the
+    /// child — fire-and-forget. Tradeoffs:
+    ///
+    /// - **Async path is preferred.** Callers should call
+    ///   [`Self::teardown`] on the clean shutdown path; that sets
+    ///   `teardown_done` and the Drop impl becomes a no-op. The Drop
+    ///   path is for the cases where `teardown` could not run
+    ///   (panic, early `?`, task cancellation).
+    /// - **Hardcoded `podman`.** Today there is exactly one
+    ///   `ContainerRuntime` impl in the workspace. If a second one
+    ///   ships, this Drop should grow a tiny abstraction (each impl
+    ///   exposing its own teardown argv).
+    /// - **Errors are swallowed.** A failing `spawn` here would mean
+    ///   `podman` is missing or the cleanup couldn't be launched —
+    ///   both situations that already imply a leaked container we
+    ///   cannot recover from in Drop. Logging via `tracing::warn!`
+    ///   makes this diagnosable post-mortem.
+    fn drop(&mut self) {
+        if self.teardown_done.load(Ordering::Acquire) {
+            return;
+        }
+        let argv = drop_cleanup_argv(&self.handle);
+        match std::process::Command::new(DROP_CLEANUP_BINARY)
+            .args(argv.iter().map(String::as_str))
+            // Detach: we are a fire-and-forget guard, not a wait()er.
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(_child) => {
+                // The child is detached on purpose — Rust's
+                // `std::process::Child::drop` does NOT reap or kill
+                // the child, so it runs to completion independently.
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    container_id = %self.handle.id,
+                    binary = DROP_CLEANUP_BINARY,
+                    "Level 2 panic-safety teardown could not spawn 'podman rm -f'; \
+                     container may leak — invoke `podman rm -f <id>` manually"
+                );
+            }
+        }
+    }
 }
 
 /// Result of executing a single step. Shape-compatible with the
-/// `{ stdout, stderr, exit_code }` JSON [`super::imp::SandboxedCommand`]
+/// `{ stdout, stderr, exit_code }` JSON `SandboxedCommand`
 /// emits via the `shell.exec` tool, so callers can treat Level 1 and
 /// Level 2 outputs identically.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -418,6 +528,11 @@ mod tests {
         let session = Level2Session::create(runtime, alpine(), ContainerLimits::default())
             .await
             .unwrap();
+        // Disarm the Drop panic-safety net: this test exercises only
+        // the lifecycle-ordering invariants, not the cleanup path,
+        // and we don't want Drop shelling out to a real `podman` for
+        // the mock container id.
+        session.disable_drop_cleanup();
         // Lifecycle order is the load-bearing assertion: pull (so the
         // image is local before create), create (so the cgroup leaf
         // is shaped before exec), start (so exec has a running ns).
@@ -438,6 +553,7 @@ mod tests {
         let session = Level2Session::create(runtime, alpine(), ContainerLimits::default())
             .await
             .unwrap();
+        session.disable_drop_cleanup();
         let outcome = session
             .exec_step(&["echo".into(), "hi".into()])
             .await
@@ -483,6 +599,60 @@ mod tests {
         let stop_idx = calls.iter().position(|c| c == "stop").unwrap();
         let remove_idx = calls.iter().position(|c| c == "remove").unwrap();
         assert!(stop_idx < remove_idx);
+    }
+
+    // ── Drop panic-safety net ────────────────────────────────────────
+
+    #[test]
+    fn drop_cleanup_argv_is_rm_force_with_handle_id() {
+        // Pinned shape of the synchronous panic-safety command. If
+        // this changes, the Drop impl's container-leak guarantee
+        // changes too.
+        let h = ContainerHandle::new("c-id-xyz");
+        assert_eq!(
+            drop_cleanup_argv(&h),
+            ["rm".to_string(), "-f".to_string(), "c-id-xyz".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn teardown_disarms_drop_panic_safety_net() {
+        // After a successful teardown(), Drop must NOT shell out to
+        // `podman rm -f` again — the container is already gone and
+        // running rm twice would log a spurious warn (or worse, race
+        // a same-id container created after teardown).
+        let mock: Arc<MockRuntime> = Arc::new(MockRuntime::default());
+        let runtime: Arc<dyn ContainerRuntime> = mock.clone();
+        let session = Level2Session::create(runtime, alpine(), ContainerLimits::default())
+            .await
+            .unwrap();
+        session.teardown().await.unwrap();
+        // The flag is set by teardown(); Drop reads it and skips.
+        // We verify by interrogating the public flag accessor we
+        // added for tests — there's no portable way to assert "this
+        // process did not spawn `podman`" without process tracing.
+        assert!(session.teardown_done.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn drop_panic_safety_armed_when_teardown_skipped() {
+        // Inverse of the test above: a session that never had
+        // teardown() called must arm the safety net so a panicking
+        // caller does not leak the container. Here we check the
+        // flag is *not* set, then explicitly disable it before
+        // dropping (so this test itself doesn't shell out to
+        // podman).
+        let mock: Arc<MockRuntime> = Arc::new(MockRuntime::default());
+        let runtime: Arc<dyn ContainerRuntime> = mock.clone();
+        let session = Level2Session::create(runtime, alpine(), ContainerLimits::default())
+            .await
+            .unwrap();
+        // Pre-condition: panic-safety net is armed (teardown_done is
+        // false) right after `create`.
+        assert!(!session.teardown_done.load(Ordering::Acquire));
+        // Defuse for the actual drop in this test environment so we
+        // don't fork off a real `podman rm -f`.
+        session.disable_drop_cleanup();
     }
 
     // ── ContainerLimits flag shaping ─────────────────────────────────
