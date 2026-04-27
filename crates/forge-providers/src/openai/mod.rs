@@ -21,7 +21,10 @@ use bytes::Bytes;
 use forge_core::Result;
 use futures::stream::{BoxStream, StreamExt};
 
+pub mod custom;
 pub mod translate;
+
+pub use custom::{AuthShape, CustomOpenAiProvider};
 
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 
@@ -107,38 +110,71 @@ impl Provider for OpenAiProvider {
         &self,
         req: ChatRequest,
     ) -> impl std::future::Future<Output = Result<BoxStream<'static, ChatChunk>>> + Send {
-        let url = format!(
-            "{}/v1/chat/completions",
-            self.base_url.trim_end_matches('/')
-        );
         let body_result = translate::serialize_request(&req, &self.model, self.max_tokens);
-        let client = self.stream_client.clone();
-        let cfg = self.stream_cfg;
-        let api_key = self.api_key.clone();
-
-        async move {
-            let body = body_result
-                .map_err(|e| anyhow::anyhow!("openai chat body serialization failed: {e}"))?;
-            let resp = client
-                .post(&url)
-                .header(reqwest::header::AUTHORIZATION, format!("Bearer {api_key}"))
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(body)
-                .send()
-                .await
-                .map_err(|e| anyhow::anyhow!("openai chat request failed: {e}"))?;
-
-            let status = resp.status();
-            if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                return Err(
-                    anyhow::anyhow!("openai chat HTTP {status}: {}", truncate(&body, 500)).into(),
-                );
-            }
-
-            Ok(decode_openai_stream(resp.bytes_stream(), cfg))
-        }
+        let auth = vec![(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", self.api_key),
+        )];
+        chat_request(
+            self.stream_client.clone(),
+            self.base_url.clone(),
+            auth,
+            body_result,
+            self.stream_cfg,
+        )
     }
+}
+
+/// Shared chat-request pipeline used by both [`OpenAiProvider`] and
+/// [`CustomOpenAiProvider`]. Lifted here so the two providers share a single
+/// implementation of the OpenAI Chat Completions wire protocol — only the
+/// auth-header construction differs between them.
+///
+/// `auth_headers` is an `(HeaderName, header-value-string)` list rather than
+/// a fully-typed `HeaderMap` so call sites stay terse and the
+/// custom-provider's `AuthShape::None` variant maps to an empty `vec![]`
+/// without wrestling with `HeaderMap::new()`.
+pub(crate) fn chat_request(
+    client: reqwest::Client,
+    base_url: String,
+    auth_headers: Vec<(reqwest::header::HeaderName, String)>,
+    body_result: std::result::Result<Vec<u8>, serde_json::Error>,
+    cfg: sse::StreamConfig,
+) -> impl std::future::Future<Output = Result<BoxStream<'static, ChatChunk>>> + Send {
+    let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
+
+    async move {
+        let body = body_result
+            .map_err(|e| anyhow::anyhow!("openai chat body serialization failed: {e}"))?;
+        let mut builder = client
+            .post(&url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json");
+        for (name, value) in auth_headers {
+            builder = builder.header(name, value);
+        }
+        let resp = builder
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("openai chat request failed: {e}"))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(
+                anyhow::anyhow!("openai chat HTTP {status}: {}", truncate(&body, 500)).into(),
+            );
+        }
+
+        Ok(decode_openai_stream(resp.bytes_stream(), cfg))
+    }
+}
+
+/// Construct a stream HTTP client with the same hardening posture as
+/// [`OpenAiProvider`]. Re-exported so [`CustomOpenAiProvider`] can build its
+/// own client with identical timeouts.
+pub(crate) fn build_stream_client_default() -> reqwest::Client {
+    build_stream_client(&ClientConfig::DEFAULT)
 }
 
 /// Decode the raw `bytes` stream into a `ChatChunk` stream by piping through

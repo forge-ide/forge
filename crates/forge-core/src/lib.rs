@@ -14,6 +14,7 @@ pub mod skill;
 mod tool;
 mod transcript;
 pub mod types;
+pub mod url_safety;
 pub mod workspace;
 pub mod workspaces;
 
@@ -28,7 +29,8 @@ pub use ids::{
 };
 pub use mcp_state::{McpStateEvent, ServerState};
 pub use settings::{
-    AppSettings, NotificationMode, NotificationsSettings, SessionMode, WindowsSettings,
+    AppSettings, AuthShapeSettings, CustomOpenAiEntry, NotificationMode, NotificationsSettings,
+    ProvidersSettings, SessionMode, WindowsSettings,
 };
 pub use skill::{Skill, SkillId, SkillIdError};
 pub use tool::Tool;

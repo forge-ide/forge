@@ -21,6 +21,10 @@ async-trait = "0.1"
 # values. `SecretBox<str>` zeroes its backing buffer on drop and refuses to
 # `Debug`-print the value; we lean on both. v0.10 is the current line.
 secrecy = "0.10"
+# F-585: `url_safety::check_url` (formerly `forge-mcp::transport::ssrf::check_url`,
+# F-346) lifted here so both forge-mcp and forge-providers can reuse the SSRF
+# guard without forge-providers gaining a wrong-direction dep on forge-mcp.
+url = "2"
 
 # F-587: Platform-gated keyring backends. Linux uses Secret Service over
 # DBus directly; macOS uses the system Keychain via `security-framework`;

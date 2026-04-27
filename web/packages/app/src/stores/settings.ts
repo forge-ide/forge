@@ -22,6 +22,7 @@ import { setSetting as ipcSetSetting, type SettingsLevel } from '../ipc/session'
 export const DEFAULT_SETTINGS: AppSettings = {
   notifications: { bg_agents: 'toast' satisfies NotificationMode },
   windows: { session_mode: 'single' satisfies SessionMode },
+  providers: { custom_openai: {} },
 };
 
 /** Deep clone the defaults so in-place store writes never mutate the

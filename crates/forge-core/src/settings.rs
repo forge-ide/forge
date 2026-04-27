@@ -28,6 +28,7 @@
 //!    mutate the raw TOML tree, not re-serialize `AppSettings`, or the
 //!    merge's "absent-means-absent" semantic silently collapses.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -76,6 +77,81 @@ pub struct WindowsSettings {
     pub session_mode: SessionMode,
 }
 
+/// One `[providers.custom_openai.<name>]` entry: connection details for a
+/// generic OpenAI-compatible self-hosted server (vLLM, LiteLLM, Together,
+/// Anyscale, etc.). Each entry round-trips into a
+/// `forge_providers::openai::CustomOpenAiProvider` at runtime.
+///
+/// Field validation (notably the SSRF guard on `base_url`) is deferred to
+/// the construction site in `forge-providers`; this struct is purely the
+/// on-disk wire shape.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct CustomOpenAiEntry {
+    /// User-supplied OpenAI-compatible base URL (e.g.
+    /// `https://api.together.xyz` or `http://127.0.0.1:8000`).
+    pub base_url: String,
+    /// Default model identifier this entry targets when no per-request
+    /// override is supplied.
+    #[serde(default)]
+    pub model: String,
+    /// Model identifiers the user has declared this endpoint serves.
+    #[serde(default)]
+    pub model_list: Vec<String>,
+    /// How the API key is presented on the wire. Defaults to `bearer` so a
+    /// minimal `[providers.custom_openai.<name>]` block with `base_url`,
+    /// `model`, and `api_key` works out-of-the-box for Together/Anyscale-style
+    /// vendors that follow the OpenAI shape exactly.
+    #[serde(default = "default_auth_shape")]
+    pub auth: AuthShapeSettings,
+    /// API key — `None` is permitted only for `auth = { shape = "none" }`
+    /// (private-network gateways, public mocks). The runtime construction
+    /// site enforces the cross-field invariant.
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+/// On-disk auth-shape selector. Mirrors
+/// `forge_providers::openai::AuthShape` one-for-one but lives here so
+/// forge-core does not depend on forge-providers (the dependency direction
+/// must go forge-providers → forge-core, not the reverse).
+///
+/// Wire shape:
+/// - `auth = { shape = "bearer" }`
+/// - `auth = { shape = "header", name = "X-API-Key" }`
+/// - `auth = { shape = "none" }`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+#[serde(tag = "shape", rename_all = "snake_case")]
+pub enum AuthShapeSettings {
+    #[default]
+    Bearer,
+    Header {
+        name: String,
+    },
+    None,
+}
+
+fn default_auth_shape() -> AuthShapeSettings {
+    AuthShapeSettings::default()
+}
+
+/// `[providers.custom_openai]` table — a map of `name → entry`. Each name
+/// is a user-chosen identifier (e.g. `"vllm-local"`, `"together"`) used to
+/// disambiguate multiple entries in error messages and the settings UI.
+///
+/// Backwards-compatible: settings files without `[providers]` continue to
+/// load (the map is empty by default), and adding entries does not break
+/// older readers because the parent struct is `#[serde(default)]`-friendly
+/// and has no `deny_unknown_fields`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct ProvidersSettings {
+    /// One entry per user-named OpenAI-compatible server.
+    #[serde(default)]
+    pub custom_openai: BTreeMap<String, CustomOpenAiEntry>,
+}
+
 /// Top-level settings shape persisted to `settings.toml`.
 ///
 /// Intentionally does **not** carry `#[serde(deny_unknown_fields)]` — the
@@ -90,6 +166,11 @@ pub struct AppSettings {
     pub notifications: NotificationsSettings,
     #[serde(default)]
     pub windows: WindowsSettings,
+    /// Built-in provider connection details (F-585). Optional and
+    /// backwards-compatible: settings files without `[providers]` deserialize
+    /// to an empty map.
+    #[serde(default)]
+    pub providers: ProvidersSettings,
 }
 
 // ---------------------------------------------------------------------------
@@ -338,6 +419,7 @@ mod tests {
             windows: WindowsSettings {
                 session_mode: SessionMode::Split,
             },
+            providers: ProvidersSettings::default(),
         };
         let body = toml::to_string(&cfg).unwrap();
         let decoded: AppSettings = toml::from_str(&body).unwrap();
@@ -455,6 +537,7 @@ x = 1
             windows: WindowsSettings {
                 session_mode: SessionMode::Split,
             },
+            providers: ProvidersSettings::default(),
         };
         save_workspace_settings(dir.path(), &cfg).await.unwrap();
         let loaded = load_workspace_settings(dir.path()).await.unwrap();
@@ -469,6 +552,7 @@ x = 1
                 bg_agents: NotificationMode::Silent,
             },
             windows: WindowsSettings::default(),
+            providers: ProvidersSettings::default(),
         };
         save_user_settings_in(dir.path(), &cfg).await.unwrap();
         let loaded = load_user_settings_in(dir.path()).await.unwrap();
@@ -493,6 +577,7 @@ x = 1
                 bg_agents: NotificationMode::Os,
             },
             windows: WindowsSettings::default(),
+            providers: ProvidersSettings::default(),
         };
         save_workspace_settings(dir.path(), &cfg).await.unwrap();
 
@@ -526,6 +611,7 @@ x = 1
                 windows: WindowsSettings {
                     session_mode: SessionMode::Split,
                 },
+                providers: ProvidersSettings::default(),
             },
         )
         .await
@@ -570,6 +656,7 @@ x = 1
             windows: WindowsSettings {
                 session_mode: SessionMode::Split,
             },
+            providers: ProvidersSettings::default(),
         };
         save_user_settings_in(user_dir.path(), &user_cfg)
             .await
@@ -698,5 +785,125 @@ session_mode = "single"
     fn user_settings_path_in_nests_under_forge() {
         let p = user_settings_path_in(Path::new("/xdg"));
         assert_eq!(p, Path::new("/xdg/forge/settings.toml"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Providers schema (F-585)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn providers_section_absent_yields_empty_map() {
+        // Backwards-compat: settings files without a [providers] section
+        // continue to load. An older user upgrading to a build that introduces
+        // the section must see no behaviour change.
+        let body = r#"
+[notifications]
+bg_agents = "os"
+"#;
+        let parsed: AppSettings = toml::from_str(body).unwrap();
+        assert!(parsed.providers.custom_openai.is_empty());
+        assert_eq!(parsed.notifications.bg_agents, NotificationMode::Os);
+    }
+
+    #[test]
+    fn providers_custom_openai_parses_one_entry_per_name() {
+        let body = r#"
+[providers.custom_openai.vllm-local]
+base_url = "http://127.0.0.1:8000"
+model = "Qwen/Qwen2.5-7B-Instruct"
+model_list = ["Qwen/Qwen2.5-7B-Instruct"]
+auth = { shape = "none" }
+
+[providers.custom_openai.together]
+base_url = "https://api.together.xyz"
+model = "mixtral"
+model_list = ["mixtral", "llama3-70b"]
+auth = { shape = "bearer" }
+api_key = "sk-test"
+"#;
+        let parsed: AppSettings = toml::from_str(body).unwrap();
+        let entries = &parsed.providers.custom_openai;
+        assert_eq!(entries.len(), 2);
+
+        let local = entries.get("vllm-local").expect("vllm-local entry");
+        assert_eq!(local.base_url, "http://127.0.0.1:8000");
+        assert_eq!(local.auth, AuthShapeSettings::None);
+        assert!(local.api_key.is_none());
+
+        let remote = entries.get("together").expect("together entry");
+        assert_eq!(remote.base_url, "https://api.together.xyz");
+        assert_eq!(remote.auth, AuthShapeSettings::Bearer);
+        assert_eq!(remote.api_key.as_deref(), Some("sk-test"));
+        assert_eq!(remote.model_list.len(), 2);
+    }
+
+    #[test]
+    fn providers_custom_openai_parses_header_auth_with_name() {
+        let body = r#"
+[providers.custom_openai.gateway]
+base_url = "https://gw.example.com"
+model = "any"
+auth = { shape = "header", name = "X-API-Key" }
+api_key = "sk-gw"
+"#;
+        let parsed: AppSettings = toml::from_str(body).unwrap();
+        let entry = parsed
+            .providers
+            .custom_openai
+            .get("gateway")
+            .expect("entry");
+        assert_eq!(
+            entry.auth,
+            AuthShapeSettings::Header {
+                name: "X-API-Key".into()
+            }
+        );
+    }
+
+    #[test]
+    fn providers_custom_openai_defaults_auth_to_bearer() {
+        // A minimal entry omitting `auth` should default to bearer so the
+        // common Together/Anyscale case needs only base_url + model + api_key.
+        let body = r#"
+[providers.custom_openai.together]
+base_url = "https://api.together.xyz"
+model = "mixtral"
+api_key = "sk-test"
+"#;
+        let parsed: AppSettings = toml::from_str(body).unwrap();
+        let entry = parsed
+            .providers
+            .custom_openai
+            .get("together")
+            .expect("entry");
+        assert_eq!(entry.auth, AuthShapeSettings::Bearer);
+    }
+
+    #[test]
+    fn providers_section_round_trips_through_save_load() {
+        // End-to-end: write a settings file with a providers entry, read it
+        // back through the same loader the IPC layer uses, assert the round
+        // trip is lossless.
+        let mut entries = std::collections::BTreeMap::new();
+        entries.insert(
+            "vllm-local".to_string(),
+            CustomOpenAiEntry {
+                base_url: "http://127.0.0.1:8000".into(),
+                model: "Qwen/Qwen2.5-7B-Instruct".into(),
+                model_list: vec!["Qwen/Qwen2.5-7B-Instruct".into()],
+                auth: AuthShapeSettings::None,
+                api_key: None,
+            },
+        );
+        let cfg = AppSettings {
+            notifications: NotificationsSettings::default(),
+            windows: WindowsSettings::default(),
+            providers: ProvidersSettings {
+                custom_openai: entries,
+            },
+        };
+        let serialized = toml::to_string(&cfg).unwrap();
+        let reparsed: AppSettings = toml::from_str(&serialized).unwrap();
+        assert_eq!(reparsed, cfg);
     }
 }

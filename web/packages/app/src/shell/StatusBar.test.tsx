@@ -332,6 +332,7 @@ describe('StatusBar — notification modes', () => {
     seedSettings({
       notifications: { bg_agents: mode },
       windows: { session_mode: 'single' },
+      providers: { custom_openai: {} },
     });
     const bus = fakeBus();
     const list = vi.fn().mockResolvedValue([running('a1', 'writer')]);
