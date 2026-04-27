@@ -89,10 +89,152 @@ Implementation:
 - Kill on session end: process group guarantees cleanup
 
 ### 8.3 Level 2 — Container
-Spec generated at session/agent start and handed to podman/docker.
 
-Image strategy:
-- Base images maintained by us: `oci.io/forge/rust-tools:<ver>`, `oci.io/forge/node-tools:<ver>`, `oci.io/forge/py-tools:<ver>`
+Implemented in `crates/forge-session/src/sandbox/level2.rs` (F-596),
+backed by the `forge_oci::ContainerRuntime` trait shipped in F-595
+(today: `PodmanRuntime`).
+
+#### Lifecycle (pre-warm + reuse)
+
+A session that opts into Level 2 brings up exactly **one** container
+for the duration of the session. The lifecycle, owned by
+`Level2Session`:
+
+1. **Detect** — `runtime.detect()` probes `podman --version` then
+   `podman info` for rootless mode. Three outcomes are folded into
+   `Level2Unavailable` and trigger auto-fallback (see below):
+   `RuntimeMissing`, `RuntimeBroken`, `RootlessUnavailable`.
+2. **Pull** — `runtime.pull(image)`. Idempotent; layers cached.
+3. **Create** — `runtime.create(image, ["sleep", "infinity"])`. The
+   `sleep infinity` init keeps the container alive between `exec`
+   calls. Resource limits attach at this step in the long-term
+   design (see below) — **deferred to follow-up #631**; containers
+   currently run with the host slice's default limits, and
+   `Level2Session::create` emits a `tracing::warn!` whenever a
+   non-default `ContainerLimits` is passed so operators are not
+   surprised at runtime.
+4. **Start** — `runtime.start(handle)`. Container is now ready for
+   `exec`.
+5. **Exec, repeated** — every step in the session runs through
+   `runtime.exec(handle, argv)`. The container is reused; there is
+   no per-step create cost.
+6. **Stop + Remove** — on session teardown, `runtime.stop(handle)`
+   then `runtime.remove(handle)`. The `-f` on `rm` reaps even if
+   `stop` lost the race; we swallow `stop` errors so the more useful
+   `rm -f` error is what surfaces.
+
+The `SandboxedCommand::execute` entry point branches on
+`SandboxLevel`: `Level1` runs the existing host-side seccomp +
+`setrlimit` + cgroup pipeline; `Level2 { session: Arc<Level2Session> }`
+delegates to `session.exec_step(argv)`. The unified return shape is
+`StepOutcome { exit_code, stdout, stderr }` so callers (e.g. the
+`shell.exec` tool) do not need to know which level ran.
+
+> **Deviation from the F-596 DoD:** the spec wrote the variant as
+> `Level2 { runtime: Box<dyn ContainerRuntime> }`. We use
+> `Arc<dyn ContainerRuntime>` (wrapped in a `Level2Session` carrying
+> the runtime, image, and handle): a session spawns many
+> `SandboxedCommand` instances per turn that all need to share the
+> same pre-warmed container, and `Box` cannot be cloned across those
+> handles.
+
+#### Resource limits
+
+Per-step caps land on the container's cgroup v2 leaf at **create
+time**, not exec time — `podman exec` does not accept resource
+flags. `ContainerLimits` captures the three caps Phase 1 cares
+about:
+
+| Field | podman flag | Maps to |
+|---|---|---|
+| `cpus: Option<f32>` | `--cpus <N>` | cgroup v2 `cpu.max` |
+| `memory_bytes: Option<u64>` | `--memory <bytes>` | cgroup v2 `memory.max` |
+| `pids_max: Option<u64>` | `--pids-limit <N>` | cgroup v2 `pids.max` |
+
+These map directly onto the same intent as the Level-1
+`SandboxConfig` — `cpu_seconds` ↔ `--cpus`, `address_space_bytes`
+↔ `--memory`, `max_processes` ↔ `--pids-limit` — but with cgroup
+enforcement (per-container) instead of `setrlimit` (per-process /
+per-uid).
+
+> **Known gap, tracked as a follow-up (issue #631).** F-595's
+> `ContainerRuntime::create` signature accepts only
+> `(image, argv)`. To preserve the F-595 public API (per F-596's
+> constraints), `Level2Session::create` currently stores the
+> `ContainerLimits` on the session for observability rather than
+> passing them through to `podman create`. The argv-shaping helper
+> `level2::limits_to_create_flags` pins the canonical podman flag
+> rendering (verified by unit test) so the eventual wiring — once
+> the trait grows a `create_with_limits` method — is a one-line
+> change.
+
+#### Auto-fallback to Level 1
+
+The F-596 contract: if the container runtime is unreachable,
+fall back transparently to Level 1 with a logged warning rather
+than failing the session. `level2::detect_or_fall_back` does this:
+
+- `OciError::RuntimeMissing(tool)` → `Level2Unavailable::RuntimeMissing`
+- `OciError::RuntimeBroken { tool, stderr }` → `Level2Unavailable::RuntimeBroken`
+- `OciError::RootlessUnavailable { runtime, reason }` → `Level2Unavailable::RootlessUnavailable`
+- Any other `OciError` (e.g. `CommandFailed`, `Io`) is also folded
+  into a logged `RuntimeBroken` because the F-596 contract is
+  "auto-fallback if container runtime unreachable" — an unexpected
+  probe error is the same situation from the caller's perspective.
+
+Every fallback emits `tracing::warn!` with the variant name and
+reason as structured fields so operators can filter on them
+without re-running the probe. Variant names are pinned strings
+(`RuntimeMissing`, `RuntimeBroken`, `RootlessUnavailable`) so log
+queries don't break on Rust enum renames.
+
+> **Fallback runs at session start, not mid-session.**
+> `detect_or_fall_back` is intended to be invoked once, before the
+> session commits to a level. The branching inside
+> `SandboxedCommand::execute` does *not* re-attempt fallback when a
+> mid-session `runtime.exec` returns `OciError`: those errors
+> propagate as `Err(io::Error)` to the caller. Mid-session demotion
+> Level 2 → Level 1 would silently relax the user-visible
+> isolation guarantee partway through a session, which is exactly
+> the surprise the isolation model is supposed to prevent.
+> Operators see one consistent level for the whole session.
+
+#### Container teardown and panic safety
+
+`Level2Session` ships two teardown paths:
+
+- **Async, preferred:** `Level2Session::teardown()` runs `stop`
+  then `remove(-f)` through the `ContainerRuntime` trait. Callers
+  on the clean shutdown path should always reach for this.
+- **Sync, panic-safety net:** `Level2Session`'s `Drop` impl
+  fire-and-forgets `podman rm -f <id>` via
+  `std::process::Command::spawn` whenever `teardown()` did not
+  complete. This protects against panic, early `?`, and task
+  cancellation. The Drop is detached (no `wait()`), so a slow or
+  hung `podman` cannot block the panicking thread. A successful
+  async `teardown()` arms a flag that disarms the Drop net so the
+  cleanup does not run twice.
+
+The Drop path hard-codes `podman` because `PodmanRuntime` is the
+only `ContainerRuntime` implementation today; introducing a second
+runtime should add a tiny per-impl teardown-argv abstraction.
+
+#### Level guard on `SandboxedCommand::spawn()`
+
+`SandboxedCommand::spawn()` is **Level 1 only**. Calling it on a
+command configured for Level 2 returns
+`io::Error::other("SandboxedCommand::spawn() is Level 1 only; use
+execute() for Level 2")` rather than silently bypassing the
+container — without this guard, a caller who reached for
+`spawn()` (perhaps because they want a `SandboxedChild` handle for
+streaming) would unintentionally run the work on the host with
+no isolation. Use `execute()` for any path that may run at either
+level.
+
+#### Image strategy (future work)
+
+- Base images maintained by us: `oci.io/forge/rust-tools:<ver>`,
+  `oci.io/forge/node-tools:<ver>`, `oci.io/forge/py-tools:<ver>`.
 - User may specify their own in `.agents/<name>.md`:
   ```yaml
   isolation:
@@ -100,17 +242,28 @@ Image strategy:
     image: docker.io/library/python:3.12
   ```
 
-Mounts:
-- Workspace mounted at `/workspace` read-write by default, read-only if declared
-- `~/.config/forge/certs/` mounted at `/etc/forge/certs/` for provider access
-- No home dir, no `/tmp` cross-mount
+#### Mounts (future work)
 
-Network:
-- Default: no network
-- Declared hosts (for MCP or tools): CNI policy allows only those
+- Workspace mounted at `/workspace` read-write by default, read-only if declared.
+- `~/.config/forge/certs/` mounted at `/etc/forge/certs/` for provider access.
+- No home dir, no `/tmp` cross-mount.
 
-Resource limits:
-- Enforced by runtime via OCI spec (`linux.resources.memory`, `cpu.shares`)
+#### Network (future work)
+
+- Default: no network.
+- Declared hosts (for MCP or tools): CNI policy allows only those.
+
+#### Trade-offs vs Level 1
+
+| Concern | Level 1 | Level 2 |
+|---|---|---|
+| Blast radius of a compromised tool | Process tree of one sandbox | Container rootfs + namespace |
+| Cold-start cost | Microseconds (fork+exec) | Image pull (one-off) + container create+start (~hundreds of ms, once per session) |
+| Per-step cost | fork+exec | `podman exec` (~tens of ms) |
+| Network containment | None (open network) | CNI policy (future); default-deny once mounts are wired |
+| Filesystem containment | `forge-fs` path checks | Container rootfs by construction |
+| Resource limits | `setrlimit` (per-process / per-uid) + cgroup v2 `pids.max` (per-sandbox) | cgroup v2 `cpu.max` / `memory.max` / `pids.max` (per-container) |
+| Operator burden | Linux + cgroup v2 | Linux + cgroup v2 + rootless `podman` |
 
 ### 8.4 Approval — orthogonal to isolation
 

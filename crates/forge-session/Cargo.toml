@@ -28,6 +28,9 @@ forge-ipc = { path = "../forge-ipc" }
 # server, and registers each advertised tool as a `Tool` trait impl in the
 # session dispatcher so agents can invoke MCP tools alongside built-ins.
 forge-mcp = { path = "../forge-mcp" }
+# F-596: Level 2 sandbox profile delegates step execution to a
+# `ContainerRuntime` (typically `PodmanRuntime`) shipped by forge-oci.
+forge-oci = { path = "../forge-oci" }
 forge-providers = { path = "../forge-providers" }
 futures = "0.3"
 libc = "0.2"

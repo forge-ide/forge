@@ -1582,6 +1582,7 @@ dependencies = [
  "forge-fs",
  "forge-ipc",
  "forge-mcp",
+ "forge-oci",
  "forge-providers",
  "futures",
  "libc",

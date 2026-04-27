@@ -1,4 +1,25 @@
-//! Level 1 process isolation per `docs/architecture/isolation-model.md` §8.2.
+//! Sandboxed step execution for `forge-session`.
+//!
+//! Two isolation levels are supported, both surfaced through the
+//! [`SandboxLevel`] enum:
+//!
+//! - **Level 1 — Process** (default; this module's existing surface).
+//!   Wraps [`tokio::process::Command`] with an environment whitelist, a
+//!   fresh process group, `setrlimit` soft caps, and (F-149) a per-sandbox
+//!   cgroup v2 leaf enforcing `pids.max` when the host delegates the
+//!   controller. Implemented in the `imp` submodule below; see
+//!   `docs/architecture/isolation-model.md` §8.2.
+//! - **Level 2 — Container** (F-596; opt-in). Delegates step execution to
+//!   a pre-warmed rootless container managed via
+//!   [`forge_oci::ContainerRuntime`]. The session pulls + creates +
+//!   starts the container once, every step runs as `runtime.exec`, and
+//!   the container is `stop`+`remove`'d on session teardown. If no
+//!   runtime is reachable, a `tracing::warn` is emitted with the
+//!   classified [`level2::Level2Unavailable`] reason and callers fall
+//!   back to Level 1. Implementation lives in [`level2`]; design rationale
+//!   is in `docs/architecture/isolation-model.md` §8.3.
+//!
+//! # Level 1 implementation notes
 //!
 //! Wraps [`tokio::process::Command`] with:
 //! - Environment whitelist (no inheritance from the session daemon).
@@ -25,6 +46,76 @@
 //! registry; real process-group kill is a Linux-only concept.
 
 use std::sync::{Arc, Mutex};
+
+pub mod level2;
+
+pub use level2::{
+    classify_detect_error, detect_or_fall_back, ContainerLimits, Level2Session, Level2Unavailable,
+    StepOutcome,
+};
+
+/// Selector for the isolation level applied to a step's execution.
+///
+/// `Level1` is the historical default — Process isolation via
+/// `setrlimit` + cgroup v2 (see this module's docs for the full
+/// implementation). `Level2` carries an `Arc<dyn ContainerRuntime>`
+/// shared across every `SandboxedCommand` in a session, and routes
+/// execution through `runtime.exec(handle, argv)` against the
+/// pre-warmed container described by [`Level2Session`].
+///
+/// # Deviation from the F-596 DoD
+///
+/// The DoD spelled the variant as
+/// `Level2 { runtime: Box<dyn ContainerRuntime> }`. We use
+/// `Arc<dyn ContainerRuntime>` because a single session typically
+/// constructs many `SandboxedCommand` instances per turn that all
+/// share the same pre-warmed container; `Box` cannot be cloned across
+/// those handles, while `Arc` clones cheaply and preserves the same
+/// dyn-trait surface. The deviation is documented in
+/// `docs/architecture/isolation-model.md` §8.3.
+#[derive(Default)]
+pub enum SandboxLevel {
+    /// Level 1 — Process isolation (default).
+    #[default]
+    Level1,
+    /// Level 2 — Container isolation via [`forge_oci::ContainerRuntime`].
+    Level2 {
+        /// Shared handle to the pre-warmed container plus the runtime
+        /// that owns it. Created once per session via
+        /// [`Level2Session::create`].
+        session: Arc<Level2Session>,
+    },
+}
+
+impl std::fmt::Debug for SandboxLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Level1 => f.write_str("SandboxLevel::Level1"),
+            Self::Level2 { session } => f
+                .debug_struct("SandboxLevel::Level2")
+                .field("image", session.image())
+                .field("handle", session.handle())
+                .finish(),
+        }
+    }
+}
+
+impl SandboxLevel {
+    /// `true` when this level is `Level2`.
+    pub fn is_level2(&self) -> bool {
+        matches!(self, Self::Level2 { .. })
+    }
+
+    /// Borrow the [`Level2Session`] when this level is `Level2`. Used
+    /// by `SandboxedCommand::execute` to dispatch to
+    /// [`Level2Session::exec_step`].
+    pub fn level2_session(&self) -> Option<&Arc<Level2Session>> {
+        match self {
+            Self::Level2 { session } => Some(session),
+            Self::Level1 => None,
+        }
+    }
+}
 
 /// Resource limits applied to sandboxed children.
 ///
@@ -166,7 +257,7 @@ impl ChildRegistry {
 
 #[cfg(target_os = "linux")]
 mod imp {
-    use super::{ChildRegistry, SandboxConfig, BASE_ENV_WHITELIST};
+    use super::{ChildRegistry, SandboxConfig, SandboxLevel, StepOutcome, BASE_ENV_WHITELIST};
     use std::ffi::OsString;
     use std::io;
     use std::path::{Path, PathBuf};
@@ -323,8 +414,18 @@ mod imp {
     /// [`SandboxedCommand::spawn`] to produce a [`SandboxedChild`].
     pub struct SandboxedCommand {
         cmd: Command,
+        /// Original program path captured for diagnostics — not
+        /// consumed at execution time because `cmd` already owns it.
+        #[allow(dead_code)]
+        program: OsString,
+        /// In-container argv for [`SandboxLevel::Level2`]. Mirrored
+        /// into `cmd` via [`SandboxedCommand::push_arg`] /
+        /// [`SandboxedCommand::push_args`] so a Level-1 spawn sees the
+        /// same args.
+        argv: Vec<OsString>,
         config: SandboxConfig,
         registry: Option<ChildRegistry>,
+        level: SandboxLevel,
     }
 
     impl SandboxedCommand {
@@ -347,7 +448,8 @@ mod imp {
             workspace_root: impl AsRef<std::path::Path>,
             config: SandboxConfig,
         ) -> Self {
-            let mut cmd = Command::new(program.into());
+            let program = program.into();
+            let mut cmd = Command::new(&program);
             cmd.current_dir(workspace_root);
             cmd.env_clear();
             // Re-inject base whitelist from the daemon's own env. Missing vars
@@ -387,9 +489,52 @@ mod imp {
 
             Self {
                 cmd,
+                program,
+                argv: Vec::new(),
                 config,
                 registry: None,
+                level: SandboxLevel::Level1,
             }
+        }
+
+        /// Promote this command to a specific [`SandboxLevel`]. The default
+        /// is [`SandboxLevel::Level1`]; callers opt into Level 2 by passing
+        /// a [`SandboxLevel::Level2`] carrying a pre-warmed
+        /// [`super::Level2Session`].
+        ///
+        /// At Level 2, only the in-container argv is consulted —
+        /// `setrlimit`/cgroup setup, `pre_exec` hooks, env whitelisting,
+        /// and `current_dir` all become no-ops because the work runs
+        /// inside the container's namespace, not in a host-side child.
+        /// Call [`Self::push_arg`] / [`Self::push_args`] to assemble the
+        /// argv that will be passed through to `runtime.exec`.
+        pub fn with_level(mut self, level: SandboxLevel) -> Self {
+            self.level = level;
+            self
+        }
+
+        /// Append a single argument to the in-container argv (Level 2)
+        /// AND to the underlying [`tokio::process::Command`] (Level 1).
+        /// Use this in preference to `command_mut().arg(...)` when the
+        /// command may run at either level — it keeps the two argv
+        /// surfaces in sync.
+        pub fn push_arg(&mut self, arg: impl Into<OsString>) -> &mut Self {
+            let arg = arg.into();
+            self.cmd.arg(&arg);
+            self.argv.push(arg);
+            self
+        }
+
+        /// Bulk version of [`Self::push_arg`].
+        pub fn push_args<I, S>(&mut self, args: I) -> &mut Self
+        where
+            I: IntoIterator<Item = S>,
+            S: Into<OsString>,
+        {
+            for a in args {
+                self.push_arg(a);
+            }
+            self
         }
 
         /// Add a caller-scoped environment variable to the whitelist. The
@@ -448,7 +593,22 @@ mod imp {
         /// parent-side enrollment can race with the child forking its own
         /// descendants before enrollment lands. Child-side, pre-exec, is
         /// the atomic barrier.
+        ///
+        /// # Level 2 guard
+        ///
+        /// `spawn()` is **Level 1 only**. Calling it on a
+        /// [`SandboxedCommand`] configured with [`SandboxLevel::Level2`]
+        /// would silently bypass the container — the work would run on
+        /// the host with no isolation. We hard-fail with a clear
+        /// `io::Error` instead. Use [`SandboxedCommand::execute`] for
+        /// commands that may run at either level; it dispatches based
+        /// on the configured [`SandboxLevel`].
         pub fn spawn(mut self) -> io::Result<SandboxedChild> {
+            if matches!(self.level, SandboxLevel::Level2 { .. }) {
+                return Err(io::Error::other(
+                    "SandboxedCommand::spawn() is Level 1 only; use execute() for Level 2",
+                ));
+            }
             let cgroup = CgroupLeaf::create(self.config.max_processes)?;
 
             // Install a pre_exec hook that writes `getpid()` into
@@ -523,6 +683,104 @@ mod imp {
         pub fn config(&self) -> SandboxConfig {
             self.config
         }
+
+        /// The active isolation level.
+        pub fn level(&self) -> &SandboxLevel {
+            &self.level
+        }
+
+        /// Run this command to completion under the configured
+        /// [`SandboxLevel`] and return a unified [`StepOutcome`].
+        ///
+        /// Branching:
+        /// - [`SandboxLevel::Level1`]: spawns via the host-side
+        ///   `pre_exec` + cgroup pipeline (the existing
+        ///   [`Self::spawn`] path) and reads stdout/stderr/exit
+        ///   concurrently.
+        /// - [`SandboxLevel::Level2`]: routes through the pre-warmed
+        ///   [`super::Level2Session`]'s
+        ///   [`super::Level2Session::exec_step`] — `podman exec` with
+        ///   the argv collected via [`Self::push_arg`] /
+        ///   [`Self::push_args`].
+        ///
+        /// The returned shape is the same in both branches so callers
+        /// (e.g. the `shell.exec` tool) do not need to know which
+        /// level executed.
+        ///
+        /// # Errors
+        ///
+        /// Level 1 returns `Err(io::Error)` on spawn / wait failure.
+        /// Level 2 returns `Err(io::Error)` synthesised from the
+        /// underlying [`forge_oci::OciError`] — the F-595 errors are
+        /// not re-exported through this method to keep the
+        /// `Tool`-layer error surface narrow.
+        pub async fn execute(self) -> io::Result<StepOutcome> {
+            match &self.level {
+                SandboxLevel::Level1 => execute_level1(self).await,
+                SandboxLevel::Level2 { session } => {
+                    let session = session.clone();
+                    let argv: Vec<String> = self
+                        .argv
+                        .iter()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .collect();
+                    drop(self); // we own no spawn-side state for Level 2.
+                    session
+                        .exec_step(&argv)
+                        .await
+                        .map_err(|e| io::Error::other(format!("level 2 exec: {e}")))
+                }
+            }
+        }
+    }
+
+    /// Level 1 implementation of [`SandboxedCommand::execute`]. Pulled
+    /// out so the branching site stays compact and the seccomp pipeline
+    /// stays in one place.
+    async fn execute_level1(sb: SandboxedCommand) -> io::Result<StepOutcome> {
+        use tokio::io::AsyncReadExt;
+
+        // Pipe stdout/stderr (caller may have already done this via
+        // `command_mut`; setting again is idempotent for tokio's
+        // builder).
+        let mut sb = sb;
+        sb.cmd.stdout(std::process::Stdio::piped());
+        sb.cmd.stderr(std::process::Stdio::piped());
+        sb.cmd.stdin(std::process::Stdio::null());
+
+        let mut sandboxed = sb.spawn()?;
+        let stdout = sandboxed.as_child_mut().stdout.take();
+        let stderr = sandboxed.as_child_mut().stderr.take();
+
+        let stdout_fut = async move {
+            match stdout {
+                Some(mut s) => {
+                    let mut buf = String::new();
+                    let _ = s.read_to_string(&mut buf).await;
+                    buf
+                }
+                None => String::new(),
+            }
+        };
+        let stderr_fut = async move {
+            match stderr {
+                Some(mut s) => {
+                    let mut buf = String::new();
+                    let _ = s.read_to_string(&mut buf).await;
+                    buf
+                }
+                None => String::new(),
+            }
+        };
+
+        let (status, stdout, stderr) =
+            tokio::join!(sandboxed.as_child_mut().wait(), stdout_fut, stderr_fut);
+        let status = status?;
+        Ok(StepOutcome {
+            exit_code: status.code(),
+            stdout,
+            stderr,
+        })
     }
 
     /// Handle to a running sandboxed child. Dropping the handle sends
@@ -1170,5 +1428,219 @@ mod tests {
             }
         }
         let _ = sandboxed.into_child();
+    }
+
+    // ── F-596: SandboxLevel + SandboxedCommand::execute branching ───────
+
+    use async_trait::async_trait;
+    use forge_oci::{
+        ContainerHandle as OciContainerHandle, ContainerRuntime, ExecResult,
+        ImageRef as OciImageRef, OciError, Stats,
+    };
+    use std::sync::Mutex as StdMutex;
+
+    /// Trait-layer recorder used by the F-596 execute-branch tests.
+    /// Functionally identical to the one in `sandbox::level2::tests`,
+    /// duplicated here because Rust's test-module privacy keeps it
+    /// out of reach.
+    #[derive(Default)]
+    struct CallLog {
+        calls: StdMutex<Vec<String>>,
+    }
+
+    struct LoggingRuntime {
+        log: Arc<CallLog>,
+        exec: ExecResult,
+    }
+
+    impl LoggingRuntime {
+        fn new(log: Arc<CallLog>, exec: ExecResult) -> Self {
+            Self { log, exec }
+        }
+        fn record(&self, name: &str) {
+            self.log.calls.lock().unwrap().push(name.to_string());
+        }
+    }
+
+    #[async_trait]
+    impl ContainerRuntime for LoggingRuntime {
+        async fn pull(&self, _image: &OciImageRef) -> Result<(), OciError> {
+            self.record("pull");
+            Ok(())
+        }
+        async fn create(
+            &self,
+            _image: &OciImageRef,
+            _argv: &[String],
+        ) -> Result<OciContainerHandle, OciError> {
+            self.record("create");
+            Ok(OciContainerHandle::new("c-id"))
+        }
+        async fn start(&self, _h: &OciContainerHandle) -> Result<(), OciError> {
+            self.record("start");
+            Ok(())
+        }
+        async fn exec(
+            &self,
+            _h: &OciContainerHandle,
+            _argv: &[String],
+        ) -> Result<ExecResult, OciError> {
+            self.record("exec");
+            Ok(self.exec.clone())
+        }
+        async fn stop(&self, _h: &OciContainerHandle) -> Result<(), OciError> {
+            self.record("stop");
+            Ok(())
+        }
+        async fn remove(&self, _h: &OciContainerHandle) -> Result<(), OciError> {
+            self.record("remove");
+            Ok(())
+        }
+        async fn stats(&self, _h: &OciContainerHandle) -> Result<Stats, OciError> {
+            Ok(Stats {
+                cpu_percent: None,
+                memory_bytes: None,
+                pids: None,
+            })
+        }
+    }
+
+    #[test]
+    fn sandbox_level_default_is_level1() {
+        // Defaulting to Level 1 preserves the historical contract:
+        // call sites that don't ask for Level 2 keep the seccomp +
+        // setrlimit pipeline.
+        let level = SandboxLevel::default();
+        assert!(matches!(level, SandboxLevel::Level1));
+        assert!(!level.is_level2());
+        assert!(level.level2_session().is_none());
+    }
+
+    #[tokio::test]
+    async fn sandbox_level_level2_carries_session() {
+        let log = Arc::new(CallLog::default());
+        let runtime: Arc<dyn ContainerRuntime> = Arc::new(LoggingRuntime::new(
+            log.clone(),
+            ExecResult {
+                exit_code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        ));
+        let session = Arc::new(
+            Level2Session::create(
+                runtime,
+                OciImageRef::parse("alpine:3.19").unwrap(),
+                ContainerLimits::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        session.disable_drop_cleanup();
+        let level = SandboxLevel::Level2 { session };
+        assert!(level.is_level2());
+        assert!(level.level2_session().is_some());
+    }
+
+    #[tokio::test]
+    async fn execute_level2_routes_through_runtime_exec() {
+        // Load-bearing: SandboxedCommand::execute on Level 2 must hit
+        // the trait's `exec` method (not spawn a host process), and
+        // the StepOutcome must mirror the captured stdout/stderr/exit.
+        let log = Arc::new(CallLog::default());
+        let runtime: Arc<dyn ContainerRuntime> = Arc::new(LoggingRuntime::new(
+            log.clone(),
+            ExecResult {
+                exit_code: Some(7),
+                stdout: "hello\n".to_string(),
+                stderr: "warn\n".to_string(),
+            },
+        ));
+        let session = Arc::new(
+            Level2Session::create(
+                runtime,
+                OciImageRef::parse("alpine:3.19").unwrap(),
+                ContainerLimits::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        session.disable_drop_cleanup();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut sb = SandboxedCommand::new("echo", tmp.path()).with_level(SandboxLevel::Level2 {
+            session: session.clone(),
+        });
+        sb.push_args(["hi", "there"]);
+
+        let outcome = sb.execute().await.expect("execute level 2");
+        assert_eq!(outcome.exit_code, Some(7));
+        assert_eq!(outcome.stdout, "hello\n");
+        assert_eq!(outcome.stderr, "warn\n");
+
+        // pull + create + start (from session creation) + 1× exec.
+        // No stop/remove yet — that runs on session.teardown().
+        let calls = log.calls.lock().unwrap().clone();
+        assert_eq!(calls, vec!["pull", "create", "start", "exec"]);
+    }
+
+    #[tokio::test]
+    async fn execute_level1_uses_host_process_path() {
+        // Smoke test that Level 1 still reaches the host-side spawn
+        // pipeline. Run a trivial `/bin/echo` and confirm we capture
+        // its stdout — the existing seccomp/setrlimit infrastructure
+        // is exercised by the older tests above; this one only pins
+        // that the new `execute()` entry point did not regress that
+        // path.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut sb = SandboxedCommand::new("/bin/echo", tmp.path());
+        sb.push_args(["forge-596"]);
+        let outcome = sb.execute().await.expect("execute level 1");
+        assert_eq!(outcome.exit_code, Some(0));
+        assert_eq!(outcome.stdout.trim(), "forge-596");
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_level2_to_avoid_silent_isolation_bypass() {
+        // Load-bearing safety property: `spawn()` is Level-1-only.
+        // A caller who builds a Level 2 command and reaches for
+        // `spawn()` would otherwise silently run the work on the
+        // host with no container isolation. The guard turns that
+        // foot-gun into a clear error.
+        let log = Arc::new(CallLog::default());
+        let runtime: Arc<dyn ContainerRuntime> = Arc::new(LoggingRuntime::new(
+            log,
+            ExecResult {
+                exit_code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        ));
+        let session = Arc::new(
+            Level2Session::create(
+                runtime,
+                OciImageRef::parse("alpine:3.19").unwrap(),
+                ContainerLimits::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        session.disable_drop_cleanup();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut sb =
+            SandboxedCommand::new("/bin/echo", tmp.path()).with_level(SandboxLevel::Level2 {
+                session: session.clone(),
+            });
+        sb.push_args(["should-not-run"]);
+
+        let err = match sb.spawn() {
+            Ok(_) => panic!("Level 2 + spawn must error"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("Level 1 only"),
+            "expected explicit Level 1 only message, got: {err}"
+        );
     }
 }
