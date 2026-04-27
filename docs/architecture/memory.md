@@ -24,16 +24,21 @@ This document is the contract for `forge_agents::memory` and the wiring in
 
 ## Storage layout
 
-```
-~/.config/forge/memory/
-  <agent>.md            # one file per agent that has opted in
-```
+The store is rooted at the platform's user-config directory, resolved via
+`dirs::config_dir`:
+
+| Platform | Path |
+|----------|------|
+| Linux    | `$XDG_CONFIG_HOME/forge/memory/<agent>.md` (default `~/.config/forge/memory/<agent>.md`) |
+| macOS    | `~/Library/Application Support/forge/memory/<agent>.md` |
+| Windows  | `%APPDATA%\forge\memory\<agent>.md` |
 
 `<agent>` is the agent name from the `.agents/<name>.md` frontmatter (or
 the filename stem when frontmatter omits it). The same string is used to
 locate the memory file and to seed the `memory.write` tool registration.
 
-The parent directory is created on first write at mode `0700` on Unix.
+The parent directory is created on first write at mode `0700` on Unix; on
+Windows the platform default ACL applies.
 
 ## File format
 

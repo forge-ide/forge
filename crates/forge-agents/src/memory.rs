@@ -1,10 +1,16 @@
 //! F-601: cross-session, per-agent memory.
 //!
 //! [`MemoryStore`] reads/writes one Markdown-with-frontmatter file per agent
-//! at `~/.config/forge/memory/<agent>.md`. The file body is appended to the
-//! agent's system prompt under a `## Memory` heading after `AGENTS.md` when
-//! the agent's per-agent memory flag is enabled — see
-//! [`assemble_system_prompt`].
+//! at `<config_dir>/forge/memory/<agent>.md`, where `<config_dir>` is
+//! resolved via [`dirs::config_dir`]:
+//!
+//! - Linux: `$XDG_CONFIG_HOME` (default `~/.config`)
+//! - macOS: `~/Library/Application Support`
+//! - Windows: `%APPDATA%`
+//!
+//! The file body is appended to the agent's system prompt under a `## Memory`
+//! heading after `AGENTS.md` when the agent's per-agent memory flag is
+//! enabled — see [`assemble_system_prompt`].
 //!
 //! ## Format
 //!
@@ -106,9 +112,9 @@ impl WriteMode {
 /// Filesystem-backed per-agent memory store rooted at
 /// `<config_root>/forge/memory/<agent>.md`.
 ///
-/// `config_root` is normally `~/.config` on Unix; tests inject a tempdir.
-/// The store creates the `forge/memory/` directory on first write with
-/// mode `0700` on Unix.
+/// `config_root` is the platform's user-config directory (see
+/// [`MemoryStore::from_home`]); tests inject a tempdir. The store creates
+/// the `forge/memory/` directory on first write with mode `0700` on Unix.
 #[derive(Debug, Clone)]
 pub struct MemoryStore {
     root: PathBuf,
@@ -125,14 +131,22 @@ impl MemoryStore {
         }
     }
 
-    /// Build a store anchored at the user's home `~/.config` directory.
+    /// Build a store anchored at the platform's user-config directory.
     ///
-    /// Returns `None` when the home directory cannot be resolved — callers
-    /// should treat that as "memory disabled for this session" rather than
-    /// failing the session.
+    /// Resolution delegates to [`dirs::config_dir`], which honors:
+    ///
+    /// - Linux: `$XDG_CONFIG_HOME` if set, else `~/.config`.
+    /// - macOS: `~/Library/Application Support`.
+    /// - Windows: `%APPDATA%` (Roaming).
+    ///
+    /// The resulting memory file lives at
+    /// `<config_dir>/forge/memory/<agent>.md`.
+    ///
+    /// Returns `None` when the platform's config directory cannot be
+    /// resolved — callers should treat that as "memory disabled for this
+    /// session" rather than failing the session.
     pub fn from_home() -> Option<Self> {
-        let home = dirs::home_dir()?;
-        Some(Self::new(home.join(".config")))
+        Some(Self::new(dirs::config_dir()?))
     }
 
     /// Path the store would read/write for the named agent.
@@ -564,5 +578,32 @@ mod tests {
         assert_eq!(WriteMode::parse("append").unwrap(), WriteMode::Append);
         assert_eq!(WriteMode::parse("replace").unwrap(), WriteMode::Replace);
         assert!(WriteMode::parse("clobber").is_err());
+    }
+
+    /// Regression: `from_home` must anchor at the platform's
+    /// `dirs::config_dir`, not a hand-rolled `~/.config` join. On Linux this
+    /// honors `$XDG_CONFIG_HOME`; on macOS it picks
+    /// `~/Library/Application Support`; on Windows it picks `%APPDATA%`.
+    /// We assert by composing the same `dirs::config_dir` lookup the
+    /// implementation uses and comparing the resolved file paths — when
+    /// `dirs::config_dir()` returns `None` (extremely rare; e.g. `$HOME`
+    /// unset on Unix) `from_home()` must agree by also returning `None`.
+    #[test]
+    fn from_home_uses_platform_config_dir() {
+        match (MemoryStore::from_home(), dirs::config_dir()) {
+            (Some(store), Some(expected_root)) => {
+                let expected = expected_root
+                    .join("forge")
+                    .join("memory")
+                    .join("scribe.md");
+                assert_eq!(store.path_for("scribe"), expected);
+            }
+            (None, None) => {
+                // Both lookups failed in lockstep — the contract holds.
+            }
+            (got, expected) => panic!(
+                "from_home / dirs::config_dir disagreed: from_home={got:?}, config_dir={expected:?}"
+            ),
+        }
     }
 }
