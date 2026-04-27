@@ -83,16 +83,15 @@ async function loadBannerDismissed(): Promise<boolean> {
 export const Dashboard: Component = () => {
   const [missing] = createResource(firstMissingCredential);
   const [runtimeStatus] = createResource(probeRuntime);
-  // Seed `bannerDismissed` from persisted user settings on mount so the
-  // "Don't show again" preference survives a restart. Until the
-  // settings load resolves, we render as "not dismissed" — the banner
-  // visibility also depends on `runtimeStatus()` being non-`available`,
-  // which only resolves on the same tick, so there's no flash where a
-  // dismissed banner briefly appears.
-  const [bannerDismissed, setBannerDismissed] = createSignal(false);
+  // Tri-state seed for the "Don't show again" preference: `null` while
+  // the persisted load is in flight, then `true`/`false` once resolved.
+  // Rendering is gated on the resolved (non-`null`) state so a user who
+  // previously dismissed the banner never sees a flash before the IPC
+  // round-trip lands.
+  const [bannerDismissed, setBannerDismissed] = createSignal<boolean | null>(null);
   onMount(() => {
     void (async () => {
-      if (await loadBannerDismissed()) setBannerDismissed(true);
+      setBannerDismissed(await loadBannerDismissed());
     })();
   });
 
@@ -113,7 +112,12 @@ export const Dashboard: Component = () => {
   };
 
   const showRuntimeBanner = () => {
-    if (bannerDismissed()) return false;
+    // Suppress until the persisted dismissal state has resolved — a
+    // `null` value means the IPC round-trip is still in flight, and
+    // rendering the banner during that window would flash for users
+    // who previously dismissed it.
+    const dismissed = bannerDismissed();
+    if (dismissed === null || dismissed) return false;
     const s = runtimeStatus();
     return s !== undefined && s.kind !== 'available';
   };
