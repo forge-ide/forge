@@ -14,6 +14,10 @@ use serde::Deserialize;
 pub mod anthropic;
 pub mod ollama;
 pub mod openai;
+// F-593: static price-table parser + cost calculator. The committed
+// `data/prices.toml` is `include_str!`-embedded so every binary that links
+// `forge-providers` (daemon, shell, CLI) shares the same lookup.
+pub mod pricing;
 // F-586: hot-swappable [`Provider`] dispatcher used by the session daemon
 // when the dashboard's `set_active_provider` IPC command emits a
 // `ProviderChanged` event for the next turn.

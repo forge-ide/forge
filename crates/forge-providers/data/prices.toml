@@ -1,0 +1,92 @@
+# forge-providers price table — F-593.
+#
+# One section per (provider, model). Rates are in **USD per million tokens**
+# (matching every published price page); the cost-calc layer divides by
+# 1_000_000 internally so callers can pass raw token counts.
+#
+# Manual updates only. Do not generate or auto-fetch this file — adding a row
+# is a deliberate act tied to a provider release. A model whose price is not
+# present surfaces as `cost: null` in `UsageSummary` rather than crashing the
+# query.
+#
+# Schema (per row):
+#   prompt_per_million_tokens     = USD/MTok charged on input tokens
+#   completion_per_million_tokens = USD/MTok charged on output tokens
+#   currency                      = ISO-4217 code; everything is "USD" today
+#   last_updated                  = YYYY-MM-DD when this row was last reviewed
+
+# ── Ollama (local; zero-cost) ──────────────────────────────────────────────
+# Local-first provider. Every model is free at point of use. Listing one
+# wildcard-shaped row is intentional: the lookup key is `provider + model`,
+# so an Ollama user running an unrecognised model still surfaces as
+# `cost: null` (the right outcome — we should not silently invent a price).
+
+[[entry]]
+provider = "ollama"
+model = "*"
+prompt_per_million_tokens = 0.0
+completion_per_million_tokens = 0.0
+currency = "USD"
+last_updated = "2026-04-26"
+
+# ── Anthropic ──────────────────────────────────────────────────────────────
+# Latest models per the F-593 spec.
+
+[[entry]]
+provider = "anthropic"
+model = "claude-3-5-sonnet-20241022"
+prompt_per_million_tokens = 3.0
+completion_per_million_tokens = 15.0
+currency = "USD"
+last_updated = "2026-04-26"
+
+[[entry]]
+provider = "anthropic"
+model = "claude-3-5-haiku"
+prompt_per_million_tokens = 0.80
+completion_per_million_tokens = 4.0
+currency = "USD"
+last_updated = "2026-04-26"
+
+[[entry]]
+provider = "anthropic"
+model = "claude-3-opus"
+prompt_per_million_tokens = 15.0
+completion_per_million_tokens = 75.0
+currency = "USD"
+last_updated = "2026-04-26"
+
+# ── OpenAI ─────────────────────────────────────────────────────────────────
+# Latest models per the F-593 spec.
+
+[[entry]]
+provider = "openai"
+model = "gpt-4o"
+prompt_per_million_tokens = 2.50
+completion_per_million_tokens = 10.0
+currency = "USD"
+last_updated = "2026-04-26"
+
+[[entry]]
+provider = "openai"
+model = "gpt-4o-mini"
+prompt_per_million_tokens = 0.15
+completion_per_million_tokens = 0.60
+currency = "USD"
+last_updated = "2026-04-26"
+
+[[entry]]
+provider = "openai"
+model = "o1-preview"
+prompt_per_million_tokens = 15.0
+completion_per_million_tokens = 60.0
+currency = "USD"
+last_updated = "2026-04-26"
+
+[[entry]]
+provider = "openai"
+model = "o1-mini"
+prompt_per_million_tokens = 3.0
+completion_per_million_tokens = 12.0
+currency = "USD"
+last_updated = "2026-04-26"

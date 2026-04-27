@@ -6,7 +6,9 @@
 //! test is `cargo run -p forge-shell`.
 
 use anyhow::{Context, Result};
-use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Manager, RunEvent, Runtime, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+};
 
 use crate::dashboard::{self, ProviderStatusCache, CACHE_TTL};
 use crate::window_spec::WindowSpec;
@@ -137,6 +139,11 @@ pub fn run() -> Result<()> {
             crate::providers_ipc::dashboard_list_providers,
             crate::providers_ipc::get_active_provider,
             crate::providers_ipc::set_active_provider,
+            // F-593: backend foundation for the (deferred F-594) usage view —
+            // the dashboard queries aggregated UsageTick rollups via this
+            // command; cross-workspace flag aggregates across every
+            // monthly file under `<config>/forge/usage/`.
+            crate::usage_ipc::usage_summary,
         ])
         .setup(|app| {
             crate::ipc::manage_bridge(&app.handle().clone());
@@ -159,6 +166,84 @@ pub fn run() -> Result<()> {
             manager.open_dashboard()?;
             Ok(())
         })
-        .run(tauri::generate_context!("tauri.conf.json"))
-        .context("tauri runtime exited with an error")
+        .build(tauri::generate_context!("tauri.conf.json"))
+        .context("tauri runtime build failed")?
+        .run(|_app_handle, event| {
+            // F-593: app-shutdown defense-in-depth flush. The orchestrator's
+            // session-end hook already flushes per-session UsageTicks into
+            // `<config>/forge/usage/<YYYY-MM>.json`, but a webview that
+            // crashes before its session emits `SessionEnded` would skip
+            // the flush. On `RunEvent::Exit` we walk the shell's view of
+            // open sessions and call the same flush function for each.
+            //
+            // The flush is idempotent (sentinel file alongside each log) so
+            // it is safe to call here even when the orchestrator hook
+            // already ran.
+            if matches!(event, RunEvent::Exit) {
+                if let Err(e) = flush_known_sessions_on_exit() {
+                    tracing::warn!(
+                        target: "forge_shell::window_manager",
+                        error = %e,
+                        "usage-flush-on-exit walk failed",
+                    );
+                }
+            }
+        });
+    Ok(())
+}
+
+/// F-593: walk the on-disk session-log directories the shell can see and
+/// invoke [`forge_session::usage_flush::flush_session_usage_to_user_dir`]
+/// for each. We deliberately do NOT consult the live `BridgeState` —
+/// `RunEvent::Exit` runs after Tauri has begun teardown, and re-entering a
+/// managed `State<_>` from the run-callback is fragile. Instead we rely on
+/// the durable session-log layout: `<workspace>/.forge/sessions/<id>/events.jsonl`
+/// (see `forge_session::server::event_log_path`). Tempdir sessions
+/// (`std::env::temp_dir().join("forge-session-<id>")`) are out of scope —
+/// they are ephemeral by definition and the orchestrator hook flushes them
+/// at SessionEnded time.
+///
+/// Workspaces are discovered from `~/.config/forge/workspaces.toml` (the
+/// same registry the dashboard reads). Each workspace's `.forge/sessions/`
+/// dir is iterated; every session subdir whose `events.jsonl` exists is
+/// flushed. Errors on any individual log are logged + swallowed so one
+/// corrupt session can't block flush of its peers.
+fn flush_known_sessions_on_exit() -> anyhow::Result<()> {
+    use forge_session::usage_flush::flush_session_usage_to_user_dir;
+
+    let toml_path = crate::dashboard_sessions::default_workspaces_toml();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("flush-on-exit: tokio runtime")?;
+
+    runtime.block_on(async move {
+        let workspaces = forge_core::workspaces::read_workspaces(&toml_path)
+            .await
+            .unwrap_or_default();
+
+        for ws in workspaces {
+            let sessions_dir = ws.path.join(".forge").join("sessions");
+            let Ok(mut rd) = tokio::fs::read_dir(&sessions_dir).await else {
+                continue;
+            };
+            let workspace_id =
+                forge_core::WorkspaceId::from_string(ws.path.to_string_lossy().into_owned());
+            while let Ok(Some(entry)) = rd.next_entry().await {
+                let log = entry.path().join("events.jsonl");
+                if !log.exists() {
+                    continue;
+                }
+                if let Err(e) = flush_session_usage_to_user_dir(&log, &workspace_id).await {
+                    tracing::warn!(
+                        target: "forge_shell::window_manager",
+                        log = %log.display(),
+                        error = %e,
+                        "usage flush at exit failed for session log",
+                    );
+                }
+            }
+        }
+    });
+    Ok(())
 }

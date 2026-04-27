@@ -15,6 +15,7 @@ pub mod session;
 pub mod socket_path;
 pub mod starttime;
 pub mod tools;
+pub mod usage_flush;
 
 pub use bg_agents::{BackgroundAgentRegistry, BgAgentError, BgAgentState, BgAgentSummary};
 pub use error::SessionError;
