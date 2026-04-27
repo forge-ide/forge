@@ -1,0 +1,56 @@
+/*
+ * F-600 — Re-run popover styling.
+ *
+ * Three-button vertical menu surfaced from the assistant message hover row.
+ * Tracks the same surface-2 / border-default treatment as
+ * `BranchMetadataPopover` so the two surfaces feel consistent when nested
+ * around the same turn.
+ */
+
+.rerun-popover {
+  min-width: 180px;
+  background: var(--color-surface-2, #13161d);
+  color: var(--color-text-primary, #eae6de);
+  border: 1px solid var(--color-border-default, #1c2230);
+  border-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  font-size: 12px;
+  line-height: 1.4;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.rerun-popover:focus-visible {
+  outline: 1px solid var(--color-ember-400, #ff4a12);
+  outline-offset: 1px;
+}
+
+.rerun-popover__header {
+  padding: var(--sp-2, 8px) var(--sp-3, 12px);
+  background: var(--color-surface-2, #13161d);
+  color: var(--color-text-secondary, #6a7e98);
+  border-bottom: 1px solid var(--color-border-default, #1c2230);
+  font-weight: 500;
+}
+
+.rerun-popover__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.rerun-popover__row {
+  display: flex;
+  border-bottom: 1px solid var(--color-border-default, #1c2230);
+}
+
+.rerun-popover__row:last-child {
+  border-bottom: none;
+}
+
+.rerun-popover__btn {
+  flex: 1 1 auto;
+  justify-content: flex-start;
+  border-radius: 0;
+}

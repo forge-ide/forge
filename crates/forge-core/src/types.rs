@@ -55,13 +55,19 @@ pub enum CompactTrigger {
     UserRequested,
 }
 
-/// F-143: variant selector for the `rerun_message` Tauri command.
+/// F-143 / F-144 / F-600: variant selector for the `rerun_message` Tauri
+/// command. All three variants dispatch through
+/// `Orchestrator::rerun_message`.
 ///
-/// Only [`RerunVariant::Replace`] is wired today — truncate the transcript
-/// logically at the target message and regenerate the assistant response in
-/// its place. [`RerunVariant::Branch`] (F-144) and [`RerunVariant::Fresh`]
-/// (F-145) are reserved enum tags so the wire shape is stable across the
-/// rerun milestone; dispatching them today returns an error.
+/// - [`RerunVariant::Replace`] — truncate the transcript at `msg_id` and
+///   regenerate the assistant response in place. The original assistant
+///   message is superseded on success.
+/// - [`RerunVariant::Branch`] — keep the original and append a new sibling
+///   variant under the same branch root. Both versions remain visible;
+///   the user switches between them via `BranchSelectorStrip`.
+/// - [`RerunVariant::Fresh`] — truncate to the originating user message
+///   only and regenerate from there, discarding all intermediate context.
+///   Produces a new root (`branch_parent = None`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
 pub enum RerunVariant {
