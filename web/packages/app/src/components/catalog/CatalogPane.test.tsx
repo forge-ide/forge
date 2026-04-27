@@ -1,0 +1,246 @@
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
+import { cleanup, fireEvent, render } from '@solidjs/testing-library';
+import type { ScopedRosterEntry } from '@forge/ipc';
+import { CatalogPane } from './CatalogPane';
+import { setInvokeForTesting } from '../../lib/tauri';
+import { resetSettingsStore } from '../../stores/settings';
+
+const invokeMock = vi.fn();
+
+const skill = (id: string): ScopedRosterEntry => ({
+  entry: { type: 'Skill', id },
+  scope: { type: 'SessionWide' },
+});
+
+const mcp = (id: string): ScopedRosterEntry => ({
+  entry: { type: 'Mcp', id },
+  scope: { type: 'SessionWide' },
+});
+
+const agent = (id: string, background = false): ScopedRosterEntry => ({
+  entry: { type: 'Agent', id, background },
+  scope: { type: 'SessionWide' },
+});
+
+interface SetupOpts {
+  skills?: ScopedRosterEntry[];
+  mcp?: ScopedRosterEntry[];
+  agents?: ScopedRosterEntry[];
+  setSettingError?: string;
+  listSkillsError?: string;
+}
+
+function setupInvoke(opts: SetupOpts = {}) {
+  invokeMock.mockImplementation((cmd: string) => {
+    switch (cmd) {
+      case 'list_skills':
+        if (opts.listSkillsError) return Promise.reject(new Error(opts.listSkillsError));
+        return Promise.resolve(opts.skills ?? []);
+      case 'list_mcp_servers':
+        return Promise.resolve(opts.mcp ?? []);
+      case 'list_agents':
+        return Promise.resolve(opts.agents ?? []);
+      case 'set_setting':
+        if (opts.setSettingError) return Promise.reject(new Error(opts.setSettingError));
+        return Promise.resolve(undefined);
+      default:
+        return Promise.resolve(undefined);
+    }
+  });
+}
+
+async function flush(): Promise<void> {
+  for (let i = 0; i < 6; i += 1) {
+    await Promise.resolve();
+  }
+}
+
+beforeEach(() => {
+  invokeMock.mockReset();
+  setInvokeForTesting(invokeMock as never);
+  resetSettingsStore();
+});
+
+afterEach(() => {
+  setInvokeForTesting(null);
+  cleanup();
+});
+
+describe('<CatalogPane> (F-592)', () => {
+  it('renders three tabs (Skills / MCP / Agents)', async () => {
+    setupInvoke();
+    const { findAllByRole } = render(() => <CatalogPane workspaceRoot="/ws" />);
+    await flush();
+
+    const tabs = await findAllByRole('tab');
+    expect(tabs).toHaveLength(3);
+    const labels = tabs.map((t) => t.textContent ?? '');
+    expect(labels.some((l) => l.includes('Skills'))).toBe(true);
+    expect(labels.some((l) => l.includes('MCP'))).toBe(true);
+    expect(labels.some((l) => l.includes('Agents'))).toBe(true);
+  });
+
+  it('fetches each list_* command with the workspaceRoot + SessionWide scope', async () => {
+    setupInvoke();
+    render(() => <CatalogPane workspaceRoot="/ws" />);
+    await flush();
+
+    expect(invokeMock).toHaveBeenCalledWith('list_skills', {
+      workspaceRoot: '/ws',
+      scope: { type: 'SessionWide' },
+    });
+    expect(invokeMock).toHaveBeenCalledWith('list_mcp_servers', {
+      workspaceRoot: '/ws',
+      scope: { type: 'SessionWide' },
+    });
+    expect(invokeMock).toHaveBeenCalledWith('list_agents', {
+      workspaceRoot: '/ws',
+      scope: { type: 'SessionWide' },
+    });
+  });
+
+  it('renders rows on the active tab, grouped by scope', async () => {
+    setupInvoke({
+      skills: [
+        skill('typescript-review'),
+        skill('postgres-schemata'),
+      ],
+    });
+    const { findByText } = render(() => <CatalogPane workspaceRoot="/ws" />);
+    await flush();
+
+    expect(await findByText('typescript-review')).toBeTruthy();
+    expect(await findByText('postgres-schemata')).toBeTruthy();
+    expect(await findByText('Session-wide')).toBeTruthy();
+  });
+
+  it('shows kind-specific empty copy when a tab returns zero entries', async () => {
+    setupInvoke({ skills: [] });
+    const { findByText } = render(() => <CatalogPane workspaceRoot="/ws" />);
+    await flush();
+
+    expect(await findByText('No skills installed')).toBeTruthy();
+  });
+
+  it('search filters the active tab', async () => {
+    setupInvoke({
+      skills: [skill('typescript-review'), skill('postgres-schemata')],
+    });
+    const { findByLabelText, queryByText, findByText } = render(() => (
+      <CatalogPane workspaceRoot="/ws" />
+    ));
+    await flush();
+
+    const search = await findByLabelText('Filter catalog entries');
+    fireEvent.input(search, { target: { value: 'postgres' } });
+    await flush();
+
+    expect(queryByText('typescript-review')).toBeNull();
+    expect(await findByText('postgres-schemata')).toBeTruthy();
+  });
+
+  it('search empties the row list with a "no matches" empty-state copy', async () => {
+    setupInvoke({ skills: [skill('only')] });
+    const { findByLabelText, findByText } = render(() => (
+      <CatalogPane workspaceRoot="/ws" />
+    ));
+    await flush();
+
+    const search = await findByLabelText('Filter catalog entries');
+    fireEvent.input(search, { target: { value: 'nothingmatches' } });
+    await flush();
+
+    expect(await findByText('No matches')).toBeTruthy();
+  });
+
+  it('toggling a row persists `catalog.enabled.<kind>.<id>` via set_setting', async () => {
+    setupInvoke({ skills: [skill('typescript-review')] });
+    const { findByRole } = render(() => <CatalogPane workspaceRoot="/ws" />);
+    await flush();
+
+    const toggle = await findByRole('switch');
+    fireEvent.click(toggle);
+    await flush();
+
+    expect(invokeMock).toHaveBeenCalledWith('set_setting', {
+      key: 'catalog.enabled.skills.typescript-review',
+      value: false,
+      level: 'user',
+      workspaceRoot: '/ws',
+    });
+  });
+
+  it('badge count on the Skills tab matches the post-filter row count', async () => {
+    setupInvoke({
+      skills: [skill('alpha'), skill('beta'), skill('gamma')],
+    });
+    const { findAllByRole, findByLabelText } = render(() => (
+      <CatalogPane workspaceRoot="/ws" />
+    ));
+    await flush();
+
+    let tabs = await findAllByRole('tab');
+    const skillsTab = tabs.find((t) => t.textContent?.includes('Skills'))!;
+    expect(skillsTab.textContent).toMatch(/3/);
+
+    const search = await findByLabelText('Filter catalog entries');
+    fireEvent.input(search, { target: { value: 'alp' } });
+    await flush();
+
+    tabs = await findAllByRole('tab');
+    const skillsTabAfter = tabs.find((t) => t.textContent?.includes('Skills'))!;
+    expect(skillsTabAfter.textContent).toMatch(/1/);
+  });
+
+  it('clicking a tab switches the visible kind panel', async () => {
+    setupInvoke({
+      skills: [skill('s1')],
+      mcp: [mcp('m1')],
+      agents: [agent('a1')],
+    });
+    const { findAllByRole, findByText, queryByText } = render(() => (
+      <CatalogPane workspaceRoot="/ws" />
+    ));
+    await flush();
+
+    expect(await findByText('s1')).toBeTruthy();
+
+    const tabs = await findAllByRole('tab');
+    const mcpTab = tabs.find((t) => t.textContent?.includes('MCP'))!;
+    fireEvent.click(mcpTab);
+    await flush();
+
+    expect(await findByText('m1')).toBeTruthy();
+    expect(queryByText('s1')).toBeNull();
+  });
+
+  it('renders an error block when a list_* command rejects', async () => {
+    setupInvoke({ listSkillsError: 'workspace_root not in registry: /ws' });
+    const { findByText } = render(() => <CatalogPane workspaceRoot="/ws" />);
+    // Resource rejection transitions through `loading=true` → `loading=false,
+    // state='errored'`. The default 6-microtask flush above is enough for
+    // happy-path resolutions but a rejection needs an extra macrotask to land,
+    // hence the longer `findBy*` wait + explicit settle.
+    await new Promise((r) => setTimeout(r, 0));
+    await flush();
+
+    expect(await findByText('SKILLS UNAVAILABLE')).toBeTruthy();
+  });
+
+  it('surfaces a set_setting rejection without disabling the toggle UI', async () => {
+    setupInvoke({
+      skills: [skill('typescript-review')],
+      setSettingError: 'invalid value',
+    });
+    const { findByRole, findByText } = render(() => (
+      <CatalogPane workspaceRoot="/ws" />
+    ));
+    await flush();
+
+    const toggle = await findByRole('switch');
+    fireEvent.click(toggle);
+    await flush();
+
+    expect(await findByText(/set_setting failed: invalid value/)).toBeTruthy();
+  });
+});
