@@ -135,6 +135,7 @@ pub async fn run_turn<P: Provider>(
             role: ChatRole::User,
             content: vec![ChatBlock::Text(text)],
         }],
+        parallel_tool_calls_allowed: false,
     };
 
     // F-567: pull the dispatcher from the session-scoped cache when one is
@@ -1304,6 +1305,7 @@ fn finalise_request(messages: Vec<ChatMessage>) -> Result<ChatRequest> {
     Ok(ChatRequest {
         system: None,
         messages,
+        parallel_tool_calls_allowed: false,
     })
 }
 
@@ -1400,6 +1402,7 @@ fn build_fresh_request_for(history: &[(u64, Event)], target: &MessageId) -> Resu
                         role: ChatRole::User,
                         content: vec![ChatBlock::Text(text)],
                     }],
+                    parallel_tool_calls_allowed: false,
                 });
             }
             _ => {}

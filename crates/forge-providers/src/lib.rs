@@ -11,7 +11,9 @@ use futures::stream::BoxStream;
 use parking_lot::Mutex;
 use serde::Deserialize;
 
+pub mod anthropic;
 pub mod ollama;
+pub mod sse;
 
 // ── Chat domain types ─────────────────────────────────────────────────────────
 
@@ -23,7 +25,7 @@ pub mod ollama;
 /// provider-specific configuration. Callers that need provider-specific
 /// knobs should wrap or extend this type at the provider boundary rather
 /// than overload it with optional fields that no provider honours.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ChatRequest {
     /// Optional system prompt. Providers handle it in role-specific ways:
     /// e.g. Anthropic hoists it to a top-level `system` field, Ollama
@@ -40,6 +42,10 @@ pub struct ChatRequest {
     /// [`ChatRole::User`] and [`ChatRole::Assistant`], though providers
     /// vary in how strictly they enforce that.
     pub messages: Vec<ChatMessage>,
+    /// F-583: whether the provider is permitted to request multiple tool
+    /// calls in a single turn. Defaults to `false`; F-583 only plumbs the
+    /// flag through, F-599 will drive behavior.
+    pub parallel_tool_calls_allowed: bool,
 }
 
 /// One message in a chat conversation, tagged with the role that produced
