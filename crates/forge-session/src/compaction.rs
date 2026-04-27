@@ -271,6 +271,13 @@ impl Drop for ReleaseCompactingOnDrop {
 ///    (`branch_parent: None`, `branch_variant_index: 0`).
 /// 5. Emit [`Event::ContextCompacted`] referring back to the summary.
 ///
+/// `provider_id` and `model` are stamped onto the synthetic
+/// `AssistantMessage` so a future Agent Monitor / replay correlation
+/// keys the summary against the same provider+model the session is
+/// active on, instead of an orphan id. Callers must pass the values the
+/// session uses for live turns; the orchestrator's auto-trigger and the
+/// IPC server both do so.
+///
 /// Returns the new summary message id and the user-message ids of the
 /// summarised turns. The function is idempotent in the sense that a second
 /// call without intervening writes selects the same turns again — callers
@@ -279,6 +286,8 @@ impl Drop for ReleaseCompactingOnDrop {
 pub async fn compact<P: Provider>(
     session: Arc<Session>,
     provider: Arc<P>,
+    provider_id: ProviderId,
+    model: String,
     fraction: f64,
     pinned: &HashSet<MessageId>,
     trigger: CompactTrigger,
@@ -354,14 +363,27 @@ pub async fn compact<P: Provider>(
         return Err(anyhow!("compact: provider returned an empty summary"));
     }
 
+    // Compute the wire count up-front. The wire shape pins `u32`; refuse
+    // to silently truncate if a future caller somehow stages more than
+    // 4B turns. Doing this before the AssistantMessage emit means we
+    // never publish a summary message we can't correlate via marker.
+    let summarized_turns_count: u32 = selected.len().try_into().map_err(|_| {
+        anyhow!(
+            "compact: summarized_turns count {} exceeds u32::MAX",
+            selected.len()
+        )
+    })?;
+
     // Emit the summary message FIRST so consumers observing the
-    // ContextCompacted event can already resolve `summary_msg_id`.
+    // ContextCompacted event can already resolve `summary_msg_id`. The
+    // provider/model fields match the session's active provider — see
+    // the function-level doc-comment.
     let summary_msg_id = MessageId::new();
     session
         .emit(Event::AssistantMessage {
             id: summary_msg_id.clone(),
-            provider: ProviderId::new(),
-            model: "summary".to_string(),
+            provider: provider_id,
+            model,
             at: Utc::now(),
             stream_finalised: true,
             text: Arc::from(summary_text.as_str()),
@@ -372,7 +394,6 @@ pub async fn compact<P: Provider>(
 
     // Emit ContextCompacted AFTER the summary — consumers rely on the
     // ordering (the marker references `summary_msg_id`).
-    let summarized_turns_count: u32 = selected.len().try_into().unwrap_or(u32::MAX);
     session
         .emit(Event::ContextCompacted {
             at: Utc::now(),
@@ -649,9 +670,15 @@ mod tests {
         // emissions deterministically.
         let mut rx = session.event_tx.subscribe();
 
+        // Pin a deterministic provider id so the assertion below can verify
+        // the summary AssistantMessage carries the caller-supplied value
+        // rather than a fresh `ProviderId::new()` (B3 regression guard).
+        let provider_id = ProviderId::new();
         let res = compact(
             Arc::clone(&session),
             Arc::clone(&provider),
+            provider_id.clone(),
+            "active-model".to_string(),
             DEFAULT_COMPACT_FRACTION,
             &HashSet::new(),
             CompactTrigger::AutoAt98Pct,
@@ -666,9 +693,23 @@ mod tests {
         let mut saw_marker = false;
         while let Ok((_, ev)) = rx.try_recv() {
             match ev {
-                Event::AssistantMessage { id, text, .. } if id == res.summary_msg_id => {
+                Event::AssistantMessage {
+                    id,
+                    text,
+                    provider,
+                    model,
+                    ..
+                } if id == res.summary_msg_id => {
                     assert!(!saw_marker, "marker must follow summary, not precede it");
                     assert!(text.contains("summary text"));
+                    assert_eq!(
+                        provider, provider_id,
+                        "summary message must carry the caller-supplied provider id"
+                    );
+                    assert_eq!(
+                        model, "active-model",
+                        "summary message must carry the caller-supplied model"
+                    );
                     saw_summary = true;
                 }
                 Event::ContextCompacted {
@@ -711,6 +752,8 @@ mod tests {
         let err = compact(
             session,
             provider,
+            ProviderId::new(),
+            "active-model".to_string(),
             DEFAULT_COMPACT_FRACTION,
             &pinned,
             CompactTrigger::UserRequested,
@@ -732,6 +775,8 @@ mod tests {
         let err = compact(
             session,
             provider,
+            ProviderId::new(),
+            "active-model".to_string(),
             DEFAULT_COMPACT_FRACTION,
             &HashSet::new(),
             CompactTrigger::UserRequested,

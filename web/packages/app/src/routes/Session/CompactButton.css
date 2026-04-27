@@ -17,6 +17,12 @@
   flex: 0 0 auto;
 }
 
+/* `font-size: 11px` is the project-wide chrome convention used by every
+   sibling pane (ChatPane streaming indicator, ContextPicker, ContextChip,
+   ApprovalPrompt). The `@forge/design` token sheet exposes spacing and
+   color tokens but no font-size scale today; introducing one is a
+   design-system follow-up and out of scope here. The same applies to
+   `.context-compacted-marker` below. */
 .compact-button__toast {
   font-family: var(--font-mono);
   font-size: 11px;

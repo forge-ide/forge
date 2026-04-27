@@ -1248,6 +1248,13 @@ async fn handle_connection<P: Provider + 'static>(
                         // frames. The compaction emits ContextCompacted
                         // through the event stream — there's no direct
                         // response frame.
+                        //
+                        // Provider id + model stamped onto the summary
+                        // message match the synthetic pair `run_request_loop`
+                        // uses for live turns (`ProviderId::new()` /
+                        // "mock"). When real providers thread their own
+                        // ids through the orchestrator, this site moves
+                        // with them.
                         let session = Arc::clone(&session);
                         let provider = Arc::clone(&provider);
                         let session_id_for_compact = Arc::clone(&session_id);
@@ -1256,6 +1263,8 @@ async fn handle_connection<P: Provider + 'static>(
                             if let Err(e) = crate::compaction::compact(
                                 session,
                                 provider,
+                                forge_core::ids::ProviderId::new(),
+                                "mock".to_string(),
                                 crate::compaction::DEFAULT_COMPACT_FRACTION,
                                 &pinned,
                                 forge_core::CompactTrigger::UserRequested,

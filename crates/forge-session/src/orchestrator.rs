@@ -194,6 +194,11 @@ pub async fn run_turn<P: Provider>(
     // state) while the inner `try_claim_compacting()` inside `compact()`
     // is the true safety barrier (atomic, race-free against a concurrent
     // manual trigger).
+    //
+    // The provider id and model stamped on the synthetic summary message
+    // match the values `run_request_loop` uses for live turns below
+    // (currently the synthetic "mock" pair — when real providers thread
+    // their own ids, both sites move together).
     if let Some(budget) = byte_budget.as_ref() {
         let limit = budget.limit();
         let consumed = budget.consumed();
@@ -205,6 +210,8 @@ pub async fn run_turn<P: Provider>(
             if let Err(e) = compact(
                 Arc::clone(&session),
                 Arc::clone(&provider),
+                ProviderId::new(),
+                "mock".to_string(),
                 DEFAULT_COMPACT_FRACTION,
                 &pinned,
                 forge_core::CompactTrigger::AutoAt98Pct,

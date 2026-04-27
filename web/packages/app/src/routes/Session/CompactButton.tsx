@@ -66,6 +66,11 @@ export const CompactButton: Component<CompactButtonProps> = (props) => {
         size="sm"
         class="compact-button__btn"
         aria-label="Compact transcript"
+        // F-598: announce the in-flight state to assistive tech. `disabled`
+        // alone removes the control from the focus order but does not
+        // signal "operation in progress" — `aria-busy` is what screen
+        // readers narrate for the work-pending phase.
+        aria-busy={pending()}
         disabled={pending()}
         onClick={() => {
           void dispatch();
