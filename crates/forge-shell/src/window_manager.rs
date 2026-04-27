@@ -113,10 +113,18 @@ pub fn run() -> Result<()> {
             // the default `toast` mode.
             crate::ipc::get_settings,
             crate::ipc::set_setting,
-            // F-132: MCP commands — list / toggle / import.
-            crate::ipc::list_mcp_servers,
+            // F-132: live session-MCP commands. F-591 adds the roster-scoped
+            // `list_mcp_servers` next door — distinct semantics: the session
+            // command introspects the daemon's running manager, the roster
+            // command reads on-disk `.mcp.json`.
+            crate::ipc::session_list_mcp_servers,
             crate::ipc::toggle_mcp_server,
             crate::ipc::import_mcp_config,
+            // F-591: roster discovery commands.
+            crate::ipc::list_skills,
+            crate::ipc::list_mcp_servers,
+            crate::ipc::list_agents,
+            crate::ipc::list_providers,
             // F-587: per-provider credential management. The Dashboard's
             // settings panel is the only call site; `authz_check` enforces
             // the `dashboard` window label inside each command.

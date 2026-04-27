@@ -552,10 +552,19 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         // F-151: persistent settings store.
         get_settings,
         set_setting,
-        // F-132: MCP commands — list / toggle / import (+ state-stream forwarder).
-        list_mcp_servers,
+        // F-132: live session-MCP commands — daemon's authoritative manager
+        // snapshot / toggle / import. F-591 adds a separate roster-scoped
+        // `list_mcp_servers` that reads on-disk `.mcp.json` instead.
+        session_list_mcp_servers,
         toggle_mcp_server,
         import_mcp_config,
+        // F-591: roster discovery commands — read from canonical loaders
+        // (skill_loader, agent_loader, .mcp.json, hardcoded provider list)
+        // and filter by `RosterScope`. Consumed by the catalog UI (F-592).
+        list_skills,
+        list_mcp_servers,
+        list_agents,
+        list_providers,
         // F-359: server-side URL context fetch + allowlist setter.
         context_fetch_url,
         set_context_allowed_hosts,
@@ -2817,13 +2826,18 @@ pub(crate) const MAX_MCP_SLUG_BYTES: usize = 64;
 /// List every MCP server the session daemon has configured, with its
 /// current lifecycle state and cached tool list.
 ///
+/// F-132: list every MCP server the *session daemon* has live, with its
+/// current lifecycle state and cached tool list. Distinct from the F-591
+/// roster `list_mcp_servers(scope)` — this one operates on the running
+/// session's authoritative manager, not the on-disk catalog.
+///
 /// Dispatches `IpcMessage::ListMcpServers` over the session's UDS bridge
 /// — the shell no longer runs its own `McpManager` (the "two independent
 /// managers" bug F-132 inherited). The session daemon's
 /// `McpManager::list()` snapshot arrives as
 /// `IpcMessage::McpServersList` and is returned verbatim.
 #[tauri::command]
-pub async fn list_mcp_servers<R: Runtime>(
+pub async fn session_list_mcp_servers<R: Runtime>(
     session_id: String,
     webview: Webview<R>,
     state: State<'_, BridgeState>,
@@ -2831,7 +2845,7 @@ pub async fn list_mcp_servers<R: Runtime>(
     require_window_label(
         &webview,
         &format!("session-{session_id}"),
-        "list_mcp_servers",
+        "session_list_mcp_servers",
     )?;
     state
         .bridge
@@ -3099,4 +3113,282 @@ pub async fn set_context_allowed_hosts<R: Runtime>(
     }
     allowed.replace(hosts);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// F-591: Roster discovery — `list_skills` / `list_mcp_servers` / `list_agents`
+// / `list_providers`. Each command:
+//
+// 1. Reads from the canonical loader (skill_loader, agent loader, .mcp.json,
+//    hardcoded built-ins for providers).
+// 2. Tags every loaded entry with the [`forge_core::RosterScope`] it belongs to. Today
+//    every disk-loaded entry surfaces as `RosterScope::SessionWide`; agent-
+//    or provider-bound scoping arrives with the per-agent skill/MCP binding
+//    work in F-592+.
+// 3. Filters by the caller-supplied scope via [`forge_core::ScopedRosterEntry::matches`].
+//
+// Authz mirrors the F-122 / F-151 family: dashboard label OR any `session-*`
+// label is allowed, since the catalog UI lives in the dashboard but a session
+// view may also want to enumerate its own roster.
+// ---------------------------------------------------------------------------
+
+/// F-591: per-field cap on `workspace_root` byte length on the four roster
+/// commands. Same envelope as the F-122 filesystem commands; documented as a
+/// distinct constant so the cap can move independently if the catalog grows
+/// new fields.
+pub(crate) const MAX_ROSTER_WORKSPACE_ROOT_BYTES: usize = MAX_WORKSPACE_ROOT_BYTES;
+
+/// F-591: built-in providers exposed to the roster.
+///
+/// Hardcoded for Phase 3 — F-583 (Anthropic), F-584 (OpenAI) and Phase-1
+/// Ollama are the live built-ins. Future work (F-585 CustomOpenAi,
+/// per-workspace provider configs) will fold a settings-derived list in
+/// alongside these built-ins; today the built-in list is the universe.
+const BUILT_IN_PROVIDER_IDS: &[&str] = &["anthropic", "openai", "ollama"];
+
+/// F-591: shared scope-arg validator. Rejects oversized embedded id strings
+/// inside an `Agent { id }` / `Provider { id }` filter so a hostile webview
+/// frame cannot hand the loader a multi-megabyte slug.
+fn validate_roster_scope(scope: &forge_core::RosterScope) -> Result<(), String> {
+    match scope {
+        forge_core::RosterScope::SessionWide => Ok(()),
+        forge_core::RosterScope::Agent { id } => {
+            require_size("scope.agent.id", &id.to_string(), MAX_PROVIDER_ID_BYTES)
+        }
+        forge_core::RosterScope::Provider { id } => {
+            require_size("scope.provider.id", &id.to_string(), MAX_PROVIDER_ID_BYTES)
+        }
+    }
+}
+
+// Reuse the F-587 cap for embedded id payloads.
+use crate::credentials_ipc::MAX_PROVIDER_ID_BYTES;
+
+/// F-591: load every workspace + user-home skill and tag each as a session-
+/// wide roster entry.
+///
+/// Skill discovery walks `<workspace_root>/.skills/` and `<user_home>/.skills/`
+/// via `forge_agents::skill_loader::load_skills`. The loader merges the two
+/// scopes (workspace shadows user) so a skill id appears at most once.
+fn collect_skills(
+    workspace_root: &std::path::Path,
+    user_home: &std::path::Path,
+) -> Result<Vec<forge_core::ScopedRosterEntry>, String> {
+    let skills = forge_agents::skill_loader::load_skills(workspace_root, user_home)
+        .map_err(|e| format!("load skills: {e}"))?;
+    Ok(skills
+        .into_iter()
+        .map(|s| {
+            forge_core::ScopedRosterEntry::new(
+                forge_core::RosterEntry::Skill { id: s.id },
+                forge_core::RosterScope::SessionWide,
+            )
+        })
+        .collect())
+}
+
+/// F-591: load every workspace + user-home agent definition and tag each as
+/// a session-wide roster entry.
+fn collect_agents(
+    workspace_root: &std::path::Path,
+    user_home: &std::path::Path,
+) -> Result<Vec<forge_core::ScopedRosterEntry>, String> {
+    let defs = forge_agents::load_agents(workspace_root, user_home)
+        .map_err(|e| format!("load agents: {e}"))?;
+    Ok(defs
+        .into_iter()
+        .map(|def| {
+            forge_core::ScopedRosterEntry::new(
+                forge_core::RosterEntry::Agent {
+                    id: forge_core::AgentId::from_string(def.name),
+                    background: false,
+                },
+                forge_core::RosterScope::SessionWide,
+            )
+        })
+        .collect())
+}
+
+/// F-591: load every workspace + user-home MCP server declaration from
+/// `.mcp.json` and tag each as a session-wide roster entry.
+///
+/// Distinct from the F-132 `session_list_mcp_servers` which talks to the
+/// running session daemon's authoritative manager — this one reads the
+/// on-disk catalog so the catalog UI works even with no session open.
+fn collect_mcp_servers(
+    workspace_root: &std::path::Path,
+    user_home: &std::path::Path,
+) -> Result<Vec<forge_core::ScopedRosterEntry>, String> {
+    let merged = forge_mcp::config::load_merged(workspace_root, user_home)
+        .map_err(|e| format!("load mcp servers: {e}"))?;
+    Ok(merged
+        .into_keys()
+        .map(|name| {
+            forge_core::ScopedRosterEntry::new(
+                forge_core::RosterEntry::Mcp {
+                    id: forge_core::McpId::from(name),
+                },
+                forge_core::RosterScope::SessionWide,
+            )
+        })
+        .collect())
+}
+
+/// F-591: emit one [`forge_core::RosterEntry::Provider`] per built-in
+/// provider, plus any user-defined `[providers.custom_openai.<name>]`
+/// entries (F-585) that resolve from merged settings.
+///
+/// Each entry is also tagged with `RosterScope::Provider { id }` so a
+/// `Provider(id)`-filtered query returns just that provider, while a
+/// `SessionWide` query still returns the full list.
+fn collect_providers(settings: &AppSettings) -> Vec<forge_core::ScopedRosterEntry> {
+    let mut out: Vec<forge_core::ScopedRosterEntry> = BUILT_IN_PROVIDER_IDS
+        .iter()
+        .map(|id| {
+            let provider = forge_core::ProviderId::from_string((*id).to_string());
+            forge_core::ScopedRosterEntry::new(
+                forge_core::RosterEntry::Provider {
+                    id: provider.clone(),
+                    model: None,
+                },
+                forge_core::RosterScope::Provider { id: provider },
+            )
+        })
+        .collect();
+
+    // F-585: surface each user-named custom OpenAI-compat provider with the
+    // entry's default model populated. The id is `custom_openai:<name>` to
+    // avoid colliding with the built-in `openai` slug.
+    for (name, entry) in &settings.providers.custom_openai {
+        let id = forge_core::ProviderId::from_string(format!("custom_openai:{name}"));
+        let model = if entry.model.is_empty() {
+            None
+        } else {
+            Some(entry.model.clone())
+        };
+        out.push(forge_core::ScopedRosterEntry::new(
+            forge_core::RosterEntry::Provider {
+                id: id.clone(),
+                model,
+            },
+            forge_core::RosterScope::Provider { id },
+        ));
+    }
+    out
+}
+
+/// F-591: list discoverable skills filtered by [`forge_core::RosterScope`].
+///
+/// Returns a `RosterEntry::Skill { id }` per loaded skill. Today every skill
+/// surfaces with `RosterScope::SessionWide`; an `Agent`- or `Provider`-
+/// filtered call therefore returns an empty list until per-agent skill
+/// binding lands.
+#[tauri::command]
+pub async fn list_skills<R: Runtime>(
+    workspace_root: String,
+    scope: forge_core::RosterScope,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+) -> Result<Vec<forge_core::ScopedRosterEntry>, String> {
+    require_window_label_in(&webview, &["dashboard"], true, "list_skills")?;
+    require_size(
+        "workspace_root",
+        &workspace_root,
+        MAX_ROSTER_WORKSPACE_ROOT_BYTES,
+    )?;
+    validate_roster_scope(&scope)?;
+    let workspace_path =
+        resolve_workspace_root_for_command(webview.label(), &workspace_root, &state).await?;
+    let user_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let entries = collect_skills(&workspace_path, &user_home)?;
+    Ok(entries.into_iter().filter(|e| e.matches(&scope)).collect())
+}
+
+/// F-591: list MCP servers from on-disk `.mcp.json`, filtered by
+/// [`forge_core::RosterScope`].
+///
+/// Returns a `RosterEntry::Mcp { id }` per declared server. Distinct from
+/// `session_list_mcp_servers`, which introspects the running session
+/// daemon's manager. The roster command does not need a live session —
+/// the catalog UI uses it to show the configured-but-not-yet-running set.
+#[tauri::command]
+pub async fn list_mcp_servers<R: Runtime>(
+    workspace_root: String,
+    scope: forge_core::RosterScope,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+) -> Result<Vec<forge_core::ScopedRosterEntry>, String> {
+    require_window_label_in(&webview, &["dashboard"], true, "list_mcp_servers")?;
+    require_size(
+        "workspace_root",
+        &workspace_root,
+        MAX_ROSTER_WORKSPACE_ROOT_BYTES,
+    )?;
+    validate_roster_scope(&scope)?;
+    let workspace_path =
+        resolve_workspace_root_for_command(webview.label(), &workspace_root, &state).await?;
+    let user_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let entries = collect_mcp_servers(&workspace_path, &user_home)?;
+    Ok(entries.into_iter().filter(|e| e.matches(&scope)).collect())
+}
+
+/// F-591: list agent definitions from `.agents/*.md`, filtered by
+/// [`forge_core::RosterScope`].
+///
+/// Returns a `RosterEntry::Agent { id, background }` per loaded def. Today
+/// `background = false` everywhere — the def-level distinction between
+/// foreground and background agents arrives with the agent-binding work in
+/// later F-59x tasks.
+#[tauri::command]
+pub async fn list_agents<R: Runtime>(
+    workspace_root: String,
+    scope: forge_core::RosterScope,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+) -> Result<Vec<forge_core::ScopedRosterEntry>, String> {
+    require_window_label_in(&webview, &["dashboard"], true, "list_agents")?;
+    require_size(
+        "workspace_root",
+        &workspace_root,
+        MAX_ROSTER_WORKSPACE_ROOT_BYTES,
+    )?;
+    validate_roster_scope(&scope)?;
+    let workspace_path =
+        resolve_workspace_root_for_command(webview.label(), &workspace_root, &state).await?;
+    let user_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let entries = collect_agents(&workspace_path, &user_home)?;
+    Ok(entries.into_iter().filter(|e| e.matches(&scope)).collect())
+}
+
+/// F-591: list providers, filtered by [`forge_core::RosterScope`].
+///
+/// Returns one entry per built-in provider id (`anthropic`, `openai`,
+/// `ollama`) plus any user-defined `[providers.custom_openai.<name>]`
+/// entries from merged settings (F-585), each surfaced as
+/// `custom_openai:<name>`. Each entry's source scope is `Provider { id }`,
+/// so a `SessionWide` filter returns all of them, a `Provider(id)` filter
+/// returns just that provider, and an `Agent(_)` filter returns nothing
+/// (provider-binding-per-agent is reserved for a later phase).
+#[tauri::command]
+pub async fn list_providers<R: Runtime>(
+    workspace_root: String,
+    scope: forge_core::RosterScope,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+) -> Result<Vec<forge_core::ScopedRosterEntry>, String> {
+    require_window_label_in(&webview, &["dashboard"], true, "list_providers")?;
+    require_size(
+        "workspace_root",
+        &workspace_root,
+        MAX_ROSTER_WORKSPACE_ROOT_BYTES,
+    )?;
+    validate_roster_scope(&scope)?;
+    let workspace_path =
+        resolve_workspace_root_for_command(webview.label(), &workspace_root, &state).await?;
+    let user_dir = resolve_user_config_dir(&state);
+    let settings = load_merged_in(user_dir.as_deref(), &workspace_path)
+        .await
+        .map_err(|e| e.to_string())?;
+    let entries = collect_providers(&settings);
+    Ok(entries.into_iter().filter(|e| e.matches(&scope)).collect())
 }

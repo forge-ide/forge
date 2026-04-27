@@ -13,7 +13,8 @@ Canonical types, identifiers, and shared utilities for the Forge workspace. Ever
 - `event::Event` — the append-only event variant emitted to `events.jsonl`; re-exported alongside `ApprovalPreview`, `ApprovalSource`, `ContextRef`, and `EndReason`.
 - `event_log::{EventLog, read_since, MAX_LINE_BYTES}` — the bounded NDJSON writer/reader pair used by `forge-session`.
 - `transcript::Transcript` — in-memory replay of an event stream.
-- `types::{ApprovalScope, CompactTrigger, RosterScope, SessionPersistence, SessionState}` — the small enum vocabulary that flows through approvals, compaction, and session lifecycle.
+- `types::{ApprovalScope, CompactTrigger, SessionPersistence, SessionState}` — the small enum vocabulary that flows through approvals, compaction, and session lifecycle.
+- `roster::{RosterEntry, RosterScope, ScopedRosterEntry, McpId}` — F-591 catalog wire shapes shared by the `list_*(scope)` IPC commands.
 - `workspace` / `workspaces` — workspace root detection and `.forge/` directory management.
 - `error::{ForgeError, Result}` — the workspace-wide error type and result alias.
 

@@ -8,6 +8,7 @@ pub mod ids;
 pub mod mcp_state;
 pub mod meta;
 pub mod process;
+pub mod roster;
 pub mod runtime_dir;
 pub mod settings;
 pub mod skill;
@@ -28,6 +29,7 @@ pub use ids::{
     WorkspaceId,
 };
 pub use mcp_state::{McpStateEvent, ServerState};
+pub use roster::{McpId, RosterEntry, RosterScope, ScopedRosterEntry};
 pub use settings::{
     AppSettings, AuthShapeSettings, CustomOpenAiEntry, NotificationMode, NotificationsSettings,
     ProvidersSettings, SessionMode, WindowsSettings,
@@ -36,6 +38,6 @@ pub use skill::{Skill, SkillId, SkillIdError};
 pub use tool::Tool;
 pub use transcript::{apply_superseded, Transcript};
 pub use types::{
-    ApprovalLevel, ApprovalScope, CompactTrigger, RerunVariant, RosterScope, SessionPersistence,
-    SessionState, StepKind, StepOutcome, TokenUsage,
+    ApprovalLevel, ApprovalScope, CompactTrigger, RerunVariant, SessionPersistence, SessionState,
+    StepKind, StepOutcome, TokenUsage,
 };
