@@ -208,14 +208,14 @@ describe('ContainerRuntimeBanner (F-597)', () => {
     expect(banner.textContent).toContain('rootless=false');
   });
 
-  it('uses role="status" for ARIA accessibility', () => {
+  it('uses role="alert" so screen readers announce runtime failure assertively', () => {
     const { getByTestId } = render(() => (
       <ContainerRuntimeBanner
         status={{ kind: 'missing', tool: 'podman' }}
         onDismiss={() => undefined}
       />
     ));
-    expect(getByTestId('container-runtime-banner').getAttribute('role')).toBe('status');
+    expect(getByTestId('container-runtime-banner').getAttribute('role')).toBe('alert');
   });
 
   it('clicking "DON\'T SHOW AGAIN" calls the onDismiss handler', () => {

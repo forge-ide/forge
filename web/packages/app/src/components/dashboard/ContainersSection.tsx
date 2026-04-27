@@ -362,7 +362,7 @@ const LogsFlyout: Component<LogsFlyoutProps> = (props) => {
             </p>
           )}
         </Show>
-        <pre class="containers-section__log-pane" tabindex="0">
+        <pre class="containers-section__log-pane" tabIndex={0}>
           <For each={lines()}>
             {(l) => (
               <div
@@ -402,9 +402,10 @@ interface ContainerRuntimeBannerProps {
  * `dashboard.container_banner_dismissed = true` so the banner stays
  * gone across launches.
  *
- * `role="status"` (not `alert`) — the runtime probe is informational,
- * not a hard error: sessions transparently fall back to Level-1
- * isolation per F-596.
+ * `role="alert"` — the headline copy reports the runtime as
+ * "broken / unavailable" which is semantically an assertive announcement
+ * for screen-reader users, even though sessions still fall back to
+ * Level-1 isolation per F-596.
  */
 export const ContainerRuntimeBanner: Component<ContainerRuntimeBannerProps> = (props) => {
   const headline = () => bannerHeadline(props.status);
@@ -414,7 +415,7 @@ export const ContainerRuntimeBanner: Component<ContainerRuntimeBannerProps> = (p
   return (
     <div
       class="containers-banner"
-      role="status"
+      role="alert"
       data-testid="container-runtime-banner"
       aria-label={headline()}
     >
