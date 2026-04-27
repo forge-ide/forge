@@ -23,6 +23,7 @@ fn agent_def(name: &str, isolation: Isolation) -> AgentDef {
         body: String::new(),
         allowed_paths: vec![],
         isolation,
+        memory_enabled: false,
     }
 }
 

@@ -211,6 +211,7 @@ impl Orchestrator {
     ///     body: "You review diffs.".into(),
     ///     allowed_paths: vec![],
     ///     isolation: Isolation::Process,
+    ///     memory_enabled: false,
     /// };
     /// let orchestrator = Orchestrator::new();
     /// let instance = orchestrator.spawn(def, SpawnContext::user()).await?;

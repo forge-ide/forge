@@ -120,6 +120,7 @@ async fn build_agent_runtime(workspace_path: Option<&Path>) -> Option<AgentRunti
         body: String::new(),
         allowed_paths: vec![],
         isolation: forge_agents::Isolation::Process,
+        memory_enabled: false,
     };
     let root_instance = match orchestrator
         .spawn(root_def, forge_agents::SpawnContext::user())
@@ -141,6 +142,106 @@ async fn build_agent_runtime(workspace_path: Option<&Path>) -> Option<AgentRunti
         agent_defs: Arc::new(defs),
         parent_instance_id: root_instance.id,
     })
+}
+
+/// F-601: resolve the active agent's cross-session memory.
+///
+/// Returns `(memory_body, memory_binding)`:
+///
+/// - `memory_body`: the markdown body to append under `## Memory` after
+///   `AGENTS.md`, or `None` if memory is disabled / unavailable.
+/// - `memory_binding`: the [`MemoryWriteBinding`] used by the dispatcher
+///   cache to register `memory.write`, or `None` if memory is disabled.
+///
+/// Selection rules:
+///
+/// 1. The active agent name is the `active_agent` parameter — passed in
+///    by the caller (typically the Tauri shell, which knows which agent
+///    each window is targeting). `None` or an empty/whitespace string →
+///    memory off (returns `(None, None)`); the session behaves exactly
+///    as before F-601.
+/// 2. If the named agent is not found among loaded defs, memory stays off
+///    and we log at WARN.
+/// 3. If the agent def has `memory_enabled: false`, memory stays off — the
+///    per-agent flag defaults OFF as documented.
+/// 4. Otherwise, build a [`MemoryStore`] anchored at the platform config
+///    dir and try to load the existing file. A missing file yields an
+///    empty body but the binding is still produced so `memory.write` can
+///    create the file on the agent's first write.
+///
+/// Reads are best-effort: a corrupted memory file logs a warning inside
+/// [`MemoryStore::load`] and surfaces as `None` body — the session stays
+/// up.
+async fn resolve_session_memory(
+    runtime: Option<&AgentRuntime>,
+    active_agent: Option<&str>,
+) -> (
+    Option<String>,
+    Option<crate::dispatcher_cache::MemoryWriteBinding>,
+) {
+    let Some(rt) = runtime else {
+        return (None, None);
+    };
+    let Some(active_agent) = active_agent.map(str::trim).filter(|s| !s.is_empty()) else {
+        return (None, None);
+    };
+    let Some(def) = rt.agent_defs.iter().find(|a| a.name == active_agent) else {
+        tracing::warn!(
+            target: "forge_session::server",
+            requested = %active_agent,
+            "active_agent names an agent that is not loaded; memory disabled",
+        );
+        return (None, None);
+    };
+    if !def.memory_enabled {
+        return (None, None);
+    }
+    let Some(store) = forge_agents::MemoryStore::from_home() else {
+        tracing::warn!(
+            target: "forge_session::server",
+            "could not resolve user config directory for cross-session memory; disabling",
+        );
+        return (None, None);
+    };
+    resolve_session_memory_with(active_agent, std::sync::Arc::new(store)).await
+}
+
+/// Pure helper extracted from [`resolve_session_memory`] so the
+/// active-agent → memory binding can be unit-tested without touching the
+/// platform config dir. The caller is responsible for skip / opt-in
+/// gating; this helper assumes the caller has already validated
+/// `active_agent` against a loaded def with `memory_enabled: true`.
+///
+/// Splitting the helper this way is what makes the F-601 regression test
+/// for two concurrent sessions in the same process tractable: the test
+/// spins up two `MemoryStore`s (one per agent) and asserts that each
+/// `active_agent` parameter resolves to its own body. The bug this
+/// guards against — the original `FORGE_ACTIVE_AGENT` env-var read —
+/// would have shared state across the two calls.
+async fn resolve_session_memory_with(
+    active_agent: &str,
+    store: std::sync::Arc<forge_agents::MemoryStore>,
+) -> (
+    Option<String>,
+    Option<crate::dispatcher_cache::MemoryWriteBinding>,
+) {
+    let body = match store.load(active_agent) {
+        Ok(Some(memory)) => Some(memory.body),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(
+                target: "forge_session::server",
+                error = %e,
+                "memory load failed; injection skipped, write tool stays available",
+            );
+            None
+        }
+    };
+    let binding = crate::dispatcher_cache::MemoryWriteBinding {
+        store,
+        agent_id: active_agent.to_string(),
+    };
+    (body, Some(binding))
 }
 
 /// Static name for an `IpcMessage` discriminant — used for diagnostic logging
@@ -498,6 +599,7 @@ pub async fn serve(path: &Path, auto_approve: bool, ephemeral: bool) -> Result<(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -593,6 +695,15 @@ pub async fn serve_with_session<P: Provider + 'static>(
     // contract). `None` keeps the keyless `OllamaProvider` / `MockProvider`
     // path identical to pre-F-587 behaviour.
     credentials: Option<CredentialContext>,
+    // F-601: the agent the session is bound to for cross-session memory
+    // selection. `None` (or empty/whitespace) → memory off and the session
+    // behaves exactly as before F-601. The Tauri shell knows which agent
+    // each window targets and passes it in here; tests pass `None` unless
+    // the test exercises memory injection. Replaces the prior
+    // `FORGE_ACTIVE_AGENT` env-var indirection: a typed parameter is the
+    // only safe way to give different connections in a persistent-mode
+    // daemon distinct active agents.
+    active_agent: Option<String>,
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -639,7 +750,13 @@ pub async fn serve_with_session<P: Provider + 'static>(
     // `ChatRequest.system` (refcount bump), and per-iteration `req.clone()`
     // inside `run_request_loop` is now refcount-only on the prefix even when
     // the prefix is hundreds of KiB.
-    let agents_md: Option<Arc<str>> = match workspace_path.as_deref() {
+    //
+    // F-601: when an active agent is selected via the `active_agent`
+    // parameter and that agent's def has `memory_enabled: true`, the
+    // cross-session memory body is appended after the AGENTS.md prefix
+    // under a `## Memory` heading; both the load and the assembly run
+    // once here so per-turn cost stays at the existing `Arc::clone`.
+    let agents_md_prefix: Option<String> = match workspace_path.as_deref() {
         Some(ws) => match forge_agents::load_agents_md(ws) {
             Ok(Some(content)) => {
                 tracing::warn!(
@@ -647,9 +764,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
                     "AGENTS.md injected into session system prompt; \
                      review the file if this workspace is not fully trusted"
                 );
-                Some(Arc::from(format!(
-                    "\n\n---\nAGENTS.md (workspace):\n{content}"
-                )))
+                Some(format!("\n\n---\nAGENTS.md (workspace):\n{content}"))
             }
             Ok(None) => None,
             Err(e) => {
@@ -726,11 +841,6 @@ pub async fn serve_with_session<P: Provider + 'static>(
         });
     }
 
-    // F-567: the per-session dispatcher cache. Lives across every turn so
-    // the builtins register exactly once and MCP adapters rebuild only
-    // when `mcp_tools_epoch` advances.
-    let dispatcher_cache = crate::dispatcher_cache::DispatcherCache::new(mcp_tools_epoch);
-
     // F-140: session-scoped agent runtime so live turns can actually spawn
     // sub-agents via `agent.spawn`.
     //
@@ -743,8 +853,44 @@ pub async fn serve_with_session<P: Provider + 'static>(
     // + `<home>/.agents` — a failed load downgrades the runtime to
     // `None` so a filesystem blip never kills the whole session, it just
     // reverts to the pre-F-140 "agent runtime not configured" behaviour.
+    //
+    // F-601: built before the dispatcher cache so the active agent's
+    // `memory_enabled` flag can decide whether `memory.write` registers
+    // and whether the memory body is appended to the system prompt.
     let agent_runtime: Option<AgentRuntime> = build_agent_runtime(workspace_path.as_deref()).await;
+
+    // F-601: resolve the active agent + load its memory once per session.
+    //
+    // The active agent is selected via the `active_agent` parameter. When
+    // set and matching a loaded def, the def's `memory_enabled` flag
+    // controls both memory injection and `memory.write` registration.
+    // When `None`, unmatched, or set against a `memory_enabled: false`
+    // def, memory is off — the session behaves exactly as before F-601.
+    let (memory_body, memory_binding) =
+        resolve_session_memory(agent_runtime.as_ref(), active_agent.as_deref()).await;
+
+    // F-601: assemble the final per-turn system prompt by appending the
+    // optional memory body under a `## Memory` heading after AGENTS.md.
+    // Stored as `Arc<str>` so each turn clones the refcount, never the
+    // bytes.
+    let agents_md: Option<Arc<str>> =
+        forge_agents::assemble_system_prompt(agents_md_prefix.as_deref(), memory_body.as_deref())
+            .map(Arc::from);
+
     let agent_runtime = Arc::new(agent_runtime);
+
+    // F-567: the per-session dispatcher cache. Lives across every turn so
+    // the builtins register exactly once and MCP adapters rebuild only
+    // when `mcp_tools_epoch` advances.
+    //
+    // F-601: when the active agent has `memory_enabled: true`,
+    // `memory.write` registers alongside the other built-ins so the agent
+    // can update its own cross-session memory file. Without the binding,
+    // the tool stays unregistered.
+    let dispatcher_cache = match memory_binding {
+        Some(b) => crate::dispatcher_cache::DispatcherCache::with_memory(mcp_tools_epoch, b),
+        None => crate::dispatcher_cache::DispatcherCache::new(mcp_tools_epoch),
+    };
     let workspace = Arc::new(
         workspace
             .map(|w| w.display().to_string())
@@ -1577,6 +1723,57 @@ mod tests {
         assert!(
             msg.contains("not allowed by allowed_paths"),
             "expected path-denied error, got: {msg}"
+        );
+    }
+
+    /// F-601 regression: two concurrent sessions in the same process can
+    /// target different active agents (typed param) and each must receive
+    /// its own memory body.
+    ///
+    /// This is the test that would have caught the original
+    /// `FORGE_ACTIVE_AGENT` env-var bug: a single mutable process-global
+    /// captured at session start meant a second connection (or a second
+    /// `serve_with_session` invocation in the same process) silently
+    /// observed the first active agent's memory. With the typed
+    /// parameter, no shared state — calling `resolve_session_memory_with`
+    /// concurrently with two distinct `active_agent` strings keyed
+    /// against the same store must surface the per-agent body each time.
+    #[tokio::test]
+    async fn concurrent_sessions_with_different_active_agents_get_their_own_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(forge_agents::MemoryStore::new(dir.path()));
+
+        // Seed two distinct memory bodies for two distinct agent ids.
+        store
+            .write("alpha", "alpha body", forge_agents::WriteMode::Append)
+            .unwrap();
+        store
+            .write("beta", "beta body", forge_agents::WriteMode::Append)
+            .unwrap();
+
+        // Resolve concurrently — the typed parameter is the only thing
+        // that distinguishes the two calls. With the prior env-var
+        // implementation, both calls would have observed whichever value
+        // `std::env::var("FORGE_ACTIVE_AGENT")` happened to return.
+        let (a_result, b_result) = tokio::join!(
+            resolve_session_memory_with("alpha", store.clone()),
+            resolve_session_memory_with("beta", store.clone()),
+        );
+
+        let (a_body, a_binding) = a_result;
+        let (b_body, b_binding) = b_result;
+
+        assert_eq!(a_body.as_deref(), Some("alpha body"));
+        assert_eq!(b_body.as_deref(), Some("beta body"));
+        assert_eq!(
+            a_binding.expect("alpha binding").agent_id,
+            "alpha",
+            "binding agent_id must reflect the typed parameter, not shared state"
+        );
+        assert_eq!(
+            b_binding.expect("beta binding").agent_id,
+            "beta",
+            "binding agent_id must reflect the typed parameter, not shared state"
         );
     }
 }

@@ -107,6 +107,7 @@ async fn next_turn_uses_new_provider_after_swap() {
             None,
             None,
             None, // F-587 keyless
+            None, // F-601 active_agent: memory off
         )
         .await
         .ok();

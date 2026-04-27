@@ -27,9 +27,29 @@ use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::tools::{
-    AgentSpawnTool, FsEditTool, FsReadTool, FsWriteTool, McpTool, ShellExecTool, ToolDispatcher,
+    AgentSpawnTool, FsEditTool, FsReadTool, FsWriteTool, McpTool, MemoryWriteTool, ShellExecTool,
+    ToolDispatcher,
 };
+use forge_agents::MemoryStore;
 use forge_mcp::McpManager;
+
+/// F-601: per-agent memory binding consulted by the dispatcher cache.
+///
+/// Built once per session in `serve_with_session` only when the active
+/// agent has `memory_enabled: true`. When `Some`, the cache registers a
+/// [`MemoryWriteTool`] alongside the other built-ins so the agent can
+/// update its own `~/.config/forge/memory/<agent>.md` file. When `None`,
+/// the tool is omitted from the dispatcher entirely — an agent that has
+/// not opted in cannot discover the wire name and the surface area stays
+/// minimal.
+#[derive(Debug, Clone)]
+pub struct MemoryWriteBinding {
+    /// Shared store rooted at `~/.config/forge/memory/`.
+    pub store: Arc<MemoryStore>,
+    /// The agent name keyed against the store — same string used to derive
+    /// the `<agent>.md` filename and the `## Memory` injection.
+    pub agent_id: String,
+}
 
 /// Monotonic counter for the MCP tools-list snapshot.
 ///
@@ -73,6 +93,8 @@ struct CachedDispatcher {
 pub struct DispatcherCache {
     epoch: McpToolsEpoch,
     cache: AsyncMutex<Option<CachedDispatcher>>,
+    /// F-601: when `Some`, every cached dispatcher exposes `memory.write`.
+    memory: Option<MemoryWriteBinding>,
 }
 
 impl DispatcherCache {
@@ -80,6 +102,18 @@ impl DispatcherCache {
         Arc::new(Self {
             epoch,
             cache: AsyncMutex::new(None),
+            memory: None,
+        })
+    }
+
+    /// F-601: build a cache that also registers `memory.write` against the
+    /// agent identified by `binding`. Only called when the active agent
+    /// has opted into cross-session memory.
+    pub fn with_memory(epoch: McpToolsEpoch, binding: MemoryWriteBinding) -> Arc<Self> {
+        Arc::new(Self {
+            epoch,
+            cache: AsyncMutex::new(None),
+            memory: Some(binding),
         })
     }
 
@@ -99,7 +133,7 @@ impl DispatcherCache {
             }
         }
 
-        let dispatcher = build_dispatcher(mcp).await;
+        let dispatcher = build_dispatcher(mcp, self.memory.as_ref()).await;
         let dispatcher = Arc::new(dispatcher);
         *guard = Some(CachedDispatcher {
             epoch: observed_epoch,
@@ -112,7 +146,10 @@ impl DispatcherCache {
 /// Build a fresh dispatcher: register every builtin, then every MCP-server
 /// adapter exposed by `mgr.list().await`. Mirrors the previous in-line body
 /// of `run_turn` exactly so dispatch behavior stays identical.
-async fn build_dispatcher(mcp: Option<&Arc<McpManager>>) -> ToolDispatcher {
+async fn build_dispatcher(
+    mcp: Option<&Arc<McpManager>>,
+    memory: Option<&MemoryWriteBinding>,
+) -> ToolDispatcher {
     let mut dispatcher = ToolDispatcher::new();
     dispatcher
         .register(Box::new(FsReadTool))
@@ -129,6 +166,15 @@ async fn build_dispatcher(mcp: Option<&Arc<McpManager>>) -> ToolDispatcher {
     dispatcher
         .register(Box::new(AgentSpawnTool))
         .expect("agent.spawn must register on a fresh dispatcher");
+
+    if let Some(binding) = memory {
+        dispatcher
+            .register(Box::new(MemoryWriteTool::new(
+                Arc::clone(&binding.store),
+                binding.agent_id.clone(),
+            )))
+            .expect("memory.write must register on a fresh dispatcher");
+    }
 
     if let Some(mgr) = mcp {
         for server in mgr.list().await {
@@ -197,6 +243,52 @@ mod tests {
             assert!(
                 dispatcher.get(name).is_ok(),
                 "builtin {name} must be registered on a fresh cache"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_write_is_omitted_when_binding_absent() {
+        // F-601: an agent that has not opted into memory must not see the
+        // tool. `DispatcherCache::new` creates a cache without a binding;
+        // `memory.write` must be absent.
+        let cache = DispatcherCache::new(McpToolsEpoch::new());
+        let dispatcher = cache.get(None).await;
+        assert!(
+            dispatcher.get("memory.write").is_err(),
+            "memory.write must NOT register without a binding"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_write_is_registered_when_binding_present() {
+        // F-601: when the active agent has `memory_enabled: true`,
+        // `serve_with_session` constructs the cache via `with_memory` and
+        // the resulting dispatcher exposes `memory.write` alongside the
+        // other built-ins.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(MemoryStore::new(dir.path()));
+        let binding = MemoryWriteBinding {
+            store,
+            agent_id: "scribe".to_string(),
+        };
+        let cache = DispatcherCache::with_memory(McpToolsEpoch::new(), binding);
+        let dispatcher = cache.get(None).await;
+        assert!(
+            dispatcher.get("memory.write").is_ok(),
+            "memory.write must register when a binding is present"
+        );
+        // The other built-ins must still register too.
+        for name in [
+            "fs.read",
+            "fs.write",
+            "fs.edit",
+            "shell.exec",
+            "agent.spawn",
+        ] {
+            assert!(
+                dispatcher.get(name).is_ok(),
+                "builtin {name} must still register alongside memory.write"
             );
         }
     }

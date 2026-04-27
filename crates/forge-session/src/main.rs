@@ -68,6 +68,17 @@ async fn main() -> Result<()> {
     let log_path = event_log_path(&session_id, workspace.as_deref());
     let session = Arc::new(Session::create(log_path).await?);
 
+    // F-601: the daemon binary still accepts `FORGE_ACTIVE_AGENT` as the
+    // way an operator (or the Tauri shell launcher) names the agent this
+    // daemon process is bound to. Read once here at startup and hand off
+    // as a typed argument — `serve_with_session` no longer touches the
+    // environment for this concern, which is the fix for the persistent-
+    // mode multi-connection bug where two browser windows could share the
+    // first window's captured env value.
+    let active_agent = std::env::var("FORGE_ACTIVE_AGENT")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+
     // Provider selection (F-038):
     //   1. explicit `--provider <spec>` flag, OR `FORGE_PROVIDER` env, OR
     //   2. Mock when `FORGE_MOCK_SEQUENCE_FILE` is set, OR
@@ -89,6 +100,8 @@ async fn main() -> Result<()> {
                     Some(session_id),
                     // F-587: MockProvider is keyless; no credential pull.
                     None,
+                    // F-601: typed active-agent — `None` here keeps memory off.
+                    active_agent,
                 )
                 .await
             }
@@ -136,6 +149,8 @@ async fn main() -> Result<()> {
                     // providers will wire their LayeredStore + provider id
                     // here when they land.
                     None,
+                    // F-601: typed active-agent — `None` here keeps memory off.
+                    active_agent,
                 )
                 .await
             }
@@ -152,6 +167,8 @@ async fn main() -> Result<()> {
                 Some(session_id),
                 // F-587: MockProvider is keyless.
                 None,
+                // F-601: typed active-agent — `None` here keeps memory off.
+                active_agent,
             )
             .await
         }
