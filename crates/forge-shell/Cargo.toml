@@ -36,6 +36,11 @@ forge-lsp = { path = "../forge-lsp" }
 # manager in-process to pin the "server disabled" error-text contract),
 # but the shell no longer runs a live manager of its own.
 forge-mcp = { path = "../forge-mcp" }
+# F-597: container lifecycle UI on the Dashboard. Reuses F-595's
+# `PodmanRuntime::detect` and `ContainerLogs::logs` so the dashboard's
+# first-run banner and logs viewer share the runtime probe with the
+# session-side Level-2 sandbox.
+forge-oci = { path = "../forge-oci" }
 forge-providers = { path = "../forge-providers" }
 # F-137: `forge-shell` hosts `BackgroundAgentRegistry` (a `forge-session`
 # library type) per-session so the three `start/promote/list_background_agent`

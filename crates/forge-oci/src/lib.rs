@@ -240,6 +240,44 @@ pub enum OciError {
     },
 }
 
+/// One line of captured container output.
+///
+/// Surfaced by [`ContainerLogs::logs`]. The runtime hands back stdout and
+/// stderr interleaved in emission order; the `stream` field tells the UI
+/// which pipe each line came from so it can render them in different
+/// colours without a second IPC round-trip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogLine {
+    /// `"stdout"` or `"stderr"` — the pipe the line came from.
+    pub stream: String,
+    /// Captured line text (newline already stripped).
+    pub line: String,
+    /// RFC-3339 timestamp the runtime attached to the line. `None` when
+    /// the underlying call did not request timestamps.
+    pub timestamp: Option<String>,
+}
+
+/// Read-recent-logs surface. Added in F-597 as a non-breaking extension to
+/// [`ContainerRuntime`] so the dashboard's logs viewer can stream output
+/// from a running container without expanding the core trait.
+///
+/// Implementors return logs in emission order (oldest first). Pagination
+/// is the caller's responsibility — `since` lets the dashboard poll
+/// incrementally without re-fetching the full transcript.
+#[async_trait]
+pub trait ContainerLogs: Send + Sync {
+    /// Fetch the recent log lines for `handle`. `since` is an optional
+    /// RFC-3339 timestamp; lines emitted at or after `since` are returned.
+    /// `tail` caps the number of lines returned (most-recent N) to keep
+    /// the IPC payload bounded for huge workloads.
+    async fn logs(
+        &self,
+        handle: &ContainerHandle,
+        since: Option<&str>,
+        tail: Option<usize>,
+    ) -> Result<Vec<LogLine>, OciError>;
+}
+
 /// Container lifecycle surface. See module docs.
 #[async_trait]
 pub trait ContainerRuntime: Send + Sync {

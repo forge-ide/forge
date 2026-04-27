@@ -334,6 +334,7 @@ describe('StatusBar — notification modes', () => {
       windows: { session_mode: 'single' },
       providers: { custom_openai: {} },
       catalog: { enabled: {} },
+      dashboard: { container_banner_dismissed: false },
     });
     const bus = fakeBus();
     const list = vi.fn().mockResolvedValue([running('a1', 'writer')]);

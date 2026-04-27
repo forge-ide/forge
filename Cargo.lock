@@ -1617,6 +1617,7 @@ dependencies = [
  "forge-ipc",
  "forge-lsp",
  "forge-mcp",
+ "forge-oci",
  "forge-providers",
  "forge-session",
  "forge-term",

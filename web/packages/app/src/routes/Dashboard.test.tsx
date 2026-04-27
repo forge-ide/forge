@@ -1,8 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, waitFor } from '@solidjs/testing-library';
 import { MemoryRouter, Route } from '@solidjs/router';
 import { Dashboard } from './Dashboard';
 import { setInvokeForTesting } from '../lib/tauri';
+
+// F-597: ContainersSection subscribes to a Tauri event via
+// `@tauri-apps/api/event`. Stub it so the listen() call resolves to a
+// no-op unlisten in jsdom (no Tauri runtime present).
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(async () => () => undefined),
+}));
 
 describe('Dashboard', () => {
   beforeEach(() => {
@@ -21,6 +28,11 @@ describe('Dashboard', () => {
         }
         if (cmd === 'session_list') return [];
         if (cmd === 'has_credential') return true;
+        // F-597: ContainersSection probes the runtime + lists containers
+        // on mount. Hermetic responses keep tests deterministic and skip
+        // the first-run banner (status: available).
+        if (cmd === 'detect_container_runtime') return { kind: 'available' };
+        if (cmd === 'list_active_containers') return [];
         return undefined;
       }) as never,
     );
