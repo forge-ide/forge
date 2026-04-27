@@ -57,7 +57,16 @@ pub enum SkillScope {
 }
 
 impl SkillScope {
-    /// Resolve the on-disk scope root (`.skills/` lives directly under it).
+    /// Path that the F-589 loader expects: the *parent* of `.skills/`, not
+    /// the `.skills/` directory itself. `load_user_skills` and
+    /// `load_workspace_skills` both append `.skills/` internally — passing
+    /// them a path that already ends in `.skills` would make them look for
+    /// `.skills/.skills/` and silently return empty.
+    ///
+    /// Pinning this contract by name: if you need the *directory containing
+    /// the installed skill folders* (where each skill lives at
+    /// `<scope_root>/.skills/<id>/SKILL.md`), call [`Self::skills_dir`]
+    /// instead.
     fn scope_root(&self, workspace_root: &Path, home: &Path) -> PathBuf {
         match self {
             SkillScope::User => home.to_path_buf(),
@@ -65,6 +74,10 @@ impl SkillScope {
         }
     }
 
+    /// `<scope_root>/.skills/` — the directory whose immediate children are
+    /// per-skill folders. Used by install/remove which write directly under
+    /// `.skills/`. Distinct from [`Self::scope_root`], which is what the
+    /// F-589 loader expects.
     fn skills_dir(&self, workspace_root: &Path, home: &Path) -> PathBuf {
         self.scope_root(workspace_root, home).join(".skills")
     }
@@ -111,6 +124,11 @@ pub trait Resolver {
 /// Path canonicalization runs through [`fs::canonicalize`] which resolves
 /// symlinks and normalizes `..` segments. Symlink loops surface as a
 /// canonicalize IO error and are treated as a refusal.
+///
+/// The install step that follows (see [`install_resolved`]) additionally
+/// refuses to copy any symlink inside the resolved directory whose target
+/// escapes the source root, so a hostile skill folder cannot smuggle a
+/// link to e.g. `/etc/passwd` into the installed scope.
 pub struct LocalPathResolver {
     pub source: PathBuf,
     pub cwd: PathBuf,
@@ -258,10 +276,22 @@ impl Resolver for GitResolver<'_> {
             let cache_dir_str = cache_dir
                 .to_str()
                 .ok_or_else(|| anyhow!("cache path is not valid UTF-8"))?;
+            // `--` separator before the URL: defense-in-depth against
+            // flag-injection payloads slipping through `looks_like_git_url`.
+            // Anything after `--` is treated by `git` as a positional arg,
+            // not a flag, so a hostile URL like `--upload-pack=/bin/evil`
+            // cannot be reinterpreted as a git option.
             self.runner
                 .run(
                     "git",
-                    &["clone", "--quiet", "--depth=1", &self.url, cache_dir_str],
+                    &[
+                        "clone",
+                        "--quiet",
+                        "--depth=1",
+                        "--",
+                        &self.url,
+                        cache_dir_str,
+                    ],
                     None,
                 )
                 .with_context(|| format!("cloning {}", self.url))?;
@@ -297,6 +327,16 @@ pub fn default_cache_root(home: &Path) -> PathBuf {
 /// Anything else is a local path. We deliberately do not heuristically treat
 /// `<owner>/<repo>` as GitHub shorthand; the user must spell out the full URL.
 pub fn looks_like_git_url(source: &str) -> bool {
+    // Defense-in-depth against flag injection (e.g. `--upload-pack=/bin/evil`):
+    // a URL that begins with `-` is never a real URL, and even if `--` would
+    // separate it from `git clone`'s flags, classifying it as a URL would
+    // route it through the git resolver where it has no business going.
+    // Reject explicitly so the classification is independent of the prefix
+    // list below — a future addition there can't accidentally let a
+    // leading-dash payload through.
+    if source.starts_with('-') {
+        return false;
+    }
     if source.starts_with("https://")
         || source.starts_with("http://")
         || source.starts_with("git://")
@@ -342,13 +382,20 @@ pub fn install_resolved(
         );
     }
 
-    copy_dir_recursive(&resolved.source_dir, &target).with_context(|| {
+    // Copy into the target. On any failure, roll back the partial copy so
+    // a refused install (e.g. an escape-symlink) leaves no trace behind.
+    if let Err(err) = copy_dir_recursive(&resolved.source_dir, &target).with_context(|| {
         format!(
             "copying {} -> {}",
             resolved.source_dir.display(),
             target.display()
         )
-    })?;
+    }) {
+        // Best-effort cleanup; if removal itself fails (e.g. permissions),
+        // surface the original install error rather than the cleanup error.
+        let _ = fs::remove_dir_all(&target);
+        return Err(err);
+    }
 
     Ok(target)
 }
@@ -447,7 +494,22 @@ pub fn render_list(rows: &[InstalledSkillRow], out: &mut impl Write) -> Result<(
     Ok(())
 }
 
+/// Copy `src` into `dst`, refusing any symlink whose canonical target
+/// escapes the original source root.
+///
+/// Path-traversal hardening (F-590 review): a malicious skill folder could
+/// contain `evil -> /etc/passwd`. Without an explicit escape check, the
+/// copy would happily exfiltrate the linked file into the user's installed
+/// scope. We canonicalize the source root once at the top of the recursion
+/// and pass it through; every symlink is canonicalized and rejected unless
+/// its resolved target stays under that root.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    let source_root = fs::canonicalize(src)
+        .with_context(|| format!("canonicalizing source dir {}", src.display()))?;
+    copy_dir_recursive_inner(src, dst, &source_root)
+}
+
+fn copy_dir_recursive_inner(src: &Path, dst: &Path, source_root: &Path) -> Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
@@ -462,20 +524,31 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
             continue;
         }
 
-        if file_type.is_dir() {
-            copy_dir_recursive(&from, &to)?;
-        } else if file_type.is_symlink() {
+        if file_type.is_symlink() {
             // Resolve symlinks at copy time. A skill source that uses a
             // symlink should land as a regular file in the target so the
-            // installed copy is self-contained.
+            // installed copy is self-contained — but only if the target
+            // stays within the original source root. Otherwise we refuse
+            // loudly rather than silently skip, so a hostile skill can't
+            // smuggle `/etc/passwd` past install by hiding it behind a link.
             let resolved = fs::canonicalize(&from)
                 .with_context(|| format!("resolving symlink {}", from.display()))?;
+            if !resolved.starts_with(source_root) {
+                bail!(
+                    "skill contains symlink that escapes source dir: {} -> {} (source root: {})",
+                    from.display(),
+                    resolved.display(),
+                    source_root.display(),
+                );
+            }
             let resolved_meta = fs::metadata(&resolved)?;
             if resolved_meta.is_dir() {
-                copy_dir_recursive(&resolved, &to)?;
+                copy_dir_recursive_inner(&resolved, &to, source_root)?;
             } else {
                 fs::copy(&resolved, &to)?;
             }
+        } else if file_type.is_dir() {
+            copy_dir_recursive_inner(&from, &to, source_root)?;
         } else {
             fs::copy(&from, &to)?;
         }
@@ -640,6 +713,109 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn install_refuses_symlink_pointing_outside_source_dir() {
+        // Path-traversal hardening: a malicious skill folder that contains
+        // `evil -> /etc/passwd` (or any target outside the source root) must
+        // not let `forge skill install` exfiltrate that file into the user's
+        // installed scope. The DoD calls for "safe canonicalization", which
+        // we read as "refuse symlinks that escape the source dir."
+        use std::os::unix::fs::symlink;
+
+        let src = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let secret = outside.path().join("secret.txt");
+        fs::write(&secret, "should never be copied").unwrap();
+
+        let workspace = tempdir().unwrap();
+        let home = tempdir().unwrap();
+
+        let skill_dir = src.path().join("evil");
+        write_skill_md(&skill_dir, good_frontmatter());
+        // Symlink inside the skill folder pointing at a file *outside* it.
+        symlink(&secret, skill_dir.join("evil")).unwrap();
+
+        let resolved = LocalPathResolver::new(&skill_dir, src.path())
+            .resolve()
+            .unwrap();
+        let err = install_resolved(&resolved, SkillScope::User, workspace.path(), home.path())
+            .unwrap_err();
+        let msg = format!("{err:#}").to_lowercase();
+        assert!(
+            msg.contains("symlink") && (msg.contains("escape") || msg.contains("outside")),
+            "expected escape/outside symlink error, got: {err:#}",
+        );
+
+        // Nothing leaked into the user scope.
+        let installed_root = home.path().join(".skills").join("evil");
+        assert!(
+            !installed_root.exists(),
+            "install must be transactional or refuse cleanly; nothing should be copied",
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn install_refuses_symlink_pointing_at_directory_outside_source_dir() {
+        use std::os::unix::fs::symlink;
+
+        let src = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        fs::create_dir_all(outside.path().join("loot")).unwrap();
+        fs::write(outside.path().join("loot").join("a"), "x").unwrap();
+
+        let workspace = tempdir().unwrap();
+        let home = tempdir().unwrap();
+
+        let skill_dir = src.path().join("evil-dir");
+        write_skill_md(&skill_dir, good_frontmatter());
+        symlink(outside.path().join("loot"), skill_dir.join("loot")).unwrap();
+
+        let resolved = LocalPathResolver::new(&skill_dir, src.path())
+            .resolve()
+            .unwrap();
+        let err = install_resolved(&resolved, SkillScope::User, workspace.path(), home.path())
+            .unwrap_err();
+        let msg = format!("{err:#}").to_lowercase();
+        assert!(
+            msg.contains("symlink") && (msg.contains("escape") || msg.contains("outside")),
+            "expected escape/outside symlink error, got: {err:#}",
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn install_allows_symlink_that_stays_inside_source_dir() {
+        // Negative-control: symlinks whose canonical target stays within the
+        // source dir are still allowed, so the guard does not regress
+        // legitimate skills that use internal symlinks (e.g. a stable
+        // alias for a versioned reference file).
+        use std::os::unix::fs::symlink;
+
+        let src = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let home = tempdir().unwrap();
+
+        let skill_dir = src.path().join("alias");
+        write_skill_md(&skill_dir, good_frontmatter());
+        fs::create_dir_all(skill_dir.join("references")).unwrap();
+        let real = skill_dir.join("references").join("v1.txt");
+        fs::write(&real, "real contents").unwrap();
+        symlink(&real, skill_dir.join("latest.txt")).unwrap();
+
+        let resolved = LocalPathResolver::new(&skill_dir, src.path())
+            .resolve()
+            .unwrap();
+        let installed =
+            install_resolved(&resolved, SkillScope::User, workspace.path(), home.path())
+                .expect("internal symlink must still install");
+        assert_eq!(
+            fs::read_to_string(installed.join("latest.txt")).unwrap(),
+            "real contents",
+        );
+    }
+
+    #[test]
     fn install_refuses_to_overwrite_existing_skill() {
         let src = tempdir().unwrap();
         let workspace = tempdir().unwrap();
@@ -786,6 +962,9 @@ mod tests {
     #[derive(Default)]
     struct RecordingRunner {
         log: RefCell<Vec<String>>,
+        /// Per-call argv (excluding the program), so tests can assert the
+        /// position of specific tokens like `--` without splitting strings.
+        argv: RefCell<Vec<Vec<String>>>,
         // Hooks that prep the cache dir as if `git` had run, so the resolver
         // can find a `.git` and a `SKILL.md`.
         clone_writes_skill: bool,
@@ -800,6 +979,9 @@ mod tests {
                 cwd.map(|p| p.display().to_string())
             );
             self.log.borrow_mut().push(line);
+            self.argv
+                .borrow_mut()
+                .push(args.iter().map(|s| s.to_string()).collect());
             if self.clone_writes_skill && program == "git" && args.first() == Some(&"clone") {
                 let target = PathBuf::from(args.last().unwrap());
                 fs::create_dir_all(target.join(".git")).unwrap();
@@ -847,6 +1029,51 @@ mod tests {
         assert_eq!(log.len(), 2, "expected fetch + reset, got: {log:?}");
         assert!(log[0].contains("fetch"));
         assert!(log[1].contains("reset --quiet --hard origin/HEAD"));
+    }
+
+    #[test]
+    fn git_clone_passes_double_dash_before_url_to_block_flag_injection() {
+        // Hardening (post-merge review): a user-supplied URL like
+        // `--upload-pack=/bin/evil` would be parsed as a flag by `git clone`
+        // unless we pass `--` before it. `looks_like_git_url()` blocks the
+        // most obvious payloads, but a defense-in-depth `--` separator
+        // costs nothing and matches F-595's pattern.
+        let cache = tempdir().unwrap();
+        let runner = RecordingRunner {
+            clone_writes_skill: true,
+            ..Default::default()
+        };
+        let url = "https://example.com/skills/planner.git";
+        let resolver = GitResolver::new(url, cache.path(), &runner);
+
+        resolver.resolve().unwrap();
+
+        let argv = runner.argv.borrow();
+        assert_eq!(argv.len(), 1, "expected exactly one git invocation");
+        let clone_argv = &argv[0];
+        let dash_dash = clone_argv
+            .iter()
+            .position(|a| a == "--")
+            .expect("git clone argv must contain `--`");
+        let url_pos = clone_argv
+            .iter()
+            .position(|a| a == url)
+            .expect("git clone argv must contain the URL");
+        assert_eq!(
+            dash_dash + 1,
+            url_pos,
+            "`--` must immediately precede the URL: {clone_argv:?}",
+        );
+    }
+
+    #[test]
+    fn looks_like_git_url_rejects_leading_dash_payloads() {
+        // Defense-in-depth (post-merge review): URLs that begin with `-`
+        // are flag-injection payloads, not real URLs. Reject them at the
+        // classification step so they never reach the git argv.
+        assert!(!looks_like_git_url("-evil"));
+        assert!(!looks_like_git_url("--upload-pack=/bin/evil"));
+        assert!(!looks_like_git_url("--config=core.gitProxy=http://evil"));
     }
 
     #[test]
