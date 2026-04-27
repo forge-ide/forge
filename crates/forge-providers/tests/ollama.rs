@@ -49,6 +49,7 @@ async fn chat_streams_text_tool_call_and_done() {
     let req = ChatRequest {
         system: Some(std::sync::Arc::from("be helpful")),
         messages: vec![user_msg("hi")],
+        parallel_tool_calls_allowed: false,
     };
     let mut stream = provider.chat(req).await.expect("chat call succeeds");
 
@@ -85,6 +86,7 @@ async fn chat_maps_http_errors() {
     let req = ChatRequest {
         system: None,
         messages: vec![user_msg("hi")],
+        parallel_tool_calls_allowed: false,
     };
 
     let err = match provider.chat(req).await {
@@ -125,6 +127,7 @@ async fn chat_oversized_line_yields_typed_error_and_terminates() {
     let req = ChatRequest {
         system: None,
         messages: vec![user_msg("hi")],
+        parallel_tool_calls_allowed: false,
     };
     let mut stream = provider.chat(req).await.expect("chat call succeeds");
 
@@ -212,6 +215,7 @@ async fn chat_idle_timeout_yields_typed_error_and_terminates() {
     let req = ChatRequest {
         system: None,
         messages: vec![user_msg("hi")],
+        parallel_tool_calls_allowed: false,
     };
 
     // The chat() call itself must not hang after headers arrive.
@@ -289,6 +293,7 @@ async fn chat_half_open_connect_times_out_within_read_timeout() {
     let req = ChatRequest {
         system: None,
         messages: vec![user_msg("hi")],
+        parallel_tool_calls_allowed: false,
     };
 
     let start = std::time::Instant::now();
