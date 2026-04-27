@@ -1,0 +1,44 @@
+/* F-592: Catalog route shell. The pane itself supplies its own surface
+ * styling; the route is the page-level wrapper that gives it breathing
+ * room and hosts the missing-workspace fallback copy. */
+
+.catalog-route {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+  padding: var(--sp-6);
+  min-height: 100vh;
+  background: var(--color-bg);
+}
+
+.catalog-route__missing {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-6);
+  background: var(--color-surface-1);
+  border: 1px dashed var(--color-border-2);
+  border-radius: var(--r-sm);
+  font-family: var(--font-body);
+  color: var(--color-text-primary);
+}
+
+.catalog-route__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 18px;
+}
+
+.catalog-route__hint {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.catalog-route__hint code {
+  color: var(--color-ember-300);
+}

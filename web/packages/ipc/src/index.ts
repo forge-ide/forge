@@ -7,6 +7,7 @@ export type { BgAgentSummary } from './generated/BgAgentSummary';
 export type { ApprovalEntry } from './generated/ApprovalEntry';
 export type { ApprovalLevel } from './generated/ApprovalLevel';
 export type { ApprovalScope } from './generated/ApprovalScope';
+export type { CatalogSettings } from './generated/CatalogSettings';
 export type { CompactTrigger } from './generated/CompactTrigger';
 export type { FetchedUrl } from './generated/FetchedUrl';
 export type { FileContent } from './generated/FileContent';

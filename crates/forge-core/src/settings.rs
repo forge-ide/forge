@@ -28,7 +28,7 @@
 //!    mutate the raw TOML tree, not re-serialize `AppSettings`, or the
 //!    merge's "absent-means-absent" semantic silently collapses.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -181,6 +181,27 @@ pub struct ProvidersSettings {
     pub custom_openai: BTreeMap<String, CustomOpenAiEntry>,
 }
 
+/// `[catalog]` section (F-592): per-(kind,id) enable flags for the Skills /
+/// MCP / Agents catalog UI.
+///
+/// Wire shape mirrors the dotted-key path the frontend writes via
+/// `set_setting`: `catalog.enabled.<kind>.<id> = <bool>`. Both levels are
+/// open maps — adding a new kind (or a new asset id within a kind) requires
+/// zero schema churn. Absent entries default to "enabled = true" at the read
+/// site.
+///
+/// `HashMap` (rather than `BTreeMap`) is intentional: order does not matter
+/// for catalog flags, and the dotted-key write path inserts arbitrary string
+/// keys; we never enumerate them in a stable order on the wire.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct CatalogSettings {
+    /// `enabled.<kind>.<id> = <bool>`. Outer key is the catalog tab
+    /// (`"skills"`, `"mcp"`, `"agents"`); inner key is the asset id.
+    #[serde(default)]
+    pub enabled: HashMap<String, HashMap<String, bool>>,
+}
+
 /// Top-level settings shape persisted to `settings.toml`.
 ///
 /// Intentionally does **not** carry `#[serde(deny_unknown_fields)]` — the
@@ -200,6 +221,10 @@ pub struct AppSettings {
     /// to an empty map.
     #[serde(default)]
     pub providers: ProvidersSettings,
+    /// Catalog UI enable/disable flags (F-592). Open-shape map; absent =
+    /// enabled.
+    #[serde(default)]
+    pub catalog: CatalogSettings,
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +474,7 @@ mod tests {
                 session_mode: SessionMode::Split,
             },
             providers: ProvidersSettings::default(),
+            catalog: CatalogSettings::default(),
         };
         let body = toml::to_string(&cfg).unwrap();
         let decoded: AppSettings = toml::from_str(&body).unwrap();
@@ -567,6 +593,7 @@ x = 1
                 session_mode: SessionMode::Split,
             },
             providers: ProvidersSettings::default(),
+            catalog: CatalogSettings::default(),
         };
         save_workspace_settings(dir.path(), &cfg).await.unwrap();
         let loaded = load_workspace_settings(dir.path()).await.unwrap();
@@ -582,6 +609,7 @@ x = 1
             },
             windows: WindowsSettings::default(),
             providers: ProvidersSettings::default(),
+            catalog: CatalogSettings::default(),
         };
         save_user_settings_in(dir.path(), &cfg).await.unwrap();
         let loaded = load_user_settings_in(dir.path()).await.unwrap();
@@ -607,6 +635,7 @@ x = 1
             },
             windows: WindowsSettings::default(),
             providers: ProvidersSettings::default(),
+            catalog: CatalogSettings::default(),
         };
         save_workspace_settings(dir.path(), &cfg).await.unwrap();
 
@@ -641,6 +670,7 @@ x = 1
                     session_mode: SessionMode::Split,
                 },
                 providers: ProvidersSettings::default(),
+                catalog: CatalogSettings::default(),
             },
         )
         .await
@@ -686,6 +716,7 @@ x = 1
                 session_mode: SessionMode::Split,
             },
             providers: ProvidersSettings::default(),
+            catalog: CatalogSettings::default(),
         };
         save_user_settings_in(user_dir.path(), &user_cfg)
             .await
@@ -931,6 +962,7 @@ api_key = "sk-test"
                 custom_openai: entries,
                 ..Default::default()
             },
+            catalog: CatalogSettings::default(),
         };
         let serialized = toml::to_string(&cfg).unwrap();
         let reparsed: AppSettings = toml::from_str(&serialized).unwrap();
@@ -969,6 +1001,7 @@ api_key = "sk-test"
                 custom_openai: entries,
                 ..Default::default()
             },
+            catalog: CatalogSettings::default(),
         }
     }
 
@@ -1083,6 +1116,123 @@ api_key = "sk-test"
             dump.contains("<redacted>"),
             "Debug output must signal redaction: {dump}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Catalog (F-592) — round-trip + apply_setting_update path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn catalog_section_absent_yields_empty_map() {
+        // Backwards-compat: pre-F-592 settings files have no `[catalog]`
+        // section; they must continue to load and produce an empty enabled
+        // map.
+        let body = r#"
+[notifications]
+bg_agents = "os"
+"#;
+        let parsed: AppSettings = toml::from_str(body).unwrap();
+        assert!(parsed.catalog.enabled.is_empty());
+    }
+
+    #[test]
+    fn catalog_enable_persists_through_apply_setting_update() {
+        // The exact dotted-key path the F-592 frontend writes:
+        // `catalog.enabled.<kind>.<id>`. apply_setting_update must accept the
+        // boolean leaf, validate it against the schema, and round-trip the
+        // value through to the parsed `AppSettings`.
+        let updated = apply_setting_update(
+            "",
+            "catalog.enabled.skills.typescript-review",
+            toml::Value::Boolean(false),
+        )
+        .unwrap();
+        let reparsed: AppSettings = toml::from_str(&updated).unwrap();
+        let kind_map = reparsed
+            .catalog
+            .enabled
+            .get("skills")
+            .expect("skills kind map");
+        assert_eq!(kind_map.get("typescript-review"), Some(&false));
+    }
+
+    #[test]
+    fn catalog_multiple_kinds_and_ids_round_trip() {
+        // Layered writes: two kinds, two ids each. Verifies the nested-map
+        // shape survives `apply_setting_update`'s composability.
+        let mut s = String::new();
+        s = apply_setting_update(
+            &s,
+            "catalog.enabled.skills.alpha",
+            toml::Value::Boolean(true),
+        )
+        .unwrap();
+        s = apply_setting_update(
+            &s,
+            "catalog.enabled.skills.beta",
+            toml::Value::Boolean(false),
+        )
+        .unwrap();
+        s = apply_setting_update(&s, "catalog.enabled.mcp.gamma", toml::Value::Boolean(false))
+            .unwrap();
+
+        let reparsed: AppSettings = toml::from_str(&s).unwrap();
+        let skills = reparsed.catalog.enabled.get("skills").unwrap();
+        assert_eq!(skills.get("alpha"), Some(&true));
+        assert_eq!(skills.get("beta"), Some(&false));
+        let mcp = reparsed.catalog.enabled.get("mcp").unwrap();
+        assert_eq!(mcp.get("gamma"), Some(&false));
+    }
+
+    #[test]
+    fn catalog_rejects_non_boolean_leaf() {
+        // The schema declares `bool`; a string must fail validation rather
+        // than land on disk.
+        let err = apply_setting_update(
+            "",
+            "catalog.enabled.skills.alpha",
+            toml::Value::String("yes".into()),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err}").contains("invalid setting value"),
+            "expected validation failure, got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_set_then_load_merged_round_trips() {
+        // Full round-trip through the same load_merged_in path the IPC layer
+        // uses: write workspace TOML carrying a catalog enable flag, then
+        // verify it surfaces in the merged AppSettings.
+        let user_dir = TempDir::new().unwrap();
+        let workspace_dir = TempDir::new().unwrap();
+
+        tokio::fs::create_dir_all(workspace_dir.path().join(".forge"))
+            .await
+            .unwrap();
+        let body = apply_setting_update(
+            "",
+            "catalog.enabled.agents.background-runner",
+            toml::Value::Boolean(false),
+        )
+        .unwrap();
+        tokio::fs::write(
+            workspace_dir.path().join(".forge").join("settings.toml"),
+            body,
+        )
+        .await
+        .unwrap();
+
+        let merged = load_merged_in(Some(user_dir.path()), workspace_dir.path())
+            .await
+            .unwrap();
+        let agents = merged
+            .catalog
+            .enabled
+            .get("agents")
+            .expect("agents kind map");
+        assert_eq!(agents.get("background-runner"), Some(&false));
     }
 
     #[test]

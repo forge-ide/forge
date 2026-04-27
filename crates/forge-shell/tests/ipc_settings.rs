@@ -335,6 +335,67 @@ async fn set_setting_preserves_sibling_workspace_fields() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn catalog_enable_round_trips_through_ipc() {
+    // F-592 DoD: a `catalog.enabled.<kind>.<id>` toggle written via
+    // `set_setting` must surface in the next `get_settings` response. The
+    // open-shape map (`HashMap<String, HashMap<String, bool>>`) on
+    // `AppSettings.catalog.enabled` is what makes this round-trip survive
+    // — without it the validation step would silently drop the unknown
+    // section and the toggle would revert on reload.
+    let workspace = TempDir::new().unwrap();
+    let user_cfg_dir = TempDir::new().unwrap();
+
+    let sid = "abcdef0123456789";
+    let app = make_app(workspace.path(), sid, user_cfg_dir.path()).await;
+    let window = make_session_window(&app, sid);
+
+    let _: serde_json::Value = invoke_ok(
+        &window,
+        "set_setting",
+        serde_json::json!({
+            "key": "catalog.enabled.skills.typescript-review",
+            "value": false,
+            "level": "user",
+            "workspaceRoot": workspace.path(),
+        }),
+    );
+
+    let got = invoke_ok(
+        &window,
+        "get_settings",
+        serde_json::json!({ "workspaceRoot": workspace.path() }),
+    );
+    // The exact dotted-key path the F-592 frontend reads after a toggle.
+    assert_eq!(
+        got["catalog"]["enabled"]["skills"]["typescript-review"], false,
+        "catalog enable flag must round-trip through set_setting → get_settings"
+    );
+
+    // A second flag under a different (kind,id) must coexist — the open-map
+    // shape is per-(kind,id), not a singleton.
+    let _: serde_json::Value = invoke_ok(
+        &window,
+        "set_setting",
+        serde_json::json!({
+            "key": "catalog.enabled.mcp.gateway",
+            "value": true,
+            "level": "user",
+            "workspaceRoot": workspace.path(),
+        }),
+    );
+    let got = invoke_ok(
+        &window,
+        "get_settings",
+        serde_json::json!({ "workspaceRoot": workspace.path() }),
+    );
+    assert_eq!(
+        got["catalog"]["enabled"]["skills"]["typescript-review"],
+        false
+    );
+    assert_eq!(got["catalog"]["enabled"]["mcp"]["gateway"], true);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn set_setting_rejects_invalid_value_for_known_key() {
     let workspace = TempDir::new().unwrap();
     let user_cfg_dir = TempDir::new().unwrap();

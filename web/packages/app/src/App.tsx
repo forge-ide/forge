@@ -3,6 +3,7 @@ import { Router, Route } from '@solidjs/router';
 import { Dashboard } from './routes/Dashboard';
 import { SessionWindow } from './routes/Session/SessionWindow';
 import { AgentMonitor } from './routes/AgentMonitor';
+import { Catalog } from './routes/Catalog';
 import { CommandPalette, registerBuiltins } from './commands';
 
 /**
@@ -32,6 +33,10 @@ export const App: Component = () => {
           entry point until F-138 wires the status-bar agent badge. */}
       <Route path="/agents" component={AgentMonitor} />
       <Route path="/agents/:id" component={AgentMonitor} />
+      {/* F-592: Catalog route. `?ws=<workspace_root>` selects the workspace;
+          missing parameter renders a friendly "open from a session" notice
+          rather than calling list_* with an empty path. */}
+      <Route path="/catalog" component={Catalog} />
     </Router>
   );
 };
