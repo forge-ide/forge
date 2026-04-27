@@ -9,6 +9,7 @@ pub mod meta;
 pub mod process;
 pub mod runtime_dir;
 pub mod settings;
+pub mod skill;
 mod tool;
 mod transcript;
 pub mod types;
@@ -27,6 +28,7 @@ pub use mcp_state::{McpStateEvent, ServerState};
 pub use settings::{
     AppSettings, NotificationMode, NotificationsSettings, SessionMode, WindowsSettings,
 };
+pub use skill::{Skill, SkillId, SkillIdError};
 pub use tool::Tool;
 pub use transcript::{apply_superseded, Transcript};
 pub use types::{
