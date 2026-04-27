@@ -36,6 +36,11 @@ pub enum IpcMessage {
     SelectBranch(SelectBranch),
     /// F-145: client → session request to tombstone a branch variant.
     DeleteBranch(DeleteBranch),
+    /// F-598: client → session request to compact the transcript.
+    /// The daemon dispatches to `forge_session::compaction::compact` and
+    /// (on success) emits `Event::ContextCompacted` through the event
+    /// stream — there is no direct response payload here.
+    CompactTranscript(CompactTranscript),
     /// F-155: client → session request for the daemon's MCP server list.
     /// Response arrives as [`IpcMessage::McpServersList`].
     ListMcpServers(ListMcpServers),
@@ -104,6 +109,14 @@ pub struct DeleteBranch {
 pub struct SendUserMessage {
     pub text: String,
 }
+
+/// F-598: client → session: ask the daemon to compact the active session's
+/// transcript via the privileged summary path. No fields today — the
+/// daemon resolves the session from the connection. On success, a
+/// `ContextCompacted` event arrives through the event stream; on failure
+/// the daemon logs and the stream stays unchanged.
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct CompactTranscript {}
 
 /// F-155: client → session: list the daemon's managed MCP servers.
 ///

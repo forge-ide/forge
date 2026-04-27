@@ -45,6 +45,7 @@ import {
 } from '../../ipc/session';
 import { ApprovalPrompt } from '../../components/ApprovalPrompt/ApprovalPrompt';
 import { WhitelistedPill } from '../../components/ApprovalPrompt/WhitelistedPill';
+import { CompactButton } from './CompactButton';
 import {
   ContextPicker,
   detectAtTrigger,
@@ -1461,6 +1462,12 @@ export const ChatPane: Component<ChatPaneProps> = (props) => {
   return (
     <section class="chat-pane" data-testid="chat-pane" aria-label="Chat pane">
       <span class="chat-pane__type-label">CHAT</span>
+      {/* F-598: transcript toolbar — manual context-compaction trigger.
+          Mounted at the top so the action is reachable without scrolling
+          to the composer. Hidden when no session is bound. */}
+      <Show when={sessionId() !== null}>
+        <CompactButton sessionId={sessionId() as SessionId} />
+      </Show>
       {/* Streaming indicator shown while awaiting a response */}
       <Show when={state().awaitingResponse}>
         <div
@@ -1534,6 +1541,28 @@ export const ChatPane: Component<ChatPaneProps> = (props) => {
                 // the banner's `children` prop when they arrive with a
                 // matching `instance_id`; today the list is empty.
                 return <SubAgentBanner turn={turn} />;
+              case 'context_compacted':
+                // F-598: inline summary marker. Anchors the user's eye to
+                // the boundary between summarized history (now collapsed
+                // into the privileged summary message) and live context.
+                return (
+                  <div
+                    class="context-compacted-marker"
+                    data-testid="context-compacted-marker"
+                    data-summary-msg-id={turn.summary_msg_id}
+                    data-trigger={turn.trigger}
+                  >
+                    <span aria-hidden="true">≡</span>
+                    <span>
+                      compacted{' '}
+                      <span class="context-compacted-marker__count">
+                        {turn.summarized_turns}
+                      </span>{' '}
+                      turn{turn.summarized_turns === 1 ? '' : 's'}
+                      {turn.trigger === 'AutoAt98Pct' ? ' · auto' : ' · manual'}
+                    </span>
+                  </div>
+                );
             }
           }}
         </For>

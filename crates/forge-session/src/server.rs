@@ -151,6 +151,7 @@ fn ipc_message_kind(msg: &IpcMessage) -> &'static str {
         IpcMessage::McpToggleResult(_) => "McpToggleResult",
         IpcMessage::ImportMcpConfig(_) => "ImportMcpConfig",
         IpcMessage::McpImportResult(_) => "McpImportResult",
+        IpcMessage::CompactTranscript(_) => "CompactTranscript",
     }
 }
 
@@ -1235,6 +1236,37 @@ async fn handle_connection<P: Provider + 'static>(
                                     session_id = %session_id_for_delete,
                                     error = %e,
                                     "delete_branch error",
+                                );
+                            }
+                        });
+                    }
+
+                    Some(IpcMessage::CompactTranscript(_)) => {
+                        // F-598: manual transcript compaction. Spawned off
+                        // the event loop like the rerun/branch commands so
+                        // a slow summary call does not block other client
+                        // frames. The compaction emits ContextCompacted
+                        // through the event stream — there's no direct
+                        // response frame.
+                        let session = Arc::clone(&session);
+                        let provider = Arc::clone(&provider);
+                        let session_id_for_compact = Arc::clone(&session_id);
+                        tokio::spawn(async move {
+                            let pinned = std::collections::HashSet::new();
+                            if let Err(e) = crate::compaction::compact(
+                                session,
+                                provider,
+                                crate::compaction::DEFAULT_COMPACT_FRACTION,
+                                &pinned,
+                                forge_core::CompactTrigger::UserRequested,
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    target: "forge_session::server",
+                                    session_id = %session_id_for_compact,
+                                    error = %e,
+                                    "compact_transcript error",
                                 );
                             }
                         });

@@ -194,6 +194,17 @@ export async function deleteBranch(
   await invoke('delete_branch', { sessionId, parentId, variantIndex });
 }
 
+/**
+ * F-598: trigger manual context compaction. The daemon emits
+ * `Event::ContextCompacted` through the existing event stream when the
+ * privileged summary call lands; the promise resolves once the IPC frame
+ * is delivered (success of the underlying summary is observed via the
+ * stream).
+ */
+export async function compactTranscript(sessionId: SessionId): Promise<void> {
+  await invoke('compact_transcript', { sessionId });
+}
+
 // ---------------------------------------------------------------------------
 // F-151: persistent settings commands
 // ---------------------------------------------------------------------------

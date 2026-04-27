@@ -292,6 +292,41 @@ export function fromRustEvent(rustEvent: unknown): SessionEvent | null {
     return { kind: 'BranchSelected', parent, selected };
   }
 
+  // F-598: context compaction — anchors an inline summary marker on the
+  // summary message id. The Rust wire shape carries `summarized_turns`
+  // (u32), `summary_msg_id` (string), `trigger` (`AutoAt98Pct` |
+  // `UserRequested`); each is required, so a missing field drops the
+  // event rather than rendering a malformed marker.
+  if (type === 'context_compacted') {
+    const summaryMsgId = ev['summary_msg_id'];
+    const summarizedTurnsRaw = ev['summarized_turns'];
+    const trigger = ev['trigger'];
+    if (!isString(summaryMsgId)) {
+      warnDrop('context_compacted', 'summary_msg_id missing or not a string');
+      return null;
+    }
+    if (
+      typeof summarizedTurnsRaw !== 'number' ||
+      !Number.isFinite(summarizedTurnsRaw)
+    ) {
+      warnDrop(
+        'context_compacted',
+        'summarized_turns missing or not a finite number',
+      );
+      return null;
+    }
+    if (trigger !== 'AutoAt98Pct' && trigger !== 'UserRequested') {
+      warnDrop('context_compacted', 'trigger missing or not a known variant');
+      return null;
+    }
+    return {
+      kind: 'ContextCompacted',
+      summary_msg_id: summaryMsgId,
+      summarized_turns: summarizedTurnsRaw,
+      trigger,
+    };
+  }
+
   // F-145: branch deletion — tombstones a variant.
   if (type === 'branch_deleted') {
     const parent = ev['parent'];

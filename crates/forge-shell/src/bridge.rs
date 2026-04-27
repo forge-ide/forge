@@ -26,10 +26,10 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use forge_core::{ApprovalScope, RerunVariant};
 use forge_ipc::{
-    read_frame, read_frame_into, write_frame, ClientInfo, DeleteBranch, Hello, HelloAck,
-    ImportMcpConfig, IpcMessage, ListMcpServers, McpImportResult, McpServersList, McpToggleResult,
-    RerunMessage, SelectBranch, SendUserMessage, Subscribe, ToggleMcpServer, ToolCallApproved,
-    ToolCallRejected, PROTO_VERSION,
+    read_frame, read_frame_into, write_frame, ClientInfo, CompactTranscript, DeleteBranch, Hello,
+    HelloAck, ImportMcpConfig, IpcMessage, ListMcpServers, McpImportResult, McpServersList,
+    McpToggleResult, RerunMessage, SelectBranch, SendUserMessage, Subscribe, ToggleMcpServer,
+    ToolCallApproved, ToolCallRejected, PROTO_VERSION,
 };
 use serde::Serialize;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -446,6 +446,19 @@ impl SessionBridge {
             parent_id,
             variant_index,
         });
+        write_frame(&mut *writer, &frame).await
+    }
+
+    /// F-598: forward a manual `compact_transcript` request to the session
+    /// daemon. The daemon emits `Event::ContextCompacted` through the
+    /// event stream once the privileged summary call lands; the Tauri
+    /// command returns `Ok(())` once the frame is written, so callers
+    /// observe completion via the same event subscription that already
+    /// drives the transcript view.
+    pub async fn compact_transcript(&self, session_id: &str) -> Result<()> {
+        let writer = self.writer_for(session_id).await?;
+        let mut writer = writer.lock().await;
+        let frame = IpcMessage::CompactTranscript(CompactTranscript::default());
         write_frame(&mut *writer, &frame).await
     }
 

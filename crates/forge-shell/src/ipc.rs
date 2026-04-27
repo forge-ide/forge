@@ -525,6 +525,8 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         rerun_message,
         select_branch,
         delete_branch,
+        // F-598: manual transcript compaction trigger.
+        compact_transcript,
         get_persistent_approvals,
         save_approval,
         remove_approval,
@@ -2764,6 +2766,37 @@ pub async fn delete_branch<R: Runtime>(
     state
         .bridge
         .delete_branch(&session_id, parent_id, variant_index)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// F-598: manual transcript compaction.
+//
+// The webview's `<CompactButton>` invokes this command when the user clicks
+// "Compact transcript". The bridge forwards a `CompactTranscript` frame to
+// the daemon, which dispatches to `forge_session::compaction::compact` and
+// emits `Event::ContextCompacted` through the existing event stream — so
+// the webview observes the outcome via the same subscription that already
+// renders the transcript. Authz mirrors `delete_branch`: only the owning
+// session's webview may compact its own transcript. No size cap is needed
+// because the request carries no client-supplied payload.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn compact_transcript<R: Runtime>(
+    session_id: String,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+) -> Result<(), String> {
+    require_window_label(
+        &webview,
+        &format!("session-{session_id}"),
+        "compact_transcript",
+    )?;
+    state
+        .bridge
+        .compact_transcript(&session_id)
         .await
         .map_err(|e| e.to_string())
 }

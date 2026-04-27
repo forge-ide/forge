@@ -80,6 +80,7 @@ async fn pull_active_credential(ctx: &Option<CredentialContext>) -> Result<()> {
 }
 
 use crate::byte_budget::ByteBudget;
+use crate::compaction::{compact, AUTO_COMPACT_THRESHOLD, DEFAULT_COMPACT_FRACTION};
 use crate::dispatcher_cache::DispatcherCache;
 use crate::sandbox::ChildRegistry;
 use crate::session::Session;
@@ -178,8 +179,48 @@ pub async fn run_turn<P: Provider>(
     // F-587: pull the credential for the active provider before any
     // model-side work begins. Shared with the rerun paths via
     // `pull_active_credential` so every turn-shaped entry point honors the
-    // same pull-once contract.
+    // same pull-once contract. A credential-pull failure fails the turn
+    // before compaction runs — that's the right ordering: we won't burn a
+    // privileged summary call on a turn that was going to fail anyway.
     pull_active_credential(&credentials).await?;
+
+    // F-598: auto-trigger context compaction at byte-budget >= 98%. Runs
+    // BEFORE the new turn's UserMessage is logged so the summary marker
+    // cleanly separates pre-compaction history from the new prompt.
+    // Errors during auto-compaction are non-fatal — we log and proceed
+    // with the turn rather than block the user on a misbehaving summary
+    // provider. Two-layer re-entrancy guard: the outer `is_compacting()`
+    // is a fast-path skip (avoids reading the event log on the steady
+    // state) while the inner `try_claim_compacting()` inside `compact()`
+    // is the true safety barrier (atomic, race-free against a concurrent
+    // manual trigger).
+    if let Some(budget) = byte_budget.as_ref() {
+        let limit = budget.limit();
+        let consumed = budget.consumed();
+        if limit > 0
+            && (consumed as f64) >= (limit as f64) * AUTO_COMPACT_THRESHOLD
+            && !session.is_compacting()
+        {
+            let pinned = std::collections::HashSet::new();
+            if let Err(e) = compact(
+                Arc::clone(&session),
+                Arc::clone(&provider),
+                DEFAULT_COMPACT_FRACTION,
+                &pinned,
+                forge_core::CompactTrigger::AutoAt98Pct,
+            )
+            .await
+            {
+                tracing::warn!(
+                    target: "forge_session::orchestrator",
+                    error = %e,
+                    consumed,
+                    limit,
+                    "auto-compaction failed; proceeding with turn",
+                );
+            }
+        }
+    }
 
     let msg_id = MessageId::new();
 
@@ -1822,5 +1863,155 @@ mod tests {
         // return the parent unchanged.
         let orphan = MessageId::new();
         assert!(resolve_branch_variant(&history, &orphan, 0).is_err());
+    }
+
+    // F-598: when the byte budget is at >= 98% of capacity at run_turn
+    // entry, the orchestrator must auto-trigger compaction BEFORE the new
+    // UserMessage lands. Wire the budget to a tiny limit and pre-charge it
+    // past the threshold so a single run_turn invocation observes the
+    // condition.
+    #[tokio::test]
+    async fn run_turn_auto_triggers_compaction_at_98pct() {
+        use forge_core::Event as Ev;
+
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+        let session = Arc::new(Session::create(log_path).await.unwrap());
+
+        // Seed prior turns so compaction has something to summarize.
+        for n in 0..3 {
+            session
+                .emit(Ev::UserMessage {
+                    id: MessageId::new(),
+                    at: Utc::now(),
+                    text: Arc::from(format!("prior question {n}").as_str()),
+                    context: vec![],
+                    branch_parent: None,
+                })
+                .await
+                .unwrap();
+            session
+                .emit(Ev::AssistantMessage {
+                    id: MessageId::new(),
+                    provider: ProviderId::new(),
+                    model: "mock".into(),
+                    at: Utc::now(),
+                    stream_finalised: true,
+                    text: Arc::from(format!("prior answer {n}").as_str()),
+                    branch_parent: None,
+                    branch_variant_index: 0,
+                })
+                .await
+                .unwrap();
+        }
+
+        // Provider script: first call is the compaction summary, second
+        // call is the new turn itself.
+        let summary_script =
+            "{\"delta\":\"compacted summary\"}\n{\"done\":\"end_turn\"}\n".to_string();
+        let turn_script = "{\"delta\":\"new answer\"}\n{\"done\":\"end_turn\"}\n".to_string();
+        let provider = Arc::new(
+            MockProvider::from_responses(vec![summary_script, turn_script])
+                .expect("construct mock"),
+        );
+
+        // Tiny budget pre-charged past 98% so run_turn trips the gate
+        // immediately on entry.
+        let budget = Arc::new(ByteBudget::new(1_000));
+        budget.charge(990);
+
+        let pending: PendingApprovals = Arc::new(Mutex::new(HashMap::new()));
+
+        let mut rx = session.event_tx.subscribe();
+
+        run_turn(
+            Arc::clone(&session),
+            Arc::clone(&provider),
+            "fresh prompt".to_string(),
+            pending,
+            vec![],
+            true,
+            None,
+            None,
+            Some(Arc::clone(&budget)),
+            None,
+            None,
+            None,
+            None,
+            None, // F-587: no credentials wired in this auto-trigger test.
+        )
+        .await
+        .unwrap();
+
+        // Drain emissions and look for ContextCompacted before the
+        // *new* UserMessage of the actual turn. The order check is the
+        // load-bearing assertion: marker first, then the new turn.
+        let mut saw_compacted = false;
+        let mut saw_new_user_msg_after = false;
+        while let Ok((_, ev)) = rx.try_recv() {
+            match ev {
+                Ev::ContextCompacted { trigger, .. } => {
+                    assert_eq!(trigger, forge_core::CompactTrigger::AutoAt98Pct);
+                    saw_compacted = true;
+                }
+                Ev::UserMessage { text, .. } if &*text == "fresh prompt" && saw_compacted => {
+                    saw_new_user_msg_after = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_compacted, "auto-trigger must emit ContextCompacted");
+        assert!(
+            saw_new_user_msg_after,
+            "the new turn's UserMessage must follow ContextCompacted"
+        );
+    }
+
+    // F-598: with the byte budget under 98% the orchestrator MUST NOT
+    // fire compaction. Negative-side gate.
+    #[tokio::test]
+    async fn run_turn_does_not_compact_below_threshold() {
+        use forge_core::Event as Ev;
+
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+        let session = Arc::new(Session::create(log_path).await.unwrap());
+
+        let provider = Arc::new(
+            MockProvider::from_responses(vec!["{\"done\":\"end_turn\"}\n".into()])
+                .expect("construct mock"),
+        );
+
+        let budget = Arc::new(ByteBudget::new(1_000));
+        budget.charge(500); // 50% — well under 98%
+        let pending: PendingApprovals = Arc::new(Mutex::new(HashMap::new()));
+
+        let mut rx = session.event_tx.subscribe();
+
+        run_turn(
+            Arc::clone(&session),
+            Arc::clone(&provider),
+            "below threshold".to_string(),
+            pending,
+            vec![],
+            true,
+            None,
+            None,
+            Some(budget),
+            None,
+            None,
+            None,
+            None,
+            None, // F-587: no credentials wired in this negative-gate test.
+        )
+        .await
+        .unwrap();
+
+        while let Ok((_, ev)) = rx.try_recv() {
+            assert!(
+                !matches!(ev, Ev::ContextCompacted { .. }),
+                "compaction must not fire below 98%"
+            );
+        }
     }
 }
