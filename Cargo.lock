@@ -1491,6 +1491,14 @@ dependencies = [
 [[package]]
 name = "forge-oci"
 version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "forge-providers"

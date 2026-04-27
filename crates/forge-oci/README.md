@@ -1,15 +1,26 @@
 # forge-oci
 
-Container lifecycle for agent isolation. Reserved scaffold in Phase 1 — the crate compiles into the workspace as a placeholder so the eventual `ContainerRuntime` trait and its `podman` / `docker` shells can land without a workspace-wide reshuffle. The Phase 1 binary does not run any containerised workloads; the architecture doc describes the planned API and runtime detection.
+Container lifecycle for agent isolation. Defines the [`ContainerRuntime`] trait and ships [`PodmanRuntime`] — a rootless, daemonless `podman` shell-out — as the first concrete implementation.
 
 ## Role in the workspace
 
-- Depended on by: nothing yet; future agent isolation paths in `forge-agents` / `forge-session` will consume it.
-- Depends on: nothing (intentionally empty until implementation begins).
+- Depended on by: future agent isolation paths in `forge-agents` / `forge-session` will consume `ContainerRuntime` to launch sandboxed agents.
+- Depends on: `tokio` (process spawn), `serde_json` (parsing `podman info` / `podman stats`), `thiserror`, `async-trait`, `tracing`. Intentionally lean.
 
 ## Key types / entry points
 
-- _None yet._ The planned `ContainerRuntime` trait, `PodmanRuntime` / `DockerRuntime` implementations, OCI-spec generation via `oci-spec-rs`, and the first-run install banner are described in the architecture doc.
+- `ContainerRuntime` — async trait: `pull / create / start / exec / stop / remove / stats`.
+- `ImageRef` — typed image reference (`{ registry, name, tag }`) with `parse(&str)` round-trip.
+- `ContainerHandle` — opaque container ID returned by `create`.
+- `ExecResult { exit_code, stdout, stderr }` — captured exec output.
+- `Stats { cpu_percent, memory_bytes, pids }` — single-shot resource snapshot.
+- `OciError` — typed errors: `RuntimeMissing`, `RootlessUnavailable`, `CommandFailed`, `InvalidImageRef`, `Io`, `InvalidJson`.
+- `PodmanRuntime::detect()` — first-run probe: confirms `podman --version` and parses `podman info` JSON for `host.security.rootless = true`.
+
+## Testing
+
+- Unit tests cover argv-shaping for every method via the `RecordingRunner` mock — no `podman` binary required.
+- Integration test `tests/podman_integration.rs` is `cfg(target_os = "linux")` and auto-skips when `podman` is absent or rootless mode is unavailable. It pulls `docker.io/library/alpine:3.19`, runs `echo hello`, asserts stdout, and verifies cleanup via `podman inspect`.
 
 ## Further reading
 
