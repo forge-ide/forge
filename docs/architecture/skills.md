@@ -113,12 +113,52 @@ All four functions return `forge_agents::Result<_>` (the typed crate error). Cal
 
 ## 7. What's *not* here yet
 
-This task (F-589) defines types, parsing, and discovery only. The following are explicitly deferred:
+F-589 defines types, parsing, and discovery; F-590 adds installation. The following are explicitly deferred:
 
 - **Roster integration** (F-591) — `RosterEntry::Skill { id }` referencing a loaded `Skill`.
 - **Skill-as-tool execution** — running `scripts/` from a sandboxed agent.
-- **`forge skill install`** — fetching skills from a Git URL or local path.
 - **Catalog UI** — scope-aware listing in the dashboard.
 - **Tool-binding enforcement** — today the `tools:` field is a hint, not a constraint.
 
 When those land they consume the types defined here; this module's surface should not change.
+
+## 8. Installation (F-590)
+
+`forge skill install` fetches a skill from a git URL or a local path and copies it into the target scope. Validation runs through [`forge_agents::skill_loader::parse_skill_file`] before anything is written to disk; a parse failure aborts the install with a clear error naming the offending field.
+
+```sh
+# Install from a local checkout into the user scope (default).
+forge skill install ./path/to/skill
+
+# Install from an HTTPS git URL into the workspace scope.
+forge skill install https://github.com/example/my-skill.git --target workspace
+
+# List installed skills across both scopes.
+forge skill list
+
+# Remove a workspace-scoped skill (default when the id exists in both scopes).
+forge skill remove planner --scope workspace
+```
+
+### Resolvers
+
+| Resolver | Recognized prefixes | Behavior |
+|---|---|---|
+| **Local path** | anything else | Canonicalizes the path, requires `SKILL.md` at the root, parses it, then copies the directory tree into `<scope>/.skills/<id>/`. Side files (`scripts/`, `references/`) come along. |
+| **Git** | `https://`, `http://`, `git://`, `ssh://`, `user@host:path` | Shells out to the system `git` binary. Clones to `<cache_root>/<sha256(url)>/`. Cache hits run `git fetch + reset --hard origin/HEAD` so re-installing pulls the latest commit. The repository's root must contain `SKILL.md`. |
+
+The cache root is `~/.cache/forge/skills/`. The cache subdirectory name is the lowercase hex sha256 of the source URL.
+
+### Why shell out to `git`?
+
+We deliberately do not use `git2`. The skill-installation surface is rarely exercised, the dependency is heavy, and `git` is universally on PATH for any user authoring skills. Shell-out keeps the binary lean and the failure mode obvious (the user can re-run the failing command directly). The fallback path is to switch to `git2` if a future task needs in-process git operations.
+
+### Refusal contract
+
+Install refuses (and writes nothing to the target scope) when:
+
+- the source path does not exist or is not a directory,
+- the source has no `SKILL.md` at its root,
+- the `SKILL.md` fails F-589 parse validation (invalid frontmatter, bad `SkillId`, etc.),
+- a skill with the same id is already installed in the same scope (run `forge skill remove` first),
+- the `git` binary is missing or the clone/fetch returns a non-zero exit code.

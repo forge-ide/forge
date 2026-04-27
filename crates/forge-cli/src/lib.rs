@@ -1,5 +1,6 @@
 pub mod display;
 pub mod mcp;
+pub mod skill;
 pub mod socket;
 
 use clap::{Parser, Subcommand};
@@ -50,6 +51,11 @@ pub enum Commands {
     Mcp {
         #[command(subcommand)]
         cmd: McpCommands,
+    },
+    /// Manage skills (agentskills.io packs).
+    Skill {
+        #[command(subcommand)]
+        cmd: SkillCommands,
     },
 }
 
@@ -144,6 +150,72 @@ pub enum McpCommands {
 pub enum ImportSourceFlag {
     Auto,
     Source(forge_mcp::import::ImportSource),
+}
+
+/// `forge skill` subcommands (F-590).
+///
+/// `install` accepts a CLI source string distinguished at runtime: anything
+/// matching [`skill::looks_like_git_url`] is fetched via `git`, otherwise
+/// it is treated as a local path. The `--target` flag selects the install
+/// scope and defaults to `user`.
+#[derive(Subcommand, Debug)]
+pub enum SkillCommands {
+    /// Install a skill from a git URL or a local path.
+    Install {
+        /// Source: HTTPS/SSH/git URL, or a local directory containing
+        /// `SKILL.md`.
+        source: String,
+        /// Where to install the skill. Defaults to `user`.
+        #[arg(long, default_value = "user", value_parser = parse_skill_scope)]
+        target: SkillScopeFlag,
+    },
+    /// List installed skills (workspace + user scopes).
+    List {
+        /// Workspace root used to look up the workspace scope. Defaults to
+        /// the current working directory.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+    /// Remove an installed skill.
+    Remove {
+        /// Skill id (folder name under `.skills/`).
+        id: String,
+        /// Which scope to remove from. Defaults to `workspace` if the id
+        /// exists in both scopes, else the only scope it exists in.
+        #[arg(long, value_parser = parse_skill_scope)]
+        scope: Option<SkillScopeFlag>,
+        /// Workspace root used to look up the workspace scope. Defaults to
+        /// the current working directory.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+}
+
+/// CLI-side wrapper over [`skill::SkillScope`] so the clap layer doesn't
+/// pull `forge-agents` into its public surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillScopeFlag {
+    User,
+    Workspace,
+}
+
+impl From<SkillScopeFlag> for skill::SkillScope {
+    fn from(f: SkillScopeFlag) -> Self {
+        match f {
+            SkillScopeFlag::User => skill::SkillScope::User,
+            SkillScopeFlag::Workspace => skill::SkillScope::Workspace,
+        }
+    }
+}
+
+fn parse_skill_scope(raw: &str) -> Result<SkillScopeFlag, String> {
+    match raw {
+        "user" => Ok(SkillScopeFlag::User),
+        "workspace" => Ok(SkillScopeFlag::Workspace),
+        other => Err(format!(
+            "unknown skill scope {other:?}; expected `user` or `workspace`"
+        )),
+    }
 }
 
 fn parse_import_source(raw: &str) -> Result<ImportSourceFlag, String> {

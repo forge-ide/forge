@@ -4,6 +4,7 @@
 use clap::Parser;
 use forge_cli::{
     Cli, Commands, ImportSourceFlag, McpCommands, RunCommands, SessionCommands, SessionNewKind,
+    SkillCommands, SkillScopeFlag,
 };
 use forge_mcp::import::ImportSource;
 use std::path::PathBuf;
@@ -282,6 +283,84 @@ fn parse_mcp_import_with_explicit_source_and_apply() {
 fn parse_mcp_import_rejects_bogus_source() {
     let result = Cli::try_parse_from(["forge", "mcp", "import", "--source=bogus"]);
     assert!(result.is_err(), "bogus source should fail to parse");
+}
+
+#[test]
+fn parse_skill_install_defaults_to_user_target() {
+    let cli =
+        Cli::try_parse_from(["forge", "skill", "install", "./fixtures/sample"]).expect("parse");
+    let Commands::Skill {
+        cmd: SkillCommands::Install { source, target },
+    } = cli.command
+    else {
+        panic!("wrong command shape");
+    };
+    assert_eq!(source, "./fixtures/sample");
+    assert_eq!(target, SkillScopeFlag::User);
+}
+
+#[test]
+fn parse_skill_install_with_explicit_workspace_target() {
+    let cli = Cli::try_parse_from([
+        "forge",
+        "skill",
+        "install",
+        "https://example.com/x.git",
+        "--target",
+        "workspace",
+    ])
+    .expect("parse");
+    let Commands::Skill {
+        cmd: SkillCommands::Install { source, target },
+    } = cli.command
+    else {
+        panic!("wrong command shape");
+    };
+    assert_eq!(source, "https://example.com/x.git");
+    assert_eq!(target, SkillScopeFlag::Workspace);
+}
+
+#[test]
+fn parse_skill_install_rejects_unknown_target() {
+    let result = Cli::try_parse_from(["forge", "skill", "install", "./x", "--target", "bogus"]);
+    assert!(result.is_err(), "bogus target must be rejected");
+}
+
+#[test]
+fn parse_skill_list() {
+    let cli = Cli::try_parse_from(["forge", "skill", "list"]).expect("parse");
+    assert!(matches!(
+        cli.command,
+        Commands::Skill {
+            cmd: SkillCommands::List { workspace: None }
+        }
+    ));
+}
+
+#[test]
+fn parse_skill_remove_requires_id() {
+    let result = Cli::try_parse_from(["forge", "skill", "remove"]);
+    assert!(result.is_err(), "missing id must fail to parse");
+}
+
+#[test]
+fn parse_skill_remove_with_scope() {
+    let cli = Cli::try_parse_from(["forge", "skill", "remove", "planner", "--scope", "user"])
+        .expect("parse");
+    let Commands::Skill {
+        cmd:
+            SkillCommands::Remove {
+                id,
+                scope,
+                workspace,
+            },
+    } = cli.command
+    else {
+        panic!("wrong command shape");
+    };
+    assert_eq!(id, "planner");
+    assert_eq!(scope, Some(SkillScopeFlag::User));
+    assert_eq!(workspace, None);
 }
 
 #[test]
