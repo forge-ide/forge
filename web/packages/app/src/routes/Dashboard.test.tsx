@@ -92,4 +92,36 @@ describe('Dashboard', () => {
     const banner = await findByTestId('credential-banner');
     expect(banner.textContent).toContain('Anthropic');
   });
+
+  // F-588: a single broken probe must not silently suppress the banner
+  // for the remaining providers. Anthropic throws, OpenAI is missing —
+  // the banner must name OpenAI.
+  it('falls back to the next provider when the first probe throws', async () => {
+    setInvokeForTesting(
+      (async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'provider_status') {
+          return {
+            reachable: true,
+            base_url: 'http://127.0.0.1:11434',
+            models: [],
+            last_checked: '2026-04-18T00:00:00Z',
+          };
+        }
+        if (cmd === 'session_list') return [];
+        if (cmd === 'has_credential') {
+          if (args?.['providerId'] === 'anthropic') {
+            throw new Error('keyring locked');
+          }
+          if (args?.['providerId'] === 'openai') return false;
+          return false;
+        }
+        return undefined;
+      }) as never,
+    );
+
+    const { findByTestId } = renderDashboard();
+    const banner = await findByTestId('credential-banner');
+    expect(banner.textContent).toContain('OpenAI');
+    expect(banner.textContent).not.toContain('Anthropic has no stored credential');
+  });
 });

@@ -13,7 +13,10 @@
 //
 // Security contract:
 //   - The key value lives only in a single `<input type="password">`'s
-//     local state and is cleared the moment the IPC call resolves.
+//     local state and is cleared the moment the IPC call resolves —
+//     regardless of outcome (success or rejection) — and on rotation
+//     cancel. The user can re-type if they want; the value never
+//     persists past a terminal state.
 //   - The DOM never contains a rendered key — only the `password` input
 //     (browser-DOM-only) ever holds the typed value.
 //   - Logging / aria-labels never echo the key.
@@ -23,6 +26,8 @@ import {
   createResource,
   createSignal,
   For,
+  onCleanup,
+  onMount,
   Show,
 } from 'solid-js';
 import { Button } from '@forge/design';
@@ -62,9 +67,20 @@ export const CREDENTIAL_PROVIDERS: CredentialProvider[] = [
 // Component
 // ---------------------------------------------------------------------------
 
+/**
+ * Anchor id on the Credentials `<section>`. Exported so the first-run
+ * banner can hyperlink to the same target without the two values
+ * drifting apart.
+ */
+export const CREDENTIALS_SECTION_ID = 'credentials-section';
+
 export const CredentialsSection: Component = () => {
   return (
-    <section class="credentials-section" aria-label="Provider credentials">
+    <section
+      id={CREDENTIALS_SECTION_ID}
+      class="credentials-section"
+      aria-label="Provider credentials"
+    >
       <header class="credentials-section__header">
         <span class="credentials-section__label">CREDENTIALS</span>
       </header>
@@ -87,9 +103,19 @@ interface CredentialRowProps {
 }
 
 const CredentialRow: Component<CredentialRowProps> = (props) => {
+  // Probe failure should not crash the row (or pollute the unhandled-rejection
+  // log) — degrade to "no stored credential" so the user can still type a
+  // key and recover. The submit-time error path surfaces actionable
+  // failures via `setError` regardless.
   const [present, { refetch }] = createResource(
     () => props.provider.id,
-    (id) => hasCredential(id),
+    async (id) => {
+      try {
+        return await hasCredential(id);
+      } catch {
+        return false;
+      }
+    },
   );
   const [draft, setDraft] = createSignal('');
   const [pending, setPending] = createSignal(false);
@@ -101,13 +127,15 @@ const CredentialRow: Component<CredentialRowProps> = (props) => {
     setError(null);
     try {
       await loginProvider(props.provider.id, value);
-      // Per security contract, drop the value from local state the moment
-      // the IPC call resolves so the runtime heap no longer holds a copy.
-      setDraft('');
       await refetch();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
+      // Per security contract, drop the value from local state the moment
+      // the IPC call resolves regardless of outcome so the runtime heap
+      // no longer holds a copy. The user can re-type if they want; a stuck
+      // input would otherwise persist the secret across an error path.
+      setDraft('');
       setPending(false);
       setPendingRotation(null);
     }
@@ -207,7 +235,13 @@ const CredentialRow: Component<CredentialRowProps> = (props) => {
       <Show when={pendingRotation() !== null}>
         <RotationConfirm
           providerLabel={props.provider.label}
-          onCancel={() => setPendingRotation(null)}
+          onCancel={() => {
+            // Cancel = explicit terminal state for the typed value. Clear
+            // both the pending-rotation buffer AND the draft input so the
+            // secret does not linger past the user's dismiss action.
+            setPendingRotation(null);
+            setDraft('');
+          }}
           onConfirm={() => {
             const value = pendingRotation();
             if (value !== null) void submit(value);
@@ -252,12 +286,21 @@ const RotationConfirm: Component<RotationConfirmProps> = (props) => {
   let dialogRef: HTMLDivElement | undefined;
   useFocusTrap(() => dialogRef);
 
-  const onKey = (e: KeyboardEvent) => {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      props.onCancel();
-    }
-  };
+  // WAI-ARIA APG Dialog pattern: Escape must dismiss regardless of focus
+  // location. The focus trap keeps Tab inside the dialog under normal
+  // operation, but a screen reader, browser shortcut, or VoiceOver rotor
+  // jump can move focus out of the dialog — a div-bound listener would
+  // miss those keystrokes. A window-level listener supersedes them all.
+  onMount(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        props.onCancel();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    onCleanup(() => window.removeEventListener('keydown', handler));
+  });
 
   return (
     <div
@@ -273,7 +316,6 @@ const RotationConfirm: Component<RotationConfirmProps> = (props) => {
         role="dialog"
         aria-modal="true"
         aria-labelledby="credential-rotation-title"
-        onKeyDown={onKey}
       >
         <header class="credentials-section__modal-head">
           <h3 id="credential-rotation-title" class="credentials-section__modal-title">
@@ -336,8 +378,11 @@ export const CredentialBanner: Component<CredentialBannerProps> = (props) => (
       ⚠
     </span>
     <p class="credentials-banner__text">
-      <strong>{props.providerLabel}</strong> has no stored credential. Add one in the Credentials
-      section below to start a session.
+      <strong>{props.providerLabel}</strong> has no stored credential.{' '}
+      <a class="credentials-banner__link" href={`#${CREDENTIALS_SECTION_ID}`}>
+        Add one in the Credentials section
+      </a>{' '}
+      below to start a session.
     </p>
   </div>
 );

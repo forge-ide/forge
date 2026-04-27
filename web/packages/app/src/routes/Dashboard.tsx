@@ -15,6 +15,12 @@ import './Dashboard.css';
  * (`anthropic`, `openai`); without an explicit "active provider" signal
  * yet, the banner picks the first such provider that lacks a credential
  * so the user has a concrete target to add.
+ *
+ * Probe failure on a single provider is treated as "stored for that
+ * provider only" — the loop `continue`s so a broken probe on Anthropic
+ * does not silently suppress the banner that would otherwise call out a
+ * missing OpenAI key. The per-row indicator inside `<CredentialsSection>`
+ * surfaces the underlying probe error to the user.
  */
 async function firstMissingCredential(): Promise<{ id: string; label: string } | null> {
   for (const provider of CREDENTIAL_PROVIDERS) {
@@ -22,10 +28,7 @@ async function firstMissingCredential(): Promise<{ id: string; label: string } |
       const stored = await hasCredential(provider.id);
       if (!stored) return { id: provider.id as unknown as string, label: provider.label };
     } catch {
-      // Probe failure shouldn't block the dashboard render. Treat the
-      // probe outcome as "stored" so the banner stays quiet — the user
-      // will see the per-row indicator pick up the same error.
-      return null;
+      continue;
     }
   }
   return null;

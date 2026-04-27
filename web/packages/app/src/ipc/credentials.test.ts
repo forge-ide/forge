@@ -62,4 +62,36 @@ describe('credentials ipc wrappers (F-588)', () => {
       /forbidden/,
     );
   });
+
+  // -------------------------------------------------------------------------
+  // Local validation — fail fast before invoking the backend.
+  // -------------------------------------------------------------------------
+
+  it('loginProvider rejects an empty providerId without invoking the backend', async () => {
+    await expect(loginProvider('' as ProviderId, 'sk-ant-1')).rejects.toThrow(
+      /providerId must not be empty/,
+    );
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it('loginProvider rejects an empty key without invoking the backend', async () => {
+    await expect(loginProvider('anthropic' as ProviderId, '')).rejects.toThrow(
+      /key must not be empty/,
+    );
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it('logoutProvider rejects an empty providerId without invoking the backend', async () => {
+    await expect(logoutProvider('' as ProviderId)).rejects.toThrow(
+      /providerId must not be empty/,
+    );
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it('hasCredential rejects an empty providerId without invoking the backend', async () => {
+    await expect(hasCredential('' as ProviderId)).rejects.toThrow(
+      /providerId must not be empty/,
+    );
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
 });

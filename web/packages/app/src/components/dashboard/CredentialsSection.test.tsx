@@ -225,6 +225,80 @@ describe('CredentialsSection (F-588)', () => {
     expect(err.textContent).toContain('keyring unavailable');
   });
 
+  it('clears the input value on IPC failure (security contract)', async () => {
+    const failingInvoke = vi.fn(async (cmd: string) => {
+      if (cmd === 'has_credential') return false;
+      if (cmd === 'login_provider') throw new Error('keyring unavailable');
+      return undefined;
+    });
+    setInvokeForTesting(failingInvoke as never);
+
+    const { findByTestId } = render(() => <CredentialsSection />);
+    const input = (await findByTestId('credential-input-anthropic')) as HTMLInputElement;
+    const submit = await findByTestId('credential-submit-anthropic');
+
+    fireEvent.input(input, { target: { value: 'sk-ant-bad' } });
+    fireEvent.click(submit);
+
+    // Wait for the error path to settle, then assert the input is empty —
+    // the typed value must NOT linger past the IPC call.
+    await findByTestId('credential-error-anthropic');
+    await waitFor(() => {
+      expect(input.value).toBe('');
+    });
+  });
+
+  it('clears the input value when the rotation modal is cancelled', async () => {
+    const { fn } = buildCredentialInvoke({ anthropic: true });
+    setInvokeForTesting(fn as never);
+
+    const { findByTestId, queryByTestId } = render(() => <CredentialsSection />);
+    const input = (await findByTestId('credential-input-anthropic')) as HTMLInputElement;
+    const submit = await findByTestId('credential-submit-anthropic');
+
+    await waitFor(() => {
+      expect(queryByTestId('credential-logout-anthropic')).toBeTruthy();
+    });
+
+    fireEvent.input(input, { target: { value: 'sk-ant-NEW' } });
+    fireEvent.click(submit);
+
+    const cancel = await findByTestId('credential-rotation-cancel');
+    fireEvent.click(cancel);
+
+    // The pending value lived in `pendingRotation` until cancel; the input
+    // bound to `draft` must also be cleared so the secret does not linger.
+    await waitFor(() => {
+      expect(input.value).toBe('');
+    });
+  });
+
+  it('rotation modal Escape (window-level) dismisses and clears the input', async () => {
+    const { fn } = buildCredentialInvoke({ anthropic: true });
+    setInvokeForTesting(fn as never);
+
+    const { findByTestId, queryByTestId } = render(() => <CredentialsSection />);
+    const input = (await findByTestId('credential-input-anthropic')) as HTMLInputElement;
+    const submit = await findByTestId('credential-submit-anthropic');
+
+    await waitFor(() => {
+      expect(queryByTestId('credential-logout-anthropic')).toBeTruthy();
+    });
+
+    fireEvent.input(input, { target: { value: 'sk-ant-NEW' } });
+    fireEvent.click(submit);
+    await findByTestId('credential-rotation-modal');
+
+    // Dispatch Escape at window level — focus may be anywhere; this must
+    // still dismiss the modal per WAI-ARIA APG Dialog pattern.
+    fireEvent.keyDown(window, { key: 'Escape' });
+
+    await waitFor(() => {
+      expect(queryByTestId('credential-rotation-modal')).toBeNull();
+    });
+    expect(input.value).toBe('');
+  });
+
   it('async submit button carries aria-busy for accessibility', async () => {
     let resolveLogin: (() => void) | undefined;
     const slowInvoke = vi.fn(async (cmd: string) => {
@@ -259,5 +333,25 @@ describe('CredentialBanner (F-588)', () => {
     const banner = getByTestId('credential-banner');
     expect(banner.textContent).toContain('Anthropic');
     expect(banner.getAttribute('role')).toBe('status');
+  });
+
+  it('exposes a keyboard-accessible anchor pointing at the Credentials section', () => {
+    const { getByTestId } = render(() => <CredentialBanner providerLabel="Anthropic" />);
+    const banner = getByTestId('credential-banner');
+    const link = banner.querySelector('a');
+    expect(link).toBeTruthy();
+    expect(link?.getAttribute('href')).toBe('#credentials-section');
+  });
+});
+
+describe('CredentialsSection landing target (F-588)', () => {
+  it('exposes id="credentials-section" so the banner anchor resolves', async () => {
+    setInvokeForTesting(
+      (async () => true) as never,
+    );
+    const { container } = render(() => <CredentialsSection />);
+    const section = container.querySelector('#credentials-section');
+    expect(section).toBeTruthy();
+    expect(section?.tagName).toBe('SECTION');
   });
 });
