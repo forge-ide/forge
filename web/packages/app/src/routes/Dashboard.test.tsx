@@ -33,6 +33,17 @@ describe('Dashboard', () => {
         // the first-run banner (status: available).
         if (cmd === 'detect_container_runtime') return { kind: 'available' };
         if (cmd === 'list_active_containers') return [];
+        // F-597: the dashboard reads persisted settings on mount to seed
+        // the banner-dismissed signal. Default to "not dismissed" so the
+        // banner-suppression behaviour is opt-in per test.
+        if (cmd === 'get_settings') {
+          return {
+            notifications: { bg_agents: 'toast' },
+            windows: { session_mode: 'single' },
+            providers: { custom_openai: {} },
+            dashboard: { container_banner_dismissed: false },
+          };
+        }
         return undefined;
       }) as never,
     );
@@ -103,6 +114,51 @@ describe('Dashboard', () => {
     const { findByTestId } = renderDashboard();
     const banner = await findByTestId('credential-banner');
     expect(banner.textContent).toContain('Anthropic');
+  });
+
+  // F-597: persisted "Don't show again" preference survives a restart —
+  // when `dashboard.container_banner_dismissed=true` is loaded from
+  // settings on mount, the runtime banner must NOT render even if the
+  // probe reports the runtime as missing.
+  it('suppresses the runtime banner when dashboard.container_banner_dismissed=true', async () => {
+    setInvokeForTesting(
+      (async (cmd: string) => {
+        if (cmd === 'provider_status') {
+          return {
+            reachable: true,
+            base_url: 'http://127.0.0.1:11434',
+            models: [],
+            last_checked: '2026-04-18T00:00:00Z',
+          };
+        }
+        if (cmd === 'session_list') return [];
+        if (cmd === 'has_credential') return true;
+        // Probe reports the runtime is missing — without the persisted
+        // dismissal, the banner WOULD render. The test asserts the
+        // dismissal flag wins.
+        if (cmd === 'detect_container_runtime') {
+          return { kind: 'missing', tool: 'podman' };
+        }
+        if (cmd === 'list_active_containers') return [];
+        if (cmd === 'get_settings') {
+          return {
+            notifications: { bg_agents: 'toast' },
+            windows: { session_mode: 'single' },
+            providers: { custom_openai: {} },
+            dashboard: { container_banner_dismissed: true },
+          };
+        }
+        return undefined;
+      }) as never,
+    );
+
+    const { queryByTestId } = renderDashboard();
+    // Give every mount-time async resolution a chance to land — the
+    // probe, the settings read, and any reactive re-renders. The banner
+    // must remain absent across the settle.
+    await waitFor(() => {
+      expect(queryByTestId('container-runtime-banner')).toBeNull();
+    });
   });
 
   // F-588: a single broken probe must not silently suppress the banner

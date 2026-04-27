@@ -1,4 +1,4 @@
-import { type Component, createResource, createSignal, Show } from 'solid-js';
+import { type Component, createResource, createSignal, onMount, Show } from 'solid-js';
 import { ProviderPanel } from './Dashboard/ProviderPanel';
 import { ProvidersSection } from '../components/dashboard/ProvidersSection';
 import { SessionsPanel } from './Dashboard/SessionsPanel';
@@ -17,7 +17,7 @@ import {
   detectContainerRuntime,
   type RuntimeStatus,
 } from '../ipc/containers';
-import { setSetting } from '../ipc/session';
+import { getSettings, setSetting } from '../ipc/session';
 import './Dashboard.css';
 
 /**
@@ -63,10 +63,38 @@ async function probeRuntime(): Promise<RuntimeStatus> {
   }
 }
 
+/**
+ * F-597: read the persisted "Don't show again" preference. The Dashboard
+ * is workspace-agnostic and the dismissed flag lives in user-tier
+ * settings, so we pass an empty `workspaceRoot` (the backend ignores it
+ * for the user tier on read just as on write). Probe failures fall back
+ * to "not dismissed" so a broken settings file doesn't permanently
+ * suppress the banner.
+ */
+async function loadBannerDismissed(): Promise<boolean> {
+  try {
+    const s = await getSettings('');
+    return s.dashboard?.container_banner_dismissed === true;
+  } catch {
+    return false;
+  }
+}
+
 export const Dashboard: Component = () => {
   const [missing] = createResource(firstMissingCredential);
   const [runtimeStatus] = createResource(probeRuntime);
+  // Seed `bannerDismissed` from persisted user settings on mount so the
+  // "Don't show again" preference survives a restart. Until the
+  // settings load resolves, we render as "not dismissed" — the banner
+  // visibility also depends on `runtimeStatus()` being non-`available`,
+  // which only resolves on the same tick, so there's no flash where a
+  // dismissed banner briefly appears.
   const [bannerDismissed, setBannerDismissed] = createSignal(false);
+  onMount(() => {
+    void (async () => {
+      if (await loadBannerDismissed()) setBannerDismissed(true);
+    })();
+  });
 
   // Pass an empty workspaceRoot — F-597 banner-dismissed is a user-tier
   // setting and the backend ignores `workspace_root` for `level: "user"`
