@@ -232,6 +232,13 @@ impl Session {
     /// pause/resume events appear in the event log in the same order
     /// as the corresponding state transitions. Wakes any orchestrator
     /// parked on `wait_if_paused` only on a real transition.
+    ///
+    /// F-653: uses `notify_one` (not `notify_waiters`) so a resume that
+    /// lands *before* the orchestrator reaches the checkpoint retains
+    /// a permit — the next `notified()` consumes it without parking,
+    /// avoiding the dropped-permit deadlock that
+    /// `pause_resume_burst_before_turn_does_not_deadlock_or_leak_step`
+    /// pins.
     pub async fn resume_and_emit_if_transitioned(&self) -> Result<bool, SessionError> {
         let _guard = self.pause_emit_lock.lock().await;
         if self
@@ -241,7 +248,7 @@ impl Session {
         {
             return Ok(false);
         }
-        self.resume_notify.notify_waiters();
+        self.resume_notify.notify_one();
         self.emit(Event::SessionResumed { at: Utc::now() }).await?;
         Ok(true)
     }
