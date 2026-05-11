@@ -152,6 +152,12 @@ pub fn run() -> Result<()> {
             crate::containers_ipc::stop_container,
             crate::containers_ipc::remove_container,
             crate::containers_ipc::container_logs,
+            // F-725: dashboard `+ New session` modal. Spawns a daemon-backed
+            // session via the same code path `forge session new` walks.
+            crate::session_spawn_ipc::session_start,
+            // F-727: dashboard `Attach to session` picker. Returns the
+            // attachable (detached) subset of `session_list`.
+            crate::session_spawn_ipc::list_sessions,
         ])
         .setup(|app| {
             crate::ipc::manage_bridge(&app.handle().clone());

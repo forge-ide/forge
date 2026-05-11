@@ -26,6 +26,12 @@ dirs = "5"
 # per-connection MCP reply-router in `bridge.rs`.
 futures = "0.3"
 forge-agents = { path = "../forge-agents" }
+# F-725: shell-side `session_start` IPC reuses the CLI's session-spawn helper
+# (`forge_cli::spawn::spawn_forged_session`) so both `forge session new` and
+# the dashboard's "+ New session" modal walk identical daemon-boot semantics.
+# Only the library half of forge-cli is pulled in; the `forge` binary is not
+# bundled into the shell.
+forge-cli = { path = "../forge-cli" }
 forge-core = { path = "../forge-core" }
 forge-fs = { path = "../forge-fs" }
 forge-ipc = { path = "../forge-ipc" }

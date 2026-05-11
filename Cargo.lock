@@ -1640,6 +1640,7 @@ dependencies = [
  "chrono",
  "dirs 5.0.1",
  "forge-agents",
+ "forge-cli",
  "forge-core",
  "forge-fs",
  "forge-ipc",
