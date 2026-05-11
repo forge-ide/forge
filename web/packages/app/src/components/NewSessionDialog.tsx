@@ -15,12 +15,11 @@
 //   spawn-failed  verbatim daemon error rendered with role="alert"; form
 //                 re-enabled, state preserved so the operator can amend
 //
-// Workspace picker: the spec calls for `tauri-plugin-dialog`'s directory
-// picker on the empty-workspace branch. That plugin isn't shipped today
-// (see routes/AgentMonitor.tsx §"plugin-dialog... which Forge doesn't ship
-// with today"), so the modal degrades to a manual text-field workflow: the
-// active workspace prefills the field; otherwise the operator types the
-// absolute path. Wiring the native picker is a follow-up.
+// Workspace picker: per spec §Empty-workspace branch the `Browse` action
+// dispatches `tauri-plugin-dialog`'s directory picker. The typed field
+// remains the source of truth so power-users can paste an absolute path;
+// `Browse` overwrites the field on confirm and leaves it untouched on
+// cancel (no toast, no error — see spec §Trigger).
 //
 // `activeWorkspaceRoot()` is a Dashboard-scoped signal that's typically
 // null since the Dashboard window has no bound session — kept here so the
@@ -37,6 +36,7 @@ import {
   onMount,
   Show,
 } from 'solid-js';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { Button } from '@forge/design';
 import type { SessionStartInput, SessionStartOutput } from '@forge/ipc';
 import { invoke } from '../lib/tauri';
@@ -199,6 +199,33 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     }
   };
 
+  // Spec §Empty-workspace branch + §Form: the `Browse` action launches
+  // `tauri-plugin-dialog`'s directory picker. Cancel is a silent no-op — the
+  // typed field is preserved exactly as it was.
+  const onBrowse = async (): Promise<void> => {
+    if (isBusy()) return;
+    try {
+      const picked = await openDialog({
+        directory: true,
+        multiple: false,
+        title: 'Pick a workspace for the new session',
+      });
+      if (typeof picked === 'string' && picked.length > 0) {
+        setWorkspaceRoot(picked);
+      }
+    } catch (err: unknown) {
+      // Surface picker failures the same way as daemon spawn errors —
+      // verbatim, with the `session_start:` prefix the spec mandates for
+      // every error in this modal (spec §IPC contract).
+      setError(
+        `session_start: workspace picker failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      setState('spawn-failed');
+    }
+  };
+
   const onBackdropClick = (e: MouseEvent): void => {
     if (e.target !== e.currentTarget) return;
     if (state() === 'spawning') return;
@@ -263,15 +290,27 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
           <form class="new-session-dialog__form" onSubmit={onSubmit}>
             <label class="new-session-dialog__field">
               <span class="new-session-dialog__label">WORKSPACE</span>
-              <input
-                type="text"
-                class="new-session-dialog__input"
-                data-testid="workspace-input"
-                value={workspaceRoot()}
-                disabled={isBusy()}
-                placeholder="/absolute/path/to/workspace"
-                onInput={(e) => setWorkspaceRoot(e.currentTarget.value)}
-              />
+              <div class="new-session-dialog__workspace-row">
+                <input
+                  type="text"
+                  class="new-session-dialog__input new-session-dialog__workspace-input"
+                  data-testid="workspace-input"
+                  value={workspaceRoot()}
+                  disabled={isBusy()}
+                  placeholder="/absolute/path/to/workspace"
+                  onInput={(e) => setWorkspaceRoot(e.currentTarget.value)}
+                />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  type="button"
+                  data-testid="workspace-browse"
+                  disabled={isBusy()}
+                  onClick={onBrowse}
+                >
+                  Browse
+                </Button>
+              </div>
             </label>
 
             <label class="new-session-dialog__field">

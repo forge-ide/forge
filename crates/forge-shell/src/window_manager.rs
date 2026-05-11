@@ -70,6 +70,11 @@ pub fn run() -> Result<()> {
         // capability file grants the browser-facing permissions; see
         // `crates/forge-shell/capabilities/default.json`.
         .plugin(tauri_plugin_notification::init())
+        // F-726 follow-up: native directory picker for the `+ New session`
+        // modal's empty-workspace branch. The webview calls `open({ directory:
+        // true, ... })` from `@tauri-apps/plugin-dialog`; the capability file
+        // grants the matching `dialog:allow-open` permission.
+        .plugin(tauri_plugin_dialog::init())
         .manage(ProviderStatusCache::new(CACHE_TTL))
         .invoke_handler(tauri::generate_handler![
             dashboard::provider_status,

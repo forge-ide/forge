@@ -66,6 +66,17 @@
   color: var(--color-text-secondary);
 }
 
+.new-session-dialog__workspace-row {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: stretch;
+}
+
+.new-session-dialog__workspace-input {
+  flex: 1;
+  min-width: 0;
+}
+
 .new-session-dialog__input {
   background: var(--color-bg);
   color: var(--color-text-primary);

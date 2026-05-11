@@ -8,6 +8,14 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@solidjs/testing-library';
+
+// Mock the dialog plugin before importing the SUT — the real plugin throws
+// outside a Tauri runtime. The mock is reset per-test via `mockOpenDialog`.
+const mockOpenDialog = vi.fn();
+vi.mock('@tauri-apps/plugin-dialog', () => ({
+  open: (...args: unknown[]) => mockOpenDialog(...args),
+}));
+
 import { NewSessionDialog } from './NewSessionDialog';
 import { setInvokeForTesting } from '../lib/tauri';
 import { setActiveWorkspaceRoot } from '../stores/session';
@@ -104,6 +112,7 @@ function renderDialog(props: {
 beforeEach(() => {
   // Reset the workspace signal so each test starts from a known baseline.
   setActiveWorkspaceRoot(null);
+  mockOpenDialog.mockReset();
 });
 
 afterEach(() => {
@@ -440,6 +449,78 @@ describe('NewSessionDialog dismiss paths', () => {
     fireEvent.keyDown(window, { key: 'Escape' });
     fireEvent.click(getByTestId('new-session-backdrop'));
     expect(onClose).not.toHaveBeenCalled();
+
+    resolveStart({ session_id: 'done' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Workspace picker — native directory dialog (F-726 follow-up)
+// ---------------------------------------------------------------------------
+
+describe('NewSessionDialog workspace picker', () => {
+  it('renders a Browse button next to the workspace input', async () => {
+    installInvokeStub();
+    const { getByTestId } = renderDialog();
+    await waitFor(() => expect(getByTestId('provider-select')).toBeInTheDocument());
+    const browse = getByTestId('workspace-browse');
+    expect(browse).toBeInTheDocument();
+    expect(browse).toHaveTextContent('Browse');
+  });
+
+  it('updates the workspace input when the picker returns a path', async () => {
+    installInvokeStub();
+    mockOpenDialog.mockResolvedValueOnce('/picked/from/native');
+    const { getByTestId } = renderDialog();
+    await waitFor(() => expect(getByTestId('provider-select')).toBeInTheDocument());
+
+    fireEvent.click(getByTestId('workspace-browse'));
+
+    await waitFor(() =>
+      expect((getByTestId('workspace-input') as HTMLInputElement).value).toBe(
+        '/picked/from/native',
+      ),
+    );
+    expect(mockOpenDialog).toHaveBeenCalledWith({
+      directory: true,
+      multiple: false,
+      title: 'Pick a workspace for the new session',
+    });
+  });
+
+  it('leaves the workspace input unchanged when the picker is cancelled', async () => {
+    installInvokeStub();
+    setActiveWorkspaceRoot('/seed/path');
+    mockOpenDialog.mockResolvedValueOnce(null);
+    const { getByTestId } = renderDialog();
+    await waitFor(() => expect(getByTestId('provider-select')).toBeInTheDocument());
+
+    fireEvent.click(getByTestId('workspace-browse'));
+
+    // Give the picker promise a chance to resolve before asserting unchanged.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect((getByTestId('workspace-input') as HTMLInputElement).value).toBe('/seed/path');
+    expect(mockOpenDialog).toHaveBeenCalledTimes(1);
+  });
+
+  it('disables the Browse button while spawning', async () => {
+    let resolveStart!: (value: { session_id: string }) => void;
+    const pending = new Promise<{ session_id: string }>((res) => {
+      resolveStart = res;
+    });
+    installInvokeStub({ sessionStart: () => pending });
+    setActiveWorkspaceRoot('/work/repo');
+    const { getByTestId } = renderDialog();
+    await waitFor(() => expect(getByTestId('provider-select')).toBeInTheDocument());
+
+    fireEvent.click(getByTestId('new-session-submit'));
+    await waitFor(() =>
+      expect(getByTestId('new-session-dialog')).toHaveAttribute('data-state', 'spawning'),
+    );
+
+    expect(getByTestId('workspace-browse')).toBeDisabled();
 
     resolveStart({ session_id: 'done' });
   });
