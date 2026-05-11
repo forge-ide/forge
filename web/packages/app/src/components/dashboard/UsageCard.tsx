@@ -22,7 +22,7 @@ import {
   type Component,
   type JSX,
 } from 'solid-js';
-import { Button, Skeleton } from '@forge/design';
+import { Button, Skeleton, Tab, Tabs } from '@forge/design';
 import type { Money, UsageRange } from '@forge/ipc';
 import {
   fetchUsageSummary,
@@ -213,26 +213,26 @@ export const UsageCard: Component = () => {
           Usage <span class="usage-card__label-sep">·</span>{' '}
           <span class="usage-card__label-range">last {headerFragment()}</span>
         </span>
-        <div
+        <Tabs
+          variant="radio"
           class="usage-card__ranges"
-          role="group"
           aria-label="Usage time range"
         >
           <For each={RANGE_OPTIONS}>
             {(opt) => (
-              <button
-                type="button"
+              <Tab
+                variant="radio"
+                selected={rangeKey() === opt}
                 class="usage-card__range"
                 classList={{ 'usage-card__range--selected': rangeKey() === opt }}
-                aria-pressed={rangeKey() === opt}
                 onClick={() => setRangeKey(opt)}
                 data-testid={`usage-card-range-${opt.toLowerCase()}`}
               >
                 {opt}
-              </button>
+              </Tab>
             )}
           </For>
-        </div>
+        </Tabs>
       </header>
 
       <Show when={data.loading}>

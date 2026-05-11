@@ -214,14 +214,14 @@ describe('UsageCard range toggle', () => {
     expect(callsAfterMount).toBe(2); // current + prior
 
     const thirtyButton = await findByTestId('usage-card-range-30d');
-    expect(thirtyButton.getAttribute('aria-pressed')).toBe('false');
+    expect(thirtyButton.getAttribute('aria-checked')).toBe('false');
     const sevenButton = await findByTestId('usage-card-range-7d');
-    expect(sevenButton.getAttribute('aria-pressed')).toBe('true');
+    expect(sevenButton.getAttribute('aria-checked')).toBe('true');
 
     fireEvent.click(thirtyButton);
 
     await waitFor(() => {
-      expect(thirtyButton.getAttribute('aria-pressed')).toBe('true');
+      expect(thirtyButton.getAttribute('aria-checked')).toBe('true');
       // Toggle fires another current+prior pair.
       expect(mock.mock.calls.length).toBeGreaterThanOrEqual(callsAfterMount + 2);
     });

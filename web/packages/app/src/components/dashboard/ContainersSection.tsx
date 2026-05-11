@@ -30,7 +30,7 @@ import {
   onMount,
   Show,
 } from 'solid-js';
-import { Button, Skeleton } from '@forge/design';
+import { Button, IconButton, Skeleton } from '@forge/design';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import {
   CONTAINERS_CHANGED_EVENT,
@@ -262,27 +262,21 @@ const ContainerRow: Component<ContainerRowProps> = (props) => {
       <div class="containers-section__image">{props.container.image}</div>
       <div class="containers-section__resources">cpu unknown {'·'} ram unknown</div>
       <div class="containers-section__row-actions">
-        <button
-          type="button"
+        <IconButton
           class="containers-section__icon-btn"
           data-testid={`container-term-${props.container.container_id}`}
-          aria-label="Open terminal"
-          title="Open terminal"
+          label="Open terminal"
+          icon={<TerminalGlyph />}
           onClick={props.onTerminal}
-        >
-          <TerminalGlyph />
-        </button>
-        <button
-          type="button"
+        />
+        <IconButton
           class="containers-section__icon-btn"
           disabled={props.container.stopped}
           data-testid={`container-stop-${props.container.container_id}`}
-          aria-label="Stop container"
-          title="Stop container"
+          label="Stop container"
+          icon={<StopGlyph />}
           onClick={props.onStop}
-        >
-          <StopGlyph />
-        </button>
+        />
       </div>
     </li>
   );
