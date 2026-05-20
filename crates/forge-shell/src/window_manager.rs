@@ -185,6 +185,12 @@ pub fn run() -> Result<()> {
             crate::ipc::list_mcp_servers,
             crate::ipc::list_agents,
             crate::ipc::list_providers,
+            // Seeds the workspaces registry for the dashboard's "Open
+            // workspace" picker (EnabledAssetsCard). The downstream
+            // list_skills / list_mcp_servers / list_agents calls validate
+            // against the registry, so the picker must register before
+            // setting the active workspace.
+            crate::ipc::register_workspace,
             // F-587: per-provider credential management. The Dashboard's
             // settings panel is the only call site; `require_window_label`
             // enforces the `dashboard` window label inside each command.

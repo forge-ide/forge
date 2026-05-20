@@ -9,9 +9,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render } from '@solidjs/testing-library';
 import type { ScopedRosterEntry } from '@forge/ipc';
-import { EnabledAssetsCard, workspaceShortName } from './EnabledAssetsCard';
+
+// Mock the dialog plugin before importing the SUT — the real plugin throws
+// outside a Tauri runtime. The mock is reset per-test via `mockOpenDialog`.
+const mockOpenDialog = vi.fn();
+vi.mock('@tauri-apps/plugin-dialog', () => ({
+  open: (...args: unknown[]) => mockOpenDialog(...args),
+}));
+
+import {
+  EnabledAssetsCard,
+  workspaceShortName,
+} from './EnabledAssetsCard';
 import { setInvokeForTesting } from '../../lib/tauri';
 import {
+  activeWorkspaceRoot,
   setActiveWorkspaceRoot,
 } from '../../stores/session';
 import { resetSettingsStore } from '../../stores/settings';
@@ -41,10 +53,14 @@ interface SetupOpts {
   setSettingError?: string;
   /** Pend a single command — its promise never resolves until the test ends. */
   pending?: boolean;
+  /** Override `register_workspace`'s returned canonical path. Default echoes the input. */
+  registerWorkspaceCanonical?: (picked: string) => string;
+  /** Force `register_workspace` to reject with this message. */
+  registerWorkspaceError?: string;
 }
 
 function setupInvoke(opts: SetupOpts = {}) {
-  invokeMock.mockImplementation((cmd: string) => {
+  invokeMock.mockImplementation((cmd: string, payload?: Record<string, unknown>) => {
     if (opts.pending) return new Promise(() => undefined);
     switch (cmd) {
       case 'list_skills':
@@ -57,6 +73,16 @@ function setupInvoke(opts: SetupOpts = {}) {
       case 'set_setting':
         if (opts.setSettingError) return Promise.reject(new Error(opts.setSettingError));
         return Promise.resolve(undefined);
+      case 'register_workspace': {
+        if (opts.registerWorkspaceError) {
+          return Promise.reject(new Error(opts.registerWorkspaceError));
+        }
+        const picked = (payload?.workspaceRoot as string | undefined) ?? '';
+        const canonical = opts.registerWorkspaceCanonical
+          ? opts.registerWorkspaceCanonical(picked)
+          : picked;
+        return Promise.resolve(canonical);
+      }
       default:
         return Promise.resolve(undefined);
     }
@@ -71,6 +97,7 @@ async function flush(): Promise<void> {
 
 beforeEach(() => {
   invokeMock.mockReset();
+  mockOpenDialog.mockReset();
   setInvokeForTesting(invokeMock as never);
   setActiveWorkspaceRoot('/home/user/acme-api');
   resetSettingsStore();
@@ -274,6 +301,86 @@ describe('<EnabledAssetsCard> (F-724)', () => {
     expect(queryByTestId('enabled-assets-workspace')).toBeNull();
     // No IPCs fire when there's no workspace.
     expect(invokeMock).not.toHaveBeenCalledWith('list_skills', expect.anything());
+  });
+
+  // ---- picker → register_workspace seam ----
+  //
+  // Regression coverage for the bug where the dashboard's "Open workspace"
+  // CTA set activeWorkspaceRoot without seeding workspaces.toml, so every
+  // downstream list_* call tripped resolve_workspace_root_for_command's
+  // registry gate ("workspace_root not in registry").
+
+  it('Open workspace CTA registers the picked path before publishing it as active', async () => {
+    setActiveWorkspaceRoot(null);
+    mockOpenDialog.mockResolvedValue('/home/user/picked-ws');
+    setupInvoke();
+
+    const { findByTestId } = render(() => <EnabledAssetsCard />);
+    const cta = await findByTestId('enabled-assets-open-workspace');
+    fireEvent.click(cta);
+    await flush();
+    // Native dialog → register_workspace → setActiveWorkspaceRoot is a
+    // promise chain; one extra macrotask lets it settle before assertions.
+    await new Promise((r) => setTimeout(r, 0));
+    await flush();
+
+    expect(invokeMock).toHaveBeenCalledWith('register_workspace', {
+      workspaceRoot: '/home/user/picked-ws',
+    });
+    expect(activeWorkspaceRoot()).toBe('/home/user/picked-ws');
+  });
+
+  it('persists the canonical path returned by register_workspace, not the raw picker output', async () => {
+    setActiveWorkspaceRoot(null);
+    mockOpenDialog.mockResolvedValue('/home/user/symlink-ws');
+    setupInvoke({
+      registerWorkspaceCanonical: () => '/home/user/canonical-ws',
+    });
+
+    const { findByTestId } = render(() => <EnabledAssetsCard />);
+    fireEvent.click(await findByTestId('enabled-assets-open-workspace'));
+    await flush();
+    await new Promise((r) => setTimeout(r, 0));
+    await flush();
+
+    expect(activeWorkspaceRoot()).toBe('/home/user/canonical-ws');
+  });
+
+  it('surfaces register_workspace rejection and leaves activeWorkspaceRoot unset', async () => {
+    setActiveWorkspaceRoot(null);
+    mockOpenDialog.mockResolvedValue('/home/user/picked-ws');
+    setupInvoke({
+      registerWorkspaceError: 'workspace_root not found on disk: nope',
+    });
+
+    const { findByTestId, findByText } = render(() => <EnabledAssetsCard />);
+    fireEvent.click(await findByTestId('enabled-assets-open-workspace'));
+    await flush();
+    await new Promise((r) => setTimeout(r, 0));
+    await flush();
+
+    expect(await findByText(/register_workspace failed/)).toBeTruthy();
+    expect(activeWorkspaceRoot()).toBeNull();
+    // No list_* call should fire either — the active root never flipped.
+    expect(invokeMock).not.toHaveBeenCalledWith('list_skills', expect.anything());
+  });
+
+  it('does not call register_workspace when the picker is cancelled', async () => {
+    setActiveWorkspaceRoot(null);
+    mockOpenDialog.mockResolvedValue(null);
+    setupInvoke();
+
+    const { findByTestId } = render(() => <EnabledAssetsCard />);
+    fireEvent.click(await findByTestId('enabled-assets-open-workspace'));
+    await flush();
+    await new Promise((r) => setTimeout(r, 0));
+    await flush();
+
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      'register_workspace',
+      expect.anything(),
+    );
+    expect(activeWorkspaceRoot()).toBeNull();
   });
 });
 

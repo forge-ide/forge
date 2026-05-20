@@ -48,6 +48,23 @@ export async function openSession(id: string): Promise<void> {
   await invoke('open_session', { id });
 }
 
+/**
+ * Seed `~/.config/forge/workspaces.toml` with `workspaceRoot` so the
+ * registry gate inside `resolve_workspace_root_for_command` will accept it
+ * on subsequent dashboard list commands.
+ *
+ * Required for dashboard surfaces that let the user pick a workspace
+ * outside the `+ New session` flow (today: `EnabledAssetsCard`'s
+ * "Open workspace" CTA). `session_start` registers internally, so
+ * `NewSessionDialog` does not need to call this.
+ *
+ * Returns the canonical form of `workspaceRoot` — callers should persist
+ * the canonical string (matching what `session_hello` would return).
+ */
+export async function registerWorkspace(workspaceRoot: string): Promise<string> {
+  return invoke<string>('register_workspace', { workspaceRoot });
+}
+
 // ---------------------------------------------------------------------------
 // Provider selection (F-586)
 // ---------------------------------------------------------------------------

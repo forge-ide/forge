@@ -714,6 +714,12 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         list_mcp_servers,
         list_agents,
         list_providers,
+        // Seed the workspaces registry from a dashboard surface that lets
+        // the user pick a workspace outside the new-session flow (today:
+        // `EnabledAssetsCard`'s "Open workspace" CTA). The downstream list
+        // commands rely on the registry gate, so the picker must register
+        // before setting the active workspace.
+        register_workspace,
         // F-359: server-side URL context fetch + allowlist setter.
         context_fetch_url,
         set_context_allowed_hosts,
@@ -1024,6 +1030,38 @@ pub(crate) async fn resolve_workspace_root_for_command(
         ));
     }
     Ok(canonical)
+}
+
+/// Dashboard-scoped registry-seeding command. Mirrors the canonicalize +
+/// `register_workspace_if_missing` snippet inside `session_start`, so a
+/// dashboard surface that lets the user pick a workspace without starting a
+/// session (today: `EnabledAssetsCard`'s "Open workspace" CTA) can seed the
+/// registry before its downstream list commands trip the
+/// [`resolve_workspace_root_for_command`] defense-in-depth gate.
+///
+/// Returns the canonical path so the caller can persist the canonicalized
+/// form in its local state (matching the form `session_hello` would later
+/// return through the cached-root path).
+#[tauri::command]
+pub async fn register_workspace<R: Runtime>(
+    workspace_root: String,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+) -> Result<String, String> {
+    require_window_label(&webview, "dashboard", "register_workspace")?;
+    require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
+
+    let supplied = std::path::Path::new(&workspace_root);
+    let canonical = supplied
+        .canonicalize()
+        .map_err(|e| format!("register_workspace: workspace_root not found on disk: {e}"))?;
+
+    let toml_path = resolve_workspaces_toml(&state);
+    forge_core::workspaces::register_workspace_if_missing(&toml_path, &canonical)
+        .await
+        .map_err(|e| format!("register_workspace: could not update workspaces registry: {e}"))?;
+
+    Ok(canonical.to_string_lossy().into_owned())
 }
 
 // ---------------------------------------------------------------------------

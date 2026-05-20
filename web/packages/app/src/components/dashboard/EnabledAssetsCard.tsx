@@ -23,6 +23,7 @@ import {
   listSkills,
   SESSION_WIDE_SCOPE,
 } from '../../ipc/catalog';
+import { registerWorkspace } from '../../ipc/dashboard';
 import { activeWorkspaceRoot, setActiveWorkspaceRoot } from '../../stores/session';
 import { settings, setSetting } from '../../stores/settings';
 import './EnabledAssetsCard.css';
@@ -324,6 +325,13 @@ interface NoWorkspaceEmptyProps {
  * user select an existing folder OR create a new one inline via its
  * platform-native "new folder" affordance, so one button covers both
  * intents the user asked about.
+ *
+ * Before publishing the picked path to `activeWorkspaceRoot`, we call
+ * `register_workspace` so the downstream `list_skills` / `list_mcp_servers`
+ * / `list_agents` calls don't immediately trip the dashboard-caller
+ * registry gate in `resolve_workspace_root_for_command`. `session_start`
+ * does this same step internally; this CTA is the dashboard's only other
+ * path that seeds the active workspace from outside that flow.
  */
 const NoWorkspaceEmpty: Component<NoWorkspaceEmptyProps> = (props) => {
   const [busy, setBusy] = createSignal(false);
@@ -337,9 +345,18 @@ const NoWorkspaceEmpty: Component<NoWorkspaceEmptyProps> = (props) => {
         multiple: false,
         title: 'Open a workspace',
       });
-      if (typeof picked === 'string' && picked.length > 0) {
-        props.onOpened(picked);
+      if (typeof picked !== 'string' || picked.length === 0) return;
+
+      let canonical: string;
+      try {
+        canonical = await registerWorkspace(picked);
+      } catch (err: unknown) {
+        props.onError(
+          `register_workspace failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return;
       }
+      props.onOpened(canonical);
     } catch (err: unknown) {
       props.onError(
         `workspace picker failed: ${err instanceof Error ? err.message : String(err)}`,
