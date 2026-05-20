@@ -1320,3 +1320,127 @@ describe('StatusBar — runtime feed (F-741)', () => {
     expect(queryByTestId('status-bar-runtime')).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Dashboard-scoped IPCs must not fire in session windows
+//
+// Every status-bar feed in this block is backed by an IPC that gates on
+// `require_window_label(..., "dashboard", ...)` in `crates/forge-shell/`.
+// Mounting StatusBar in a session window used to fire them all anyway —
+// the shell rejected each call with "forbidden: window label mismatch",
+// the segments fell back to `unknown`, and the console filled with the
+// rejection traces. The fix detects the route via `useMatch` and skips
+// the seeds when we're in a session window; the bg-agent badge + the
+// connection-state segment stay live because they're driven by
+// session-scoped event channels rather than dashboard IPCs.
+// ---------------------------------------------------------------------------
+
+describe('StatusBar — session-window gate', () => {
+  function renderInSession(props: {
+    sessionList: ReturnType<typeof vi.fn>;
+    getActiveProvider: ReturnType<typeof vi.fn>;
+    gitBranch?: ReturnType<typeof vi.fn>;
+    detectContainerRuntime?: ReturnType<typeof vi.fn>;
+    subscribeProviderChanged?: ReturnType<typeof vi.fn>;
+    workspaceRoot?: string;
+  }) {
+    const history = createMemoryHistory();
+    history.set({ value: '/session/abc' });
+    return render(() => (
+      <MemoryRouter history={history}>
+        <Route
+          path="/session/:id"
+          component={() => (
+            <StatusBar
+              listBackgroundAgents={vi.fn().mockResolvedValue([])}
+              subscribe={bgBusStub().subscribe}
+              sessionList={props.sessionList as never}
+              getActiveProvider={props.getActiveProvider as never}
+              {...(props.gitBranch ? { gitBranch: props.gitBranch as never } : {})}
+              {...(props.detectContainerRuntime
+                ? { detectContainerRuntime: props.detectContainerRuntime as never }
+                : {})}
+              {...(props.subscribeProviderChanged
+                ? { subscribeProviderChanged: props.subscribeProviderChanged as never }
+                : {})}
+              workspaceRoot={props.workspaceRoot ?? '/ws'}
+            />
+          )}
+        />
+      </MemoryRouter>
+    ));
+  }
+
+  it('skips session_list, get_active_provider, git_branch, and detect_container_runtime in session windows', async () => {
+    const sessionList = vi.fn().mockResolvedValue([]);
+    const getActiveProvider = vi.fn().mockResolvedValue('anthropic');
+    const gitBranch = vi.fn().mockResolvedValue('main');
+    const detectContainerRuntime = vi
+      .fn()
+      .mockResolvedValue({ kind: 'available' });
+    const subscribeProviderChanged = vi.fn().mockResolvedValue(() => undefined);
+
+    const { findByTestId } = renderInSession({
+      sessionList,
+      getActiveProvider,
+      gitBranch,
+      detectContainerRuntime,
+      subscribeProviderChanged,
+    });
+    // Wait for mount so any pending async would have had a chance to fire.
+    await findByTestId('status-bar');
+
+    expect(sessionList).not.toHaveBeenCalled();
+    expect(getActiveProvider).not.toHaveBeenCalled();
+    expect(gitBranch).not.toHaveBeenCalled();
+    expect(detectContainerRuntime).not.toHaveBeenCalled();
+    expect(subscribeProviderChanged).not.toHaveBeenCalled();
+  });
+
+  it('hides the dashboard-scoped segments in session windows', async () => {
+    const { findByTestId, queryByTestId } = renderInSession({
+      sessionList: vi.fn().mockResolvedValue([{ id: 'a' }, { id: 'b' }]),
+      getActiveProvider: vi.fn().mockResolvedValue('anthropic'),
+      gitBranch: vi.fn().mockResolvedValue('main'),
+      detectContainerRuntime: vi.fn().mockResolvedValue({ kind: 'available' }),
+    });
+    await findByTestId('status-bar');
+
+    // Each segment renders only after its feed resolves; the feeds are
+    // gated off in session windows, so every segment stays absent.
+    expect(queryByTestId('status-bar-sessions')).toBeNull();
+    expect(queryByTestId('status-bar-provider')).toBeNull();
+    expect(queryByTestId('status-bar-branch')).toBeNull();
+    expect(queryByTestId('status-bar-runtime')).toBeNull();
+  });
+
+  it('still fires the dashboard-scoped feeds when mounted in a dashboard window', async () => {
+    // Regression guard for the gate itself — when the StatusBar is
+    // mounted under the dashboard route (or without any Router context,
+    // as the historical unit tests do), every feed must keep firing.
+    const sessionList = vi.fn().mockResolvedValue([{ id: 'a' }]);
+    const getActiveProvider = vi.fn().mockResolvedValue('anthropic');
+    const history = createMemoryHistory();
+    history.set({ value: '/' });
+    const { findByTestId } = render(() => (
+      <MemoryRouter history={history}>
+        <Route
+          path="/"
+          component={() => (
+            <StatusBar
+              listBackgroundAgents={vi.fn().mockResolvedValue([])}
+              subscribe={bgBusStub().subscribe}
+              sessionList={sessionList as never}
+              getActiveProvider={getActiveProvider as never}
+            />
+          )}
+        />
+      </MemoryRouter>
+    ));
+    await findByTestId('status-bar');
+    await waitFor(() => {
+      expect(sessionList).toHaveBeenCalled();
+      expect(getActiveProvider).toHaveBeenCalled();
+    });
+  });
+});

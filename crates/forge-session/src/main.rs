@@ -5,8 +5,10 @@ use forge_core::credentials::{Credentials, EnvFallbackStore, LayeredStore};
 use forge_core::Event;
 use forge_providers::anthropic::{AnthropicProvider, DEFAULT_MAX_TOKENS};
 use forge_providers::ollama::OllamaProvider;
+use forge_providers::openai::custom::{AuthShape, CustomOpenAiProvider};
 use forge_providers::openai::OpenAiProvider;
 use forge_providers::MockProvider;
+use forge_core::settings::{load_user_settings_in, AuthShapeSettings};
 use forge_session::orchestrator::{CredentialContext, ProviderTag};
 use forge_session::{
     log_bridge,
@@ -274,6 +276,96 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        // Settings-backed OpenAI-compatible endpoint (`custom_openai:<name>`).
+        // Resolves base_url / model / auth_shape from the on-disk
+        // `[providers.custom_openai.<name>]` entry the dashboard wrote
+        // via add_provider. Keyless entries (`auth.shape = "none"`,
+        // LM Studio default) skip credential injection entirely; Bearer
+        // / Header entries get the F-744 seam keyed on the full
+        // `custom_openai:<name>` id so the orchestrator pulls the
+        // per-turn key from the keyring under that slug.
+        ProviderKind::CustomOpenAi { name } => {
+            let user_dir = resolve_user_config_dir_for_daemon().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "custom_openai:{name}: cannot resolve user config directory"
+                )
+            })?;
+            let settings = load_user_settings_in(&user_dir).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "custom_openai:{name}: failed to load user settings.toml: {e}"
+                )
+            })?;
+            let entry = settings.providers.custom_openai.get(&name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "custom_openai:{name}: provider not configured under \
+                     [providers.custom_openai.{name}] in user settings"
+                )
+            })?;
+
+            let auth_shape = match &entry.auth {
+                AuthShapeSettings::Bearer => AuthShape::Bearer,
+                AuthShapeSettings::Header { name: hdr } => {
+                    AuthShape::Header { name: hdr.clone() }
+                }
+                AuthShapeSettings::None => AuthShape::None,
+            };
+
+            // CustomOpenAiProvider::new rejects a Bearer/Header shape with
+            // no api_key. The dashboard's keyed flow stores the key in the
+            // OS keychain (under the full `custom_openai:<name>` id) and
+            // leaves settings.api_key as None; the F-744 seam then injects
+            // the live key per chat turn. Mirror the Anthropic/OpenAI
+            // built-in constructor by passing an empty-string placeholder
+            // — the seam's `override_key` wins inside `auth_headers_with`
+            // when chat() runs.
+            let placeholder_key = match (&auth_shape, &entry.api_key) {
+                (AuthShape::None, _) => None,
+                (_, Some(k)) => Some(k.clone()),
+                (_, None) => Some(String::new()),
+            };
+
+            let provider = CustomOpenAiProvider::new(
+                name.clone(),
+                entry.base_url.clone(),
+                entry.model.clone(),
+                entry.model_list.clone(),
+                auth_shape,
+                placeholder_key,
+            )
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "custom_openai:{name}: failed to construct provider: {e}"
+                )
+            })?;
+
+            let provider_id = format!("custom_openai:{name}");
+            let provider_tag = Some(ProviderTag::new(&provider_id, entry.model.clone()));
+            // Keyless entries skip the per-turn credential pull entirely
+            // — there is no key to fetch and the orchestrator's check
+            // would only ever surface "missing" on a working
+            // configuration. Bearer / Header entries pull through the
+            // keyring under the full id slug.
+            let credentials = if matches!(entry.auth, AuthShapeSettings::None) {
+                None
+            } else {
+                build_credential_context(provider_id.clone())
+            };
+
+            serve_with_session(
+                &socket_path,
+                session,
+                Arc::new(provider),
+                auto_approve,
+                ephemeral,
+                workspace,
+                Some(session_id),
+                credentials,
+                active_agent,
+                user_home_override,
+                provider_tag,
+            )
+            .await
+        }
     }
 }
 
@@ -284,7 +376,12 @@ async fn main() -> Result<()> {
 /// primary, env fallback. On targets without a platform keyring (none
 /// today; the cfg gates all three desktop OSes), fall back to the
 /// env-only store.
-fn build_credential_context(provider_id: &'static str) -> Option<CredentialContext> {
+///
+/// Accepts `impl Into<String>` rather than `&'static str` so dynamic
+/// provider ids (the `custom_openai:<name>` family, where `<name>` comes
+/// from settings at runtime) can share the same construction path as the
+/// built-in keyed kinds.
+fn build_credential_context(provider_id: impl Into<String>) -> Option<CredentialContext> {
     // `EnvFallbackStore::default()` reads `ANTHROPIC_API_KEY` for the
     // `anthropic` provider and `OPENAI_API_KEY` for `openai` when the
     // keyring has no entry — the canonical vendor env vars.
@@ -303,9 +400,26 @@ fn build_credential_context(provider_id: &'static str) -> Option<CredentialConte
     };
     Some(CredentialContext {
         store,
-        provider_id: provider_id.to_string(),
+        provider_id: provider_id.into(),
         sidecar_push: None,
     })
+}
+
+/// Resolve the user config directory the daemon should load settings
+/// from. Mirrors the shell's `resolve_user_config_dir` policy — platform
+/// config dir (`~/.config` on Linux) in production. Tests pass
+/// `FORGE_USER_CONFIG_DIR_FOR_TEST` so they can prime a tempdir; the
+/// override is debug-only to keep the production binary on the canonical
+/// path.
+fn resolve_user_config_dir_for_daemon() -> Option<PathBuf> {
+    if cfg!(debug_assertions) {
+        if let Ok(p) = std::env::var("FORGE_USER_CONFIG_DIR_FOR_TEST") {
+            if !p.is_empty() {
+                return Some(PathBuf::from(p));
+            }
+        }
+    }
+    dirs::config_dir()
 }
 
 /// Parse `--flag value` from a flat argv. Returns None if the flag isn't

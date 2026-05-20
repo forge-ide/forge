@@ -131,13 +131,21 @@ pub(crate) struct McpReplySlots {
 /// value. Populated in [`SessionBridge::hello`] after the `HelloAck`
 /// returns.
 ///
+/// **Workspace-id cache (strict per-session ownership).** `workspace_ids`
+/// stores the stable `WorkspaceId` (resolved from the workspaces registry
+/// at `session_hello` and seeded at `session_start`) so the IPC authz
+/// helpers can verify that the calling `workspace-<id>` window owns the
+/// session it claims. Populated alongside `workspace_roots`; a missing
+/// entry causes the strict gate to fail closed.
+///
 /// TODO: once a `session_disconnect` command lands, drop the matching
-/// `workspace_roots` entry alongside the `inner` entry so a recycled
-/// `session_id` can't reuse a stale cache.
+/// `workspace_roots` + `workspace_ids` entries alongside the `inner` entry
+/// so a recycled `session_id` can't reuse a stale cache.
 #[derive(Clone, Default)]
 pub struct SessionConnections {
     inner: Arc<Mutex<HashMap<String, Connection>>>,
     workspace_roots: Arc<Mutex<HashMap<String, PathBuf>>>,
+    workspace_ids: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl SessionConnections {
@@ -184,6 +192,45 @@ impl SessionConnections {
             .await
             .insert(session_id.into(), root);
     }
+
+    /// Return the cached `WorkspaceId` for `session_id`, or `None` when no
+    /// `session_hello` / `session_start` has populated the cache yet. The
+    /// id is cloned — the map lock is released before the caller awaits
+    /// anything. Consumed by `require_session_owner_label` to enforce
+    /// strict per-session ownership of the calling workspace window.
+    pub async fn workspace_id(&self, session_id: &str) -> Option<String> {
+        self.workspace_ids.lock().await.get(session_id).cloned()
+    }
+
+    /// Production accessor for the workspace-id cache. Invoked from
+    /// `session_start` (after a fresh workspace_id is minted) and from
+    /// `SessionBridge::hello` (after the workspaces registry has been
+    /// consulted) so the strict per-session ownership gate has a populated
+    /// cache regardless of whether the spawn or hello race lands first.
+    pub async fn set_workspace_id(
+        &self,
+        session_id: impl Into<String>,
+        workspace_id: String,
+    ) {
+        self.workspace_ids
+            .lock()
+            .await
+            .insert(session_id.into(), workspace_id);
+    }
+
+    /// Test seam alias for `set_workspace_id`. Kept under `webview-test` so
+    /// the test surface mirrors the existing `prime_workspace_root_for_test`
+    /// naming convention — integration tests use it to populate the strict
+    /// authz gate without running a live `session_hello`.
+    #[cfg(feature = "webview-test")]
+    #[doc(hidden)]
+    pub async fn prime_workspace_id_for_test(
+        &self,
+        session_id: impl Into<String>,
+        workspace_id: String,
+    ) {
+        self.set_workspace_id(session_id, workspace_id).await;
+    }
 }
 
 /// Resolve the default socket path for a session id, following the same
@@ -226,7 +273,19 @@ impl SessionBridge {
     /// framed `Hello`/`HelloAck` handshake. Returns the daemon's ack.
     ///
     /// If `socket_path` is `None`, [`default_socket_path`] is used.
-    pub async fn hello(&self, session_id: &str, socket_path: Option<&Path>) -> Result<HelloAck> {
+    ///
+    /// `workspaces_toml`, when provided, is used to look up the stable
+    /// `WorkspaceId` for the daemon-reported `HelloAck.workspace` so the
+    /// strict per-session authz gate has a populated cache. The lookup is
+    /// best-effort — a registry miss leaves the workspace_id cache empty
+    /// and the strict gate will fail closed for any subsequent session
+    /// command.
+    pub async fn hello(
+        &self,
+        session_id: &str,
+        socket_path: Option<&Path>,
+        workspaces_toml: Option<&Path>,
+    ) -> Result<HelloAck> {
         {
             let map = self.connections.inner.lock().await;
             if map.contains_key(session_id) {
@@ -301,11 +360,34 @@ impl SessionBridge {
         if !ack.workspace.is_empty() {
             let cached = std::fs::canonicalize(&ack.workspace)
                 .unwrap_or_else(|_| PathBuf::from(&ack.workspace));
+            // Look up the workspace_id BEFORE acquiring any of the
+            // SessionConnections locks — the workspaces.toml read goes
+            // through tokio::fs and we must not hold the map lock across
+            // that await per the F-109 locking discipline at the top of
+            // this file.
+            let workspace_id = match workspaces_toml {
+                Some(toml_path) => {
+                    forge_core::workspaces::lookup_workspace_id(toml_path, &cached)
+                        .await
+                        .ok()
+                        .flatten()
+                }
+                None => None,
+            };
+            // Install both cache entries under brief, sequential locks so
+            // neither is held across an `.await`.
             self.connections
                 .workspace_roots
                 .lock()
                 .await
                 .insert(session_id.to_string(), cached);
+            if let Some(wid) = workspace_id {
+                self.connections
+                    .workspace_ids
+                    .lock()
+                    .await
+                    .insert(session_id.to_string(), wid.to_string());
+            }
         }
 
         Ok(ack)
@@ -571,6 +653,14 @@ impl SessionBridge {
         // not inherit the prior cache (see the TODO in `SessionConnections`).
         self.connections
             .workspace_roots
+            .lock()
+            .await
+            .remove(session_id);
+        // Drop the cached workspace_id too — the strict per-session
+        // ownership gate must fail closed against a recycled session id
+        // until the next `session_hello` repopulates the entry.
+        self.connections
+            .workspace_ids
             .lock()
             .await
             .remove(session_id);

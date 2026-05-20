@@ -2,19 +2,23 @@
 //!
 //! Every command is a thin wrapper over [`crate::bridge::SessionBridge`],
 //! plus an [`EventSink`] implementation that forwards payloads to the
-//! owning session's webview via `AppHandle::emit_to(EventTarget::webview_window(
-//! "session-{session_id}"), "session:event", …)`.
+//! owning workspace's webview via `AppHandle::emit_to(EventTarget::webview_window(
+//! "workspace-{workspace_id}"), "session:event", …)`.
 //!
 //! **Authorization (F-051 / H10):** each session command requires the
-//! calling webview's label to equal `format!("session-{session_id}")`.
-//! Window labels are set by `window_manager` at window creation and cannot
-//! be forged from webview JS, so they serve as the per-window authenticator
-//! binding a session's control channel to its review channel. Mismatches
-//! return a label-mismatch error and never reach the daemon.
+//! calling webview's label to equal `format!("workspace-{workspace_id}")`
+//! for the workspace that owns the session. Window labels are set by
+//! `window_manager` at window creation and cannot be forged from webview
+//! JS, so they serve as the per-window authenticator binding a workspace's
+//! control channel to its review channel. Mismatches return a label-
+//! mismatch error and never reach the daemon. (Historically labels were
+//! `session-{session_id}` under the one-window-per-session model; the
+//! authz helpers still accept that legacy form as a transition shim — see
+//! `authz_check` below.)
 //!
 //! **Webview isolation (F-062 / M10 / T5):** the event sink targets a single
-//! webview (`session-{session_id}`) instead of broadcasting app-wide. Prior
-//! to this fix, every session window (and the dashboard) received every
+//! webview (`workspace-{workspace_id}`) instead of broadcasting app-wide.
+//! Prior to this fix, every window (and the dashboard) received every
 //! session's events; the trust boundary was enforced client-side in the
 //! Solid store. The per-sink `session_id` is bound at construction in
 //! `session_subscribe` (already label-authenticated), not re-read from the
@@ -29,19 +33,19 @@
 //! 1. `require_window_label` — strict, single-label match. Use when the
 //!    command is bound to one specific window:
 //!    - dashboard-only: `require_window_label(&webview, "dashboard", "<cmd>")`
-//!    - session-bound: `require_window_label(&webview, &format!("session-{id}"), "<cmd>")`
+//!    - workspace-bound: `require_window_label(&webview, &format!("workspace-{id}"), "<cmd>")`
 //!
 //! 2. `require_window_label_in` — permissive, allow-list + optional
-//!    session-window admission. Use when the command's artifact is not
+//!    workspace-window admission. Use when the command's artifact is not
 //!    bound to a single window (workspace-level, user-level, or shared
-//!    between dashboard and any session):
-//!    - dashboard-or-any-session: `require_window_label_in(&webview, &["dashboard"], true, "<cmd>")`
-//!    - any session window only:  `require_window_label_in(&webview, &[], true, "<cmd>")`
+//!    between dashboard and any workspace):
+//!    - dashboard-or-any-workspace: `require_window_label_in(&webview, &["dashboard"], true, "<cmd>")`
+//!    - any workspace window only:  `require_window_label_in(&webview, &[], true, "<cmd>")`
 //!
 //! The third boolean argument `allow_any_session` is load-bearing: `false`
 //! restricts the gate to labels listed in `exact`; `true` additionally
-//! admits any `session-*` label without binding to a specific session id.
-//! For dashboard-only commands prefer `require_window_label` over
+//! admits any `workspace-*` label without binding to a specific workspace
+//! id. For dashboard-only commands prefer `require_window_label` over
 //! `require_window_label_in(&webview, &["dashboard"], false, ...)` — both
 //! are functionally equivalent, but the strict helper makes the single-label
 //! intent obvious at the call site.
@@ -121,17 +125,16 @@ pub(crate) const LABEL_MISMATCH_ERROR: &str = "forbidden: window label mismatch"
 
 fn authz_check(label: &str, expected: &str, command: &'static str) -> Result<(), String> {
     if label == expected {
-        Ok(())
-    } else {
-        tracing::warn!(
-            target: "forge_shell::ipc::authz",
-            actual = label,
-            expected = expected,
-            command = command,
-            "window label mismatch"
-        );
-        Err(LABEL_MISMATCH_ERROR.to_string())
+        return Ok(());
     }
+    tracing::warn!(
+        target: "forge_shell::ipc::authz",
+        actual = label,
+        expected = expected,
+        command = command,
+        "window label mismatch"
+    );
+    Err(LABEL_MISMATCH_ERROR.to_string())
 }
 
 fn authz_check_in(
@@ -246,6 +249,47 @@ pub(crate) fn require_window_label<R: Runtime>(
     command: &'static str,
 ) -> Result<(), String> {
     authz_check(webview.label(), expected, command)
+}
+
+/// Strict per-session ownership gate.
+///
+/// Used by every session-scoped Tauri command in this crate to verify that
+/// the calling `workspace-<workspace_id>` window is the legitimate owner of
+/// `session_id`. The workspace_id is looked up from the `SessionConnections`
+/// cache (populated at `session_start` and again at `session_hello`); a
+/// missing entry fails closed so a misordered renderer cannot widen its
+/// reach during the startup race.
+pub(crate) async fn require_session_owner_label<R: Runtime>(
+    webview: &Webview<R>,
+    session_id: &str,
+    command: &'static str,
+    state: &BridgeState,
+) -> Result<(), String> {
+    let connections = state.bridge.connections();
+    let Some(workspace_id) = connections.workspace_id(session_id).await else {
+        tracing::warn!(
+            target: "forge_shell::ipc::authz",
+            actual = webview.label(),
+            session_id = %session_id,
+            command = command,
+            "session has no cached workspace_id; rejecting",
+        );
+        return Err(LABEL_MISMATCH_ERROR.to_string());
+    };
+    let expected = crate::window_spec::workspace_label(&workspace_id);
+    if webview.label() == expected {
+        Ok(())
+    } else {
+        tracing::warn!(
+            target: "forge_shell::ipc::authz",
+            actual = webview.label(),
+            expected = %expected,
+            session_id = %session_id,
+            command = command,
+            "session-owner window label mismatch",
+        );
+        Err(LABEL_MISMATCH_ERROR.to_string())
+    }
 }
 
 /// F-068 / L4 (T7): reject payloads whose byte length exceeds `limit_bytes`.
@@ -403,35 +447,36 @@ impl BridgeState {
 /// forged payload field cannot redirect delivery to another window.
 pub(crate) struct AppHandleSink<R: Runtime> {
     pub(crate) app: AppHandle<R>,
-    pub(crate) session_id: String,
+    /// Webview window label to emit to. Captured from the calling webview
+    /// at `session_subscribe` time, so the emit target is the workspace
+    /// window that authenticated the subscription — never inferred from
+    /// the session_id (which is decoupled from the window label under the
+    /// workspace-per-window model).
+    pub(crate) target_label: String,
 }
 
 impl<R: Runtime> EventSink for AppHandleSink<R> {
     fn emit(&self, payload: SessionEventPayload) {
-        // F-062 (M10 / T5): target the session's own webview window instead
-        // of broadcasting app-wide. Prior to this, every `session-*` window
-        // (and the dashboard) received every session's events; filtering
-        // happened client-side in the Solid store — exactly the wrong place
-        // for a trust boundary. Target label uses `self.session_id` (bound
-        // at construction from the authenticated `session_subscribe`
-        // argument), not a payload field, so a forged payload cannot
-        // redirect delivery.
-        let target = EventTarget::webview_window(format!("session-{}", self.session_id));
+        // F-062 (M10 / T5): target the calling webview window instead of
+        // broadcasting app-wide. The window label is captured at
+        // construction from the authenticated `session_subscribe` caller,
+        // not from a payload field — a forged payload cannot redirect
+        // delivery. Under the workspace-per-window model the label is the
+        // workspace window's `workspace-<id>`; the session-event sink and
+        // crash sink both target it.
+        let target = EventTarget::webview_window(self.target_label.clone());
         if let Err(e) = self.app.emit_to(target, "session:event", payload) {
             tracing::warn!(error = %e, "session:event emit failed");
         }
     }
 
     fn on_crash(&self, session_id: &str, last_seq: u64) {
-        // F-748: surface daemon-pipe death to the owning session window so
-        // the user gets the restart-prompt overlay. Target is the same
-        // window label `emit` uses (`session-<id>`) — never the dashboard,
-        // because a crashed session is a per-window concern. `last_seq`
-        // is the resume anchor: the webview hands it back through
-        // `session_restart` → `sessionHello + sessionSubscribe { since }`
-        // so the daemon's history replay starts after the last frame the
-        // webview already rendered, with no duplicate events.
-        let target = EventTarget::webview_window(format!("session-{}", self.session_id));
+        // F-748: surface daemon-pipe death to the owning workspace window
+        // so the user gets the restart-prompt overlay. `last_seq` is the
+        // resume anchor: the webview hands it back through `session_restart`
+        // → `sessionHello + sessionSubscribe { since }` so the daemon's
+        // history replay starts after the last rendered frame.
+        let target = EventTarget::webview_window(self.target_label.clone());
         let payload = SessionCrashedPayload {
             session_id: session_id.to_string(),
             last_seq,
@@ -461,7 +506,12 @@ pub fn make_app_handle_sink<R: Runtime>(
     app: AppHandle<R>,
     session_id: String,
 ) -> std::sync::Arc<dyn EventSink> {
-    std::sync::Arc::new(AppHandleSink { app, session_id })
+    // Tests historically constructed sinks without a window — keep the
+    // legacy `session-<id>` target so existing assertions in
+    // `tests/ipc_*` continue to match.
+    let target_label = format!("session-{session_id}");
+    let _ = session_id;
+    std::sync::Arc::new(AppHandleSink { app, target_label })
 }
 
 #[tauri::command]
@@ -470,7 +520,7 @@ pub async fn session_hello<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<HelloAck, String> {
-    require_window_label(&webview, &format!("session-{session_id}"), "session_hello")?;
+    require_session_owner_label(&webview, &session_id, "session_hello", &state).await?;
     // F-052 (H11 / T7): the socket path is never taken from the invoke
     // payload — a webview cannot redirect this connection to an arbitrary
     // UDS. Production always resolves through `default_socket_path`; tests
@@ -479,9 +529,10 @@ pub async fn session_hello<R: Runtime>(
     let override_path = state.test_socket_override.as_deref();
     #[cfg(not(feature = "webview-test"))]
     let override_path: Option<&std::path::Path> = None;
+    let workspaces_toml = resolve_workspaces_toml(&state);
     state
         .bridge
-        .hello(&session_id, override_path)
+        .hello(&session_id, override_path, Some(&workspaces_toml))
         .await
         .map_err(|e| e.to_string())
 }
@@ -494,15 +545,9 @@ pub async fn session_subscribe<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(
-        &webview,
-        &format!("session-{session_id}"),
-        "session_subscribe",
-    )?;
-    let sink: Arc<dyn EventSink> = Arc::new(AppHandleSink {
-        app,
-        session_id: session_id.clone(),
-    });
+    require_session_owner_label(&webview, &session_id, "session_subscribe", &state).await?;
+    let target_label = webview.label().to_string();
+    let sink: Arc<dyn EventSink> = Arc::new(AppHandleSink { app, target_label });
     state
         .bridge
         .subscribe(&session_id, since.unwrap_or(0), sink)
@@ -517,11 +562,7 @@ pub async fn session_send_message<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(
-        &webview,
-        &format!("session-{session_id}"),
-        "session_send_message",
-    )?;
+    require_session_owner_label(&webview, &session_id, "session_send_message", &state).await?;
     // F-068 / L4 (T7): bound `text` before the bridge allocates a frame or
     // the provider is billed. Runs after authz so unauthorized windows
     // don't learn the cap value.
@@ -544,9 +585,9 @@ pub async fn session_send_message<R: Runtime>(
 pub async fn session_cancel<R: Runtime>(
     session_id: String,
     webview: Webview<R>,
-    _state: State<'_, BridgeState>,
+    state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(&webview, &format!("session-{session_id}"), "session_cancel")?;
+    require_session_owner_label(&webview, &session_id, "session_cancel", &state).await?;
     Ok(())
 }
 
@@ -558,11 +599,7 @@ pub async fn session_approve_tool<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(
-        &webview,
-        &format!("session-{session_id}"),
-        "session_approve_tool",
-    )?;
+    require_session_owner_label(&webview, &session_id, "session_approve_tool", &state).await?;
     // F-068 / L4 (T7): tool_call_id is a short opaque handle; bound it here.
     // F-069 / L5 (T7): `scope` is typed as `forge_core::ApprovalScope` — serde
     // rejects any non-variant string at Tauri arg-deserialization (before this
@@ -588,7 +625,7 @@ pub async fn rerun_message<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(&webview, &format!("session-{session_id}"), "rerun_message")?;
+    require_session_owner_label(&webview, &session_id, "rerun_message", &state).await?;
     // F-068 / L4: bound `msg_id` before the bridge allocates a frame.
     require_size("msg_id", &msg_id, MAX_MESSAGE_ID_BYTES)?;
     state
@@ -615,7 +652,7 @@ pub async fn select_branch<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(&webview, &format!("session-{session_id}"), "select_branch")?;
+    require_session_owner_label(&webview, &session_id, "select_branch", &state).await?;
     require_size("parent_id", &parent_id, MAX_MESSAGE_ID_BYTES)?;
     state
         .bridge
@@ -632,11 +669,7 @@ pub async fn session_reject_tool<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(
-        &webview,
-        &format!("session-{session_id}"),
-        "session_reject_tool",
-    )?;
+    require_session_owner_label(&webview, &session_id, "session_reject_tool", &state).await?;
     // F-068 / L4 (T7): bound tool_call_id and — only when present — reason.
     // `None` reason is the common case and must skip the size check.
     require_size("tool_call_id", &tool_call_id, MAX_TOOL_CALL_ID_BYTES)?;
@@ -2022,7 +2055,7 @@ pub async fn read_file<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<FileContent, String> {
-    require_window_label(&webview, &format!("session-{session_id}"), "read_file")?;
+    require_session_owner_label(&webview, &session_id, "read_file", &state).await?;
     require_size("path", &path, MAX_FS_PATH_BYTES)?;
 
     let workspace = cached_workspace_root(&state, &session_id).await?;
@@ -2045,7 +2078,7 @@ pub async fn write_file<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(&webview, &format!("session-{session_id}"), "write_file")?;
+    require_session_owner_label(&webview, &session_id, "write_file", &state).await?;
     require_size("path", &path, MAX_FS_PATH_BYTES)?;
     // Pre-check before `forge-fs` copies the buffer into the atomic-write
     // temp file. `forge-fs` also enforces; belt-and-braces keeps the error
@@ -2075,7 +2108,7 @@ pub async fn tree<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<TreeNodeDto, String> {
-    require_window_label(&webview, &format!("session-{session_id}"), "tree")?;
+    require_session_owner_label(&webview, &session_id, "tree", &state).await?;
     require_size("root", &root, MAX_FS_PATH_BYTES)?;
 
     let workspace = cached_workspace_root(&state, &session_id).await?;
@@ -2538,10 +2571,31 @@ fn new_bg_session<R: Runtime>(
         // independent. Starting at 0 is fine: the webview UI uses the
         // event variant, not the seq, to update the Agent Monitor row.
         let mut seq: u64 = 0;
-        let sink = AppHandleSink {
-            app,
-            session_id: sink_session_id.clone(),
+        // Background-agent forwarder: target the workspace window owning
+        // this session. We first consult the bridge's in-memory
+        // workspace_id cache (populated at `session_start` /
+        // `session_hello`) — that's the authoritative source under the
+        // strict per-session ownership model. If the cache is empty
+        // (test seam installing a registry without a hello), fall back to
+        // the workspaces-registry lookup; finally to the legacy
+        // `session-<id>` label so the existing integration sinks still
+        // observe events.
+        let cached_label = match app.try_state::<BridgeState>() {
+            Some(state) => state
+                .bridge
+                .connections()
+                .workspace_id(&sink_session_id)
+                .await
+                .map(|wid| crate::window_spec::workspace_label(&wid)),
+            None => None,
         };
+        let target_label = match cached_label {
+            Some(label) => label,
+            None => crate::dashboard_sessions::workspace_label_for_session(&sink_session_id)
+                .await
+                .unwrap_or_else(|| format!("session-{sink_session_id}")),
+        };
+        let sink = AppHandleSink { app, target_label };
         loop {
             match events.recv().await {
                 Ok(event) => {
@@ -2728,11 +2782,7 @@ pub async fn start_background_agent<R: Runtime>(
     state: State<'_, BridgeState>,
     bg_state: State<'_, BgAgentState>,
 ) -> Result<String, String> {
-    require_window_label(
-        &webview,
-        &format!("session-{session_id}"),
-        "start_background_agent",
-    )?;
+    require_session_owner_label(&webview, &session_id, "start_background_agent", &state).await?;
     require_size("agent_name", &agent_name, MAX_AGENT_NAME_BYTES)?;
     require_size("prompt", &prompt, MAX_BG_PROMPT_BYTES)?;
 
@@ -2758,11 +2808,7 @@ pub async fn promote_background_agent<R: Runtime>(
     state: State<'_, BridgeState>,
     bg_state: State<'_, BgAgentState>,
 ) -> Result<(), String> {
-    require_window_label(
-        &webview,
-        &format!("session-{session_id}"),
-        "promote_background_agent",
-    )?;
+    require_session_owner_label(&webview, &session_id, "promote_background_agent", &state).await?;
     require_size("instance_id", &instance_id, MAX_AGENT_INSTANCE_ID_BYTES)?;
 
     let entry = resolve_bg_session(&app, &state, &bg_state, &session_id).await?;
@@ -2780,11 +2826,7 @@ pub async fn list_background_agents<R: Runtime>(
     state: State<'_, BridgeState>,
     bg_state: State<'_, BgAgentState>,
 ) -> Result<Vec<BgAgentSummary>, String> {
-    require_window_label(
-        &webview,
-        &format!("session-{session_id}"),
-        "list_background_agents",
-    )?;
+    require_session_owner_label(&webview, &session_id, "list_background_agents", &state).await?;
 
     let entry = resolve_bg_session(&app, &state, &bg_state, &session_id).await?;
     let rows = entry.registry.list().await;
@@ -2825,7 +2867,7 @@ pub async fn rename_path<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(&webview, &format!("session-{session_id}"), "rename_path")?;
+    require_session_owner_label(&webview, &session_id, "rename_path", &state).await?;
     require_size("from", &from, MAX_FS_PATH_BYTES)?;
     require_size("to", &to, MAX_FS_PATH_BYTES)?;
 
@@ -2846,7 +2888,7 @@ pub async fn delete_path<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(&webview, &format!("session-{session_id}"), "delete_path")?;
+    require_session_owner_label(&webview, &session_id, "delete_path", &state).await?;
     require_size("path", &path, MAX_FS_PATH_BYTES)?;
 
     let workspace = cached_workspace_root(&state, &session_id).await?;
@@ -3030,11 +3072,7 @@ pub async fn stop_background_agent<R: Runtime>(
     state: State<'_, BridgeState>,
     bg_state: State<'_, BgAgentState>,
 ) -> Result<(), String> {
-    require_window_label(
-        &webview,
-        &format!("session-{session_id}"),
-        "stop_background_agent",
-    )?;
+    require_session_owner_label(&webview, &session_id, "stop_background_agent", &state).await?;
     require_size("instance_id", &instance_id, MAX_AGENT_INSTANCE_ID_BYTES)?;
 
     let entry = resolve_bg_session(&app, &state, &bg_state, &session_id).await?;
@@ -3102,7 +3140,7 @@ pub async fn delete_branch<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(&webview, &format!("session-{session_id}"), "delete_branch")?;
+    require_session_owner_label(&webview, &session_id, "delete_branch", &state).await?;
     require_size("parent_id", &parent_id, MAX_MESSAGE_ID_BYTES)?;
     state
         .bridge
@@ -3130,11 +3168,7 @@ pub async fn compact_transcript<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(
-        &webview,
-        &format!("session-{session_id}"),
-        "compact_transcript",
-    )?;
+    require_session_owner_label(&webview, &session_id, "compact_transcript", &state).await?;
     state
         .bridge
         .compact_transcript(&session_id)
@@ -3156,7 +3190,7 @@ pub async fn session_pause<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(&webview, &format!("session-{session_id}"), "session_pause")?;
+    require_session_owner_label(&webview, &session_id, "session_pause", &state).await?;
     state
         .bridge
         .pause_session(&session_id)
@@ -3175,7 +3209,7 @@ pub async fn session_resume<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(&webview, &format!("session-{session_id}"), "session_resume")?;
+    require_session_owner_label(&webview, &session_id, "session_resume", &state).await?;
     state
         .bridge
         .resume_session(&session_id)
@@ -3201,11 +3235,7 @@ pub async fn session_switch_provider<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label(
-        &webview,
-        &format!("session-{session_id}"),
-        "session_switch_provider",
-    )?;
+    require_session_owner_label(&webview, &session_id, "session_switch_provider", &state).await?;
     // Tracker #702: size-cap + non-empty guard, matching every other
     // provider IPC (`set_active_provider`, credential commands). Without
     // this, a webview could submit an arbitrarily long `provider_id`
@@ -3242,11 +3272,8 @@ pub async fn session_interrupt_and_refine<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<forge_ipc::RefineHandoff, String> {
-    require_window_label(
-        &webview,
-        &format!("session-{session_id}"),
-        "session_interrupt_and_refine",
-    )?;
+    require_session_owner_label(&webview, &session_id, "session_interrupt_and_refine", &state)
+        .await?;
     state
         .bridge
         .interrupt_session(&session_id)
@@ -3319,11 +3346,7 @@ pub async fn session_list_mcp_servers<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<Vec<forge_ipc::McpServerInfo>, String> {
-    require_window_label(
-        &webview,
-        &format!("session-{session_id}"),
-        "session_list_mcp_servers",
-    )?;
+    require_session_owner_label(&webview, &session_id, "session_list_mcp_servers", &state).await?;
     state
         .bridge
         .list_mcp_servers(&session_id)
@@ -3350,11 +3373,7 @@ pub async fn toggle_mcp_server<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<forge_ipc::McpToggleResult, String> {
-    require_window_label(
-        &webview,
-        &format!("session-{session_id}"),
-        "toggle_mcp_server",
-    )?;
+    require_session_owner_label(&webview, &session_id, "toggle_mcp_server", &state).await?;
     require_size("name", &name, MAX_MCP_SERVER_NAME_BYTES)?;
     state
         .bridge
@@ -3380,11 +3399,7 @@ pub async fn import_mcp_config<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<forge_ipc::McpImportResult, String> {
-    require_window_label(
-        &webview,
-        &format!("session-{session_id}"),
-        "import_mcp_config",
-    )?;
+    require_session_owner_label(&webview, &session_id, "import_mcp_config", &state).await?;
     require_size("source", &source, MAX_MCP_SLUG_BYTES)?;
     state
         .bridge
@@ -3614,14 +3629,11 @@ pub async fn context_fetch_url<R: Runtime>(
     session_id: String,
     url: String,
     webview: Webview<R>,
+    bridge_state: State<'_, BridgeState>,
     allowed: State<'_, AllowedHostsState>,
     fetch_state: State<'_, ContextFetchState>,
 ) -> Result<FetchedUrl, String> {
-    require_window_label(
-        &webview,
-        &format!("session-{session_id}"),
-        "context_fetch_url",
-    )?;
+    require_session_owner_label(&webview, &session_id, "context_fetch_url", &bridge_state).await?;
     require_size("url", &url, MAX_CONTEXT_URL_BYTES)?;
 
     let hosts = allowed.snapshot();

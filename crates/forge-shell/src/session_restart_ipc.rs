@@ -116,14 +116,21 @@ pub async fn session_restart<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<SessionRestartOutput, String> {
-    // Authorization: only the matching `session-<id>` window can ask its
-    // own daemon to be re-spawned. The dashboard does not own this path —
-    // crash-restart is a session-window-local affordance.
-    let window_label = format!("session-{}", input.session_id);
-    crate::ipc::require_window_label(&webview, &window_label, "session_restart")
-        .map_err(|e| format!("{SESSION_RESTART_ERROR}{e}"))?;
-
     validate_session_restart_input(&input)?;
+
+    // Authorization: only the workspace window that owns this session can
+    // ask its own daemon to be re-spawned. The strict gate consults the
+    // workspace_id cache populated at `session_start` / `session_hello`; a
+    // missing entry (e.g. a renderer that drove `session_restart` before
+    // any prior bridge call) fails closed.
+    crate::ipc::require_session_owner_label(
+        &webview,
+        &input.session_id,
+        "session_restart",
+        &state,
+    )
+    .await
+    .map_err(|e| format!("{SESSION_RESTART_ERROR}{e}"))?;
 
     run_session_restart(
         &state.bridge,

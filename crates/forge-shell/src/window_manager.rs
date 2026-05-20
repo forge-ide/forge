@@ -7,11 +7,11 @@
 
 use anyhow::{Context, Result};
 use tauri::{
-    image::Image, AppHandle, Manager, RunEvent, Runtime, WebviewUrl, WebviewWindow,
+    image::Image, AppHandle, Emitter, Manager, RunEvent, Runtime, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder, WindowEvent,
 };
 
-use crate::window_spec::WindowSpec;
+use crate::window_spec::{workspace_label, WindowSpec};
 
 /// Raw bytes of the canonical forge mark, embedded at compile time so the
 /// dev binary doesn't need the bundle's icon directory present at runtime.
@@ -32,12 +32,34 @@ impl<R: Runtime> WindowManager<R> {
         self.open(WindowSpec::dashboard())
     }
 
-    /// Opens a blank Session window for `id`.
+    /// Open (or focus + navigate) the workspace window for `workspace_id`,
+    /// showing `session_id` as the active session.
     ///
-    /// Scaffold only — F-024 wires the session route and content. No IPC to
-    /// `forge-session` yet (F-020).
-    pub fn open_session(&self, id: &str) -> Result<WebviewWindow<R>> {
-        self.open(WindowSpec::session(id))
+    /// If the window does not yet exist, it is created at
+    /// `/session/<session_id>`. If it already exists, it is focused and the
+    /// webview is told to navigate to `/session/<session_id>` via the
+    /// `workspace:navigate` event so the user lands on the requested session
+    /// inside the same window. This is what realises "one window per
+    /// workspace" — every session in the workspace reuses the same Tauri
+    /// window.
+    pub fn open_workspace_session(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+    ) -> Result<WebviewWindow<R>> {
+        let label = workspace_label(workspace_id);
+        if let Some(existing) = self.app.get_webview_window(&label) {
+            existing
+                .set_focus()
+                .with_context(|| format!("focus existing workspace window `{label}`"))?;
+            // Targeted emit: only the workspace window listens. The payload
+            // carries the session_id the webview's router should navigate to.
+            existing
+                .emit("workspace:navigate", session_id)
+                .with_context(|| format!("emit workspace:navigate on `{label}`"))?;
+            return Ok(existing);
+        }
+        self.open(WindowSpec::workspace_session(workspace_id, session_id))
     }
 
     fn open(&self, spec: WindowSpec) -> Result<WebviewWindow<R>> {
@@ -283,7 +305,7 @@ pub fn run() -> Result<()> {
                 return;
             }
             let label = window.label().to_string();
-            let Some(session_id) = label.strip_prefix("session-").map(str::to_string) else {
+            let Some(workspace_id) = label.strip_prefix("workspace-").map(str::to_string) else {
                 return;
             };
             let app_handle = window.app_handle().clone();
@@ -299,21 +321,29 @@ pub fn run() -> Result<()> {
                     None => {
                         tracing::warn!(
                             target: "forge_shell::window_manager",
-                            session_id = %session_id,
-                            "session window closed but BridgeState not managed; daemon will be left running",
+                            workspace_id = %workspace_id,
+                            "workspace window closed but BridgeState not managed; daemons will be left running",
                         );
                         return;
                     }
                 };
-                if let Err(e) =
-                    crate::session_close_ipc::run_session_close(&state.bridge, &session_id).await
-                {
-                    tracing::warn!(
-                        target: "forge_shell::window_manager",
-                        session_id = %session_id,
-                        error = %e,
-                        "session_close orchestration failed on window close",
-                    );
+                let toml_path = crate::ipc::resolve_workspaces_toml(&state);
+                let session_ids =
+                    crate::session_close_ipc::session_ids_for_workspace_id(&toml_path, &workspace_id)
+                        .await
+                        .unwrap_or_default();
+                for session_id in session_ids {
+                    if let Err(e) =
+                        crate::session_close_ipc::run_session_close(&state.bridge, &session_id).await
+                    {
+                        tracing::warn!(
+                            target: "forge_shell::window_manager",
+                            workspace_id = %workspace_id,
+                            session_id = %session_id,
+                            error = %e,
+                            "session_close orchestration failed on workspace window close",
+                        );
+                    }
                 }
             });
         })

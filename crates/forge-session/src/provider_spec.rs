@@ -14,6 +14,16 @@
 //! - `openai`                              — defaults (api.openai.com, gpt-4o-mini)
 //! - `openai:<model>`                      — custom model, default base_url
 //! - `openai:<model>@<base_url>`           — both custom
+//! - `custom_openai:<name>`                — references a `[providers.custom_openai.<name>]`
+//!                                           entry in the user's settings.toml. The daemon
+//!                                           loads base_url / model / auth_shape from that
+//!                                           entry at startup and constructs a
+//!                                           `CustomOpenAiProvider`. Unlike the keyed
+//!                                           specs above, no inline `<model>@<base_url>`
+//!                                           override is accepted — settings is the single
+//!                                           source of truth so the dashboard's
+//!                                           Add Provider modal and the daemon never
+//!                                           diverge on the same provider id.
 
 use anyhow::{anyhow, Result};
 
@@ -55,6 +65,17 @@ pub enum ProviderKind {
         base_url: String,
         model: String,
     },
+    /// Named OpenAI-compatible endpoint declared in user settings under
+    /// `[providers.custom_openai.<name>]`. The daemon's main loop resolves
+    /// `name` against settings at startup to fetch base_url / model /
+    /// auth_shape and constructs a `CustomOpenAiProvider`. For keyed shapes
+    /// (Bearer / Header), the F-744 seam pulls the per-turn key from the
+    /// keyring under the full id `custom_openai:<name>`. For keyless
+    /// (`auth.shape = "none"`) entries — LM Studio, vLLM, internal mocks —
+    /// no credential context is attached.
+    CustomOpenAi {
+        name: String,
+    },
 }
 
 pub fn parse_provider_spec(spec: &str) -> Result<ProviderKind> {
@@ -70,10 +91,51 @@ pub fn parse_provider_spec(spec: &str) -> Result<ProviderKind> {
         "ollama" => parse_ollama_rest(rest),
         "anthropic" => parse_anthropic_rest(rest),
         "openai" => parse_openai_rest(rest),
+        "custom_openai" => parse_custom_openai_rest(rest),
         other => Err(anyhow!(
-            "unknown provider kind: {other:?} (supported: mock, ollama, anthropic, openai)"
+            "unknown provider kind: {other:?} (supported: mock, ollama, anthropic, openai, custom_openai)"
         )),
     }
+}
+
+/// `custom_openai:<name>` — references a `[providers.custom_openai.<name>]`
+/// settings entry by id. Does NOT accept inline `<model>@<base_url>`
+/// overrides (settings is authoritative; allowing both invites the
+/// dashboard and the daemon to disagree on the same id).
+fn parse_custom_openai_rest(rest: Option<&str>) -> Result<ProviderKind> {
+    let name = rest
+        .ok_or_else(|| anyhow!("custom_openai spec: name is required (e.g. `custom_openai:lm-studio`)"))?;
+    if name.is_empty() {
+        return Err(anyhow!("custom_openai spec: name cannot be empty"));
+    }
+    // Reject inline overrides — bail before they look like a "model" arg.
+    // The settings file is the single source of truth for endpoint / model
+    // / auth shape on a custom_openai entry; offering a CLI override path
+    // would split the configuration surface and let the daemon disagree
+    // with the dashboard on the same id.
+    if name.contains(':') || name.contains('@') {
+        return Err(anyhow!(
+            "custom_openai spec: inline overrides not supported — \
+             configure base_url / model / auth in settings.toml under \
+             `[providers.custom_openai.<name>]` and pass only the name here"
+        ));
+    }
+    // Mirror the dashboard's CUSTOM_NAME_PATTERN so a name that round-trips
+    // through `add_provider` always round-trips back through the daemon
+    // parser. Settings on disk may technically hold any TOML key, but the
+    // add_provider IPC enforces this same charset, so anything not matching
+    // it cannot reach us through the supported flow.
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err(anyhow!(
+            "custom_openai spec: name {name:?} must match [A-Za-z0-9_-]+"
+        ));
+    }
+    Ok(ProviderKind::CustomOpenAi {
+        name: name.to_string(),
+    })
 }
 
 /// Resolve a provider kind from the optional `--provider` flag / env var.
@@ -395,5 +457,98 @@ mod tests {
     fn resolve_provider_kind_with_openai_spec_returns_openai() {
         let kind = resolve_provider_kind(Some("openai")).unwrap();
         assert!(matches!(kind, ProviderKind::OpenAi { .. }));
+    }
+
+    // custom_openai:<name> — settings-backed OpenAI-compatible endpoints.
+    // The daemon's main loop resolves the name against
+    // `[providers.custom_openai.<name>]` in user settings to fetch
+    // base_url / model / auth_shape; this parser only validates the
+    // shape of the spec itself.
+
+    #[test]
+    fn parses_custom_openai_with_name() {
+        let kind = parse_provider_spec("custom_openai:lm-studio").unwrap();
+        assert_eq!(
+            kind,
+            ProviderKind::CustomOpenAi {
+                name: "lm-studio".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_custom_openai_with_underscore_name() {
+        let kind = parse_provider_spec("custom_openai:vllm_local").unwrap();
+        assert_eq!(
+            kind,
+            ProviderKind::CustomOpenAi {
+                name: "vllm_local".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_custom_openai_without_name() {
+        // Bare `custom_openai` — the name is required because it keys the
+        // settings lookup.
+        let err = parse_provider_spec("custom_openai").unwrap_err();
+        assert!(
+            err.to_string().contains("name is required"),
+            "expected name-required error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_custom_openai_with_empty_name() {
+        // `custom_openai:` — colon present but suffix empty.
+        let err = parse_provider_spec("custom_openai:").unwrap_err();
+        assert!(
+            err.to_string().contains("name cannot be empty"),
+            "expected empty-name error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_custom_openai_with_inline_overrides() {
+        // The dashboard owns the on-disk config; offering a CLI override
+        // path would let the two callers disagree on the same id.
+        let err = parse_provider_spec("custom_openai:lm-studio:qwen2.5").unwrap_err();
+        assert!(
+            err.to_string().contains("inline overrides not supported"),
+            "expected inline-override error, got: {err}"
+        );
+
+        let err = parse_provider_spec("custom_openai:lm-studio@http://x").unwrap_err();
+        assert!(
+            err.to_string().contains("inline overrides not supported"),
+            "expected inline-override error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_custom_openai_with_invalid_name_charset() {
+        // Same charset the dashboard's add_provider IPC validates against,
+        // so a name produced by the supported flow always round-trips.
+        let err = parse_provider_spec("custom_openai:has spaces").unwrap_err();
+        assert!(
+            err.to_string().contains("must match [A-Za-z0-9_-]+"),
+            "expected charset error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_kind_error_lists_custom_openai_in_supported() {
+        let err = parse_provider_spec("notarealprovider:foo").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("custom_openai"),
+            "supported list should include custom_openai: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_provider_kind_with_custom_openai_spec_returns_custom_openai() {
+        let kind = resolve_provider_kind(Some("custom_openai:lm-studio")).unwrap();
+        assert!(matches!(kind, ProviderKind::CustomOpenAi { .. }));
     }
 }

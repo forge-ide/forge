@@ -1,0 +1,139 @@
+/* Shared chrome for workspace-window sidebar panes.
+ *
+ * Every pane in src/shell/panes/ slots into the AppShell next to the
+ * ActivityBar. The visual contract — width, header strip, body scroll —
+ * matches FilesSidebar so the seven panes feel like one rail with
+ * interchangeable content.
+ */
+
+.workspace-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 260px;
+  min-width: 200px;
+  background: var(--color-surface-0, #0d0d0d);
+  border-right: 1px solid var(--color-border-1, #1f1f1f);
+  color: var(--color-text-primary, #eee);
+  font-family: var(--font-body);
+  font-size: var(--type-body-sm);
+  overflow: hidden;
+}
+
+.workspace-pane__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 28px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--color-border-1, #1f1f1f);
+  color: var(--color-text-tertiary, #888);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: var(--type-mono-xxs);
+}
+
+.workspace-pane__title {
+  font-family: var(--font-mono);
+}
+
+.workspace-pane__action {
+  all: unset;
+  cursor: pointer;
+  color: var(--color-text-tertiary, #888);
+  padding: 2px 6px;
+  border-radius: 2px;
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xxs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.workspace-pane__action:hover:not(:disabled) {
+  color: var(--color-text-primary, #eee);
+  background: var(--color-surface-1, #161616);
+}
+
+.workspace-pane__action:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.workspace-pane__body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: var(--sp-2) 0;
+}
+
+.workspace-pane__loading,
+.workspace-pane__empty,
+.workspace-pane__error {
+  padding: var(--sp-3) var(--sp-3);
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-sm);
+  letter-spacing: 0.04em;
+  color: var(--color-text-tertiary, #888);
+}
+
+.workspace-pane__error {
+  color: var(--color-error, #ff4a12);
+}
+
+.workspace-pane__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.workspace-pane__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  cursor: pointer;
+  color: var(--color-text-primary, #eee);
+}
+
+.workspace-pane__row:hover {
+  background: var(--color-surface-1, #161616);
+}
+
+.workspace-pane__row--active {
+  background: var(--color-surface-2, #1a1a1a);
+}
+
+.workspace-pane__row-name {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-sm);
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-pane__row-meta {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xxs);
+  color: var(--color-text-tertiary, #888);
+}
+
+.workspace-pane__placeholder {
+  padding: var(--sp-4) var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  color: var(--color-text-tertiary, #888);
+}
+
+.workspace-pane__placeholder-title {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-sm);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary, #aaa);
+}
+
+.workspace-pane__placeholder-detail {
+  font-family: var(--font-body);
+  font-size: var(--type-body-sm);
+  line-height: 1.4;
+}

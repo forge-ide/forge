@@ -136,7 +136,7 @@ async fn connect_bridge(
     session_id: &str,
 ) -> (SessionBridge, mpsc::UnboundedReceiver<SessionEventPayload>) {
     let bridge = SessionBridge::new(SessionConnections::new());
-    bridge.hello(session_id, Some(sock)).await.expect("hello");
+    bridge.hello(session_id, Some(sock), None).await.expect("hello");
     let (tx, rx) = mpsc::unbounded_channel();
     let sink = Arc::new(ChannelSink { tx });
     bridge

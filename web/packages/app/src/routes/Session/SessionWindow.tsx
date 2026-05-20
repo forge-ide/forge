@@ -79,12 +79,23 @@ export function __setInjectedLayoutStoreForTesting(
 }
 
 /**
- * Session window shell — default single-pane layout from
- * docs/ui-specs/layout-panes.md §3.4. F-150 replaces the F-126 "singleton
- * editor slot" with a real GridContainer: the active layout's tree drives
- * rendering end-to-end, so multiple editors can coexist, drag-to-dock works
- * on editor leaves the same as any other pane, and F-119 compactness runs
- * per-leaf rather than on a single window-scope pane.
+ * Session window shell — also the workspace window in the new
+ * workspace-centric framing. Sessions belong to the workspace this
+ * window opened against; the AppShell's ActivityBar surfaces the
+ * workspace facets (Files / Search / Chat / Agents / Skills / MCP /
+ * Plugins) along the left edge, and the matched sidebar pane swaps in
+ * next to the chat content area. Underlying multi-window architecture
+ * is still "one Tauri window per session" — the Chat pane lets the
+ * user jump between sessions in the same workspace via
+ * `open_session`, which focuses the existing window for that id.
+ *
+ * Default single-pane chat layout from
+ * docs/ui-specs/layout-panes.md §3.4. F-150 replaced the F-126
+ * "singleton editor slot" with a real GridContainer: the active
+ * layout's tree drives rendering end-to-end, so multiple editors can
+ * coexist, drag-to-dock works on editor leaves the same as any other
+ * pane, and F-119 compactness runs per-leaf rather than on a single
+ * window-scope pane.
  */
 export const SessionWindow: Component = () => {
   const params = useParams<{ id: string }>();

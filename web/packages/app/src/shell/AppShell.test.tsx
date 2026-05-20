@@ -81,6 +81,22 @@ describe('AppShell', () => {
     expect(await findByTestId(SESSION_TESTID)).toBeInTheDocument();
   });
 
+  it('mounts the primary Sidebar on the Dashboard route', async () => {
+    const { findByTestId } = renderAt('/');
+    expect(await findByTestId(DASHBOARD_TESTID)).toBeInTheDocument();
+    expect(await findByTestId('sidebar')).toBeInTheDocument();
+  });
+
+  it('hides the primary Sidebar on the Session route', async () => {
+    // The Sidebar's nav entries all point at dashboard routes
+    // (/providers, /catalog, /usage) whose IPCs reject a session-*
+    // webview label. Mounting it in the session window leaves the user
+    // with "links" that all error on click; explicit gate keeps it out.
+    const { findByTestId, queryByTestId } = renderAt('/session/abc123');
+    expect(await findByTestId(SESSION_TESTID)).toBeInTheDocument();
+    expect(queryByTestId('sidebar')).toBeNull();
+  });
+
   it('hides the ActivityBar on the Usage route', async () => {
     const { findByTestId, queryByTestId } = renderAt('/usage');
     expect(await findByTestId('status-bar')).toBeInTheDocument();
@@ -168,5 +184,70 @@ describe('AppShell', () => {
     // toggle on Dashboard, so the workspace tree cannot mount.
     expect(queryByTestId('activity-bar-files')).toBeNull();
     expect(queryByTestId('files-sidebar')).toBeNull();
+  });
+
+  // Activity-bar pane swap — each entry opens the matching sidebar pane,
+  // clicking the active entry closes it.
+
+  it('opens the Chat pane when the Chat activity is clicked', async () => {
+    setActiveSessionId('abc123' as never);
+    setActiveWorkspaceRoot('/ws');
+    const { findByTestId } = renderAt('/session/abc123');
+    const btn = await findByTestId('activity-bar-chat');
+    btn.click();
+    expect(await findByTestId('workspace-pane-chat')).toBeInTheDocument();
+  });
+
+  it('opens the Agents pane when the Agents activity is clicked', async () => {
+    setActiveSessionId('abc123' as never);
+    setActiveWorkspaceRoot('/ws');
+    const { findByTestId } = renderAt('/session/abc123');
+    const btn = await findByTestId('activity-bar-agents');
+    btn.click();
+    expect(await findByTestId('workspace-pane-agents')).toBeInTheDocument();
+  });
+
+  it('opens the Skills pane when the Skills activity is clicked', async () => {
+    setActiveSessionId('abc123' as never);
+    setActiveWorkspaceRoot('/ws');
+    const { findByTestId } = renderAt('/session/abc123');
+    const btn = await findByTestId('activity-bar-skills');
+    btn.click();
+    expect(await findByTestId('workspace-pane-skills')).toBeInTheDocument();
+  });
+
+  it('opens the MCP pane when the MCP activity is clicked', async () => {
+    setActiveSessionId('abc123' as never);
+    setActiveWorkspaceRoot('/ws');
+    const { findByTestId } = renderAt('/session/abc123');
+    const btn = await findByTestId('activity-bar-mcp');
+    btn.click();
+    expect(await findByTestId('workspace-pane-mcp')).toBeInTheDocument();
+  });
+
+  it('clicking the active activity closes its pane (toggle semantics)', async () => {
+    setActiveSessionId('abc123' as never);
+    setActiveWorkspaceRoot('/ws');
+    const { findByTestId, queryByTestId } = renderAt('/session/abc123');
+    const btn = await findByTestId('activity-bar-chat');
+    btn.click();
+    await findByTestId('workspace-pane-chat');
+    btn.click();
+    await waitFor(() =>
+      expect(queryByTestId('workspace-pane-chat')).toBeNull(),
+    );
+  });
+
+  it('switching activities swaps the pane (one pane visible at a time)', async () => {
+    setActiveSessionId('abc123' as never);
+    setActiveWorkspaceRoot('/ws');
+    const { findByTestId, queryByTestId } = renderAt('/session/abc123');
+    (await findByTestId('activity-bar-chat')).click();
+    await findByTestId('workspace-pane-chat');
+
+    (await findByTestId('activity-bar-skills')).click();
+    await findByTestId('workspace-pane-skills');
+    // Old pane is gone.
+    expect(queryByTestId('workspace-pane-chat')).toBeNull();
   });
 });

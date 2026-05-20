@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 #[cfg(feature = "webview")]
-use tauri::{Runtime, State, Webview};
+use tauri::{AppHandle, Runtime, State, Webview};
 
 #[cfg(feature = "webview")]
 use crate::ipc::{
@@ -79,6 +79,10 @@ pub struct SessionStartInput {
 #[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
 pub struct SessionStartOutput {
     pub session_id: String,
+    /// Stable workspace id (from the workspaces registry) the session
+    /// belongs to. The dashboard uses it to focus or open the matching
+    /// `workspace-<id>` window before the daemon's first event arrives.
+    pub workspace_id: String,
 }
 
 /// Pure validation of the optional identifier fields. Exposed so tests can
@@ -233,6 +237,7 @@ pub fn agent_is_known(
 #[tauri::command]
 pub async fn session_start<R: Runtime>(
     input: SessionStartInput,
+    app: AppHandle<R>,
     webview: Webview<R>,
     state: State<'_, BridgeState>,
     credentials: State<'_, crate::credentials_ipc::CredentialsState>,
@@ -248,17 +253,17 @@ pub async fn session_start<R: Runtime>(
     // Seed the workspaces registry with the picked path before the
     // downstream resolve gate validates it. The user explicitly chose
     // this path via the OS file picker in the new-session dialog —
-    // that's the registry-creation moment. Idempotent: if the path is
-    // already registered (most calls), this is a no-op.
+    // that's the registry-creation moment. The registry returns the
+    // workspace's stable id, which the response carries back so the
+    // dashboard can immediately focus the right `workspace-<id>` window.
     let supplied = std::path::Path::new(&input.workspace_root);
-    if let Ok(canonical) = supplied.canonicalize() {
-        let toml_path = crate::ipc::resolve_workspaces_toml(&state);
-        forge_core::workspaces::register_workspace_if_missing(&toml_path, &canonical)
-            .await
-            .map_err(|e| {
-                format!("{SESSION_START_ERROR}could not update workspaces registry: {e}")
-            })?;
-    }
+    let canonical = supplied
+        .canonicalize()
+        .map_err(|e| format!("{SESSION_START_ERROR}workspace_root not found on disk: {e}"))?;
+    let toml_path = crate::ipc::resolve_workspaces_toml(&state);
+    let workspace_id = forge_core::workspaces::register_or_get_workspace_id(&toml_path, &canonical)
+        .await
+        .map_err(|e| format!("{SESSION_START_ERROR}could not update workspaces registry: {e}"))?;
 
     let workspace_path =
         resolve_workspace_root_for_command(webview.label(), &input.workspace_root, &state)
@@ -307,8 +312,37 @@ pub async fn session_start<R: Runtime>(
     .await
     .map_err(|e| format!("{SESSION_START_ERROR}{e}"))?;
 
+    let workspace_id_str = workspace_id.to_string();
+    // Seed the workspace_id cache so the strict per-session authz gate
+    // (`require_session_owner_label`) accepts a `session_hello` arriving
+    // before the bridge can populate the cache itself. The two writes
+    // converge on the same value — `session_hello` later resolves the same
+    // workspace_id from the registry — so no drift is possible.
+    state
+        .bridge
+        .connections()
+        .set_workspace_id(&spawned.session_id, workspace_id_str.clone())
+        .await;
+    // Open (or focus + navigate) the workspace window for this workspace
+    // immediately. The dashboard's caller does not have to do a second
+    // round-trip to surface the new session — the workspace window comes
+    // up at /session/<id> on cold start, or is navigated there via the
+    // `workspace:navigate` event on warm start.
+    if let Err(e) = crate::window_manager::WindowManager::new(app)
+        .open_workspace_session(&workspace_id_str, &spawned.session_id)
+    {
+        tracing::warn!(
+            target: "forge_shell::session_start",
+            workspace_id = %workspace_id_str,
+            session_id = %spawned.session_id,
+            error = %e,
+            "failed to open workspace window after session_start; the daemon is still running",
+        );
+    }
+
     Ok(SessionStartOutput {
         session_id: spawned.session_id,
+        workspace_id: workspace_id_str,
     })
 }
 
@@ -504,6 +538,8 @@ mod tests {
             persistence: "persist".to_string(),
             created_at: "2026-05-10T00:00:00Z".to_string(),
             last_event_at: "2026-05-10T00:00:00Z".to_string(),
+            workspace_root: "/tmp/ws".to_string(),
+            workspace_id: "ws01".to_string(),
         }
     }
 

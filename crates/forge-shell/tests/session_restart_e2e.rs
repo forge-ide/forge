@@ -109,7 +109,7 @@ async fn session_restart_resumes_event_log_without_duplicates() {
 
     let bridge = SessionBridge::new(SessionConnections::new());
     let _ack = bridge
-        .hello(session_id, Some(&sock_path))
+        .hello(session_id, Some(&sock_path), None)
         .await
         .expect("hello #1");
 
@@ -197,7 +197,7 @@ async fn session_restart_resumes_event_log_without_duplicates() {
     // emit calls inside the resumed daemon must continue past last_seq.
     let (tx2, mut rx2) = mpsc::unbounded_channel();
     let _ack2 = bridge
-        .hello(session_id, Some(&sock_path))
+        .hello(session_id, Some(&sock_path), None)
         .await
         .expect("hello #2");
     bridge

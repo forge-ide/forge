@@ -149,3 +149,66 @@
   gap: var(--sp-2);
   margin-top: var(--sp-2);
 }
+
+/* Endpoint field — label row carries the at-a-glance probe status dot,
+ * input row hosts the inline IconButton trigger. */
+.add-provider-form__label-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.add-provider-form__status-dot {
+  display: inline-block;
+  width: var(--sp-2);
+  height: var(--sp-2);
+  border-radius: 50%;
+  background: var(--color-text-tertiary);
+}
+
+.add-provider-form__status-dot--ok {
+  background: var(--color-success);
+  box-shadow: 0 0 6px var(--color-success-border);
+}
+
+.add-provider-form__status-dot--err {
+  background: var(--color-error);
+  box-shadow: 0 0 6px var(--color-error-border);
+}
+
+.add-provider-form__endpoint-row {
+  display: flex;
+  align-items: stretch;
+  gap: var(--sp-2);
+}
+
+.add-provider-form__endpoint-input {
+  /* Input grows; the square IconButton on the right keeps its natural width. */
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.add-provider-form__probe {
+  /* Stretch the IconButton vertically so its bottom edge aligns with the
+   * input. The design-system width stays at --sp-6 (24px) so the trigger
+   * stays a square presence next to the field. */
+  align-self: stretch;
+  height: auto;
+}
+
+/* Subtle pulse while the probe is in flight so the disabled button still
+ * reads as "working" rather than "broken". `aria-busy` is the contract
+ * the JSX sets when the form transitions into the `probing` state. */
+.add-provider-form__probe[aria-busy='true'] {
+  animation: add-provider-form__pulse 1s ease-in-out infinite;
+}
+
+@keyframes add-provider-form__pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}

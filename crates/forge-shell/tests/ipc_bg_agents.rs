@@ -33,6 +33,11 @@ use tauri::{Listener, Manager};
 
 const LABEL_MISMATCH: &str = "forbidden: window label mismatch";
 
+/// Default workspace id used by the happy-path tests below. Cross-session
+/// rejection tests use a different `wid` for the victim session so the
+/// strict per-session authz gate observes the mismatch.
+const TEST_WS: &str = "ws01";
+
 fn make_app() -> tauri::App<tauri::test::MockRuntime> {
     let app = mock_builder()
         .invoke_handler(build_invoke_handler())
@@ -45,6 +50,22 @@ fn make_app() -> tauri::App<tauri::test::MockRuntime> {
     // `install_bg_session_for_test` seam below expects it to exist.
     manage_bg_agents(&app.handle().clone());
     app
+}
+
+/// Seed the workspace_id cache for `session_id → workspace_id`. The strict
+/// per-session authz gate consults this cache when admitting a caller's
+/// `workspace-<id>` window.
+async fn prime_owner(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    session_id: &str,
+    workspace_id: &str,
+) {
+    let state = app.state::<BridgeState>();
+    state
+        .bridge
+        .connections()
+        .prime_workspace_id_for_test(session_id.to_string(), workspace_id.to_string())
+        .await;
 }
 
 fn make_window(
@@ -131,14 +152,15 @@ fn dashboard_window_invoking_start_background_agent_is_rejected() {
     );
 }
 
-#[test]
-fn cross_session_start_is_rejected_with_label_mismatch() {
-    // Session-A webview tries to start a bg agent under session-B.
-    // Authz fires before bridge lookup → we see LABEL_MISMATCH, never a
-    // "missing registry" fall-through.
+#[tokio::test(flavor = "multi_thread")]
+async fn cross_session_start_is_rejected_with_label_mismatch() {
+    // session-B lives in workspace `ws-victim`; the caller is the
+    // workspace window for `ws-attacker`. The strict per-session gate
+    // expects `workspace-ws-victim` and sees `workspace-ws-attacker`.
     let app = make_app();
     install_registry(&app, "session-B");
-    let window = make_window(&app, "session-A");
+    prime_owner(&app, "session-B", "ws-victim").await;
+    let window = make_window(&app, "workspace-ws-attacker");
 
     let err = invoke(
         &window,
@@ -149,36 +171,38 @@ fn cross_session_start_is_rejected_with_label_mismatch() {
             "prompt": "go",
         }),
     )
-    .expect_err("session-A must not start agents under session-B");
+    .expect_err("attacker window must not start agents under session-B");
     assert!(
         err.contains(LABEL_MISMATCH),
         "expected label-mismatch error, got: {err}"
     );
 }
 
-#[test]
-fn cross_session_list_is_rejected_with_label_mismatch() {
+#[tokio::test(flavor = "multi_thread")]
+async fn cross_session_list_is_rejected_with_label_mismatch() {
     let app = make_app();
     install_registry(&app, "session-B");
-    let window = make_window(&app, "session-A");
+    prime_owner(&app, "session-B", "ws-victim").await;
+    let window = make_window(&app, "workspace-ws-attacker");
 
     let err = invoke(
         &window,
         "list_background_agents",
         serde_json::json!({ "sessionId": "session-B" }),
     )
-    .expect_err("session-A must not list session-B's bg agents");
+    .expect_err("attacker window must not list session-B's bg agents");
     assert!(
         err.contains(LABEL_MISMATCH),
         "expected label-mismatch error, got: {err}"
     );
 }
 
-#[test]
-fn cross_session_promote_is_rejected_with_label_mismatch() {
+#[tokio::test(flavor = "multi_thread")]
+async fn cross_session_promote_is_rejected_with_label_mismatch() {
     let app = make_app();
     install_registry(&app, "session-B");
-    let window = make_window(&app, "session-A");
+    prime_owner(&app, "session-B", "ws-victim").await;
+    let window = make_window(&app, "workspace-ws-attacker");
 
     let err = invoke(
         &window,
@@ -188,21 +212,22 @@ fn cross_session_promote_is_rejected_with_label_mismatch() {
             "instanceId": "deadbeefcafebabe",
         }),
     )
-    .expect_err("session-A must not promote session-B's agents");
+    .expect_err("attacker window must not promote session-B's agents");
     assert!(
         err.contains(LABEL_MISMATCH),
         "expected label-mismatch error, got: {err}"
     );
 }
 
-#[test]
-fn cross_session_stop_is_rejected_with_label_mismatch() {
-    // F-138: session-A webview must not stop session-B's background agents.
-    // Authz fires before `orchestrator.stop`, so we see LABEL_MISMATCH rather
-    // than a "missing registry" fall-through.
+#[tokio::test(flavor = "multi_thread")]
+async fn cross_session_stop_is_rejected_with_label_mismatch() {
+    // F-138: an attacker workspace window must not stop session-B's
+    // background agents. Authz fires before `orchestrator.stop`, so we
+    // see LABEL_MISMATCH rather than a "missing registry" fall-through.
     let app = make_app();
     install_registry(&app, "session-B");
-    let window = make_window(&app, "session-A");
+    prime_owner(&app, "session-B", "ws-victim").await;
+    let window = make_window(&app, "workspace-ws-attacker");
 
     let err = invoke(
         &window,
@@ -212,7 +237,7 @@ fn cross_session_stop_is_rejected_with_label_mismatch() {
             "instanceId": "deadbeefcafebabe",
         }),
     )
-    .expect_err("session-A must not stop session-B's agents");
+    .expect_err("attacker window must not stop session-B's agents");
     assert!(
         err.contains(LABEL_MISMATCH),
         "expected label-mismatch error, got: {err}"
@@ -223,11 +248,12 @@ fn cross_session_stop_is_rejected_with_label_mismatch() {
 // DoD: start + list + completion event forwarding + promote round trip.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn start_registers_an_instance_and_list_surfaces_it_as_running() {
+#[tokio::test(flavor = "multi_thread")]
+async fn start_registers_an_instance_and_list_surfaces_it_as_running() {
     let app = make_app();
+    prime_owner(&app, "sess-start", TEST_WS).await;
     install_registry(&app, "sess-start");
-    let window = make_window(&app, "session-sess-start");
+    let window = make_window(&app, &format!("workspace-{TEST_WS}"));
 
     let start_res = invoke(
         &window,
@@ -266,11 +292,12 @@ fn start_registers_an_instance_and_list_surfaces_it_as_running() {
     assert_eq!(arr[0]["state"], "Running");
 }
 
-#[test]
-fn unknown_agent_name_returns_typed_error_not_panic() {
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_agent_name_returns_typed_error_not_panic() {
     let app = make_app();
+    prime_owner(&app, "sess-unknown", TEST_WS).await;
     install_registry(&app, "sess-unknown");
-    let window = make_window(&app, "session-sess-unknown");
+    let window = make_window(&app, &format!("workspace-{TEST_WS}"));
 
     let err = invoke(
         &window,
@@ -303,8 +330,9 @@ async fn start_and_completion_events_reach_the_webview_via_session_event_channel
     use std::sync::Mutex;
 
     let app = make_app();
+    prime_owner(&app, "sess-events", TEST_WS).await;
     let registry = install_registry(&app, "sess-events");
-    let window = make_window(&app, "session-sess-events");
+    let window = make_window(&app, &format!("workspace-{TEST_WS}"));
 
     // Install the listener BEFORE invoking `start` so the `Started` event
     // is not lost to a listener-registration race. Tauri's `listen` is
@@ -403,11 +431,12 @@ async fn start_and_completion_events_reach_the_webview_via_session_event_channel
     );
 }
 
-#[test]
-fn promote_removes_from_list_without_stopping_underlying_instance() {
+#[tokio::test(flavor = "multi_thread")]
+async fn promote_removes_from_list_without_stopping_underlying_instance() {
     let app = make_app();
+    prime_owner(&app, "sess-promote", TEST_WS).await;
     let registry = install_registry(&app, "sess-promote");
-    let window = make_window(&app, "session-sess-promote");
+    let window = make_window(&app, &format!("workspace-{TEST_WS}"));
 
     let start_res = invoke(
         &window,
@@ -466,9 +495,7 @@ fn promote_removes_from_list_without_stopping_underlying_instance() {
     );
 
     let id = forge_core::AgentInstanceId::from_string(instance_id);
-    let still_alive = tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(async move { registry.orchestrator().get(&id).await });
+    let still_alive = registry.orchestrator().get(&id).await;
     assert!(
         still_alive.is_some(),
         "promote must not stop the orchestrator instance — UX re-attribution only"
@@ -486,8 +513,9 @@ async fn stop_completes_instance_and_emits_completion_event() {
     use std::sync::Mutex;
 
     let app = make_app();
+    prime_owner(&app, "sess-stop", TEST_WS).await;
     install_registry(&app, "sess-stop");
-    let window = make_window(&app, "session-sess-stop");
+    let window = make_window(&app, &format!("workspace-{TEST_WS}"));
 
     let collected: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
     let saw_completed: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
@@ -566,11 +594,12 @@ async fn stop_completes_instance_and_emits_completion_event() {
     );
 }
 
-#[test]
-fn stop_rejects_oversize_instance_id_at_command_layer() {
+#[tokio::test(flavor = "multi_thread")]
+async fn stop_rejects_oversize_instance_id_at_command_layer() {
     let app = make_app();
+    prime_owner(&app, "sess-stop-oversize", TEST_WS).await;
     install_registry(&app, "sess-stop-oversize");
-    let window = make_window(&app, "session-sess-stop-oversize");
+    let window = make_window(&app, &format!("workspace-{TEST_WS}"));
 
     let err = invoke(
         &window,
@@ -629,8 +658,9 @@ async fn stop_background_agent_transitions_instance_to_terminal_and_stops_sampli
         Arc::new(vec![def("writer"), def("reviewer")]),
         Arc::clone(&monitor),
     ));
+    prime_owner(&app, "sess-term", TEST_WS).await;
     install_bg_session_for_test(&app.handle().clone(), "sess-term", Arc::clone(&registry));
-    let window = make_window(&app, "session-sess-term");
+    let window = make_window(&app, &format!("workspace-{TEST_WS}"));
 
     let start_res = invoke(
         &window,
@@ -718,11 +748,12 @@ async fn stop_background_agent_transitions_instance_to_terminal_and_stops_sampli
 /// DoD: `stop_background_agent` from a session-A window with a payload
 /// claiming session-B must be rejected by the window-label gate before any
 /// registry lookup happens.
-#[test]
-fn stop_background_agent_from_wrong_session_is_rejected() {
+#[tokio::test(flavor = "multi_thread")]
+async fn stop_background_agent_from_wrong_session_is_rejected() {
     let app = make_app();
     install_registry(&app, "session-owner");
-    let window = make_window(&app, "session-attacker");
+    prime_owner(&app, "session-owner", "ws-victim").await;
+    let window = make_window(&app, "workspace-ws-attacker");
 
     let err = invoke(
         &window,
@@ -732,7 +763,7 @@ fn stop_background_agent_from_wrong_session_is_rejected() {
             "instanceId": "deadbeefcafebabe",
         }),
     )
-    .expect_err("a session-attacker window must not stop session-owner's agents");
+    .expect_err("an attacker workspace window must not stop session-owner's agents");
     assert!(
         err.contains(LABEL_MISMATCH),
         "expected label-mismatch error, got: {err}"
@@ -741,11 +772,12 @@ fn stop_background_agent_from_wrong_session_is_rejected() {
 
 /// Size-cap regression: oversize prompts must be rejected at the command
 /// layer (`require_size`) before the registry's `start` allocates anything.
-#[test]
-fn start_rejects_oversize_prompt_at_command_layer() {
+#[tokio::test(flavor = "multi_thread")]
+async fn start_rejects_oversize_prompt_at_command_layer() {
     let app = make_app();
+    prime_owner(&app, "sess-oversize", TEST_WS).await;
     install_registry(&app, "sess-oversize");
-    let window = make_window(&app, "session-sess-oversize");
+    let window = make_window(&app, &format!("workspace-{TEST_WS}"));
 
     let err = invoke(
         &window,

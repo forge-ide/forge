@@ -107,7 +107,7 @@ async fn graceful_shutdown_via_orchestrator_exits_daemon_and_reaps_artifacts() {
     let connections = SessionConnections::new();
     let bridge = SessionBridge::new(connections);
     let _ack = bridge
-        .hello(session_id, Some(&sock_path))
+        .hello(session_id, Some(&sock_path), None)
         .await
         .expect("hello");
     let (tx, _rx) = mpsc::unbounded_channel::<SessionEventPayload>();
@@ -196,7 +196,7 @@ async fn second_close_after_daemon_already_gone_is_already_closed() {
     let connections = SessionConnections::new();
     let bridge = SessionBridge::new(connections);
     let _ack = bridge
-        .hello(session_id, Some(&sock_path))
+        .hello(session_id, Some(&sock_path), None)
         .await
         .expect("hello");
     bridge

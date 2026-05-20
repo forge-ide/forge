@@ -10,6 +10,8 @@ function session(overrides: Partial<SessionSummary> = {}): SessionSummary {
     persistence: 'persist',
     createdAt: '2026-04-18T00:00:00Z',
     lastEventAt: '2026-04-18T00:00:00Z',
+    workspaceRoot: '/tmp/ws',
+    workspaceId: 'ws01',
     ...overrides,
   };
 }

@@ -78,6 +78,28 @@ describe('ChatPane rendering', () => {
     expect(getByText('Hi there')).toBeInTheDocument();
   });
 
+  // Provider outputs are markdown-shaped; the assistant bubble routes
+  // through `<Markdown>` so backticks render as `<code>`, asterisks as
+  // emphasis, fences as `<pre><code>`, etc. The previous render path
+  // emitted raw text inside a `<p>`, so this is a regression guard.
+  it('renders markdown inside an assistant bubble (emphasis, inline code, fenced block)', () => {
+    pushEvent(SID, {
+      kind: 'AssistantMessage',
+      message_id: 'a-md',
+      text: 'use **bold** and `code` and:\n\n```\nlet x = 1;\n```',
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    const body = getByTestId('assistant-turn-body');
+    expect(body.querySelector('strong')?.textContent).toBe('bold');
+    expect(body.querySelector('code')?.textContent).toBe('code');
+    // Fenced block lands in its own `<pre><code>` — separate from the
+    // inline `<code>` above. Match by tag chain rather than count to
+    // stay robust to whitespace nodes between siblings.
+    const pre = body.querySelector('pre');
+    expect(pre).not.toBeNull();
+    expect(pre?.querySelector('code')?.textContent).toContain('let x = 1;');
+  });
+
   it('renders a streaming assistant turn with blinking cursor', () => {
     pushEvent(SID, { kind: 'AssistantDelta', delta: 'Typing...', message_id: 'a2' });
     const { getByTestId } = render(() => <ChatPane />);

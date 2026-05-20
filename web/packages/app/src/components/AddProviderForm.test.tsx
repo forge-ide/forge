@@ -297,7 +297,7 @@ describe('AddProviderForm submit', () => {
     });
   });
 
-  it('removes ollama from the KIND dropdown (rolled into custom_openai preset)', () => {
+  it('exposes ollama, lm_studio, and custom_openai as KIND options alongside built-ins', () => {
     installInvokeStub();
     const { getByTestId } = renderForm();
     const trigger = getByTestId('add-provider-kind');
@@ -307,8 +307,14 @@ describe('AddProviderForm submit', () => {
     const values = Array.from(
       panel?.querySelectorAll<HTMLElement>('[data-option-value]') ?? [],
     ).map((o) => o.getAttribute('data-option-value'));
-    expect(values).not.toContain('ollama');
+    // Built-ins
+    expect(values).toContain('anthropic');
+    expect(values).toContain('openai');
+    expect(values).toContain('mistral');
+    // Custom-family: generic plus the preset shortcuts.
     expect(values).toContain('custom_openai');
+    expect(values).toContain('ollama');
+    expect(values).toContain('lm_studio');
   });
 
   it('renders the PRESET selector only when kind = custom_openai', async () => {
@@ -322,7 +328,7 @@ describe('AddProviderForm submit', () => {
     );
   });
 
-  it('Ollama preset auto-fills endpoint/model and seeds the API key with `ollama`', async () => {
+  it('Ollama preset auto-fills name/endpoint/model and seeds the API key with `ollama`', async () => {
     installInvokeStub();
     const { getByTestId, queryByTestId } = renderForm();
     pickDropdown(getByTestId, 'add-provider-kind', 'custom_openai');
@@ -337,6 +343,7 @@ describe('AddProviderForm submit', () => {
         'http://127.0.0.1:11434',
       );
     });
+    expect((getByTestId('add-provider-name') as HTMLInputElement).value).toBe('ollama');
     expect((getByTestId('add-provider-model') as HTMLInputElement).value).toBe(
       'llama3.2',
     );
@@ -355,8 +362,7 @@ describe('AddProviderForm submit', () => {
     pickDropdown(getByTestId, 'add-provider-kind', 'custom_openai');
     await waitFor(() => expect(getByTestId('add-provider-preset')).toBeInTheDocument());
     pickDropdown(getByTestId, 'add-provider-preset', 'ollama');
-    await waitFor(() => expect(getByTestId('add-provider-name')).toBeInTheDocument());
-    fireEvent.input(getByTestId('add-provider-name'), { target: { value: 'ollama' } });
+    // Name auto-fills to "ollama" via applyPreset — no manual entry required.
 
     fireEvent.click(getByTestId('add-provider-submit'));
 
@@ -382,6 +388,113 @@ describe('AddProviderForm submit', () => {
     });
   });
 
+  it('custom_openai add with blank API key submits keyless and skips login_provider', async () => {
+    // Backend already supports keyless custom_openai (CustomOpenAiEntry.auth =
+    // AuthShapeSettings::None); the form just needs to opt in by setting
+    // `keyless: true` and skipping the loginProvider chain. Mirrors the
+    // existing keyed-add test above for direct comparison.
+    const { calls } = installInvokeStub({
+      addProvider: async () => ({ ...SAMPLE_ENTRY, id: 'custom_openai:vllm' }),
+    });
+    const { getByTestId, queryByTestId } = renderForm();
+    pickDropdown(getByTestId, 'add-provider-kind', 'custom_openai');
+    await waitFor(() => expect(getByTestId('add-provider-name')).toBeInTheDocument());
+
+    fireEvent.input(getByTestId('add-provider-name'), { target: { value: 'vllm' } });
+    fireEvent.input(getByTestId('add-provider-endpoint'), {
+      target: { value: 'http://127.0.0.1:8000' },
+    });
+    fireEvent.input(getByTestId('add-provider-model'), { target: { value: 'qwen2' } });
+    // No fillApiKey — the field is optional for custom_openai.
+
+    fireEvent.click(getByTestId('add-provider-submit'));
+
+    await waitFor(() => {
+      const add = calls.find((c) => c.cmd === 'add_provider');
+      expect(add?.args).toEqual({
+        input: {
+          id: 'custom_openai:vllm',
+          config: {
+            endpoint: 'http://127.0.0.1:8000',
+            model: 'qwen2',
+            keyless: true,
+          },
+        },
+      });
+    });
+    // No login_provider — there is no key to store. Asserted after the
+    // success path settles so a delayed call would still fail the test.
+    expect(calls.some((c) => c.cmd === 'login_provider')).toBe(false);
+    // No field error for the empty key either.
+    expect(queryByTestId('add-provider-api-key-error')).toBeNull();
+  });
+
+  it('custom_openai add with API key supplied stays keyed (no keyless flag, login_provider chains)', async () => {
+    // Regression guard: keyed-add behavior must be unaffected by the
+    // keyless-on-blank change. `keyless` is absent from the payload (not
+    // false) so the backend writes the default Bearer auth shape.
+    const { calls } = installInvokeStub({
+      addProvider: async () => ({ ...SAMPLE_ENTRY, id: 'custom_openai:together' }),
+    });
+    const { getByTestId } = renderForm();
+    pickDropdown(getByTestId, 'add-provider-kind', 'custom_openai');
+    await waitFor(() => expect(getByTestId('add-provider-name')).toBeInTheDocument());
+
+    fireEvent.input(getByTestId('add-provider-name'), { target: { value: 'together' } });
+    fireEvent.input(getByTestId('add-provider-endpoint'), {
+      target: { value: 'https://api.together.xyz' },
+    });
+    fireEvent.input(getByTestId('add-provider-model'), { target: { value: 'qwen2' } });
+    fillApiKey(getByTestId);
+
+    fireEvent.click(getByTestId('add-provider-submit'));
+
+    await waitFor(() => {
+      const add = calls.find((c) => c.cmd === 'add_provider');
+      expect(add?.args).toEqual({
+        input: {
+          id: 'custom_openai:together',
+          config: {
+            endpoint: 'https://api.together.xyz',
+            model: 'qwen2',
+          },
+        },
+      });
+    });
+    await waitFor(() => {
+      const login = calls.find((c) => c.cmd === 'login_provider');
+      expect(login?.args).toEqual({
+        providerId: 'custom_openai:together',
+        key: TEST_API_KEY,
+      });
+    });
+  });
+
+  it('built-in credentialed kinds still require an API key on add', async () => {
+    // Regression guard against the validation relaxation — built-ins must
+    // not silently submit without a key.
+    const { calls } = installInvokeStub();
+    const { getByTestId, queryByTestId } = renderForm();
+    // Default kind is anthropic — a built-in credentialed kind.
+
+    fireEvent.click(getByTestId('add-provider-submit'));
+
+    await waitFor(() =>
+      expect(queryByTestId('add-provider-api-key-error')).toBeInTheDocument(),
+    );
+    expect(calls.some((c) => c.cmd === 'add_provider')).toBe(false);
+  });
+
+  it('relabels the API key field as "(optional)" for custom_openai add mode', async () => {
+    installInvokeStub();
+    const { getByTestId } = renderForm();
+    pickDropdown(getByTestId, 'add-provider-kind', 'custom_openai');
+    await waitFor(() => expect(getByTestId('add-provider-name')).toBeInTheDocument());
+
+    const label = getByTestId('add-provider-api-key').previousSibling as HTMLElement;
+    expect(label.textContent).toContain('optional');
+  });
+
   it('switching the preset back to Custom clears the auto-filled fields', async () => {
     installInvokeStub();
     const { getByTestId } = renderForm();
@@ -398,6 +511,201 @@ describe('AddProviderForm submit', () => {
       expect((getByTestId('add-provider-endpoint') as HTMLInputElement).value).toBe(''),
     );
     expect((getByTestId('add-provider-model') as HTMLInputElement).value).toBe('');
+  });
+
+  it('LM Studio preset auto-fills name + endpoint, leaves model + API key blank (keyless)', async () => {
+    installInvokeStub();
+    const { getByTestId, queryByTestId } = renderForm();
+    pickDropdown(getByTestId, 'add-provider-kind', 'custom_openai');
+    await waitFor(() => expect(getByTestId('add-provider-preset')).toBeInTheDocument());
+    // Default custom preset: API key field shown, all fields blank.
+    expect(queryByTestId('add-provider-api-key')).toBeInTheDocument();
+
+    pickDropdown(getByTestId, 'add-provider-preset', 'lm_studio');
+
+    await waitFor(() => {
+      expect((getByTestId('add-provider-endpoint') as HTMLInputElement).value).toBe(
+        'http://127.0.0.1:1234',
+      );
+    });
+    // Name auto-fills with the canonical "lm-studio" instance id.
+    expect((getByTestId('add-provider-name') as HTMLInputElement).value).toBe(
+      'lm-studio',
+    );
+    // Model stays blank — LM Studio's loaded model is user-controlled
+    // and has no canonical default. User clicks Test connection to fetch.
+    expect((getByTestId('add-provider-model') as HTMLInputElement).value).toBe('');
+    // API key blank → form's keyless path on submit (keyless: true).
+    expect((getByTestId('add-provider-api-key') as HTMLInputElement).value).toBe('');
+  });
+
+  it('LM Studio preset submit sends keyless: true and skips login_provider', async () => {
+    const { calls } = installInvokeStub({
+      addProvider: async () => ({ ...SAMPLE_ENTRY, id: 'custom_openai:lm-studio' }),
+    });
+    const { getByTestId } = renderForm();
+    pickDropdown(getByTestId, 'add-provider-kind', 'custom_openai');
+    await waitFor(() => expect(getByTestId('add-provider-preset')).toBeInTheDocument());
+    pickDropdown(getByTestId, 'add-provider-preset', 'lm_studio');
+    // Name is auto-filled to "lm-studio" via applyPreset.
+    // User types a model id since LM Studio's loaded model is local-only.
+    fireEvent.input(getByTestId('add-provider-model'), {
+      target: { value: 'qwen2.5-7b-instruct' },
+    });
+
+    fireEvent.click(getByTestId('add-provider-submit'));
+
+    await waitFor(() => {
+      const add = calls.find((c) => c.cmd === 'add_provider');
+      expect(add?.args).toEqual({
+        input: {
+          id: 'custom_openai:lm-studio',
+          config: {
+            endpoint: 'http://127.0.0.1:1234',
+            model: 'qwen2.5-7b-instruct',
+            keyless: true,
+          },
+        },
+      });
+    });
+    // No credential to store — keyless path skips login_provider entirely.
+    expect(calls.some((c) => c.cmd === 'login_provider')).toBe(false);
+  });
+
+  // ---- KIND-menu shortcuts ----
+  //
+  // Picking `ollama` or `lm_studio` directly from the KIND dropdown should
+  // route through the same custom_openai branch and apply the matching
+  // preset in one click — no need to land on `custom_openai` and then
+  // pick a preset.
+
+  it('picking Ollama from the KIND dropdown applies the Ollama preset', async () => {
+    installInvokeStub();
+    const { getByTestId, queryByTestId } = renderForm();
+    pickDropdown(getByTestId, 'add-provider-kind', 'ollama');
+    await waitFor(() =>
+      expect(getByTestId('add-provider-name')).toBeInTheDocument(),
+    );
+
+    expect((getByTestId('add-provider-name') as HTMLInputElement).value).toBe('ollama');
+    expect((getByTestId('add-provider-endpoint') as HTMLInputElement).value).toBe(
+      'http://127.0.0.1:11434',
+    );
+    expect((getByTestId('add-provider-model') as HTMLInputElement).value).toBe(
+      'llama3.2',
+    );
+    expect((getByTestId('add-provider-api-key') as HTMLInputElement).value).toBe(
+      'ollama',
+    );
+    // PRESET selector hides — KIND already locked the preset.
+    expect(queryByTestId('add-provider-preset')).toBeNull();
+  });
+
+  it('picking LM Studio from the KIND dropdown applies the LM Studio preset (keyless)', async () => {
+    installInvokeStub();
+    const { getByTestId, queryByTestId } = renderForm();
+    pickDropdown(getByTestId, 'add-provider-kind', 'lm_studio');
+    await waitFor(() =>
+      expect(getByTestId('add-provider-name')).toBeInTheDocument(),
+    );
+
+    expect((getByTestId('add-provider-name') as HTMLInputElement).value).toBe(
+      'lm-studio',
+    );
+    expect((getByTestId('add-provider-endpoint') as HTMLInputElement).value).toBe(
+      'http://127.0.0.1:1234',
+    );
+    expect((getByTestId('add-provider-api-key') as HTMLInputElement).value).toBe('');
+    expect(queryByTestId('add-provider-preset')).toBeNull();
+  });
+
+  it('Ollama KIND shortcut submit lands as custom_openai:ollama with login_provider chained', async () => {
+    const { calls } = installInvokeStub({
+      addProvider: async () => ({ ...SAMPLE_ENTRY, id: 'custom_openai:ollama' }),
+    });
+    const { getByTestId } = renderForm();
+    pickDropdown(getByTestId, 'add-provider-kind', 'ollama');
+    await waitFor(() =>
+      expect(getByTestId('add-provider-name')).toBeInTheDocument(),
+    );
+
+    fireEvent.click(getByTestId('add-provider-submit'));
+
+    await waitFor(() => {
+      const add = calls.find((c) => c.cmd === 'add_provider');
+      expect(add?.args).toEqual({
+        input: {
+          id: 'custom_openai:ollama',
+          config: {
+            endpoint: 'http://127.0.0.1:11434',
+            model: 'llama3.2',
+          },
+        },
+      });
+    });
+    await waitFor(() => {
+      const login = calls.find((c) => c.cmd === 'login_provider');
+      expect(login?.args).toEqual({
+        providerId: 'custom_openai:ollama',
+        key: 'ollama',
+      });
+    });
+  });
+
+  // ---- per-preset hint copy ----
+
+  it('preset hint shows only the Ollama-specific line when preset = ollama', async () => {
+    installInvokeStub();
+    const { getByTestId } = renderForm();
+    pickDropdown(getByTestId, 'add-provider-kind', 'custom_openai');
+    await waitFor(() => expect(getByTestId('add-provider-preset')).toBeInTheDocument());
+    pickDropdown(getByTestId, 'add-provider-preset', 'ollama');
+
+    await waitFor(() => {
+      const hint = getByTestId('add-provider-preset-hint');
+      expect(hint.textContent).toContain('Ollama runs on');
+      expect(hint.textContent).not.toContain('LM Studio');
+    });
+  });
+
+  it('preset hint shows only the LM-Studio-specific line when preset = lm_studio', async () => {
+    installInvokeStub();
+    const { getByTestId } = renderForm();
+    pickDropdown(getByTestId, 'add-provider-kind', 'custom_openai');
+    await waitFor(() => expect(getByTestId('add-provider-preset')).toBeInTheDocument());
+    pickDropdown(getByTestId, 'add-provider-preset', 'lm_studio');
+
+    await waitFor(() => {
+      const hint = getByTestId('add-provider-preset-hint');
+      expect(hint.textContent).toContain('LM Studio runs on');
+      expect(hint.textContent).not.toContain('Ollama runs on');
+    });
+  });
+
+  it('switching LM Studio → Ollama re-fills with Ollama defaults (no preset bleed)', async () => {
+    installInvokeStub();
+    const { getByTestId } = renderForm();
+    pickDropdown(getByTestId, 'add-provider-kind', 'custom_openai');
+    await waitFor(() => expect(getByTestId('add-provider-preset')).toBeInTheDocument());
+    pickDropdown(getByTestId, 'add-provider-preset', 'lm_studio');
+    await waitFor(() =>
+      expect((getByTestId('add-provider-endpoint') as HTMLInputElement).value).toBe(
+        'http://127.0.0.1:1234',
+      ),
+    );
+
+    pickDropdown(getByTestId, 'add-provider-preset', 'ollama');
+    await waitFor(() =>
+      expect((getByTestId('add-provider-endpoint') as HTMLInputElement).value).toBe(
+        'http://127.0.0.1:11434',
+      ),
+    );
+    expect((getByTestId('add-provider-model') as HTMLInputElement).value).toBe(
+      'llama3.2',
+    );
+    expect((getByTestId('add-provider-api-key') as HTMLInputElement).value).toBe(
+      'ollama',
+    );
   });
 });
 
@@ -822,5 +1130,64 @@ describe('AddProviderForm test connection', () => {
     const alert = getByTestId('add-provider-test-error');
     expect(alert).toHaveAttribute('role', 'alert');
     expect(alert.textContent).toBe('auth HTTP 401');
+  });
+
+  // ---- status dot next to ENDPOINT label ----
+
+  it('does not render the endpoint status dot before any probe attempt', async () => {
+    installInvokeStub();
+    const { getByTestId, queryByTestId } = renderForm();
+    pickDropdown(getByTestId, 'add-provider-kind', 'custom_openai');
+    await waitFor(() =>
+      expect(getByTestId('add-provider-test-connection')).toBeInTheDocument(),
+    );
+    // Idle: no dot is painted yet — the absence is the "unknown" state.
+    expect(queryByTestId('add-provider-endpoint-status')).toBeNull();
+  });
+
+  it('paints a green (ok) status dot after a successful probe', async () => {
+    installInvokeStub({
+      probeProviderConfig: async () => ({
+        ok: true,
+        latency_ms: 7,
+        models: ['llama3.2'],
+      }),
+    });
+    const { getByTestId } = renderForm();
+    pickDropdown(getByTestId, 'add-provider-kind', 'custom_openai');
+    await waitFor(() =>
+      expect(getByTestId('add-provider-test-connection')).toBeInTheDocument(),
+    );
+    fireEvent.input(getByTestId('add-provider-endpoint'), {
+      target: { value: 'http://127.0.0.1:1234' },
+    });
+
+    fireEvent.click(getByTestId('add-provider-test-connection'));
+
+    const dot = await waitFor(() => getByTestId('add-provider-endpoint-status'));
+    expect(dot.getAttribute('data-status')).toBe('success');
+    expect(dot.className).toContain('add-provider-form__status-dot--ok');
+  });
+
+  it('paints a red (err) status dot after a failed probe', async () => {
+    installInvokeStub({
+      probeProviderConfig: async () => {
+        throw new Error('test_provider_connection: ECONNREFUSED');
+      },
+    });
+    const { getByTestId } = renderForm();
+    pickDropdown(getByTestId, 'add-provider-kind', 'custom_openai');
+    await waitFor(() =>
+      expect(getByTestId('add-provider-test-connection')).toBeInTheDocument(),
+    );
+    fireEvent.input(getByTestId('add-provider-endpoint'), {
+      target: { value: 'http://127.0.0.1:9999' },
+    });
+
+    fireEvent.click(getByTestId('add-provider-test-connection'));
+
+    const dot = await waitFor(() => getByTestId('add-provider-endpoint-status'));
+    expect(dot.getAttribute('data-status')).toBe('error');
+    expect(dot.className).toContain('add-provider-form__status-dot--err');
   });
 });

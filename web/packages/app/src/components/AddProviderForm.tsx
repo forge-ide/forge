@@ -24,8 +24,13 @@
 // API key field with the literal `ollama` — Ollama's OpenAI-compat
 // endpoint accepts any value, but a fronting proxy may require the
 // `Authorization: Bearer ollama` header, so we default it explicitly
-// and leave the field editable for non-default tokens. In edit mode the
-// API key is optional — blank leaves the existing credential untouched.
+// and leave the field editable for non-default tokens. The LM Studio
+// preset auto-fills the local endpoint and leaves the API key blank,
+// taking the form's keyless path (`keyless: true` → `auth.shape = "none"`
+// on disk); LM Studio's loaded model is user-controlled, so the model
+// field stays blank and the user clicks "Test connection" to populate
+// it from the running instance's `/v1/models`. In edit mode the API key
+// is optional — blank leaves the existing credential untouched.
 
 import {
   type Component,
@@ -37,7 +42,7 @@ import {
   Show,
   Switch,
 } from 'solid-js';
-import { Button } from '@forge/design';
+import { Button, IconButton } from '@forge/design';
 import type {
   AddProviderInput,
   BuiltinAuthKind,
@@ -58,10 +63,16 @@ export type FormState = 'idle' | 'validating' | 'saving' | 'save-failed';
 export type FormMode = 'add' | 'edit';
 
 type BuiltinKind = 'anthropic' | 'openai' | 'mistral';
-type Kind = BuiltinKind | 'custom_openai';
+/** Kinds that route through the `custom_openai` branch on the wire. The
+ * generic `custom_openai` lets the user fill every field; `ollama` and
+ * `lm_studio` are first-class KIND-menu shortcuts that pre-fill the
+ * matching preset. All three submit as `custom_openai:<name>`. */
+type CustomFamilyKind = 'custom_openai' | 'ollama' | 'lm_studio';
+type Kind = BuiltinKind | CustomFamilyKind;
 
 const BUILTIN_KINDS: BuiltinKind[] = ['anthropic', 'openai', 'mistral'];
-const KINDS: Kind[] = [...BUILTIN_KINDS, 'custom_openai'];
+const CUSTOM_FAMILY_KINDS: CustomFamilyKind[] = ['custom_openai', 'ollama', 'lm_studio'];
+const KINDS: Kind[] = [...BUILTIN_KINDS, ...CUSTOM_FAMILY_KINDS];
 const CUSTOM_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 /** Kinds for which the Vertex AI auth option is meaningful. Today only
@@ -69,19 +80,24 @@ const CUSTOM_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
  * the auth selector stays hidden for everything else. */
 const VERTEX_CAPABLE_KINDS: ReadonlySet<Kind> = new Set<Kind>(['anthropic']);
 
-/** Kinds that require an API key. */
+/** Kinds that surface the API KEY field. For built-ins the field is
+ * required; for the custom-family kinds (`custom_openai` / `ollama` /
+ * `lm_studio`) it's optional — blank takes the keyless path
+ * (`keyless: true` → `auth.shape = "none"` on disk). The Ollama preset
+ * pre-fills the literal `ollama` so the field is non-empty by default,
+ * keeping fronting-proxy compat. */
 const CREDENTIALED_KINDS: ReadonlySet<Kind> = new Set<Kind>([
   'anthropic',
   'openai',
   'mistral',
-  'custom_openai',
+  ...CUSTOM_FAMILY_KINDS,
 ]);
 
 /** Preset selector for the `custom_openai` branch. `custom` lets the user
- * fill every field by hand; `ollama` is a one-click shortcut that pins
- * the local Ollama endpoint/model and seeds the API key with the
- * conventional literal `ollama`. */
-type CustomPreset = 'custom' | 'ollama';
+ * fill every field by hand; `ollama` and `lm_studio` are shortcuts that
+ * pin the local endpoint and shape the auth field for each backend's
+ * conventions. */
+type CustomPreset = 'custom' | 'ollama' | 'lm_studio';
 
 /** Local Ollama defaults used when the Ollama preset is selected. The
  * model is a sensible default — the user can edit it after selection.
@@ -90,11 +106,34 @@ type CustomPreset = 'custom' | 'ollama';
  * `Authorization` header, so we always send `Bearer ollama` unless the
  * user overrides it. */
 const OLLAMA_PRESET = {
+  /** Default instance name. Produces an `id` of `custom_openai:ollama`
+   * on the wire. Editable in the NAME field after the preset applies. */
+  name: 'ollama',
   // Base URL must be the root — both the probe (`/v1/models`) and the
   // runtime (`/v1/chat/completions`) append their own versioned path.
   endpoint: 'http://127.0.0.1:11434',
   model: 'llama3.2',
   apiKey: 'ollama',
+} as const;
+
+/** Local LM Studio defaults used when the LM Studio preset is selected.
+ * LM Studio's loaded model is user-controlled and has no canonical
+ * vendor default, so the model field stays blank — the user clicks
+ * "Test connection" to populate it from the running instance's
+ * `/v1/models`, or types a known id manually. The API key is left blank
+ * so the form takes the keyless path (`keyless: true` in
+ * `CustomOpenAiConfig` → `auth.shape = "none"` on disk), matching
+ * LM Studio's default no-auth posture. Users behind a Bearer-requiring
+ * proxy can still type a key after picking the preset. */
+const LM_STUDIO_PRESET = {
+  /** Default instance name. Produces an `id` of `custom_openai:lm-studio`
+   * on the wire. Hyphenated rather than `lm_studio` to read naturally
+   * in human-facing surfaces (Providers page list, error messages);
+   * matches `CUSTOM_NAME_PATTERN` (`[A-Za-z0-9_-]+`). */
+  name: 'lm-studio',
+  endpoint: 'http://127.0.0.1:1234',
+  model: '',
+  apiKey: '',
 } as const;
 
 /**
@@ -160,7 +199,15 @@ export const AddProviderForm: Component<AddProviderFormProps> = (props) => {
 
   const mode = (): FormMode => props.mode ?? 'add';
   const isEdit = (): boolean => mode() === 'edit';
-  const isCustom = (): boolean => kind() === 'custom_openai';
+  /** True for any kind that submits as `custom_openai:<name>` — the
+   * generic kind plus the preset-shortcut kinds. Drives field visibility
+   * for NAME / ENDPOINT / MODEL / API KEY and the validation branch. */
+  const isCustom = (): boolean =>
+    (CUSTOM_FAMILY_KINDS as readonly Kind[]).includes(kind());
+  /** True only for the generic kind. The preset-shortcut kinds already
+   * lock the preset by virtue of being picked from KIND, so the PRESET
+   * selector hides for them. */
+  const isCustomGeneric = (): boolean => kind() === 'custom_openai';
   const isBusy = (): boolean => state() === 'saving';
   const supportsVertex = (): boolean => !isEdit() && VERTEX_CAPABLE_KINDS.has(kind());
   const isVertex = (): boolean => supportsVertex() && authKind() === 'vertex';
@@ -249,10 +296,15 @@ export const AddProviderForm: Component<AddProviderFormProps> = (props) => {
         errs.name = 'Name must match [A-Za-z0-9_-]+';
       }
     }
-    // API key is required when adding a credentialed provider. In edit
-    // mode it's optional — blank means "leave the existing credential
-    // untouched"; a value means "overwrite".
-    if (!isEdit() && needsCredential() && apiKey().trim() === '') {
+    // API key is required when adding a built-in credentialed provider
+    // (anthropic / openai / mistral). In edit mode it's optional — blank
+    // means "leave the existing credential untouched"; a value means
+    // "overwrite". For `custom_openai`, blank means "keyless endpoint"
+    // (vLLM, LM Studio, llama.cpp, internal mocks); `buildCustomConfig`
+    // sets `keyless: true` on the wire so the backend persists
+    // `auth = { shape = "none" }` and `session_start` skips credential
+    // probing for the entry.
+    if (!isEdit() && needsCredential() && !isCustom() && apiKey().trim() === '') {
       errs.apiKey = 'API key is required';
     }
     if (isVertex()) {
@@ -275,17 +327,27 @@ export const AddProviderForm: Component<AddProviderFormProps> = (props) => {
     };
   };
 
-  const buildCustomConfig = (): CustomOpenAiConfig => ({
-    endpoint: endpoint().trim(),
-    model: model().trim(),
-  });
+  const buildCustomConfig = (): CustomOpenAiConfig => {
+    const cfg: CustomOpenAiConfig = {
+      endpoint: endpoint().trim(),
+      model: model().trim(),
+    };
+    // Blank API key on add = keyless endpoint (vLLM, LM Studio, llama.cpp,
+    // internal mocks). Backend writes `auth = { shape = "none" }` and
+    // `session_start` skips credential probing. `update_provider` ignores
+    // this field today, so edit mode never flips an existing entry's auth
+    // shape on its own.
+    if (!isEdit() && apiKey().trim() === '') {
+      cfg.keyless = true;
+    }
+    return cfg;
+  };
 
-  /** Apply a preset's defaults to the endpoint / model / api-key fields.
-   * Called from the PRESET selector's onChange — switching to `ollama`
-   * pins the local endpoint/model and seeds the api-key with the literal
-   * `ollama` so the user can submit in one click; switching back to
-   * `custom` clears them so the form doesn't carry stale preset values
-   * into a fresh entry. */
+  /** Apply a preset's defaults to the name / endpoint / model / api-key
+   * fields. Called from both the KIND selector (when picking `ollama` or
+   * `lm_studio` directly) and the PRESET selector (under the generic
+   * `custom_openai` kind). Switching back to `custom` clears the fields
+   * so the form doesn't carry stale preset values into a fresh entry. */
   const applyPreset = (next: CustomPreset): void => {
     setPreset(next);
     // Any stale probe result is invalidated by switching presets — the
@@ -294,13 +356,36 @@ export const AddProviderForm: Component<AddProviderFormProps> = (props) => {
     setProbeState({ kind: 'idle' });
     setModels([]);
     if (next === 'ollama') {
+      setName(OLLAMA_PRESET.name);
       setEndpoint(OLLAMA_PRESET.endpoint);
       setModel(OLLAMA_PRESET.model);
       setApiKey(OLLAMA_PRESET.apiKey);
+    } else if (next === 'lm_studio') {
+      setName(LM_STUDIO_PRESET.name);
+      setEndpoint(LM_STUDIO_PRESET.endpoint);
+      setModel(LM_STUDIO_PRESET.model);
+      setApiKey(LM_STUDIO_PRESET.apiKey);
     } else {
+      setName('');
       setEndpoint('');
       setModel('');
       setApiKey('');
+    }
+  };
+
+  /** Drive the KIND dropdown — for the preset-shortcut kinds, also
+   * apply the matching preset so the user lands in a "ready to add"
+   * state in one click. For the generic `custom_openai`, reset to the
+   * blank `custom` preset so any leftover preset values from a prior
+   * kind don't leak in. Built-in kinds untouched. */
+  const onKindChange = (next: Kind): void => {
+    setKind(next);
+    if (next === 'ollama') {
+      applyPreset('ollama');
+    } else if (next === 'lm_studio') {
+      applyPreset('lm_studio');
+    } else if (next === 'custom_openai') {
+      applyPreset('custom');
     }
   };
 
@@ -502,7 +587,7 @@ export const AddProviderForm: Component<AddProviderFormProps> = (props) => {
                 disabled={isBusy() || isEdit()}
                 readonly={isEdit()}
                 value={kind()}
-                onChange={(v) => setKind(v as Kind)}
+                onChange={(v) => onKindChange(v as Kind)}
                 options={KINDS.map((k) => ({ value: k, label: k }))}
               />
             </div>
@@ -621,14 +706,13 @@ export const AddProviderForm: Component<AddProviderFormProps> = (props) => {
               </label>
             </Show>
 
-            <Show when={isCustom() && !isEdit()}>
-              {/* Preset selector — `Custom` is the open-ended OpenAI-
-                  compatible flow (vLLM, internal mocks, anything that
-                  speaks the OpenAI wire). `Ollama (local)` pins the
-                  local Ollama endpoint/model and seeds the API key
-                  field with the literal `ollama` so the user can
-                  submit in one click. Hidden in edit mode since the
-                  preset is fixed at add time. */}
+            <Show when={isCustomGeneric() && !isEdit()}>
+              {/* Preset selector — available only under the generic
+                  `custom_openai` KIND. The `ollama` and `lm_studio`
+                  KINDs already lock the preset (picking them from KIND
+                  calls applyPreset directly), so we don't render this
+                  redundant selector for them. Hidden in edit mode since
+                  the preset is fixed at add time. */}
               <div class="add-provider-form__field">
                 <span class="add-provider-form__label">PRESET</span>
                 <Dropdown
@@ -640,13 +724,31 @@ export const AddProviderForm: Component<AddProviderFormProps> = (props) => {
                   options={[
                     { value: 'custom', label: 'Custom (OpenAI-compatible)' },
                     { value: 'ollama', label: 'Ollama (local)' },
+                    { value: 'lm_studio', label: 'LM Studio (local)' },
                   ]}
                 />
-                <span class="add-provider-form__hint">
-                  Ollama runs on http://127.0.0.1:11434 with API key
-                  `ollama` — pick this preset for a one-click local
-                  setup. Choose Custom for any other OpenAI-compatible
-                  endpoint.
+                <span
+                  class="add-provider-form__hint"
+                  data-testid="add-provider-preset-hint"
+                >
+                  <Switch
+                    fallback={
+                      <>
+                        Open-ended OpenAI-compatible flow — fill out every
+                        field manually for vLLM, internal mocks, or any
+                        other endpoint.
+                      </>
+                    }
+                  >
+                    <Match when={preset() === 'ollama'}>
+                      Ollama runs on http://127.0.0.1:11434 with API key
+                      `ollama`.
+                    </Match>
+                    <Match when={preset() === 'lm_studio'}>
+                      LM Studio runs on http://127.0.0.1:1234 keyless —
+                      click "Test connection" to fetch the loaded model.
+                    </Match>
+                  </Switch>
                 </span>
               </div>
             </Show>
@@ -676,25 +778,106 @@ export const AddProviderForm: Component<AddProviderFormProps> = (props) => {
                 </Show>
               </label>
 
+              {/* ENDPOINT field. The probe trigger sits as a square IconButton
+                  inline with the input; the most recent probe result paints a
+                  colored dot next to the ENDPOINT label (green ok / red err)
+                  for a quick at-a-glance read. Latency + model count or the
+                  daemon's verbatim error message render as text below the
+                  input for diagnostic detail. */}
               <label class="add-provider-form__field">
-                <span class="add-provider-form__label">ENDPOINT</span>
-                <input
-                  type="url"
-                  class="add-provider-form__input"
-                  data-testid="add-provider-endpoint"
-                  value={endpoint()}
-                  disabled={isBusy()}
-                  autocomplete="off"
-                  spellcheck={false}
-                  placeholder="https://api.example.com"
-                  onInput={(e) => setEndpoint(e.currentTarget.value)}
-                />
+                <span class="add-provider-form__label-row">
+                  <span class="add-provider-form__label">ENDPOINT</span>
+                  <Show
+                    when={
+                      probeState().kind === 'success' ||
+                      probeState().kind === 'error'
+                    }
+                  >
+                    <span
+                      class="add-provider-form__status-dot"
+                      classList={{
+                        'add-provider-form__status-dot--ok':
+                          probeState().kind === 'success',
+                        'add-provider-form__status-dot--err':
+                          probeState().kind === 'error',
+                      }}
+                      data-testid="add-provider-endpoint-status"
+                      data-status={probeState().kind}
+                      aria-hidden="true"
+                    />
+                  </Show>
+                </span>
+                <span class="add-provider-form__endpoint-row">
+                  <input
+                    type="url"
+                    class="add-provider-form__input add-provider-form__endpoint-input"
+                    data-testid="add-provider-endpoint"
+                    value={endpoint()}
+                    disabled={isBusy()}
+                    autocomplete="off"
+                    spellcheck={false}
+                    placeholder="https://api.example.com"
+                    onInput={(e) => setEndpoint(e.currentTarget.value)}
+                  />
+                  <IconButton
+                    class="add-provider-form__probe"
+                    data-testid="add-provider-test-connection"
+                    label={
+                      probeState().kind === 'probing'
+                        ? 'Testing connection…'
+                        : 'Test connection'
+                    }
+                    disabled={probeState().kind === 'probing' || isBusy()}
+                    aria-busy={probeState().kind === 'probing' ? 'true' : 'false'}
+                    onClick={() => {
+                      void onTestConnection();
+                    }}
+                    icon={<ProbeIcon />}
+                  />
+                </span>
                 <Show when={fieldErrors().endpoint}>
                   {(msg) => (
                     <span class="add-provider-form__field-error" data-testid="add-provider-endpoint-error">
                       {msg()}
                     </span>
                   )}
+                </Show>
+                <Show when={probeState().kind === 'success'}>
+                  {(_) => {
+                    const s = probeState();
+                    if (s.kind !== 'success') return null;
+                    const latencyTxt =
+                      s.latencyMs !== undefined ? ` in ${s.latencyMs} ms` : '';
+                    const modelsTxt =
+                      s.count > 0
+                        ? `, ${s.count} model${s.count === 1 ? '' : 's'} found`
+                        : ', no models advertised';
+                    return (
+                      <span
+                        class="add-provider-form__hint"
+                        data-testid="add-provider-test-success"
+                        role="status"
+                      >
+                        Connected{latencyTxt}
+                        {modelsTxt}.
+                      </span>
+                    );
+                  }}
+                </Show>
+                <Show when={probeState().kind === 'error'}>
+                  {(_) => {
+                    const s = probeState();
+                    if (s.kind !== 'error') return null;
+                    return (
+                      <span
+                        class="add-provider-form__field-error"
+                        data-testid="add-provider-test-error"
+                        role="alert"
+                      >
+                        {s.message}
+                      </span>
+                    );
+                  }}
                 </Show>
               </label>
 
@@ -748,7 +931,12 @@ export const AddProviderForm: Component<AddProviderFormProps> = (props) => {
             <Show when={needsCredential()}>
               <label class="add-provider-form__field">
                 <span class="add-provider-form__label">
-                  API KEY{isEdit() ? ' (leave blank to keep existing)' : ''}
+                  API KEY
+                  {isEdit()
+                    ? ' (leave blank to keep existing)'
+                    : isCustom()
+                      ? ' (optional)'
+                      : ''}
                 </span>
                 <input
                   type="password"
@@ -758,7 +946,7 @@ export const AddProviderForm: Component<AddProviderFormProps> = (props) => {
                   disabled={isBusy()}
                   autocomplete="off"
                   spellcheck={false}
-                  placeholder="sk-..."
+                  placeholder={isCustom() ? 'leave blank for keyless endpoints' : 'sk-...'}
                   onInput={(e) => setApiKey(e.currentTarget.value)}
                 />
                 <Show when={fieldErrors().apiKey}>
@@ -772,68 +960,18 @@ export const AddProviderForm: Component<AddProviderFormProps> = (props) => {
                   )}
                 </Show>
                 <span class="add-provider-form__hint">
-                  Stored in the OS keychain via login_provider; never written to disk.
+                  <Show
+                    when={!isEdit() && isCustom()}
+                    fallback={
+                      <>Stored in the OS keychain via login_provider; never written to disk.</>
+                    }
+                  >
+                    Leave blank for keyless endpoints (vLLM, LM Studio, llama.cpp,
+                    internal mocks). Provide a key for hosted services that require
+                    one (Together, Groq, OpenRouter, Anyscale).
+                  </Show>
                 </span>
               </label>
-            </Show>
-
-            <Show when={isCustom()}>
-              {/* Ad-hoc probe driven by the current form values. Hitting
-                  `/v1/models` on the provider's base URL verifies
-                  reachability + credential before save, and populates
-                  the MODEL field above with whatever ids the endpoint
-                  advertises. */}
-              <div class="add-provider-form__field">
-                <Button
-                  variant="ghost"
-                  type="button"
-                  data-testid="add-provider-test-connection"
-                  loading={probeState().kind === 'probing'}
-                  disabled={probeState().kind === 'probing' || isBusy()}
-                  onClick={() => {
-                    void onTestConnection();
-                  }}
-                >
-                  {probeState().kind === 'probing' ? 'Testing…' : 'Test connection'}
-                </Button>
-                <Show when={probeState().kind === 'success'}>
-                  {(_) => {
-                    const s = probeState();
-                    if (s.kind !== 'success') return null;
-                    const latencyTxt =
-                      s.latencyMs !== undefined ? ` in ${s.latencyMs} ms` : '';
-                    const modelsTxt =
-                      s.count > 0
-                        ? `, ${s.count} model${s.count === 1 ? '' : 's'} found`
-                        : ', no models advertised';
-                    return (
-                      <span
-                        class="add-provider-form__hint"
-                        data-testid="add-provider-test-success"
-                        role="status"
-                      >
-                        Connected{latencyTxt}
-                        {modelsTxt}.
-                      </span>
-                    );
-                  }}
-                </Show>
-                <Show when={probeState().kind === 'error'}>
-                  {(_) => {
-                    const s = probeState();
-                    if (s.kind !== 'error') return null;
-                    return (
-                      <span
-                        class="add-provider-form__field-error"
-                        data-testid="add-provider-test-error"
-                        role="alert"
-                      >
-                        {s.message}
-                      </span>
-                    );
-                  }}
-                </Show>
-              </div>
             </Show>
 
             <Show when={error() !== null}>
@@ -874,3 +1012,21 @@ export const AddProviderForm: Component<AddProviderFormProps> = (props) => {
     </Show>
   );
 };
+
+/** Square play-triangle glyph for the endpoint-row Test connection trigger.
+ * Filled triangle reads as "execute" the same way `▶` does in transport /
+ * test-runner UIs. 1.7px stroke convention is reserved for outline-style
+ * icons elsewhere in the modal; this one is intentionally solid because
+ * IconButton's 24px square gives the glyph almost no perimeter to read
+ * from at typical zooms. */
+const ProbeIcon: Component = () => (
+  <svg
+    viewBox="0 0 16 16"
+    width="12"
+    height="12"
+    fill="currentColor"
+    aria-hidden="true"
+  >
+    <path d="M4 3l9 5-9 5V3z" />
+  </svg>
+);

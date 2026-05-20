@@ -35,6 +35,13 @@ pub struct SessionSummary {
     pub created_at: String,
     /// ISO-8601 UTC timestamp.
     pub last_event_at: String,
+    /// Canonical absolute path of the workspace owning the session, as a
+    /// display string. Enables the workspace window's ChatPane to filter
+    /// the full session list to the sessions belonging to its workspace.
+    pub workspace_root: String,
+    /// Stable id of the workspace (from the workspaces registry). Maps 1:1
+    /// to the workspace-keyed Tauri window label (`workspace-<id>`).
+    pub workspace_id: String,
 }
 
 /// Liveness probe for an active session's UDS socket. Injected so
@@ -59,8 +66,14 @@ pub async fn collect_sessions(
 
     for workspace in &workspaces {
         let sessions_root = workspace.path.join(".forge").join("sessions");
-        scan_active(&sessions_root, pinger, &mut summaries).await?;
-        scan_archived(&sessions_root.join("archived"), &mut summaries).await?;
+        let workspace_root = workspace.path.to_string_lossy().into_owned();
+        scan_active(&sessions_root, &workspace_root, pinger, &mut summaries).await?;
+        scan_archived(
+            &sessions_root.join("archived"),
+            &workspace_root,
+            &mut summaries,
+        )
+        .await?;
     }
 
     Ok(summaries)
@@ -70,6 +83,7 @@ pub async fn collect_sessions(
 /// each as an active session dir, and push its summary.
 async fn scan_active(
     sessions_root: &Path,
+    workspace_root: &str,
     pinger: &dyn Pinger,
     out: &mut Vec<SessionSummary>,
 ) -> Result<()> {
@@ -83,7 +97,7 @@ async fn scan_active(
         if !entry.is_dir {
             continue;
         }
-        if let Some(summary) = summarize_active(&entry.path, pinger).await? {
+        if let Some(summary) = summarize_active(&entry.path, workspace_root, pinger).await? {
             out.push(summary);
         }
     }
@@ -92,7 +106,11 @@ async fn scan_active(
 
 /// Iterate direct children of `archived_root`, treat each as an archived
 /// session dir, and push its summary.
-async fn scan_archived(archived_root: &Path, out: &mut Vec<SessionSummary>) -> Result<()> {
+async fn scan_archived(
+    archived_root: &Path,
+    workspace_root: &str,
+    out: &mut Vec<SessionSummary>,
+) -> Result<()> {
     let Some(entries) = read_dir_opt(archived_root).await? else {
         return Ok(());
     };
@@ -100,7 +118,7 @@ async fn scan_archived(archived_root: &Path, out: &mut Vec<SessionSummary>) -> R
         if !entry.is_dir {
             continue;
         }
-        if let Some(summary) = summarize_archived(&entry.path).await? {
+        if let Some(summary) = summarize_archived(&entry.path, workspace_root).await? {
             out.push(summary);
         }
     }
@@ -139,6 +157,7 @@ async fn read_dir_opt(dir: &Path) -> Result<Option<Vec<DirEntry>>> {
 
 async fn summarize_active(
     session_dir: &Path,
+    workspace_root: &str,
     pinger: &dyn Pinger,
 ) -> Result<Option<SessionSummary>> {
     let Some(meta) = load_meta(session_dir).await? else {
@@ -146,14 +165,21 @@ async fn summarize_active(
     };
     let alive = pinger.ping(&meta.socket_path).await;
     let state = if alive { "active" } else { "stopped" };
-    Ok(Some(make_summary(state, &meta, session_dir).await))
+    Ok(Some(
+        make_summary(state, &meta, session_dir, workspace_root).await,
+    ))
 }
 
-async fn summarize_archived(session_dir: &Path) -> Result<Option<SessionSummary>> {
+async fn summarize_archived(
+    session_dir: &Path,
+    workspace_root: &str,
+) -> Result<Option<SessionSummary>> {
     let Some(meta) = load_meta(session_dir).await? else {
         return Ok(None);
     };
-    Ok(Some(make_summary("archived", &meta, session_dir).await))
+    Ok(Some(
+        make_summary("archived", &meta, session_dir, workspace_root).await,
+    ))
 }
 
 async fn load_meta(session_dir: &Path) -> Result<Option<forge_core::meta::SessionMeta>> {
@@ -168,6 +194,7 @@ async fn make_summary(
     wire_state: &str,
     meta: &forge_core::meta::SessionMeta,
     session_dir: &Path,
+    workspace_root: &str,
 ) -> SessionSummary {
     let last_event_at = last_event_at(session_dir, meta.started_at).await;
     SessionSummary {
@@ -180,6 +207,8 @@ async fn make_summary(
         },
         created_at: meta.started_at.to_rfc3339(),
         last_event_at: last_event_at.to_rfc3339(),
+        workspace_root: workspace_root.to_string(),
+        workspace_id: meta.workspace_id.to_string(),
     }
 }
 
@@ -376,26 +405,106 @@ pub async fn session_list<R: tauri::Runtime>(
         .map_err(|e| e.to_string())
 }
 
-/// Tauri command: open (or focus) the Session window for `id`. Delegates to
-/// the F-019 `WindowManager`.
+/// Tauri command: open (or focus) the workspace window for the session
+/// `id`, navigating to `/session/<id>` inside it.
+///
+/// Under the workspace-per-window model, opening a session never spawns a
+/// dedicated window; instead the workspace window that owns the session
+/// is focused (or created if absent) and asked to navigate via the
+/// `workspace:navigate` event.
 ///
 /// **F-063 (M11 / T5):** `id` is validated against the canonical
-/// `SessionId` wire shape *before* the label is built. The capability
-/// file's `session-*` glob would otherwise match labels such as
-/// `session-../foo` produced from a path-traversal id.
+/// `SessionId` wire shape *before* it is composed into any window label.
 #[cfg(feature = "webview")]
 #[tauri::command]
 pub async fn open_session<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     webview: tauri::Webview<R>,
+    state: tauri::State<'_, crate::ipc::BridgeState>,
     id: String,
 ) -> Result<(), String> {
     crate::ipc::require_window_label(&webview, "dashboard", "open_session")?;
     if !is_valid_session_id(&id) {
         return Err(INVALID_SESSION_ID_ERROR.to_string());
     }
+    let workspace_id = resolve_workspace_id_for_session(&state, &id)
+        .await
+        .ok_or_else(|| format!("open_session: session not found: {id}"))?;
     crate::window_manager::WindowManager::new(app)
-        .open_session(&id)
+        .open_workspace_session(&workspace_id, &id)
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+/// Walk the workspaces registry and return the workspace-keyed Tauri
+/// window label (`workspace-<workspace_id>`) owning the session, or
+/// `None` if the session cannot be located. Production helper used by
+/// emit-target resolution in places where the calling webview's label
+/// is not available (e.g. background-agent forwarders).
+pub async fn workspace_label_for_session(session_id: &str) -> Option<String> {
+    let toml_path = default_workspaces_toml();
+    let workspaces = forge_core::workspaces::read_workspaces(&toml_path).await.ok()?;
+    for workspace in workspaces {
+        for sub in ["sessions", "sessions/archived"] {
+            let mut meta_path = workspace.path.join(".forge");
+            for seg in sub.split('/') {
+                meta_path = meta_path.join(seg);
+            }
+            let meta_path = meta_path.join(session_id).join("meta.toml");
+            if !meta_path.exists() {
+                continue;
+            }
+            if let Ok(meta) = forge_core::meta::read_meta(&meta_path).await {
+                return Some(crate::window_spec::workspace_label(&meta.workspace_id.to_string()));
+            }
+        }
+    }
+    None
+}
+
+/// Walk the workspaces registry and return the `workspace_id` for the
+/// session with the given id, by reading each candidate
+/// `<workspace>/.forge/sessions/<id>/meta.toml`.
+///
+/// Returns `None` if no matching session exists (the dashboard then
+/// surfaces an actionable error rather than opening a window at a
+/// fabricated label).
+#[cfg(feature = "webview")]
+async fn resolve_workspace_id_for_session(
+    state: &crate::ipc::BridgeState,
+    session_id: &str,
+) -> Option<String> {
+    let toml_path = crate::ipc::resolve_workspaces_toml(state);
+    let workspaces = forge_core::workspaces::read_workspaces(&toml_path)
+        .await
+        .ok()?;
+    for workspace in workspaces {
+        let meta_path = workspace
+            .path
+            .join(".forge")
+            .join("sessions")
+            .join(session_id)
+            .join("meta.toml");
+        if !meta_path.exists() {
+            // Archived sessions live one directory deeper.
+            let archived = workspace
+                .path
+                .join(".forge")
+                .join("sessions")
+                .join("archived")
+                .join(session_id)
+                .join("meta.toml");
+            if !archived.exists() {
+                continue;
+            }
+            if let Ok(meta) = forge_core::meta::read_meta(&archived).await {
+                return Some(meta.workspace_id.to_string());
+            }
+            continue;
+        }
+        if let Ok(meta) = forge_core::meta::read_meta(&meta_path).await {
+            return Some(meta.workspace_id.to_string());
+        }
+    }
+    None
 }

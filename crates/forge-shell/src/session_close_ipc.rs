@@ -423,10 +423,11 @@ fn is_valid_session_id(id: &str) -> bool {
 }
 
 /// F-747 Tauri command: orchestrate graceful daemon shutdown for
-/// `session_id`. Authorized only when called from the matching
-/// `session-<id>` window — the dashboard's manual "Close session" path
-/// is intentionally a different command (TBD); the window-close
-/// CloseRequested handler is the one and only caller of this entry.
+/// `session_id`. Authorized only when called from a `workspace-*` window —
+/// the dashboard is not a permitted caller. The WindowEvent::CloseRequested
+/// handler in `window_manager` is the primary call site; the command
+/// remains exposed for explicit close requests originating in the
+/// workspace window (e.g. an "End session" affordance in the ChatPane).
 #[cfg(feature = "webview")]
 #[tauri::command]
 pub async fn session_close<R: Runtime>(
@@ -434,12 +435,58 @@ pub async fn session_close<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    let window_label = format!("session-{session_id}");
-    crate::ipc::require_window_label(&webview, &window_label, "session_close")?;
     if !is_valid_session_id(&session_id) {
         return Err(format!("{SESSION_CLOSE_ERROR}invalid session_id"));
     }
+    crate::ipc::require_session_owner_label(&webview, &session_id, "session_close", &state).await?;
     run_session_close(&state.bridge, &session_id).await
+}
+
+/// Scan every workspace listed in `workspaces_toml` and return the ids of
+/// active sessions whose `meta.toml.workspace_id` equals `workspace_id`.
+/// Used by the `workspace-*` window-close hook to shut down every daemon
+/// belonging to the closing workspace.
+///
+/// Archived sessions are skipped — they have no live daemon to close.
+/// Errors on individual sessions are swallowed (a corrupt meta file
+/// cannot block the others); a missing registry file yields an empty
+/// list. The function never fails outside catastrophic IO conditions.
+pub async fn session_ids_for_workspace_id(
+    workspaces_toml: &Path,
+    workspace_id: &str,
+) -> Result<Vec<String>, String> {
+    use forge_core::meta::read_meta;
+    use forge_core::workspaces::read_workspaces;
+    if !workspaces_toml.exists() {
+        return Ok(Vec::new());
+    }
+    let workspaces = read_workspaces(workspaces_toml)
+        .await
+        .map_err(|e| format!("{SESSION_CLOSE_ERROR}read workspaces registry: {e}"))?;
+    let mut out: Vec<String> = Vec::new();
+    for workspace in &workspaces {
+        let sessions_root = workspace.path.join(".forge").join("sessions");
+        let mut rd = match tokio::fs::read_dir(&sessions_root).await {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            if entry.file_name() == std::ffi::OsStr::new("archived") {
+                continue;
+            }
+            let meta_path = entry.path().join("meta.toml");
+            if !meta_path.exists() {
+                continue;
+            }
+            let Ok(meta) = read_meta(&meta_path).await else {
+                continue;
+            };
+            if meta.workspace_id.to_string() == workspace_id {
+                out.push(meta.id.to_string());
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Production session_close body, factored out so tests in

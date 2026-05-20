@@ -436,17 +436,12 @@ async fn run_agent(name: &str, input_source: &str) -> Result<()> {
     std::process::exit(exit_code);
 }
 
-/// Locate the `forged` binary relative to the current executable, then fall back to PATH.
+/// Locate the `forged` binary — see [`forge_cli::spawn::find_forged_binary`]
+/// for the full policy (FORGE_FORGED_BIN override, sibling lookup, parent
+/// fallback for the test harness layout, PATH probe, then an actionable
+/// error when nothing exists on disk).
 fn find_forged_binary() -> Result<PathBuf> {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join("forged");
-            if candidate.exists() {
-                return Ok(candidate);
-            }
-        }
-    }
-    Ok(PathBuf::from("forged"))
+    forge_cli::spawn::find_forged_binary()
 }
 
 /// Wait until a Unix socket file appears (max 5 seconds, polling every 50ms).

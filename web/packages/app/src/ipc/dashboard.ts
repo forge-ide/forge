@@ -23,6 +23,18 @@ export interface SessionSummary {
   lastEventAt: string;
   /** Optional; provider chip is shown when present. */
   provider?: string;
+  /**
+   * Canonical absolute path of the workspace owning the session. Surfaced
+   * on every row so the workspace window's ChatPane can filter the full
+   * session list to its workspace; the dashboard reads it to label rows
+   * by workspace name.
+   */
+  workspaceRoot: string;
+  /**
+   * Stable workspace id (from the workspaces registry). Maps 1:1 to the
+   * Tauri window label `workspace-<workspaceId>`.
+   */
+  workspaceId: string;
 }
 
 /** Fetch the list of all sessions known to the shell. */
@@ -166,8 +178,12 @@ export async function setActiveProvider(providerId: string): Promise<void> {
  * per the status-bar contract.
  */
 export async function gitBranch(workspaceRoot: string): Promise<string | null> {
-  const out = await invoke<GitBranchOutput>('git_branch', {
+  // The IPC contract returns `GitBranchOutput { branch }`, but test invoke
+  // stubs and a (hypothetical) misshaped daemon response can land here as
+  // `undefined`. Optional chaining keeps the wrapper honest about its
+  // `string | null` return shape without a runtime TypeError.
+  const out = await invoke<GitBranchOutput | null | undefined>('git_branch', {
     input: { workspace_root: workspaceRoot },
   });
-  return out.branch ?? null;
+  return out?.branch ?? null;
 }

@@ -33,6 +33,7 @@ use tempfile::TempDir;
 
 const LABEL_MISMATCH: &str = "forbidden: window label mismatch";
 const TEST_SESSION: &str = "abcdef0123456789";
+const TEST_WS: &str = "ws01";
 
 /// Build a Tauri mock app with the F-122 commands and a session connections
 /// registry that a test has primed. Async because the cache-prime crosses a
@@ -54,30 +55,50 @@ async fn make_app_with_workspace(
             fs::canonicalize(workspace).expect("canonicalize workspace"),
         )
         .await;
+    // Seed the workspace_id cache so the strict per-session authz gate
+    // accepts the caller's `workspace-<TEST_WS>` window.
+    connections
+        .prime_workspace_id_for_test(session_id.to_string(), TEST_WS.to_string())
+        .await;
     app.manage(BridgeState::new(connections.clone()));
     (app, connections)
 }
 
-fn make_app_empty_cache() -> tauri::App<tauri::test::MockRuntime> {
+/// Build an app whose workspace-root cache is empty for `TEST_SESSION`,
+/// but whose workspace_id cache IS primed so the strict per-session authz
+/// gate accepts a `workspace-<TEST_WS>` caller. This exercises the
+/// "session_hello not yet called" branch on commands like `read_file`,
+/// `delete_path` — the gate passes, the cached_workspace_root lookup
+/// surfaces the "not connected" error.
+async fn make_app_empty_workspace_root_cache() -> tauri::App<tauri::test::MockRuntime> {
     let app = mock_builder()
         .invoke_handler(build_invoke_handler())
         .build(mock_context(noop_assets()))
         .expect("build mock Tauri app");
-    app.manage(BridgeState::new(SessionConnections::new()));
+    let connections = SessionConnections::new();
+    connections
+        .prime_workspace_id_for_test(TEST_SESSION.to_string(), TEST_WS.to_string())
+        .await;
+    app.manage(BridgeState::new(connections));
     app
 }
 
 fn make_session_window(
     app: &tauri::App<tauri::test::MockRuntime>,
-    session_id: &str,
+    _session_id: &str,
 ) -> tauri::WebviewWindow<tauri::test::MockRuntime> {
+    // Production windows carry a `workspace-<id>` label; the strict
+    // per-session gate maps `session_id → workspace_id` via the cache
+    // seeded in `make_app_with_workspace`. The session_id arg is kept
+    // for call-site readability — every call must still match the seeded
+    // session.
     tauri::WebviewWindowBuilder::new(
         app,
-        format!("session-{session_id}"),
+        format!("workspace-{TEST_WS}"),
         tauri::WebviewUrl::App("index.html".into()),
     )
     .build()
-    .expect("mock session window")
+    .expect("mock workspace window")
 }
 
 fn make_dashboard_window(
@@ -222,7 +243,7 @@ async fn read_file_returns_not_connected_when_cache_is_empty() {
     let file = tmp.path().join("hello.txt");
     fs::write(&file, "hi").unwrap();
 
-    let app = make_app_empty_cache();
+    let app = make_app_empty_workspace_root_cache().await;
     let window = make_session_window(&app, TEST_SESSION);
 
     let err = invoke_err(
@@ -671,7 +692,7 @@ async fn delete_path_returns_not_connected_when_cache_is_empty() {
     let file = tmp.path().join("hi.txt");
     fs::write(&file, "hi").unwrap();
 
-    let app = make_app_empty_cache();
+    let app = make_app_empty_workspace_root_cache().await;
     let window = make_session_window(&app, TEST_SESSION);
 
     let err = invoke_err(

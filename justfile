@@ -80,6 +80,13 @@ dev-setup:
 # cost — safe to leave on for dev.
 dev:
     @command -v cargo-tauri >/dev/null || { echo >&2 "cargo-tauri not found. Install: cargo install tauri-cli --version '^2.0' --locked"; exit 1; }
+    # forge-session ships the `forged` daemon binary that forge-shell's
+    # session_start IPC spawns as a sibling at runtime. `cargo tauri dev`
+    # only builds forge-shell — without this step `target/debug/forged`
+    # never exists on a fresh checkout, and session_start surfaces a
+    # confusing "session_start: No such file or directory (os error 2)"
+    # when the user clicks New session.
+    cargo build -p forge-session
     cd crates/forge-shell && WEBKIT_DISABLE_DMABUF_RENDERER=1 cargo tauri dev
 
 # Start only the Vite dev server (use with `just dev-shell` in another terminal).

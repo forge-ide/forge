@@ -6,6 +6,7 @@ import {
   listProviders,
   getActiveProvider,
   setActiveProvider,
+  gitBranch,
 } from './dashboard';
 
 describe('dashboard ipc wrappers (F-365)', () => {
@@ -66,5 +67,27 @@ describe('dashboard ipc wrappers (F-365)', () => {
     expect(invokeMock).toHaveBeenCalledWith('set_active_provider', {
       providerId: 'anthropic',
     });
+  });
+
+  it('gitBranch returns the branch name when the IPC resolves with one', async () => {
+    invokeMock.mockResolvedValue({ branch: 'main' });
+    expect(await gitBranch('/ws')).toBe('main');
+    expect(invokeMock).toHaveBeenCalledWith('git_branch', {
+      input: { workspace_root: '/ws' },
+    });
+  });
+
+  it('gitBranch returns null when the response branch is null (detached HEAD)', async () => {
+    invokeMock.mockResolvedValue({ branch: null });
+    expect(await gitBranch('/ws')).toBeNull();
+  });
+
+  it('gitBranch returns null when the IPC resolves to undefined (defensive)', async () => {
+    // Regression guard for the TypeError surfaced in jsdom: a test stub
+    // (or a misshaped daemon response) that resolves to `undefined`
+    // used to crash inside the wrapper's `.branch` destructure. The
+    // wrapper now optional-chains the access and returns `null`.
+    invokeMock.mockResolvedValue(undefined);
+    expect(await gitBranch('/ws')).toBeNull();
   });
 });

@@ -19,6 +19,8 @@ const sample = (over: Partial<SessionSummary> = {}): SessionSummary => ({
   createdAt: '2026-04-15T10:00:00Z',
   lastEventAt: '2026-04-15T11:00:00Z',
   provider: 'anthropic',
+  workspaceRoot: '/tmp/ws',
+  workspaceId: 'ws01',
   ...over,
 });
 

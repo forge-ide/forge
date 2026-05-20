@@ -304,6 +304,7 @@ fn non_dashboard_window_invoking_open_session_is_rejected() {
         ])
         .build(mock_context(noop_assets()))
         .expect("build mock Tauri app");
+    app.manage(BridgeState::new(SessionConnections::new()));
     let window = build_window(&app, "session-A");
 
     let err = invoke(
@@ -334,6 +335,7 @@ fn dashboard_window_invoking_open_session_with_invalid_id_is_rejected_and_create
         ])
         .build(mock_context(noop_assets()))
         .expect("build mock Tauri app");
+    app.manage(BridgeState::new(SessionConnections::new()));
     let window = build_window(&app, "dashboard");
 
     // Sanity: the malicious window does not exist before the call.

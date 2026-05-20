@@ -35,6 +35,26 @@ fn make_app() -> tauri::App<tauri::test::MockRuntime> {
         .expect("build mock Tauri app")
 }
 
+/// Default workspace id used by the size-cap regressions below. The exact
+/// value is irrelevant — only its consistency with the seeded
+/// workspace_id cache matters.
+const TEST_WS: &str = "ws01";
+
+/// Install a fresh `BridgeState` and seed the workspace_id cache so the
+/// strict per-session authz gate (`require_session_owner_label`) accepts
+/// the caller's `workspace-<TEST_WS>` window.
+async fn manage_bridge_with_owner(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    session_id: &str,
+    workspace_id: &str,
+) {
+    let connections = SessionConnections::new();
+    connections
+        .prime_workspace_id_for_test(session_id.to_string(), workspace_id.to_string())
+        .await;
+    app.manage(BridgeState::new(connections));
+}
+
 #[test]
 fn invoke_handler_builds_without_error() {
     let app = make_app();
@@ -83,16 +103,21 @@ async fn session_hello_command_round_trips_via_tauri_invoke() {
     // F-052: production `session_hello` no longer accepts a `socketPath`
     // parameter — the test daemon's path is wired through a test-only
     // constructor on `BridgeState` gated behind the `webview-test` feature.
+    let connections = SessionConnections::new();
+    connections
+        .prime_workspace_id_for_test("tauri-hello".to_string(), TEST_WS.to_string())
+        .await;
     app.manage(BridgeState::with_test_socket_override(
-        SessionConnections::new(),
+        connections,
         sock.clone(),
     ));
 
-    // F-051: window label must match `session-{session_id}` for the
-    // session_hello authz check to pass.
+    // Strict per-session authz: the caller is the workspace window owning
+    // session `tauri-hello`. The cache seeded above resolves the
+    // session_id to `TEST_WS`, so `workspace-<TEST_WS>` matches.
     let window = tauri::WebviewWindowBuilder::new(
         &app,
-        "session-tauri-hello",
+        format!("workspace-{TEST_WS}"),
         tauri::WebviewUrl::App("index.html".into()),
     )
     .build()
@@ -141,11 +166,15 @@ async fn session_hello_ignores_attacker_supplied_socket_path() {
 
     let app = make_app();
     // Production path: no test override → default_socket_path will be used.
-    app.manage(BridgeState::new(SessionConnections::new()));
+    let connections = SessionConnections::new();
+    connections
+        .prime_workspace_id_for_test("attacker".to_string(), TEST_WS.to_string())
+        .await;
+    app.manage(BridgeState::new(connections));
 
     let window = tauri::WebviewWindowBuilder::new(
         &app,
-        "session-attacker",
+        format!("workspace-{TEST_WS}"),
         tauri::WebviewUrl::App("index.html".into()),
     )
     .build()
@@ -202,13 +231,16 @@ async fn session_hello_ignores_attacker_supplied_socket_path() {
 // proving the boundary is inclusive and the size check alone is not swallowing
 // every call.
 
-fn make_session_window(
+/// Build a workspace window. The strict per-session gate consults the
+/// `workspace_id` cache seeded by the caller — production windows always
+/// carry a `workspace-<id>` label under the workspace-per-window model.
+fn make_workspace_window(
     app: &tauri::App<tauri::test::MockRuntime>,
-    session_id: &str,
+    workspace_id: &str,
 ) -> tauri::WebviewWindow<tauri::test::MockRuntime> {
     tauri::WebviewWindowBuilder::new(
         app,
-        format!("session-{session_id}"),
+        format!("workspace-{workspace_id}"),
         tauri::WebviewUrl::App("index.html".into()),
     )
     .build()
@@ -239,13 +271,13 @@ fn invoke_err(
     }
 }
 
-#[test]
-fn session_send_message_rejects_text_above_cap_at_command_layer() {
+#[tokio::test(flavor = "multi_thread")]
+async fn session_send_message_rejects_text_above_cap_at_command_layer() {
     // 1 MiB is well under `forge_ipc`'s 4 MiB wire cap, so any rejection must
     // originate from the command layer's size check, not the wire.
     let app = make_app();
-    app.manage(BridgeState::new(SessionConnections::new()));
-    let window = make_session_window(&app, "oversize");
+    manage_bridge_with_owner(&app, "oversize", TEST_WS).await;
+    let window = make_workspace_window(&app, TEST_WS);
 
     let err = invoke_err(
         &window,
@@ -269,14 +301,14 @@ fn session_send_message_rejects_text_above_cap_at_command_layer() {
     );
 }
 
-#[test]
-fn session_send_message_accepts_text_exactly_at_cap() {
+#[tokio::test(flavor = "multi_thread")]
+async fn session_send_message_accepts_text_exactly_at_cap() {
     // 128 KiB — the inclusive boundary. The size check must let this through
     // (the call will still fail, but at the bridge with "no active connection",
     // proving the size gate didn't swallow it).
     let app = make_app();
-    app.manage(BridgeState::new(SessionConnections::new()));
-    let window = make_session_window(&app, "at-cap");
+    manage_bridge_with_owner(&app, "at-cap", TEST_WS).await;
+    let window = make_workspace_window(&app, TEST_WS);
 
     let err = invoke_err(
         &window,
@@ -297,11 +329,11 @@ fn session_send_message_accepts_text_exactly_at_cap() {
     );
 }
 
-#[test]
-fn session_approve_tool_rejects_tool_call_id_above_cap_at_command_layer() {
+#[tokio::test(flavor = "multi_thread")]
+async fn session_approve_tool_rejects_tool_call_id_above_cap_at_command_layer() {
     let app = make_app();
-    app.manage(BridgeState::new(SessionConnections::new()));
-    let window = make_session_window(&app, "tcid");
+    manage_bridge_with_owner(&app, "tcid", TEST_WS).await;
+    let window = make_workspace_window(&app, TEST_WS);
 
     let err = invoke_err(
         &window,
@@ -329,11 +361,11 @@ fn session_approve_tool_rejects_tool_call_id_above_cap_at_command_layer() {
 // positive/negative coverage lives in `session_approve_tool_rejects_garbage_scope_at_command_layer`
 // and `session_approve_tool_accepts_valid_scope_variants` below.
 
-#[test]
-fn session_reject_tool_rejects_tool_call_id_above_cap_at_command_layer() {
+#[tokio::test(flavor = "multi_thread")]
+async fn session_reject_tool_rejects_tool_call_id_above_cap_at_command_layer() {
     let app = make_app();
-    app.manage(BridgeState::new(SessionConnections::new()));
-    let window = make_session_window(&app, "rej");
+    manage_bridge_with_owner(&app, "rej", TEST_WS).await;
+    let window = make_workspace_window(&app, TEST_WS);
 
     let err = invoke_err(
         &window,
@@ -355,11 +387,11 @@ fn session_reject_tool_rejects_tool_call_id_above_cap_at_command_layer() {
     );
 }
 
-#[test]
-fn session_reject_tool_rejects_reason_above_cap_at_command_layer() {
+#[tokio::test(flavor = "multi_thread")]
+async fn session_reject_tool_rejects_reason_above_cap_at_command_layer() {
     let app = make_app();
-    app.manage(BridgeState::new(SessionConnections::new()));
-    let window = make_session_window(&app, "rej-reason");
+    manage_bridge_with_owner(&app, "rej-reason", TEST_WS).await;
+    let window = make_workspace_window(&app, TEST_WS);
 
     let err = invoke_err(
         &window,
@@ -381,12 +413,12 @@ fn session_reject_tool_rejects_reason_above_cap_at_command_layer() {
     );
 }
 
-#[test]
-fn session_reject_tool_accepts_absent_reason() {
+#[tokio::test(flavor = "multi_thread")]
+async fn session_reject_tool_accepts_absent_reason() {
     // `reason` is `Option<String>` — None must not trigger the size check.
     let app = make_app();
-    app.manage(BridgeState::new(SessionConnections::new()));
-    let window = make_session_window(&app, "rej-none");
+    manage_bridge_with_owner(&app, "rej-none", TEST_WS).await;
+    let window = make_workspace_window(&app, TEST_WS);
 
     let err = invoke_err(
         &window,
@@ -417,11 +449,11 @@ fn session_reject_tool_accepts_absent_reason() {
 // cannot reach the bridge, which defends against type-confusion widening of
 // approvals by a compromised webview.
 
-#[test]
-fn session_approve_tool_rejects_garbage_scope_at_command_layer() {
+#[tokio::test(flavor = "multi_thread")]
+async fn session_approve_tool_rejects_garbage_scope_at_command_layer() {
     let app = make_app();
-    app.manage(BridgeState::new(SessionConnections::new()));
-    let window = make_session_window(&app, "garbage-scope");
+    manage_bridge_with_owner(&app, "garbage-scope", TEST_WS).await;
+    let window = make_workspace_window(&app, TEST_WS);
 
     let err = invoke_err(
         &window,
@@ -446,15 +478,15 @@ fn session_approve_tool_rejects_garbage_scope_at_command_layer() {
     );
 }
 
-#[test]
-fn session_approve_tool_accepts_valid_scope_variants() {
+#[tokio::test(flavor = "multi_thread")]
+async fn session_approve_tool_accepts_valid_scope_variants() {
     // Every TS-side ApprovalScope variant must round-trip through
     // Tauri arg-deserialization and reach the bridge (which will then error
     // with "no active connection" — the security-relevant evidence that the
     // typed enum accepted the value).
     let app = make_app();
-    app.manage(BridgeState::new(SessionConnections::new()));
-    let window = make_session_window(&app, "valid-scope");
+    manage_bridge_with_owner(&app, "valid-scope", TEST_WS).await;
+    let window = make_workspace_window(&app, TEST_WS);
 
     for variant in ["Once", "ThisFile", "ThisPattern", "ThisTool"] {
         let err = invoke_err(
@@ -478,11 +510,11 @@ fn session_approve_tool_accepts_valid_scope_variants() {
 // follow-up — this task establishes the command surface and its window-
 // ownership check so the frontend has a stable target to invoke.
 
-#[test]
-fn session_cancel_is_registered_and_succeeds_for_the_owning_window() {
+#[tokio::test(flavor = "multi_thread")]
+async fn session_cancel_is_registered_and_succeeds_for_the_owning_window() {
     let app = make_app();
-    app.manage(BridgeState::new(SessionConnections::new()));
-    let window = make_session_window(&app, "cancel-ok");
+    manage_bridge_with_owner(&app, "cancel-ok", TEST_WS).await;
+    let window = make_workspace_window(&app, TEST_WS);
 
     let res = tauri::test::get_ipc_response(
         &window,
@@ -499,12 +531,23 @@ fn session_cancel_is_registered_and_succeeds_for_the_owning_window() {
     res.expect("session_cancel must succeed for the matching window label");
 }
 
-#[test]
-fn session_cancel_rejects_cross_window_callers() {
+#[tokio::test(flavor = "multi_thread")]
+async fn session_cancel_rejects_cross_window_callers() {
+    // Two distinct workspaces. `victim-b` lives in workspace `ws-victim`;
+    // the calling window is the workspace owning `owned-by-a` (workspace
+    // `ws-attacker`). The strict gate consults the cache for `victim-b`
+    // and expects `workspace-ws-victim`, which does not match the
+    // attacker window's `workspace-ws-attacker` label.
     let app = make_app();
-    app.manage(BridgeState::new(SessionConnections::new()));
-    // Window labelled for *another* session — the authz check must block it.
-    let window = make_session_window(&app, "owned-by-a");
+    let connections = SessionConnections::new();
+    connections
+        .prime_workspace_id_for_test("owned-by-a".to_string(), "ws-attacker".to_string())
+        .await;
+    connections
+        .prime_workspace_id_for_test("victim-b".to_string(), "ws-victim".to_string())
+        .await;
+    app.manage(BridgeState::new(connections));
+    let window = make_workspace_window(&app, "ws-attacker");
 
     let err = invoke_err(
         &window,

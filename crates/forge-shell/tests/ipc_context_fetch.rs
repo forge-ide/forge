@@ -32,28 +32,39 @@ use tauri::Manager;
 
 const LABEL_MISMATCH: &str = "forbidden: window label mismatch";
 const TEST_SESSION: &str = "abcdef0123456789";
+const TEST_WS: &str = "ws01";
 
-fn make_app() -> tauri::App<tauri::test::MockRuntime> {
+/// Build a mock app and seed the workspace_id cache for `TEST_SESSION` so
+/// the strict per-session authz gate admits the `workspace-<TEST_WS>`
+/// caller produced by `make_session_window`.
+async fn make_app() -> tauri::App<tauri::test::MockRuntime> {
     let app = mock_builder()
         .invoke_handler(build_invoke_handler())
         .build(mock_context(noop_assets()))
         .expect("build mock Tauri app");
-    app.manage(BridgeState::new(SessionConnections::new()));
+    let connections = SessionConnections::new();
+    connections
+        .prime_workspace_id_for_test(TEST_SESSION.to_string(), TEST_WS.to_string())
+        .await;
+    app.manage(BridgeState::new(connections));
     manage_context_fetch(&app.handle().clone());
     app
 }
 
+/// Build the workspace window that owns `TEST_SESSION`. The `_session_id`
+/// arg is kept for call-site readability — the strict gate consults the
+/// cache seeded in `make_app`, not the label suffix.
 fn make_session_window(
     app: &tauri::App<tauri::test::MockRuntime>,
-    session_id: &str,
+    _session_id: &str,
 ) -> tauri::WebviewWindow<tauri::test::MockRuntime> {
     tauri::WebviewWindowBuilder::new(
         app,
-        format!("session-{session_id}"),
+        format!("workspace-{TEST_WS}"),
         tauri::WebviewUrl::App("index.html".into()),
     )
     .build()
-    .expect("mock session window")
+    .expect("mock workspace window")
 }
 
 fn make_dashboard_window(
@@ -66,6 +77,24 @@ fn make_dashboard_window(
     )
     .build()
     .expect("mock dashboard window")
+}
+
+/// Build a legacy `session-<id>` window. The non-session-scoped commands
+/// (`set_context_allowed_hosts`, settings, layouts, etc.) admit any
+/// `session-*` window through `allow_any_session=true` — that gate is
+/// independent of the strict per-session ownership gate the session-scoped
+/// commands enforce, so these tests still use a session-prefixed label.
+fn make_legacy_session_window(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    session_id: &str,
+) -> tauri::WebviewWindow<tauri::test::MockRuntime> {
+    tauri::WebviewWindowBuilder::new(
+        app,
+        format!("session-{session_id}"),
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .build()
+    .expect("mock legacy session window")
 }
 
 fn invoke_ok(
@@ -117,7 +146,7 @@ async fn context_fetch_url_rejects_dashboard_window() {
     // The @-context fetcher is session-scoped. The dashboard window
     // must not be able to use the command as a side-channel proxy into
     // the fetch path even with a valid-looking URL.
-    let app = make_app();
+    let app = make_app().await;
     let window = make_dashboard_window(&app);
     let err = invoke_err(
         &window,
@@ -146,7 +175,7 @@ async fn context_fetch_url_rejects_host_not_on_server_allowlist() {
     // allowed by policy" — so the rejection reason doesn't leak which
     // gate fired. The detailed reason is captured in `tracing` (see
     // `context_fetch_url_logs_detailed_reason_on_policy_reject`).
-    let app = make_app();
+    let app = make_app().await;
     // Server-side allowlist intentionally left empty.
     let window = make_session_window(&app, TEST_SESSION);
     let err = invoke_err(
@@ -169,7 +198,7 @@ async fn context_fetch_url_rejects_host_not_on_server_allowlist() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn context_fetch_url_rejects_file_scheme() {
-    let app = make_app();
+    let app = make_app().await;
     // Seed the allowlist with a valid hostname (post-#702 the setter
     // rejects path-shaped strings outright). The scheme check fires
     // before any host lookup, so the seeded value doesn't matter for
@@ -204,7 +233,7 @@ async fn context_fetch_url_rejects_link_local_ip_literal() {
     // specific "link-local" classification stays in `tracing`, not
     // in the wire response, so a hostile webview cannot probe which
     // IP class triggered the block.
-    let app = make_app();
+    let app = make_app().await;
     let allowed = app.state::<AllowedHostsState>();
     allowed
         .replace(vec!["169.254.169.254".to_string()])
@@ -230,7 +259,7 @@ async fn context_fetch_url_rejects_link_local_ip_literal() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn context_fetch_url_rejects_oversize_url() {
-    let app = make_app();
+    let app = make_app().await;
     let window = make_session_window(&app, TEST_SESSION);
     // MAX_CONTEXT_URL_BYTES = 8 KiB. Submit 16 KiB.
     let long = format!("https://docs.rs/{}", "x".repeat(16 * 1024));
@@ -254,8 +283,8 @@ async fn set_context_allowed_hosts_replaces_the_list() {
     // verbatim (post-trim). A subsequent `context_fetch_url` whose
     // host is NOT on the list returns the sanitized policy-violation
     // error, confirming the setter is authoritative.
-    let app = make_app();
-    let session_window = make_session_window(&app, TEST_SESSION);
+    let app = make_app().await;
+    let session_window = make_legacy_session_window(&app, TEST_SESSION);
 
     // Seed from the session window (session-* is accepted). Surrounding
     // whitespace is trimmed; the trimmed form is what lands on the list.
@@ -280,9 +309,12 @@ async fn set_context_allowed_hosts_replaces_the_list() {
     );
 
     // A URL for the *previous* allowlist entry must now be rejected
-    // with the sanitized policy-violation message.
+    // with the sanitized policy-violation message. Use the workspace
+    // window that owns `TEST_SESSION` so the strict per-session gate
+    // admits the call.
+    let workspace_window = make_session_window(&app, TEST_SESSION);
     let err = invoke_err(
-        &session_window,
+        &workspace_window,
         "context_fetch_url",
         serde_json::json!({
             "sessionId": TEST_SESSION,
@@ -297,8 +329,8 @@ async fn set_context_allowed_hosts_replaces_the_list() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn set_context_allowed_hosts_rejects_oversize_entry() {
-    let app = make_app();
-    let window = make_session_window(&app, TEST_SESSION);
+    let app = make_app().await;
+    let window = make_legacy_session_window(&app, TEST_SESSION);
     let too_long = "x".repeat(512); // > MAX_ALLOWED_HOST_BYTES (256)
     let err = invoke_err(
         &window,
@@ -313,8 +345,8 @@ async fn set_context_allowed_hosts_rejects_oversize_entry() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn set_context_allowed_hosts_rejects_oversize_list() {
-    let app = make_app();
-    let window = make_session_window(&app, TEST_SESSION);
+    let app = make_app().await;
+    let window = make_legacy_session_window(&app, TEST_SESSION);
     let hosts: Vec<String> = (0..512).map(|i| format!("host{i}.example.com")).collect();
     let err = invoke_err(
         &window,
@@ -337,8 +369,8 @@ async fn set_context_allowed_hosts_rejects_oversize_list() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn set_context_allowed_hosts_rejects_empty_entry() {
-    let app = make_app();
-    let window = make_session_window(&app, TEST_SESSION);
+    let app = make_app().await;
+    let window = make_legacy_session_window(&app, TEST_SESSION);
     let err = invoke_err(
         &window,
         "set_context_allowed_hosts",
@@ -354,8 +386,8 @@ async fn set_context_allowed_hosts_rejects_empty_entry() {
 async fn set_context_allowed_hosts_rejects_whitespace_only_entry() {
     // Whitespace-only entries used to be silently filtered. Per #702
     // they are now explicit errors.
-    let app = make_app();
-    let window = make_session_window(&app, TEST_SESSION);
+    let app = make_app().await;
+    let window = make_legacy_session_window(&app, TEST_SESSION);
     let err = invoke_err(
         &window,
         "set_context_allowed_hosts",
@@ -369,8 +401,8 @@ async fn set_context_allowed_hosts_rejects_whitespace_only_entry() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn set_context_allowed_hosts_rejects_path_chars() {
-    let app = make_app();
-    let window = make_session_window(&app, TEST_SESSION);
+    let app = make_app().await;
+    let window = make_legacy_session_window(&app, TEST_SESSION);
     let err = invoke_err(
         &window,
         "set_context_allowed_hosts",
@@ -384,8 +416,8 @@ async fn set_context_allowed_hosts_rejects_path_chars() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn set_context_allowed_hosts_rejects_wildcard() {
-    let app = make_app();
-    let window = make_session_window(&app, TEST_SESSION);
+    let app = make_app().await;
+    let window = make_legacy_session_window(&app, TEST_SESSION);
     let err = invoke_err(
         &window,
         "set_context_allowed_hosts",
@@ -399,8 +431,8 @@ async fn set_context_allowed_hosts_rejects_wildcard() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn set_context_allowed_hosts_rejects_control_char() {
-    let app = make_app();
-    let window = make_session_window(&app, TEST_SESSION);
+    let app = make_app().await;
+    let window = make_legacy_session_window(&app, TEST_SESSION);
     let err = invoke_err(
         &window,
         "set_context_allowed_hosts",
@@ -414,8 +446,8 @@ async fn set_context_allowed_hosts_rejects_control_char() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn set_context_allowed_hosts_rejects_leading_hyphen_label() {
-    let app = make_app();
-    let window = make_session_window(&app, TEST_SESSION);
+    let app = make_app().await;
+    let window = make_legacy_session_window(&app, TEST_SESSION);
     let err = invoke_err(
         &window,
         "set_context_allowed_hosts",
@@ -429,8 +461,8 @@ async fn set_context_allowed_hosts_rejects_leading_hyphen_label() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn set_context_allowed_hosts_rejects_overlong_hostname() {
-    let app = make_app();
-    let window = make_session_window(&app, TEST_SESSION);
+    let app = make_app().await;
+    let window = make_legacy_session_window(&app, TEST_SESSION);
     // 254-byte hostname (max is 253). Made of 5-char labels so no
     // single label exceeds 63 bytes — isolates the total-length gate.
     let labels: Vec<String> = (0..50).map(|i| format!("lab{:02}", i)).collect();
@@ -454,13 +486,12 @@ async fn context_fetch_url_logs_detailed_reason_on_policy_reject() {
     // "URL not allowed by policy" — but the detailed reason (here the
     // IP-class block on the AWS IMDS link-local address) must still
     // reach `tracing` so operators can debug without re-running.
+    let app = make_app().await;
     let _g = common::capture_test_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     common::install_capture_subscriber();
     let _ = common::drain_capture();
-
-    let app = make_app();
     let allowed = app.state::<AllowedHostsState>();
     allowed
         .replace(vec!["169.254.169.254".to_string()])
@@ -490,8 +521,8 @@ async fn context_fetch_url_logs_detailed_reason_on_policy_reject() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn set_context_allowed_hosts_accepts_valid_hostnames() {
-    let app = make_app();
-    let window = make_session_window(&app, TEST_SESSION);
+    let app = make_app().await;
+    let window = make_legacy_session_window(&app, TEST_SESSION);
     invoke_ok(
         &window,
         "set_context_allowed_hosts",

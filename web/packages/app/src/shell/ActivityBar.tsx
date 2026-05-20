@@ -1,22 +1,31 @@
-// F-126: 44px left-edge activity bar. Per `docs/ui-specs/shell.md` §2 the
-// bar hosts a vertical stack of icon buttons that toggle activity-bar
-// content in the adjacent sidebar slot. `shell.md` only extracts §2; the
-// finer §2.1 icon-set is not yet copied into the repo, so for this landing
-// we render three buttons — Files (active), Search, Git — with the latter
-// two as visible-but-disabled placeholders. F-127/F-128 will wire Search
-// and Git to their own sidebars.
+// Workspace-window activity bar. The session window is conceptually a
+// workspace window — its primary navigation lives here, distinct from the
+// dashboard window's Sidebar (hidden in session windows per AppShell).
 //
-// The component is a controlled visual — it emits `onSelect(activity)` and
-// accepts `active` from the parent. The parent (SessionWindow) owns the
-// sidebar-visibility signal so a keyboard shortcut (`Cmd/Ctrl+Shift+E`)
-// can toggle it without reaching through a ref.
+// The bar hosts a vertical stack of icon buttons; clicking one toggles
+// the matching sidebar pane (Files / Search / Chat / Agents / Skills /
+// MCP / Plugins). The parent (AppShell) owns the active-activity signal
+// so a keyboard shortcut like `Cmd/Ctrl+Shift+E` can toggle Files without
+// reaching through a ref.
+//
+// The component is a controlled visual — it emits `onSelect(activity)`
+// and accepts `active` from the parent. Disabled entries (`search`,
+// `plugins` today) keep their visual chrome so the 44px grid renders
+// correctly while their backing IPCs are still in flight.
 
 import type { Component } from 'solid-js';
 import { For } from 'solid-js';
 import { IconButton } from '@forge/design';
 import './ActivityBar.css';
 
-export type ActivityId = 'files' | 'search' | 'git';
+export type ActivityId =
+  | 'files'
+  | 'search'
+  | 'chat'
+  | 'agents'
+  | 'skills'
+  | 'mcp'
+  | 'plugins';
 
 export interface ActivityBarProps {
   /** Currently selected activity, or `null` when no sidebar is open. */
@@ -29,15 +38,13 @@ export interface ActivityBarProps {
 interface ActivityDef {
   id: ActivityId;
   label: string;
-  /** Keyboard shortcut shown in the tooltip. Files is Cmd/Ctrl+Shift+E per
-   *  the issue. Search / Git shortcuts land with F-127 / F-128. */
+  /** Keyboard shortcut shown in the tooltip. */
   shortcut?: string;
   /** Placeholder until the sidebar is wired. Disabled buttons keep the
    *  visual chrome intact so the 44px grid renders correctly. */
   disabled?: boolean;
-  /** Inline SVG path data. Tiny hand-rolled icons that match the linework
-   *  weight in `docs/forge-mocks.html` (1.7px stroke). Replaced with a
-   *  shared icon set when F-148 lands the chrome pass. */
+  /** Inline SVG path data. Hand-rolled icons that match the 1.7px stroke
+   *  convention used by the dashboard Sidebar. */
   svg: string;
 }
 
@@ -55,10 +62,37 @@ const ACTIVITIES: ActivityDef[] = [
     svg: 'M11 19a8 8 0 1 0-5.3-14.1A8 8 0 0 0 11 19zm10 2-4.3-4.3',
   },
   {
-    id: 'git',
-    label: 'Source control (coming soon)',
+    id: 'chat',
+    label: 'Chat',
+    // Speech bubble — sessions list in the sidebar; clicking switches /
+    // creates sessions in the active workspace.
+    svg: 'M21 12a8 8 0 1 1-3.5-6.6L21 4l-1.2 4.1A8 8 0 0 1 21 12zM8 12h.01M12 12h.01M16 12h.01',
+  },
+  {
+    id: 'agents',
+    label: 'Agents',
+    // Persona dot + shoulders — same glyph the dashboard Sidebar uses
+    // for its Agents row so the two surfaces visually agree.
+    svg: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21a8 8 0 0 1 16 0',
+  },
+  {
+    id: 'skills',
+    label: 'Skills',
+    // Star — same shape the dashboard Sidebar uses for Skills.
+    svg: 'm12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.8 1-6.1L3.2 9.4l6.1-.9z',
+  },
+  {
+    id: 'mcp',
+    label: 'MCP servers',
+    // Stacked rows — matches the dashboard Sidebar's MCP glyph.
+    svg: 'M4 7h16M4 12h16M4 17h10',
+  },
+  {
+    id: 'plugins',
+    label: 'Plugins (coming soon)',
     disabled: true,
-    svg: 'M5 3v10a4 4 0 0 0 4 4h6M5 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm14 14a2 2 0 1 0 0-4 2 2 0 0 0 0 4z',
+    // Puzzle piece outline — universal "extension" affordance.
+    svg: 'M14 4h4v4h2a2 2 0 0 1 0 4h-2v4h-4a2 2 0 1 0-4 0H6v-4H4a2 2 0 1 0 0-4h2V4h4a2 2 0 1 1 4 0z',
   },
 ];
 

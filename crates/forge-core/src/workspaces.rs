@@ -62,27 +62,68 @@ pub async fn register_workspace_if_missing(
     registry_path: &Path,
     canonical_path: &Path,
 ) -> Result<()> {
+    register_or_get_workspace_id(registry_path, canonical_path)
+        .await
+        .map(|_| ())
+}
+
+/// Register `canonical_path` if absent and return the workspace's stable
+/// `WorkspaceId`. The id is the value persisted in the registry — callers
+/// (the shell's window manager and session-start IPC) use it to construct
+/// the workspace-keyed Tauri window label (`workspace-<id>`).
+///
+/// Idempotent: a second call for the same canonical path returns the
+/// existing id without rewriting the registry. `canonical_path` MUST
+/// already be canonicalized by the caller — the existence check
+/// canonicalizes each registered entry on read so a symlink-equivalent
+/// entry still counts as a match.
+pub async fn register_or_get_workspace_id(
+    registry_path: &Path,
+    canonical_path: &Path,
+) -> Result<WorkspaceId> {
     let mut entries = read_workspaces(registry_path).await?;
-    let already_present = entries.iter().any(|e| {
+    if let Some(existing) = entries.iter().find(|e| {
         e.path
             .canonicalize()
             .map(|c| c == canonical_path)
             .unwrap_or(false)
-    });
-    if already_present {
-        return Ok(());
+    }) {
+        return Ok(existing.id.clone());
     }
+    let id = WorkspaceId::new();
     let name = canonical_path
         .file_name()
         .and_then(|n| n.to_str())
         .map(str::to_owned)
         .unwrap_or_else(|| canonical_path.display().to_string());
     entries.push(WorkspaceEntry {
-        id: WorkspaceId::new(),
+        id: id.clone(),
         path: canonical_path.to_path_buf(),
         name,
         last_opened: Utc::now(),
         pinned: false,
     });
-    write_workspaces(registry_path, &entries).await
+    write_workspaces(registry_path, &entries).await?;
+    Ok(id)
+}
+
+/// Look up the `WorkspaceId` for a canonical path without registering on
+/// miss. Returns `None` when no entry matches. Used by the dashboard's
+/// `open_session` path: a session's meta.toml already carries the
+/// workspace_id, but cross-checking it against the registry catches a
+/// drifted meta where the registry has been rebuilt without the entry.
+pub async fn lookup_workspace_id(
+    registry_path: &Path,
+    canonical_path: &Path,
+) -> Result<Option<WorkspaceId>> {
+    let entries = read_workspaces(registry_path).await?;
+    Ok(entries
+        .into_iter()
+        .find(|e| {
+            e.path
+                .canonicalize()
+                .map(|c| c == canonical_path)
+                .unwrap_or(false)
+        })
+        .map(|e| e.id))
 }

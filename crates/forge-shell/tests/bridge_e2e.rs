@@ -90,7 +90,7 @@ async fn hello_handshake_against_real_daemon() {
 
     let bridge = SessionBridge::new(SessionConnections::new());
     let ack = bridge
-        .hello("fixed-id", Some(&sock))
+        .hello("fixed-id", Some(&sock), None)
         .await
         .expect("hello succeeds");
 
@@ -108,7 +108,7 @@ async fn send_message_forwards_events_end_to_end() {
 
     let bridge = SessionBridge::new(SessionConnections::new());
     bridge
-        .hello("send-session", Some(&sock))
+        .hello("send-session", Some(&sock), None)
         .await
         .expect("hello");
 
@@ -159,7 +159,7 @@ async fn approve_tool_proxies_to_daemon() {
 
     let bridge = SessionBridge::new(SessionConnections::new());
     bridge
-        .hello("approve-session", Some(&sock))
+        .hello("approve-session", Some(&sock), None)
         .await
         .expect("hello");
 
@@ -208,11 +208,11 @@ async fn subscribe_does_not_block_concurrent_send_on_other_session() {
 
     let bridge = SessionBridge::new(SessionConnections::new());
     bridge
-        .hello("session-a", Some(&sock_a))
+        .hello("session-a", Some(&sock_a), None)
         .await
         .expect("hello a");
     bridge
-        .hello("session-b", Some(&sock_b))
+        .hello("session-b", Some(&sock_b), None)
         .await
         .expect("hello b");
 
@@ -337,7 +337,7 @@ async fn pump_signals_crash_when_daemon_socket_dies() {
 
     let bridge = SessionBridge::new(SessionConnections::new());
     bridge
-        .hello("crash-session", Some(&sock))
+        .hello("crash-session", Some(&sock), None)
         .await
         .expect("hello");
 
@@ -430,7 +430,7 @@ async fn pump_suppresses_crash_after_session_ended() {
 
     let bridge = SessionBridge::new(SessionConnections::new());
     bridge
-        .hello("graceful-session", Some(&sock))
+        .hello("graceful-session", Some(&sock), None)
         .await
         .expect("hello");
 
@@ -487,11 +487,11 @@ async fn hello_twice_for_same_session_is_rejected() {
 
     let bridge = SessionBridge::new(SessionConnections::new());
     bridge
-        .hello("dup-session", Some(&sock))
+        .hello("dup-session", Some(&sock), None)
         .await
         .expect("first hello");
     let err = bridge
-        .hello("dup-session", Some(&sock))
+        .hello("dup-session", Some(&sock), None)
         .await
         .expect_err("second hello must be rejected");
     assert!(err.to_string().contains("already connected"));

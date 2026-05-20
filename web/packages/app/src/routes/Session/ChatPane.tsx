@@ -29,6 +29,7 @@ import {
   type VariantRow,
 } from '../../components/BranchMetadataPopover';
 import { RerunPopover } from '../../components/RerunPopover';
+import { Markdown } from '../../components/Markdown';
 import type {
   ApprovalLevel,
   ApprovalScope,
@@ -763,12 +764,17 @@ const AssistantBubble: Component<{
           </span>
         </Show>
       </header>
-      <p class="turn__body">
-        {props.turn.text}
+      {/* Provider output is markdown-shaped (lists, code blocks, headings,
+          inline emphasis). The Markdown component handles parse + sanitize
+          + reactive re-render on each streaming chunk; the cursor lives
+          alongside the rendered HTML rather than inside it so the cursor
+          glyph never gets swept into a `<p>` / `<pre>` block. */}
+      <div class="turn__body" data-testid="assistant-turn-body">
+        <Markdown text={props.turn.text} class="turn__markdown" />
         <Show when={props.turn.isStreaming}>
           <span class="streaming-cursor" data-testid="streaming-cursor" aria-hidden="true" />
         </Show>
-      </p>
+      </div>
     </article>
   );
 };

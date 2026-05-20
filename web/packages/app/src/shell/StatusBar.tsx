@@ -25,7 +25,7 @@ import {
   onCleanup,
   onMount,
 } from 'solid-js';
-import { useNavigate } from '@solidjs/router';
+import { useMatch, useNavigate } from '@solidjs/router';
 import { Button } from '@forge/design';
 import type { BgAgentSummary } from '@forge/ipc';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -289,6 +289,32 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
     if (routerNavigate) routerNavigate(to);
   };
 
+  // Window-class gate for the dashboard-scoped feeds below.
+  //
+  // The dashboard window opens at `/` and navigates between dashboard
+  // routes; session windows open at `/session/<id>`. Several status-bar
+  // segments (active provider, sessions count, git branch, container
+  // runtime) hydrate from IPCs that gate on `require_window_label(...,
+  // "dashboard", ...)` in `crates/forge-shell/src/*` — invoking them in a
+  // session window returns `forbidden: window label mismatch`. Until now
+  // those errors were swallowed in `console.error`, the segments fell
+  // back to `unknown`, and the work was wasted IPC traffic. Skip the
+  // dashboard-scoped seeds when this StatusBar instance is mounted in a
+  // session window so the failing IPCs simply never fire.
+  //
+  // `useMatch` is also owner-scoped — resolved here at setup time and
+  // closed over by onMount. Existing tests mount without a Router; the
+  // try/catch keeps that path live and defaults the accessor to
+  // "dashboard route" (the historical behavior).
+  let sessionRouteMatch: (() => unknown) | null = null;
+  try {
+    sessionRouteMatch = useMatch(() => '/session/*');
+  } catch {
+    sessionRouteMatch = null;
+  }
+  const isDashboardRoute = (): boolean =>
+    sessionRouteMatch === null || sessionRouteMatch() === undefined;
+
   // Running set keyed by instance id. The same id from multiple sources (the
   // initial list + the subscribe stream) is idempotently deduped.
   const [running, setRunning] = createSignal<BgAgentSummary[]>([]);
@@ -424,94 +450,101 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
     // F-717: seed the `<N> sessions` segment from `session_list`. A failed
     // fetch leaves the signal at `null`, which renders `unknown` — chrome
     // never paints `role="alert"` for status feeds.
-    const listSessions = props.sessionList ?? defaultSessionList;
-    void (async () => {
-      try {
-        const rows = await listSessions();
-        if (mounted && Array.isArray(rows)) setSessionCount(rows.length);
-      } catch (err) {
-        console.error('session_list failed', err);
-      }
-    })();
-
-    // F-717: seed the `<provider>` segment from `get_active_provider`, then
-    // hook `provider:changed` so dashboard swaps update the bar live.
-    const getProvider = props.getActiveProvider ?? defaultGetActiveProvider;
-    void (async () => {
-      try {
-        const id = await getProvider();
-        if (mounted && typeof id === 'string' && id.length > 0) {
-          setProviderId(id);
-        }
-      } catch (err) {
-        console.error('get_active_provider failed', err);
-      }
-    })();
-    const subscribeProvider =
-      props.subscribeProviderChanged ?? defaultProviderChangedSubscribe;
-    void (async () => {
-      try {
-        // `provider:changed` fires for set / add / remove. The payload's
-        // `provider_id` carries the *triggering* provider (e.g. the
-        // removed one), not necessarily the new active provider. Re-query
-        // `get_active_provider` instead of trusting the payload so the
-        // segment reflects the authoritative post-change state — and
-        // clears (segment hidden) when removal left no active provider.
-        const off = await subscribeProvider(async () => {
-          if (!mounted) return;
-          try {
-            const id = await getProvider();
-            if (!mounted) return;
-            setProviderId(typeof id === 'string' && id.length > 0 ? id : null);
-          } catch (err) {
-            console.error('get_active_provider after provider:changed failed', err);
-          }
-        });
-        if (mounted) {
-          unlistenProviderChanged = off;
-        } else {
-          off();
-        }
-      } catch (err) {
-        console.error('provider:changed listen failed', err);
-      }
-    })();
-
-    // F-741: branch feed. The active workspace root drives the query;
-    // either prop override or the global signal. `null` workspace (no
-    // session mounted yet) keeps the segment at `unknown` rather than
-    // shelling out to git in `/` and surfacing a stray fatal.
-    const getBranch = props.gitBranch ?? defaultGitBranch;
-    const root = props.workspaceRoot ?? activeWorkspaceRoot();
-    if (typeof root === 'string' && root.length > 0) {
+    //
+    // The seeds below all gate on `isDashboardRoute()`: the underlying
+    // Tauri commands reject a session-* window label, so firing them
+    // there only buys "forbidden" log spam plus a wasted IPC round-trip
+    // before the segment falls back to its `unknown` token anyway.
+    if (isDashboardRoute()) {
+      const listSessions = props.sessionList ?? defaultSessionList;
       void (async () => {
         try {
-          const name = await getBranch(root);
-          if (mounted && typeof name === 'string' && name.length > 0) {
-            setBranch(name);
+          const rows = await listSessions();
+          if (mounted && Array.isArray(rows)) setSessionCount(rows.length);
+        } catch (err) {
+          console.error('session_list failed', err);
+        }
+      })();
+
+      // F-717: seed the `<provider>` segment from `get_active_provider`, then
+      // hook `provider:changed` so dashboard swaps update the bar live.
+      const getProvider = props.getActiveProvider ?? defaultGetActiveProvider;
+      void (async () => {
+        try {
+          const id = await getProvider();
+          if (mounted && typeof id === 'string' && id.length > 0) {
+            setProviderId(id);
           }
         } catch (err) {
-          console.error('git_branch failed', err);
+          console.error('get_active_provider failed', err);
+        }
+      })();
+      const subscribeProvider =
+        props.subscribeProviderChanged ?? defaultProviderChangedSubscribe;
+      void (async () => {
+        try {
+          // `provider:changed` fires for set / add / remove. The payload's
+          // `provider_id` carries the *triggering* provider (e.g. the
+          // removed one), not necessarily the new active provider. Re-query
+          // `get_active_provider` instead of trusting the payload so the
+          // segment reflects the authoritative post-change state — and
+          // clears (segment hidden) when removal left no active provider.
+          const off = await subscribeProvider(async () => {
+            if (!mounted) return;
+            try {
+              const id = await getProvider();
+              if (!mounted) return;
+              setProviderId(typeof id === 'string' && id.length > 0 ? id : null);
+            } catch (err) {
+              console.error('get_active_provider after provider:changed failed', err);
+            }
+          });
+          if (mounted) {
+            unlistenProviderChanged = off;
+          } else {
+            off();
+          }
+        } catch (err) {
+          console.error('provider:changed listen failed', err);
+        }
+      })();
+
+      // F-741: branch feed. The active workspace root drives the query;
+      // either prop override or the global signal. `null` workspace (no
+      // session mounted yet) keeps the segment at `unknown` rather than
+      // shelling out to git in `/` and surfacing a stray fatal.
+      const getBranch = props.gitBranch ?? defaultGitBranch;
+      const root = props.workspaceRoot ?? activeWorkspaceRoot();
+      if (typeof root === 'string' && root.length > 0) {
+        void (async () => {
+          try {
+            const name = await getBranch(root);
+            if (mounted && typeof name === 'string' && name.length > 0) {
+              setBranch(name);
+            }
+          } catch (err) {
+            console.error('git_branch failed', err);
+          }
+        })();
+      }
+
+      // F-741: runtime probe. Single-shot at mount — the dashboard's
+      // ContainersSection owns the long-lived banner; the status-bar
+      // segment is a chrome-level hint, not the user's actionable banner.
+      // Probe failures or unavailable runtimes both render `unknown`.
+      const detectRuntime =
+        props.detectContainerRuntime ?? defaultDetectContainerRuntime;
+      void (async () => {
+        try {
+          const status = await detectRuntime();
+          if (mounted && status && typeof status === 'object') {
+            setRuntimeStatus(status);
+          }
+        } catch (err) {
+          console.error('detect_container_runtime failed', err);
         }
       })();
     }
-
-    // F-741: runtime probe. Single-shot at mount — the dashboard's
-    // ContainersSection owns the long-lived banner; the status-bar
-    // segment is a chrome-level hint, not the user's actionable banner.
-    // Probe failures or unavailable runtimes both render `unknown`.
-    const detectRuntime =
-      props.detectContainerRuntime ?? defaultDetectContainerRuntime;
-    void (async () => {
-      try {
-        const status = await detectRuntime();
-        if (mounted && status && typeof status === 'object') {
-          setRuntimeStatus(status);
-        }
-      } catch (err) {
-        console.error('detect_container_runtime failed', err);
-      }
-    })();
   });
 
   onCleanup(() => {

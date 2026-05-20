@@ -14,27 +14,32 @@ use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets, INV
 use tauri::Manager;
 
 const TEST_SESSION: &str = "abcdef0123456789";
+const TEST_WS: &str = "ws01";
 
-fn make_app() -> tauri::App<tauri::test::MockRuntime> {
+async fn make_app() -> tauri::App<tauri::test::MockRuntime> {
     let app = mock_builder()
         .invoke_handler(build_invoke_handler())
         .build(mock_context(noop_assets()))
         .expect("build mock Tauri app");
-    app.manage(BridgeState::new(SessionConnections::new()));
+    let connections = SessionConnections::new();
+    connections
+        .prime_workspace_id_for_test(TEST_SESSION.to_string(), TEST_WS.to_string())
+        .await;
+    app.manage(BridgeState::new(connections));
     app
 }
 
 fn make_session_window(
     app: &tauri::App<tauri::test::MockRuntime>,
-    session_id: &str,
+    _session_id: &str,
 ) -> tauri::WebviewWindow<tauri::test::MockRuntime> {
     tauri::WebviewWindowBuilder::new(
         app,
-        format!("session-{session_id}"),
+        format!("workspace-{TEST_WS}"),
         tauri::WebviewUrl::App("index.html".into()),
     )
     .build()
-    .expect("mock session window")
+    .expect("mock workspace window")
 }
 
 fn invoke_err(
@@ -63,7 +68,7 @@ fn invoke_err(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn session_switch_provider_rejects_empty_provider_id() {
-    let app = make_app();
+    let app = make_app().await;
     let window = make_session_window(&app, TEST_SESSION);
     let err = invoke_err(
         &window,
@@ -81,7 +86,7 @@ async fn session_switch_provider_rejects_empty_provider_id() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn session_switch_provider_rejects_oversize_provider_id() {
-    let app = make_app();
+    let app = make_app().await;
     let window = make_session_window(&app, TEST_SESSION);
     // `validate_provider_id` enforces `MAX_PROVIDER_ID_BYTES` (128). Use
     // 256 to clear that cap with comfortable headroom.
@@ -107,7 +112,7 @@ async fn session_switch_provider_passes_validation_for_realistic_id() {
     // session — that's the "no active connection" surface, not the
     // size/empty guard. Pinning this distinguishes the validator from
     // the bridge in case either error string drifts.
-    let app = make_app();
+    let app = make_app().await;
     let window = make_session_window(&app, TEST_SESSION);
     let err = invoke_err(
         &window,

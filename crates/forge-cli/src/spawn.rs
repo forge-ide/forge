@@ -125,38 +125,91 @@ pub async fn spawn_forged_session_with_id(
     })
 }
 
-/// Locate the `forged` binary alongside the calling executable, falling
-/// back to `PATH`. Identical policy to the CLI's pre-extraction helper.
+/// Locate the `forged` binary alongside the calling executable, then in
+/// `PATH`. Errors with an actionable message when neither lookup turns up
+/// an existing file — previously this returned `PathBuf::from("forged")`
+/// as a bare PATH fallback, so a missing daemon surfaced as a confusing
+/// `No such file or directory (os error 2)` at `Command::spawn` time
+/// instead of a clear "build forge-session" hint.
 ///
 /// Honours the `FORGE_FORGED_BIN` env var as a test-only override (when
 /// `current_exe` is a test harness binary in `target/debug/deps/`, the
 /// sibling lookup misses; integration tests set this var to the absolute
-/// path of the `forged` binary they pre-built).
-fn find_forged_binary() -> Result<PathBuf> {
+/// path of the `forged` binary they pre-built). A non-existent override
+/// is now an error — silently ignoring it would re-introduce the same
+/// confusing `Command::spawn` ENOENT we're trying to eliminate.
+pub fn find_forged_binary() -> Result<PathBuf> {
+    let mut tried: Vec<PathBuf> = Vec::new();
+
     if let Ok(p) = std::env::var("FORGE_FORGED_BIN") {
         if !p.is_empty() {
-            return Ok(PathBuf::from(p));
+            let path = PathBuf::from(&p);
+            if path.exists() {
+                return Ok(path);
+            }
+            anyhow::bail!(
+                "FORGE_FORGED_BIN points at {p:?} but no file exists there. \
+                 Unset the variable or build the daemon with \
+                 `cargo build -p forge-session`."
+            );
         }
     }
+
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let candidate = dir.join("forged");
-            if candidate.exists() {
-                return Ok(candidate);
+            let sibling = dir.join("forged");
+            if sibling.exists() {
+                return Ok(sibling);
             }
-            // F-748: tests live in `target/<profile>/deps/<test>-<hash>`
-            // while `forged` sits at `target/<profile>/forged`. Try one
-            // level up so the integration test harness can find it
-            // without setting `FORGE_FORGED_BIN`.
+            tried.push(sibling);
+
+            // Tests live in `target/<profile>/deps/<test>-<hash>` while
+            // `forged` sits at `target/<profile>/forged`. Try one level
+            // up so the integration test harness finds it without
+            // setting `FORGE_FORGED_BIN` (F-748).
             if let Some(parent) = dir.parent() {
                 let up = parent.join("forged");
                 if up.exists() {
                     return Ok(up);
                 }
+                tried.push(up);
             }
         }
     }
-    Ok(PathBuf::from("forged"))
+
+    if let Some(on_path) = lookup_on_path("forged") {
+        return Ok(on_path);
+    }
+
+    let tried_lines = tried
+        .iter()
+        .map(|p| format!("    {}", p.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    anyhow::bail!(
+        "forged daemon binary not found. Build it with `cargo build -p forge-session` \
+         (debug) or `just build-release` (release). Looked at:\n\
+         {tried_lines}\n    PATH"
+    )
+}
+
+/// Probe `$PATH` for `name`. Returns the first directory entry that
+/// contains a file named `name`. Used as the final fallback before
+/// `find_forged_binary` declares the daemon missing — `Command::new(name)`
+/// would do the same PATH walk implicitly at spawn time, but we want to
+/// know NOW so the surfaced error can list every place we looked.
+fn lookup_on_path(name: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// Poll for the UDS to appear (50 ms × 100 = 5 s) before declaring the
@@ -248,4 +301,167 @@ fn is_pid_alive(pid: libc::pid_t) -> bool {
     }
     let err = std::io::Error::last_os_error();
     !matches!(err.raw_os_error(), Some(libc::ESRCH))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// Process-wide lock for tests that mutate FORGE_FORGED_BIN / PATH.
+    /// Mirrors the pattern in `skill.rs` — std env mutation is racy under
+    /// the default parallel test runner.
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        use std::sync::OnceLock;
+        static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// RAII helper: snapshots a set of env vars on construction, restores
+    /// them on drop. Lets each test mutate freely without leaking state
+    /// into sibling tests in the same process.
+    struct EnvSnapshot {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+    impl EnvSnapshot {
+        fn new(keys: &[&'static str]) -> Self {
+            Self {
+                saved: keys
+                    .iter()
+                    .map(|k| (*k, std::env::var_os(k)))
+                    .collect(),
+            }
+        }
+    }
+    impl Drop for EnvSnapshot {
+        fn drop(&mut self) {
+            for (k, v) in &self.saved {
+                // SAFETY: env mutation is unsafe in the 2024 edition but
+                // the surrounding harness already serializes via `env_lock`.
+                unsafe {
+                    match v {
+                        Some(val) => std::env::set_var(k, val),
+                        None => std::env::remove_var(k),
+                    }
+                }
+            }
+        }
+    }
+
+    fn write_executable(dir: &std::path::Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, b"#!/bin/sh\nexit 0\n").expect("write fake binary");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&path, perms).unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn forge_forged_bin_returns_the_override_when_path_exists() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _snap = EnvSnapshot::new(&["FORGE_FORGED_BIN", "PATH"]);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = write_executable(tmp.path(), "forged");
+        // SAFETY: serialized via env_lock.
+        unsafe { std::env::set_var("FORGE_FORGED_BIN", &bin) };
+
+        let resolved = find_forged_binary().expect("override should resolve");
+        assert_eq!(resolved, bin);
+    }
+
+    #[test]
+    fn forge_forged_bin_with_missing_path_errors_with_actionable_message() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _snap = EnvSnapshot::new(&["FORGE_FORGED_BIN", "PATH"]);
+
+        // SAFETY: serialized via env_lock.
+        unsafe { std::env::set_var("FORGE_FORGED_BIN", "/nonexistent/forge-test-binary") };
+
+        let err = find_forged_binary().expect_err("missing override must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("FORGE_FORGED_BIN"),
+            "error should name the env var that pointed nowhere: {msg}"
+        );
+        assert!(
+            msg.contains("cargo build -p forge-session"),
+            "error should include the actionable build command: {msg}"
+        );
+    }
+
+    #[test]
+    fn errors_with_candidate_paths_and_build_command_when_not_found() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _snap = EnvSnapshot::new(&["FORGE_FORGED_BIN", "PATH"]);
+
+        // PATH points at an empty dir → sibling+parent paths don't exist
+        // either (test harness layout has no `forged` next to it on a
+        // fresh checkout), so the function must produce its actionable
+        // error rather than the bare ENOENT it used to.
+        let empty = tempfile::tempdir().unwrap();
+        // SAFETY: serialized via env_lock.
+        unsafe {
+            std::env::remove_var("FORGE_FORGED_BIN");
+            std::env::set_var("PATH", empty.path());
+        }
+
+        // The sibling lookup uses current_exe (the test runner). On a
+        // workstation that ran `cargo build -p forge-session` recently,
+        // `target/debug/forged` exists and the function succeeds —
+        // assert the outcome only when the lookup fails. The build
+        // command + "not found" wording is the regression target.
+        match find_forged_binary() {
+            Ok(_) => {
+                // forged was already built into target/debug — skip the
+                // negative assertion. The other tests cover the override
+                // and PATH branches independently.
+            }
+            Err(err) => {
+                let msg = format!("{err}");
+                assert!(
+                    msg.contains("forged daemon binary not found"),
+                    "error should call out the missing daemon: {msg}"
+                );
+                assert!(
+                    msg.contains("cargo build -p forge-session"),
+                    "error should include the actionable build command: {msg}"
+                );
+                assert!(
+                    msg.contains("PATH"),
+                    "error should list PATH among the places we looked: {msg}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lookup_on_path_skips_empty_path_segments() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _snap = EnvSnapshot::new(&["PATH"]);
+
+        // Empty segments in PATH conventionally mean "current directory"
+        // — we intentionally skip them so `find_forged_binary` never
+        // returns a relative path that depends on `pwd`. Sandwich an
+        // empty segment between a non-match and a real match to verify
+        // the iteration doesn't bail on the empty entry.
+        let tmp = tempfile::tempdir().unwrap();
+        let _expected = write_executable(tmp.path(), "forged");
+        let path_var = format!(
+            "{}:{}:{}",
+            "/this/does/not/exist",
+            "",
+            tmp.path().display()
+        );
+        // SAFETY: serialized via env_lock.
+        unsafe { std::env::set_var("PATH", &path_var) };
+
+        let found = lookup_on_path("forged").expect("should find through empty segment");
+        assert!(found.is_file());
+    }
 }
