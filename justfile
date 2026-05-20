@@ -13,6 +13,61 @@ default:
 # Dev workflow
 # -----------------------------------------------------------------------------
 
+# One-shot bootstrap for everything `just dev` needs:
+#   - verifies rustc / cargo and node >= 20 are on PATH
+#   - enables corepack and pins pnpm to the version in web/package.json
+#   - installs cargo-tauri 2.x (the `cargo tauri dev` driver)
+#   - runs `pnpm install` in web/ so the SolidJS workspace is ready
+#   - on Linux, checks the Tauri webkit2gtk system libs via pkg-config and
+#     prints the right apt / dnf command if any are missing (sudo step left
+#     to the user; this recipe never escalates)
+#
+# Idempotent — safe to re-run after pulling main.
+# Bootstrap a dev environment so `just dev` runs (tauri-cli, pnpm deps, prereq checks).
+dev-setup:
+    @echo "==> Checking Rust toolchain"
+    @command -v rustc >/dev/null || { echo >&2 "rustc not found. Install rustup: https://rustup.rs"; exit 1; }
+    @command -v cargo >/dev/null || { echo >&2 "cargo not found. Install rustup: https://rustup.rs"; exit 1; }
+    @rustc --version
+    @echo "==> Checking Node >= 20"
+    @command -v node >/dev/null || { echo >&2 "node not found. Install Node.js >= 20 (https://nodejs.org or via your package manager)."; exit 1; }
+    @node_major=$(node -p 'process.versions.node.split(".")[0]'); \
+      if [ "$node_major" -lt 20 ]; then echo >&2 "Node $(node -v) is too old; need >= 20."; exit 1; fi
+    @echo "    $(node -v)"
+    @echo "==> Enabling pnpm via corepack"
+    @command -v corepack >/dev/null || { echo >&2 "corepack not found. It ships with Node >= 16.10; reinstall Node or run \`npm i -g corepack\`."; exit 1; }
+    corepack enable
+    corepack prepare pnpm@9.12.0 --activate
+    @pnpm --version
+    @echo "==> Installing cargo-tauri (if missing)"
+    @command -v cargo-tauri >/dev/null || cargo install tauri-cli --version '^2.0' --locked
+    @echo "==> Checking Tauri webkit2gtk system libs (Linux only)"
+    @if [ "$(uname -s)" = "Linux" ]; then \
+      command -v pkg-config >/dev/null || { echo >&2 "pkg-config missing — see the per-distro hint below."; }; \
+      missing=""; \
+      for pc in webkit2gtk-4.1 javascriptcoregtk-4.1 libsoup-3.0 gtk+-3.0 librsvg-2.0; do \
+        if ! pkg-config --exists "$pc" 2>/dev/null; then missing="$missing $pc"; fi; \
+      done; \
+      if [ -n "$missing" ]; then \
+        echo "    missing pkg-config modules:$missing"; \
+        if command -v dnf >/dev/null; then \
+          echo "    sudo dnf install -y webkit2gtk4.1-devel libsoup3-devel gtk3-devel librsvg2-devel pkgconf-pkg-config gcc"; \
+        elif command -v apt-get >/dev/null; then \
+          echo "    sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libgtk-3-dev librsvg2-dev pkg-config build-essential"; \
+        else \
+          echo "    install equivalents of: webkit2gtk-4.1, javascriptcoregtk-4.1, libsoup-3.0, gtk+-3.0, librsvg-2.0, pkg-config, a C toolchain"; \
+        fi; \
+        echo "    rerun \`just dev-setup\` once installed."; \
+      else \
+        echo "    all present"; \
+      fi; \
+    else \
+      echo "    skipped (non-Linux host — Tauri uses the OS webview)"; \
+    fi
+    @echo "==> Installing web workspace deps"
+    cd web && pnpm install --frozen-lockfile
+    @echo "==> Done. Run \`just dev\` to launch the app."
+
 # Run the desktop app in dev mode. Spawns Vite at :5173 via Tauri's
 # `beforeDevCommand`, then launches the shell webview against it.
 #
