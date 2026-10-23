@@ -33,6 +33,7 @@ steps:
   - exec: ["sh", "-c", "cat hello.txt"]
   - exec: ["sh", "-c", "cat {} || echo key-hidden"]
   - exec: ["{}", "proxy-connect", "blocked.example:443"]
+  - exec: ["sh", "-c", "echo key=$ANTHROPIC_API_KEY url=$ANTHROPIC_BASE_URL"]
   - message: "Done."
   - end_turn
 "#,
@@ -69,7 +70,7 @@ fn setup(tier: &str) -> Setup {
     std::fs::write(
         repo.join(".forge/agents/fake.toml"),
         format!(
-            "agent = \"fake\"\ncommand = [{:?}, {:?}]\nsandbox = \"{tier}\"\n{opt_in}[network]\nallow = [\"allowed.example\"]\n",
+            "agent = \"fake\"\ncommand = [{:?}, {:?}]\nsandbox = \"{tier}\"\n{opt_in}env_secrets = [\"ANTHROPIC_API_KEY\"]\n[network]\nallow = [\"allowed.example\"]\n",
             common::fake_agent().to_str().unwrap(),
             script_path.to_str().unwrap(),
         ),
@@ -86,6 +87,25 @@ fn setup(tier: &str) -> Setup {
     )
     .unwrap();
     Setup { home, repo, key }
+}
+
+/// The value the fake keyring holds for `ANTHROPIC_API_KEY`; it must never reach a sandbox
+/// or the event log.
+const SECRET: &str = "sk-forge-test-secret";
+
+/// Start a daemon whose keyring tool is a fake that knows only `ANTHROPIC_API_KEY`.
+fn start_daemon(s: &Setup) -> Daemon {
+    use std::os::unix::fs::PermissionsExt;
+    let tool = s.home.path().join("fake-keyring");
+    let missing = if cfg!(target_os = "macos") { 44 } else { 1 };
+    let script = format!(
+        "#!/bin/sh\ncase \"$*\" in\n  *ANTHROPIC_API_KEY*) echo {SECRET} ;;\n  *) exit {missing} ;;\nesac\n"
+    );
+    std::fs::write(&tool, script).unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    Daemon::start_with(s.home.path(), |cmd| {
+        cmd.env("FORGE_KEYRING_TOOL", &tool);
+    })
 }
 
 async fn require_tier(client: &mut forge_api::client::Client, tier: SandboxTier) {
@@ -110,7 +130,7 @@ fn terminal_output(events: &[Event]) -> String {
 async fn fake_agent_in(tier: SandboxTier) {
     sandbox_bins();
     let s = setup(forge_sandbox::tier_name(tier));
-    let daemon = Daemon::start(s.home.path());
+    let daemon = start_daemon(&s);
     let mut client = daemon.client().await;
     require_tier(&mut client, tier).await;
     let project = open(&mut client, &s.repo).await;
@@ -151,6 +171,18 @@ async fn fake_agent_in(tier: SandboxTier) {
         EventPayload::Network(b) if b.host == "blocked.example" => Some(b.clone()),
         _ => None,
     });
+    // The agent holds a placeholder and a route on the proxy; the real secret is nowhere.
+    assert!(output.contains("key=forge-proxy-injected"), "{output:?}");
+    let url = output
+        .lines()
+        .find_map(|l| l.split_once(" url=").map(|(_, url)| url))
+        .unwrap_or_default();
+    assert!(
+        url.contains("/_forge/") && url.ends_with("/anthropic"),
+        "{output:?}"
+    );
+    let logged = serde_json::to_string(&events).unwrap();
+    assert!(!logged.contains(SECRET), "the secret reached the event log");
     let denied = denied.expect("the refused connection is in the event log");
     assert_eq!((denied.port, denied.verdict), (443, Verdict::Deny));
     assert!(denied.reason.unwrap_or_default().contains("allowlist"));
@@ -188,7 +220,7 @@ async fn fake_agent_edits_and_runs_a_command_in_standard() {
 async fn a_sandbox_that_cannot_start_fails_the_session() {
     sandbox_bins();
     let s = setup("standard");
-    let daemon = Daemon::start(s.home.path());
+    let daemon = start_daemon(&s);
     let mut client = daemon.client().await;
     let tier = *hello_tiers(&mut client)
         .await
@@ -298,7 +330,7 @@ async fn network_allowlists_must_be_host_names() {
         text.replace("\"allowed.example\"", "\"https://*.example.com:443\""),
     )
     .unwrap();
-    let daemon = Daemon::start(s.home.path());
+    let daemon = start_daemon(&s);
     let mut client = daemon.client().await;
     let project = open(&mut client, &s.repo).await;
     let params = create_params(&project, "x", "go");
@@ -307,4 +339,64 @@ async fn network_allowlists_must_be_host_names() {
         forge_api::ErrorKind::ValidationFailed,
     );
     assert!(err.detail().contains("network.allow"), "{}", err.detail());
+}
+
+/// A secret missing from the keyring fails the session with the command that stores it.
+#[tokio::test]
+async fn a_missing_secret_fails_the_session_with_a_fix() {
+    let s = setup("unsandboxed");
+    let profile = s.repo.join(".forge/agents/fake.toml");
+    let text = std::fs::read_to_string(&profile).unwrap();
+    std::fs::write(
+        &profile,
+        text.replace("ANTHROPIC_API_KEY", "OPENAI_API_KEY"),
+    )
+    .unwrap();
+    let daemon = start_daemon(&s);
+    let mut client = daemon.client().await;
+    let project = open(&mut client, &s.repo).await;
+    let session = client
+        .call::<SessionCreate>(&create_params(&project, "x", ""))
+        .await
+        .unwrap();
+    wait_for_state(&mut client, &session.id, SessionState::Failed).await;
+    let reason = failure_reason(&mut client, &session.id).await;
+    let fix = if cfg!(target_os = "macos") {
+        "security add-generic-password -s forge -a OPENAI_API_KEY -w"
+    } else {
+        "secret-tool store --label='Forge OPENAI_API_KEY' service forge account OPENAI_API_KEY"
+    };
+    assert!(reason.contains(fix), "{reason}");
+}
+
+/// Only secrets Forge knows how to inject may be named.
+#[tokio::test]
+async fn unknown_secrets_are_refused() {
+    let s = setup("unsandboxed");
+    let profile = s.repo.join(".forge/agents/fake.toml");
+    let text = std::fs::read_to_string(&profile).unwrap();
+    std::fs::write(
+        &profile,
+        text.replace("ANTHROPIC_API_KEY", "AWS_SECRET_ACCESS_KEY"),
+    )
+    .unwrap();
+    let daemon = start_daemon(&s);
+    let mut client = daemon.client().await;
+    let project = open(&mut client, &s.repo).await;
+    let err = common::expect_api_error(
+        client
+            .call::<SessionCreate>(&create_params(&project, "x", "go"))
+            .await,
+        forge_api::ErrorKind::ValidationFailed,
+    );
+    assert!(
+        err.detail().contains("AWS_SECRET_ACCESS_KEY"),
+        "{}",
+        err.detail()
+    );
+    assert!(
+        err.detail().contains("ANTHROPIC_API_KEY"),
+        "{}",
+        err.detail()
+    );
 }

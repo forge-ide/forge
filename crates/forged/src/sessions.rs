@@ -10,7 +10,8 @@ use forge_api::{ApiError, ErrorKind, ProjectId};
 use forge_config::{
     AgentProfileConfig, BranchRules, ConfigError, Paths, ProfileSandbox, ProjectConfig, UserConfig,
 };
-use forge_sandbox::proxy::Allowlist;
+use forge_sandbox::proxy::{Allowlist, SecretRoute};
+use forge_sandbox::secrets::{self, SecretStore};
 use forge_sandbox::{Sandbox, TierStatus};
 use forge_session::{AgentLaunch, AgentResolver, CreateRequest, SessionError};
 
@@ -37,6 +38,7 @@ pub async fn create(state: &State, params: SessionCreateParams) -> Result<Sessio
         &state.sandbox.tiers(),
     )?;
     allowlist(&profile, &params.agent_profile)?;
+    known_secrets(&profile, &params.agent_profile)?;
     let (config, rules) = branch_rules(state, &root).await?;
     let branch = match params.branch {
         Some(branch) => branch,
@@ -172,6 +174,7 @@ pub struct ProfileResolver {
     pub sandbox: Arc<dyn Sandbox>,
     pub paths: Paths,
     pub home: PathBuf,
+    pub secrets: Arc<dyn SecretStore>,
 }
 
 impl AgentResolver for ProfileResolver {
@@ -189,6 +192,18 @@ impl AgentResolver for ProfileResolver {
             .ok_or_else(|| ApiError::not_found(format!("agent profile {id:?}")))?;
         sandbox_tier(Some(session.sandbox), &profile, id, &self.sandbox.tiers())?;
         let network = allowlist(&profile, id)?;
+        let secrets = known_secrets(&profile, id)?
+            .into_iter()
+            .map(|secret| {
+                let value = self.secrets.get(secret.name).map_err(|e| {
+                    ApiError::new(
+                        ErrorKind::AgentUnavailable,
+                        format!("agent profile {id:?}: {e}"),
+                    )
+                })?;
+                Ok(SecretRoute { secret, value })
+            })
+            .collect::<Result<Vec<_>, ApiError>>()?;
         let mut argv = profile.command.ok_or_else(|| {
             ApiError::new(
                 ErrorKind::AgentUnavailable,
@@ -215,6 +230,7 @@ impl AgentResolver for ProfileResolver {
             command: AgentCommand { argv, env: vec![] },
             read_only,
             network,
+            secrets,
         })
     }
 }
@@ -223,6 +239,27 @@ impl AgentResolver for ProfileResolver {
 fn allowlist(profile: &AgentProfileConfig, id: &str) -> Result<Allowlist, ApiError> {
     Allowlist::new(&profile.network.allow)
         .map_err(|e| ApiError::validation(format!("agent profile {id:?}: network.allow: {e}")))
+}
+
+/// The secrets the profile's `env_secrets` names; each must be one Forge knows how to inject.
+fn known_secrets(
+    profile: &AgentProfileConfig,
+    id: &str,
+) -> Result<Vec<&'static secrets::KnownSecret>, ApiError> {
+    let mut seen = std::collections::HashSet::new();
+    profile
+        .env_secrets
+        .iter()
+        .filter(|name| seen.insert(name.as_str()))
+        .map(|name| {
+            secrets::known(name).ok_or_else(|| {
+                ApiError::validation(format!(
+                    "agent profile {id:?}: env_secrets: Forge can't inject {name:?}; it knows {}",
+                    secrets::known_names()
+                ))
+            })
+        })
+        .collect()
 }
 
 /// The user config's extra read-only paths, refusing any that would expose a protected dir:

@@ -22,6 +22,7 @@ use tokio::process::Command;
 mod env;
 pub mod policy;
 pub mod proxy;
+pub mod secrets;
 mod unsandboxed;
 mod view;
 

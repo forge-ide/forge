@@ -128,10 +128,7 @@ impl Light {
         env.push(("TMPDIR".into(), view.scratch_tmp.display().to_string()));
         env.extend(view.toolchain_env.iter().cloned());
         if let Some(proxy) = &proxy {
-            env.extend(crate::proxy::env(&format!(
-                "http://127.0.0.1:{}",
-                proxy.port()
-            )));
+            env.extend(proxy.env(&format!("http://127.0.0.1:{}", proxy.port())));
         }
         Self {
             helper,
@@ -200,8 +197,8 @@ impl Bwrap {
         env.push(("HOME".into(), view.home.display().to_string()));
         env.push(("TMPDIR".into(), "/tmp".into()));
         env.extend(view.toolchain_env.iter().cloned());
-        if forward.is_some() {
-            env.extend(crate::proxy::env(&format!("http://127.0.0.1:{PROXY_PORT}")));
+        if let (Some(_), Some(proxy)) = (&forward, &proxy) {
+            env.extend(proxy.env(&format!("http://127.0.0.1:{PROXY_PORT}")));
         }
         let policy = Policy {
             mode: Mode::Standard,

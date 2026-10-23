@@ -208,7 +208,7 @@ env_secrets = ["ANTHROPIC_API_KEY"]  # keyring names, injected via proxy
 allow = ["api.anthropic.com", "crates.io", "static.crates.io", "registry.npmjs.org"]
 ```
 
-`sandbox` defaults to `standard`; `allow_unsandboxed` defaults to `false`. `[network] allow` lists the hosts the session's egress proxy lets through, on ports 80 and 443: plain host names, matched exactly (ignoring case and a trailing dot), with no scheme, port, path, wildcard, or IP address; anything else fails `session.create` with `ValidationFailed`. An empty or missing list means no network. The profile ID is the file name and may use only letters, digits, `-`, and `_`.
+`sandbox` defaults to `standard`; `allow_unsandboxed` defaults to `false`. `[network] allow` lists the hosts the session's egress proxy lets through, on ports 80 and 443: plain host names, matched exactly (ignoring case and a trailing dot), with no scheme, port, path, wildcard, or IP address; anything else fails `session.create` with `ValidationFailed`. An empty or missing list means no network. `env_secrets` may name only secrets Forge knows how to inject (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`; anything else is `ValidationFailed`). Each is read at launch from the OS keyring, service `forge`, account the secret's name; one that is missing fails the session with the command that stores it (`secret-tool store --label='Forge NAME' service forge account NAME` on Linux, `security add-generic-password -s forge -a NAME -w` on macOS). The profile ID is the file name and may use only letters, digits, `-`, and `_`.
 
 **`policy.toml`** (managed, user, or `.forge/policy.toml`)
 
