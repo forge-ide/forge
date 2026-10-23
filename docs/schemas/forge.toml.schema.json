@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProjectConfig",
+  "description": "The `forge.toml` file.",
+  "type": "object",
+  "properties": {
+    "budgets": {
+      "$ref": "#/$defs/Budgets"
+    },
+    "project": {
+      "$ref": "#/$defs/ProjectSection"
+    },
+    "repo": {
+      "description": "The repos in this project. v0.1 supports one.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RepoConfig"
+      }
+    },
+    "sessions": {
+      "$ref": "#/$defs/SessionLimits",
+      "default": {
+        "max_concurrent": 5,
+        "worktree_retention_days": 7
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": ["project", "repo"],
+  "$defs": {
+    "Budgets": {
+      "description": "Spending caps in USD. Unset means no cap.",
+      "type": "object",
+      "properties": {
+        "project_daily_usd": {
+          "type": ["number", "null"],
+          "format": "double"
+        },
+        "session_usd": {
+          "description": "Pause a session that spends more than this.",
+          "type": ["number", "null"],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProjectSection": {
+      "type": "object",
+      "properties": {
+        "default_agent": {
+          "description": "Agent profile ID used when a session doesn't name one.",
+          "type": ["string", "null"]
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": ["name"]
+    },
+    "RepoConfig": {
+      "type": "object",
+      "properties": {
+        "base_branch": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "description": "Relative to the project root, with forward slashes.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": ["name", "path", "base_branch"]
+    },
+    "SessionLimits": {
+      "type": "object",
+      "properties": {
+        "max_concurrent": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 5,
+          "minimum": 0
+        },
+        "worktree_retention_days": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 7,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

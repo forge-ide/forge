@@ -10,8 +10,29 @@ repository = "https://github.com/forge-ide/forge"
 publish = false
 
 [workspace.dependencies]
+forge-api = { path = "crates/forge-api" }
+forge-config = { path = "crates/forge-config" }
+forge-events = { path = "crates/forge-events" }
+
+anyhow = "1.0.104"
+clap = { version = "4.6.6", features = ["derive"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+schemars = "1.2.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 tauri = { version = "2", features = [] }
 tauri-build = { version = "2", features = [] }
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+time = { version = "0.3.55", features = ["formatting", "parsing", "serde"] }
+tokio = { version = "1.54.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-tungstenite = "0.30.0"
+toml = "1.1.8"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+ts-rs = { version = "12.0.1", features = ["no-serde-warnings", "serde-json-impl"] }
+ulid = "1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

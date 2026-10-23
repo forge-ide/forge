@@ -7,5 +7,24 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# A small async client over the daemon socket, for the CLI and integration tests.
+client = ["dep:futures-util", "dep:tokio", "dep:tokio-tungstenite"]
+
+[dependencies]
+futures-util = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
+ts-rs.workspace = true
+ulid.workspace = true
+
+[[bin]]
+name = "forge-api-gen"
+path = "src/bin/forge-api-gen.rs"
+
 [lints]
 workspace = true

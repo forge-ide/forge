@@ -45,13 +45,23 @@ icons: install
     pnpm --filter @forge/desktop tauri icon assets/icon-source.png -o src-tauri/icons
     rm -rf apps/desktop/src-tauri/icons/{android,ios,Square*.png,StoreLogo.png,64x64.png}
 
-# Regenerate TypeScript types and JSON Schemas from Rust types.
-gen:
-    @echo "just gen: nothing to generate until forge-api has types (M1)"
+generated := "packages/client/src/generated docs/schemas"
 
-# Fail if generated files are out of date. No-op until M1 adds generation.
+# Regenerate TypeScript types and JSON Schemas from Rust types.
+gen: install
+    mkdir -p docs/schemas
+    cargo run --quiet -p forge-api --bin forge-api-gen -- packages/client/src/generated/api.ts
+    cargo run --quiet -p forge-config --bin forge-config-schemas -- docs/schemas
+    pnpm exec prettier --log-level warn --ignore-path /dev/null --write {{generated}}
+
+# Fail if generated files are out of date.
 gen-check: gen
-    @echo "just gen-check: no generated files yet (M1)"
+    @if [ -n "$(git status --porcelain -- {{generated}})" ]; then \
+        git status --short -- {{generated}}; \
+        git diff --stat -- {{generated}}; \
+        echo "Generated files are out of date: run 'just gen' and commit the result." >&2; \
+        exit 1; \
+    fi
 
 # Sandbox escape suite for this platform.
 test-sandbox:

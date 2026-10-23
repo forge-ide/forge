@@ -1,0 +1,560 @@
+// Generated from crates/forge-api by `just gen`. Do not edit.
+
+export const API_VERSION = "0.1.0";
+
+export const EVENT_NOTIFICATION = "event";
+
+/** JSON-RPC error code for each application error kind. */
+export const ERROR_CODES: Record<ErrorKind, number> = {
+  NotFound: -32001,
+  InvalidState: -32002,
+  PolicyDenied: -32003,
+  AgentUnavailable: -32004,
+  SandboxUnavailable: -32005,
+  Conflict: -32006,
+  Unauthorized: -32007,
+  ValidationFailed: -32008,
+};
+
+/** Standard JSON-RPC codes for protocol-level failures. */
+export const RPC_CODES = {
+  parseError: -32700,
+  invalidRequest: -32600,
+  methodNotFound: -32601,
+  internalError: -32603,
+} as const;
+
+/**
+ * A project.
+ */
+export type ProjectId = string;
+
+/**
+ * A session.
+ */
+export type SessionId = string;
+
+/**
+ * An agent turn.
+ */
+export type TurnId = string;
+
+/**
+ * A worktree checkpoint.
+ */
+export type CheckpointId = string;
+
+/**
+ * A pending or decided approval.
+ */
+export type ApprovalId = string;
+
+/**
+ * A review thread.
+ */
+export type ThreadId = string;
+
+/**
+ * A comment in a review thread.
+ */
+export type CommentId = string;
+
+/**
+ * A diff hunk.
+ */
+export type HunkId = string;
+
+/**
+ * An event subscription on one connection.
+ */
+export type SubscriptionId = string;
+
+/**
+ * A point in time, always UTC on the wire.
+ */
+export type Timestamp = string;
+
+/**
+ * The kind of an application error. Each maps to one JSON-RPC error code.
+ */
+export type ErrorKind =
+  | "NotFound"
+  | "InvalidState"
+  | "PolicyDenied"
+  | "AgentUnavailable"
+  | "SandboxUnavailable"
+  | "Conflict"
+  | "Unauthorized"
+  | "ValidationFailed";
+
+/**
+ * The structured `data` field of an application error.
+ */
+export type ErrorData = { kind: ErrorKind; detail: string; retryable: boolean };
+
+/**
+ * How much the agent may do without asking.
+ */
+export type Mode = "ask" | "accept-edits" | "auto" | "full-access";
+
+/**
+ * Isolation tier for a session's agent process.
+ */
+export type SandboxTier = "light" | "standard" | "container" | "unsandboxed";
+
+/**
+ * Session lifecycle state (component-architecture.md, Session manager).
+ */
+export type SessionState =
+  "provisioning" | "ready" | "working" | "waiting" | "paused" | "review" | "done" | "failed";
+
+/**
+ * Operating system the daemon runs on.
+ */
+export type Platform = "linux" | "macos";
+
+/**
+ * An opened project. `root` is the one absolute path that crosses the API.
+ */
+export type Project = { id: ProjectId; name: string; root: string; repos: Array<Repo> };
+
+/**
+ * A repo within a project; `path` is relative to the project root.
+ */
+export type Repo = { name: string; path: string; baseBranch: string };
+
+export type AgentProfile = {
+  id: string;
+  /**
+   * Registry key: `claude-code`, `codex`, `gemini`, or another adapter.
+   */
+  agent: string;
+  installed: boolean;
+  authenticated: boolean;
+  version?: string;
+};
+
+export type Usage = { inputTokens: number; outputTokens: number; costUsd?: number };
+
+export type Session = {
+  id: SessionId;
+  projectId: ProjectId;
+  title: string;
+  agentProfile: string;
+  state: SessionState;
+  mode: Mode;
+  sandbox: SandboxTier;
+  branch: string;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+  usage: Usage;
+};
+
+export type EditKind = "create" | "modify" | "delete";
+
+/**
+ * Something an agent wants to do; every action gets exactly one policy decision.
+ */
+export type Action =
+  | { type: "edit"; path: string; kind: EditKind }
+  | { type: "exec"; argv: Array<string>; cwd: string }
+  | { type: "network"; host: string; port: number }
+  | { type: "mcp"; server: string; tool: string; args: unknown }
+  | { type: "git"; op: string };
+
+export type Approval = {
+  id: ApprovalId;
+  sessionId: SessionId;
+  action: Action;
+  reason: string;
+  createdAt: Timestamp;
+};
+
+export type Hunk = {
+  id: HunkId;
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  lines: Array<string>;
+  turnId?: TurnId;
+};
+
+export type FileStatus = "added" | "modified" | "deleted" | "renamed";
+
+export type FileChange = {
+  path: string;
+  status: FileStatus;
+  oldPath?: string;
+  additions: number;
+  deletions: number;
+};
+
+export type Changeset = {
+  sessionId: SessionId;
+  base: string;
+  head: string;
+  files: Array<FileChange>;
+};
+
+/**
+ * Inclusive, 1-based line range.
+ */
+export type LineRange = { startLine: number; endLine: number };
+
+export type ThreadStatus = "open" | "resolved" | "outdated";
+
+export type Thread = {
+  id: ThreadId;
+  sessionId: SessionId;
+  path: string;
+  range: LineRange;
+  checkpointId: CheckpointId;
+  status: ThreadStatus;
+  comments: Array<Comment>;
+};
+
+export type CommentAuthor = "human" | "agent";
+
+export type Comment = { id: CommentId; author: CommentAuthor; body: string; createdAt: Timestamp };
+
+/**
+ * One entry in a session's event log.
+ */
+export type Event = {
+  /**
+   * Per-session, gap-free.
+   */
+  seq: number;
+  sessionId: SessionId;
+  at: Timestamp;
+  /**
+   * Links a decision, hook run, or result to the tool call it belongs to.
+   */
+  parent?: number;
+} & (
+  | { kind: "session.state"; body: SessionStateBody }
+  | { kind: "turn.started"; body: TurnStartedBody }
+  | { kind: "turn.ended"; body: TurnEndedBody }
+  | { kind: "prompt"; body: PromptBody }
+  | { kind: "agent.message"; body: AgentMessageBody }
+  | { kind: "agent.plan"; body: AgentPlanBody }
+  | { kind: "tool.call"; body: ToolCallBody }
+  | { kind: "tool.result"; body: ToolResultBody }
+  | { kind: "policy.decision"; body: PolicyDecisionBody }
+  | { kind: "hook.run"; body: HookRunBody }
+  | { kind: "approval.requested"; body: ApprovalRequestedBody }
+  | { kind: "approval.decided"; body: ApprovalDecidedBody }
+  | { kind: "edit"; body: EditBody }
+  | { kind: "terminal.output"; body: TerminalOutputBody }
+  | { kind: "checkpoint"; body: CheckpointBody }
+  | { kind: "review.thread"; body: ReviewThreadBody }
+  | { kind: "usage"; body: Usage }
+  | { kind: "error"; body: ErrorData }
+);
+
+/**
+ * An event's `kind` and `body`.
+ */
+export type EventPayload =
+  | { kind: "session.state"; body: SessionStateBody }
+  | { kind: "turn.started"; body: TurnStartedBody }
+  | { kind: "turn.ended"; body: TurnEndedBody }
+  | { kind: "prompt"; body: PromptBody }
+  | { kind: "agent.message"; body: AgentMessageBody }
+  | { kind: "agent.plan"; body: AgentPlanBody }
+  | { kind: "tool.call"; body: ToolCallBody }
+  | { kind: "tool.result"; body: ToolResultBody }
+  | { kind: "policy.decision"; body: PolicyDecisionBody }
+  | { kind: "hook.run"; body: HookRunBody }
+  | { kind: "approval.requested"; body: ApprovalRequestedBody }
+  | { kind: "approval.decided"; body: ApprovalDecidedBody }
+  | { kind: "edit"; body: EditBody }
+  | { kind: "terminal.output"; body: TerminalOutputBody }
+  | { kind: "checkpoint"; body: CheckpointBody }
+  | { kind: "review.thread"; body: ReviewThreadBody }
+  | { kind: "usage"; body: Usage }
+  | { kind: "error"; body: ErrorData };
+
+/**
+ * Event kinds without bodies, for filters such as `events.query { kinds }`.
+ */
+export type EventKind =
+  | "session.state"
+  | "turn.started"
+  | "turn.ended"
+  | "prompt"
+  | "agent.message"
+  | "agent.plan"
+  | "tool.call"
+  | "tool.result"
+  | "policy.decision"
+  | "hook.run"
+  | "approval.requested"
+  | "approval.decided"
+  | "edit"
+  | "terminal.output"
+  | "checkpoint"
+  | "review.thread"
+  | "usage"
+  | "error";
+
+export type SessionStateBody = { from: SessionState; to: SessionState; reason?: string };
+
+export type TurnSource = "human" | "review" | "hook";
+
+export type TurnStartedBody = { turnId: TurnId; source: TurnSource };
+
+export type TurnEndedBody = { turnId: TurnId; stopReason: string };
+
+export type PromptBody = { turnId: TurnId; text: string };
+
+export type AgentMessageBody = { turnId: TurnId; messageId: string; delta: string };
+
+export type PlanEntry = { content: string; status: string };
+
+export type AgentPlanBody = { entries: Array<PlanEntry> };
+
+export type ToolCallBody = { toolCallId: string; action: Action; title: string };
+
+export type ToolResultBody = {
+  toolCallId: string;
+  status: string;
+  /**
+   * Truncated and redacted.
+   */
+  output?: string;
+};
+
+export type Verdict = "allow" | "deny" | "ask";
+
+export type PolicyDecisionBody = {
+  toolCallId: string;
+  verdict: Verdict;
+  reason: string;
+  source: string;
+};
+
+export type HookRunBody = {
+  hook: string;
+  event: string;
+  verdict?: Verdict;
+  durationMs: number;
+  exitCode: number;
+};
+
+export type ApprovalRequestedBody = { approvalId: ApprovalId; action: Action; reason: string };
+
+export type ApprovalDecision = "allow" | "deny";
+
+/**
+ * How long an approval decision is remembered.
+ */
+export type Remember = "session" | "project";
+
+export type ApprovalDecidedBody = {
+  approvalId: ApprovalId;
+  decision: ApprovalDecision;
+  remember?: Remember;
+};
+
+export type EditBody = { path: string; kind: EditKind; additions: number; deletions: number };
+
+export type TerminalOutputBody = { terminalId: string; chunk: string };
+
+export type CheckpointBody = { checkpointId: CheckpointId; turnId: TurnId; ref: string };
+
+export type ThreadChange = "created" | "reply" | "resolved" | "outdated";
+
+export type ReviewThreadBody = { threadId: ThreadId; change: ThreadChange };
+
+/**
+ * A subscription topic: `board`, `approvals`, `session/<id>`, or `project/<id>`.
+ */
+export type Topic = "board" | "approvals" | `session/${string}` | `project/${string}`;
+
+/**
+ * Params of the `event` notification the daemon pushes to subscribers.
+ */
+export type EventNotification = {
+  subscriptionId: SubscriptionId;
+  topic: Topic;
+  seq: number;
+  event: Event;
+};
+
+/**
+ * Params or result written as `{}` on the wire.
+ */
+export type Empty = Record<string, never>;
+
+export type HelloParams = {
+  /**
+   * Free-form client name, for logs: `forge-cli`, `forge-desktop`.
+   */
+  client: string;
+  /**
+   * The API version the client was built against.
+   */
+  apiVersion: string;
+};
+
+export type HelloResult = {
+  daemonVersion: string;
+  apiVersion: string;
+  platform: Platform;
+  sandboxTiers: Array<SandboxTier>;
+};
+
+export type ProjectOpenParams = {
+  /**
+   * Absolute path to the project root. Clients resolve relative paths first.
+   */
+  path: string;
+};
+
+export type ProjectGetParams = { projectId: ProjectId };
+
+export type SessionCreateParams = {
+  projectId: ProjectId;
+  agentProfile: string;
+  title: string;
+  prompt: string;
+  mode: Mode;
+  sandbox?: SandboxTier;
+};
+
+export type SessionPromptParams = { sessionId: SessionId; text: string };
+
+export type TurnResult = { turnId: TurnId };
+
+export type SessionIdParams = { sessionId: SessionId };
+
+export type SessionSetModeParams = { sessionId: SessionId; mode: Mode; sandbox?: SandboxTier };
+
+export type SessionRewindParams = { sessionId: SessionId; checkpointId: CheckpointId };
+
+export type SessionListParams = { projectId: ProjectId; states?: Array<SessionState> };
+
+export type SessionOutcome = "shipped" | "abandoned";
+
+export type SessionCloseParams = { sessionId: SessionId; outcome: SessionOutcome };
+
+export type ApprovalListParams = { projectId?: ProjectId };
+
+export type ApprovalDecideParams = {
+  approvalId: ApprovalId;
+  decision: ApprovalDecision;
+  remember?: Remember;
+  note?: string;
+};
+
+export type ReviewChangesetParams = { sessionId: SessionId; fromCheckpoint?: CheckpointId };
+
+export type ReviewFileDiffParams = {
+  sessionId: SessionId;
+  path: string;
+  fromCheckpoint?: CheckpointId;
+};
+
+export type FileDiffResult = { hunks: Array<Hunk> };
+
+export type ReviewCommentParams = {
+  sessionId: SessionId;
+  path: string;
+  range: LineRange;
+  body: string;
+};
+
+export type ReviewReplyParams = { threadId: ThreadId; body: string };
+
+export type ThreadIdParams = { threadId: ThreadId };
+
+export type ReviewThreadsParams = { sessionId: SessionId; status?: ThreadStatus };
+
+export type ReviewRevertHunkParams = { sessionId: SessionId; path: string; hunkId: HunkId };
+
+export type ShipStrategy = "push-branch" | "merge-local";
+
+export type ReviewShipParams = { sessionId: SessionId; strategy: ShipStrategy; branch?: string };
+
+export type ShipResult = { ref: string };
+
+export type FileReadParams = { projectId: ProjectId; path: string; sessionId?: SessionId };
+
+export type FileReadResult = { content: string; hash: string };
+
+export type FileWriteParams = {
+  projectId: ProjectId;
+  path: string;
+  content: string;
+  baseHash: string;
+  sessionId?: SessionId;
+};
+
+export type FileWriteResult = { hash: string };
+
+export type LspRequestParams = {
+  projectId: ProjectId;
+  sessionId?: SessionId;
+  method: string;
+  params: unknown;
+};
+
+/**
+ * A raw LSP result, passed through unchanged.
+ */
+export type LspResult = unknown;
+
+export type EventsSubscribeParams = { topics: Array<Topic>; afterSeq?: number };
+
+export type SubscribeResult = { subscriptionId: SubscriptionId };
+
+export type EventsUnsubscribeParams = { subscriptionId: SubscriptionId };
+
+export type EventsQueryParams = {
+  sessionId: SessionId;
+  kinds?: Array<EventKind>;
+  text?: string;
+  /**
+   * Only events with a lower `seq`.
+   */
+  before?: number;
+  limit: number;
+};
+
+/** Params and result of every daemon method, keyed by method name. */
+export type Methods = {
+  "server.hello": { params: HelloParams; result: HelloResult };
+  "project.open": { params: ProjectOpenParams; result: Project };
+  "project.list": { params: Empty; result: Array<Project> };
+  "project.get": { params: ProjectGetParams; result: Project };
+  "agent.list": { params: Empty; result: Array<AgentProfile> };
+  "session.create": { params: SessionCreateParams; result: Session };
+  "session.prompt": { params: SessionPromptParams; result: TurnResult };
+  "session.cancel": { params: SessionIdParams; result: Empty };
+  "session.setMode": { params: SessionSetModeParams; result: Session };
+  "session.rewind": { params: SessionRewindParams; result: Session };
+  "session.get": { params: SessionIdParams; result: Session };
+  "session.list": { params: SessionListParams; result: Array<Session> };
+  "session.close": { params: SessionCloseParams; result: Empty };
+  "approval.list": { params: ApprovalListParams; result: Array<Approval> };
+  "approval.decide": { params: ApprovalDecideParams; result: Empty };
+  "review.changeset": { params: ReviewChangesetParams; result: Changeset };
+  "review.fileDiff": { params: ReviewFileDiffParams; result: FileDiffResult };
+  "review.comment": { params: ReviewCommentParams; result: Thread };
+  "review.reply": { params: ReviewReplyParams; result: Thread };
+  "review.resolve": { params: ThreadIdParams; result: Thread };
+  "review.threads": { params: ReviewThreadsParams; result: Array<Thread> };
+  "review.requestChanges": { params: SessionIdParams; result: TurnResult };
+  "review.revertHunk": { params: ReviewRevertHunkParams; result: Empty };
+  "review.ship": { params: ReviewShipParams; result: ShipResult };
+  "file.read": { params: FileReadParams; result: FileReadResult };
+  "file.write": { params: FileWriteParams; result: FileWriteResult };
+  "lsp.request": { params: LspRequestParams; result: LspResult };
+  "events.subscribe": { params: EventsSubscribeParams; result: SubscribeResult };
+  "events.unsubscribe": { params: EventsUnsubscribeParams; result: Empty };
+  "events.query": { params: EventsQueryParams; result: Array<Event> };
+};
+
+export type MethodName = keyof Methods;
