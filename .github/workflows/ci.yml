@@ -84,3 +84,10 @@ jobs:
           log show --last 15m --style compact \
             --predicate 'eventMessage CONTAINS "forge-sandbox" OR eventMessage CONTAINS "sandbox-exec" OR eventMessage CONTAINS "forge-fake-agen"' \
             | tail -300
+          # The crash report's termination reason says why dyld or the kernel killed it.
+          for report in ~/Library/Logs/DiagnosticReports/forge-*.ips; do
+            [ -e "$report" ] || continue
+            echo "== $report"
+            head -c 6000 "$report"
+            echo
+          done
