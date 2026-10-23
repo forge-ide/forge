@@ -80,4 +80,7 @@ jobs:
       # Seatbelt reports what it denied only to the unified log.
       - name: Show Seatbelt denials
         if: failure() && runner.os == 'macOS'
-        run: log show --last 15m --style compact --predicate 'sender == "Sandbox"' | tail -200
+        run: |
+          log show --last 15m --style compact \
+            --predicate 'eventMessage CONTAINS "forge-sandbox" OR eventMessage CONTAINS "sandbox-exec" OR eventMessage CONTAINS "forge-fake-agen"' \
+            | tail -300
