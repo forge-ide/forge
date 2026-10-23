@@ -1,12 +1,12 @@
 //! macOS backend: one Seatbelt profile, through `sandbox-exec`, for both Light and Standard.
 //! Seatbelt has no cheaper, weaker mode worth offering, so the two tiers are the same here.
 //!
-//! The profile denies by default. It allows mapping executable code (dyld needs it to load any
-//! binary; reading is still limited), reading system directories, toolchains, the
-//! session's worktrees, and each repo's git dir; writing only the worktrees, their own git dirs,
-//! and the session's scratch dirs; signals only within the sandbox; and no network. File
-//! metadata stays readable everywhere so path lookups work, but contents outside the allowed
-//! paths do not.
+//! The profile denies by default. It allows mapping executable code and listing `/` (dyld needs
+//! both to start any program; reads below `/` are still limited), reading system directories,
+//! toolchains, the session's worktrees, and each repo's git dir; writing only the worktrees,
+//! their own git dirs, and the session's scratch dirs; signals only within the sandbox; and no
+//! network. File metadata stays readable everywhere so path lookups work, but contents outside
+//! the allowed paths do not.
 
 use std::path::Path;
 use std::process::Stdio;
@@ -139,7 +139,8 @@ fn profile(view: &View) -> String {
          (allow process-info* (target same-sandbox))\n\
          (allow sysctl-read)\n\
          (allow user-preference-read)\n\
-         (allow file-read-metadata file-test-existence)\n\
+         (allow file-read-metadata)\n\
+         (allow file-read-data (literal \"/\"))\n\
          (allow ipc-posix-shm-read-data ipc-posix-shm-read-metadata)\n",
     );
     p.push_str("(allow mach-lookup\n");
