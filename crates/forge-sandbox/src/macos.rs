@@ -139,7 +139,7 @@ fn profile(view: &View) -> String {
          (allow process-info* (target same-sandbox))\n\
          (allow sysctl-read)\n\
          (allow user-preference-read)\n\
-         (allow file-read-metadata)\n\
+         (allow file-read-metadata file-test-existence)\n\
          (allow ipc-posix-shm-read-data ipc-posix-shm-read-metadata)\n",
     );
     p.push_str("(allow mach-lookup\n");
