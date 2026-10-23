@@ -10,6 +10,8 @@ class FakeTransport implements DaemonTransport {
   up = true;
   apiVersion = API_VERSION;
   connects = 0;
+  /** Accept requests but never answer them, like a daemon that dies mid-call. */
+  holdReplies = false;
   requests: Request[] = [];
   private message = new Set<(text: string) => void>();
   private close = new Set<(reason: string) => void>();
@@ -24,7 +26,7 @@ class FakeTransport implements DaemonTransport {
     if (!this.up) return Promise.reject(new Error("not connected"));
     const req = JSON.parse(text) as Request;
     this.requests.push(req);
-    queueMicrotask(() => this.reply(req));
+    if (!this.holdReplies) queueMicrotask(() => this.reply(req));
     return Promise.resolve();
   }
 
@@ -182,6 +184,22 @@ describe("DaemonConnection", () => {
     transport.push(note("sub_2", 3));
     expect(seen).toEqual([1, 2, 3]);
     expect(states.map((s) => s.kind)).toEqual(["connected", "reconnecting", "connected"]);
+  });
+
+  it("retries when the connection drops before hello is answered", async () => {
+    const transport = new FakeTransport();
+    transport.holdReplies = true;
+    const conn = new DaemonConnection(transport);
+    conn.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(transport.requests.map((r) => r.method)).toEqual(["server.hello"]);
+
+    transport.drop();
+    transport.up = true;
+    transport.holdReplies = false;
+    await vi.runAllTimersAsync();
+    expect(transport.connects).toBe(2);
+    expect(conn.state.kind).toBe("connected");
   });
 
   it("rejects calls while disconnected", async () => {

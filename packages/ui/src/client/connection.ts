@@ -168,7 +168,11 @@ export class DaemonConnection {
   }
 
   private lost(reason: string): void {
-    if (this.current.kind !== "connected") return;
+    if (this.current.kind !== "connected") {
+      // Mid-handshake: failing the pending hello lets tryConnect schedule the retry.
+      this.rpc?.failAll(new Error(reason));
+      return;
+    }
     this.rpc?.failAll(new Error(reason));
     this.rpc = undefined;
     for (const sub of this.subs) sub.serverId = undefined;
