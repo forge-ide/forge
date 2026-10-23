@@ -4,6 +4,10 @@
   "description": "The `forge.toml` file.",
   "type": "object",
   "properties": {
+    "branches": {
+      "description": "Overrides the user's branch naming for this project.",
+      "$ref": "#/$defs/BranchConfig"
+    },
     "budgets": {
       "$ref": "#/$defs/Budgets"
     },
@@ -28,6 +32,24 @@
   "additionalProperties": false,
   "required": ["project", "repo"],
   "$defs": {
+    "BranchConfig": {
+      "description": "Branch naming. Unset keys fall back to the next layer: `forge.toml`, then the user config,\nthen the defaults.",
+      "type": "object",
+      "properties": {
+        "format": {
+          "description": "Template for new branch names. `{type}` is the branch type and `{slug}` comes from the\nsession title. Default `{type}/{slug}`.",
+          "type": ["string", "null"]
+        },
+        "types": {
+          "description": "Branch types a title may start with, as in `fix: retry loop`. The first is used when the\ntitle names none. Default `[\"feat\", \"fix\", \"bug\"]`.",
+          "type": ["array", "null"],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "Budgets": {
       "description": "Spending caps in USD. Unset means no cap.",
       "type": "object",

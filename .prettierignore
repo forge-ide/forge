@@ -1,4 +1,6 @@
 target/
+# Session worktrees are copies of the repo with their own checks.
+.worktrees/
 dist/
 pnpm-lock.yaml
 packages/client/src/generated/

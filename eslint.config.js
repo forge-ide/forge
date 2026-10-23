@@ -9,6 +9,8 @@ export default tseslint.config(
       "**/dist/",
       "**/node_modules/",
       "target/",
+      // Session worktrees are copies of the repo with their own checks.
+      ".worktrees/",
       "apps/desktop/src-tauri/",
       "packages/client/src/generated/",
     ],

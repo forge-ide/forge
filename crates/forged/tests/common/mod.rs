@@ -136,6 +136,86 @@ pub fn git_repo(parent: &Path, name: &str) -> PathBuf {
     path.canonicalize().unwrap()
 }
 
+/// Run git in `dir` with a fixed identity and no user or system config; panics on failure.
+pub fn git(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// A git repo on `main` with one commit, so worktrees can branch from it.
+pub fn git_repo_with_commit(parent: &Path, name: &str) -> PathBuf {
+    let path = git_repo(parent, name);
+    std::fs::write(path.join("README.md"), "# demo\n").unwrap();
+    git(&path, &["add", "README.md"]);
+    git(&path, &["commit", "--quiet", "-m", "initial"]);
+    path
+}
+
+/// The fake agent binary, built on first use. Cargo only exposes a package's own binaries to
+/// its tests, so build it next to `forged` with the same profile.
+pub fn fake_agent() -> &'static Path {
+    static BIN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BIN.get_or_init(|| {
+        let forged = Path::new(env!("CARGO_BIN_EXE_forged"));
+        let mut cmd = Command::new(env!("CARGO"));
+        cmd.args(["build", "--quiet", "-p", "forge-fake-agent"]);
+        if forged.parent().and_then(|p| p.file_name()) == Some("release".as_ref()) {
+            cmd.arg("--release");
+        }
+        assert!(cmd.status().unwrap().success(), "building forge-fake-agent");
+        let bin = forged.with_file_name("forge-fake-agent");
+        assert!(bin.exists(), "{} missing after build", bin.display());
+        bin
+    })
+}
+
+/// Write `.forge/agents/<id>.toml` running the fake agent on `script` (YAML text), unsandboxed.
+pub fn fake_profile(repo: &Path, id: &str, script: &str) {
+    let dir = repo.join(".forge/agents");
+    std::fs::create_dir_all(&dir).unwrap();
+    let script_path = dir.join(format!("{id}.yaml"));
+    std::fs::write(&script_path, script).unwrap();
+    let profile = format!(
+        "agent = \"fake\"\ncommand = [{:?}, {:?}]\nsandbox = \"unsandboxed\"\nallow_unsandboxed = true\n",
+        fake_agent().to_str().unwrap(),
+        script_path.to_str().unwrap(),
+    );
+    std::fs::write(dir.join(format!("{id}.toml")), profile).unwrap();
+    // Keep the test's own files out of the repo's status checks.
+    let exclude = repo.join(".git/info/exclude");
+    if exclude.parent().unwrap().is_dir() {
+        let mut text = std::fs::read_to_string(&exclude).unwrap_or_default();
+        if !text.contains(".forge/agents/") {
+            text.push_str(".forge/agents/\n");
+            std::fs::write(&exclude, text).unwrap();
+        }
+    }
+}
+
+impl Daemon {
+    /// Kill the daemon without letting it clean up, as a crash would.
+    pub fn kill(mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 pub fn expect_api_error(
     result: Result<impl std::fmt::Debug, ClientError>,
     kind: ErrorKind,

@@ -53,18 +53,20 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 
 ### M2: Sessions, worktrees, and the fake agent
 
-- [ ] `forge-git`: create, list, and remove worktrees and `forge/<slug>` branches.
-- [ ] `forge-session`: the state machine from the component architecture, persisted in SQLite.
-- [ ] `forge-acp`: ACP client handling file read/write, terminals, permission requests, and session updates.
-- [ ] `forge-fake-agent`: an ACP agent that replays a YAML script of steps (see quality-and-safety.md).
-- [ ] `forge-events`: JSONL log plus SQLite index; redaction hook point.
-- [ ] `session.create`, `prompt`, `cancel`, `get`, `list`, `close`.
-- [ ] Deferred from M1: `events.subscribe` replays from the event log after `afterSeq` (the daemon accepts and ignores it today).
-- [ ] Deferred from M1: connection limits in `forged` before events flow: a bounded per-connection outgoing queue that drops a client that stops reading, a WebSocket handshake timeout, and a cap on in-flight requests per connection.
-- [ ] Deferred from M1: a subscription that completes after its connection closed must be removed at once, not on the next failed send.
-- [ ] Deferred from M1: before creating a worktree, resolve each repo path from `forge.toml` and check it is still inside the project root. The config check is lexical, so a symlinked repo path can point outside the root.
+- [x] `forge-git`: create, list, and remove worktrees in `<repo>/.worktrees/`, on branches named by the user's convention (`{type}/{slug}` by default); name collisions ask the user.
+- [x] `forge-session`: the state machine from the component architecture, persisted in SQLite.
+- [x] `forge-acp`: ACP client handling file read/write, terminals, permission requests, and session updates.
+- [x] `forge-fake-agent`: an ACP agent that replays a YAML script of steps (see quality-and-safety.md).
+- [x] `forge-events`: JSONL log plus SQLite index; redaction hook point.
+- [x] `session.create`, `prompt`, `cancel`, `get`, `list`, `close`, and `session.branchPreview`.
+- [x] Deferred from M1: `events.subscribe` replays from the event log after `afterSeq`.
+- [x] Deferred from M1: connection limits in `forged` before events flow: a bounded per-connection outgoing queue that drops a client that stops reading, a WebSocket handshake timeout, and a cap on in-flight requests per connection.
+- [x] Deferred from M1: a subscription that completes after its connection closed must be removed at once, not on the next failed send.
+- [x] Deferred from M1: before creating a worktree, resolve each repo path from `forge.toml` and check it is still inside the project root. The config check is lexical, so a symlinked repo path can point outside the root.
 
-**Done when:** an integration test runs the fake agent to edit two files and run one command in a worktree, the session moves Provisioning → Ready → Working → Review, and every step is in the event log; and a test kills and restarts a client mid-stream, resubscribes with `afterSeq`, and loses no events. Before that test, settle what `seq` and `afterSeq` mean for topics that span sessions (`board`, `project/<id>`), since event `seq` is per session.
+**Done when:** an integration test runs the fake agent to edit two files and run one command in a worktree, the session moves Provisioning → Ready → Working → Review, and every step is in the event log; and a test kills and restarts a client mid-stream, resubscribes with `afterSeq`, and loses no events. Settled for that test: notification `seq` is a daemon-wide stream cursor, so one `afterSeq` covers every topic, including `board` and `project/<id>`, which span sessions; event `seq` stays per session.
+
+**No sandbox yet:** until M3, sessions run only unsandboxed, and only for agent profiles that set `allow_unsandboxed = true`; any other tier is `SandboxUnavailable`.
 
 ### M3: Sandbox
 

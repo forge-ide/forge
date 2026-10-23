@@ -4,12 +4,18 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, bail};
-use forge_api::model::{Project, Repo};
-use forge_api::{ProjectId, Timestamp};
-use rusqlite::{Connection, OptionalExtension, params};
+use forge_api::model::{Project, Repo, Session, SessionState, Usage};
+use forge_api::{ProjectId, SessionId, Timestamp};
+use forge_session::{SessionStore, StoreError, WorktreeRecord};
+use rusqlite::{Connection, OptionalExtension, Row, params};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 /// Migrations in order. Never edit one that has shipped; add a new file instead.
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_projects.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/0001_projects.sql"),
+    include_str!("../migrations/0002_sessions.sql"),
+];
 
 /// The daemon's database. Every call runs on the blocking pool.
 #[derive(Clone)]
@@ -28,6 +34,15 @@ impl Db {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
+    }
+
+    /// The connection, for components that own their own tables (the event log).
+    pub fn shared(&self) -> forge_events::SharedConn {
+        self.conn.clone()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     async fn call<T, F>(&self, f: F) -> anyhow::Result<T>
@@ -95,6 +110,19 @@ impl Db {
         .await
     }
 
+    /// A project's root, without going through the async pool. Blocking.
+    pub fn project_root(&self, id: &ProjectId) -> anyhow::Result<Option<std::path::PathBuf>> {
+        let root: Option<String> = self
+            .lock()
+            .query_row(
+                "SELECT root FROM projects WHERE id = ?1",
+                [id.as_str()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(root.map(std::path::PathBuf::from))
+    }
+
     pub async fn get_project(&self, id: ProjectId) -> anyhow::Result<Option<Project>> {
         self.call(move |conn| {
             let row: Option<(String, String)> = conn
@@ -133,6 +161,188 @@ fn with_repos(
         root,
         repos,
     })
+}
+
+const SESSION_COLUMNS: &str = "id, project_id, title, agent_profile, state, mode, sandbox, branch,
+    input_tokens, output_tokens, cost_usd, created_at, updated_at";
+
+impl SessionStore for Db {
+    fn insert(&self, session: &Session, worktrees: &[WorktreeRecord]) -> Result<(), StoreError> {
+        let mut conn = self.lock();
+        let tx = conn.transaction().map_err(store_err)?;
+        tx.execute(
+            "INSERT INTO sessions (id, project_id, title, agent_profile, state, mode, sandbox,
+               branch, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                session.id.as_str(),
+                session.project_id.as_str(),
+                session.title,
+                session.agent_profile,
+                wire(session.state),
+                wire(session.mode),
+                wire(session.sandbox),
+                session.branch,
+                session.created_at.to_string(),
+                session.updated_at.to_string(),
+            ],
+        )
+        .map_err(store_err)?;
+        for w in worktrees {
+            tx.execute(
+                "INSERT INTO worktrees (session_id, repo_name, path) VALUES (?1, ?2, ?3)",
+                params![session.id.as_str(), w.repo, w.path.to_string_lossy()],
+            )
+            .map_err(store_err)?;
+        }
+        tx.commit().map_err(store_err)
+    }
+
+    fn set_state(
+        &self,
+        id: &SessionId,
+        state: SessionState,
+        at: Timestamp,
+    ) -> Result<(), StoreError> {
+        self.lock()
+            .execute(
+                "UPDATE sessions SET state = ?1, updated_at = ?2 WHERE id = ?3",
+                params![wire(state), at.to_string(), id.as_str()],
+            )
+            .map(drop)
+            .map_err(store_err)
+    }
+
+    fn get(&self, id: &SessionId) -> Result<Option<Session>, StoreError> {
+        self.lock()
+            .query_row(
+                &format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE id = ?1"),
+                [id.as_str()],
+                session_row,
+            )
+            .optional()
+            .map_err(store_err)
+    }
+
+    fn list(
+        &self,
+        project: &ProjectId,
+        states: Option<&[SessionState]>,
+    ) -> Result<Vec<Session>, StoreError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {SESSION_COLUMNS} FROM sessions WHERE project_id = ?1
+                 ORDER BY created_at DESC, id DESC"
+            ))
+            .map_err(store_err)?;
+        let sessions = stmt
+            .query_map([project.as_str()], session_row)
+            .map_err(store_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(store_err)?;
+        Ok(match states {
+            Some(states) => sessions
+                .into_iter()
+                .filter(|s| states.contains(&s.state))
+                .collect(),
+            None => sessions,
+        })
+    }
+
+    fn in_states(&self, states: &[SessionState]) -> Result<Vec<Session>, StoreError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {SESSION_COLUMNS} FROM sessions ORDER BY created_at"
+            ))
+            .map_err(store_err)?;
+        let sessions = stmt
+            .query_map([], session_row)
+            .map_err(store_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(store_err)?;
+        Ok(sessions
+            .into_iter()
+            .filter(|s| states.contains(&s.state))
+            .collect())
+    }
+
+    fn worktrees(&self, id: &SessionId) -> Result<Vec<WorktreeRecord>, StoreError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare("SELECT repo_name, path FROM worktrees WHERE session_id = ?1 ORDER BY rowid")
+            .map_err(store_err)?;
+        stmt.query_map([id.as_str()], |r| {
+            Ok(WorktreeRecord {
+                repo: r.get(0)?,
+                path: std::path::PathBuf::from(r.get::<_, String>(1)?),
+            })
+        })
+        .map_err(store_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(store_err)
+    }
+
+    fn live_owner(&self, path: &Path) -> Result<Option<SessionId>, StoreError> {
+        let id: Option<String> = self
+            .lock()
+            .query_row(
+                "SELECT s.id FROM worktrees w JOIN sessions s ON s.id = w.session_id
+                 WHERE w.path = ?1 AND s.state NOT IN ('done', 'failed')
+                 ORDER BY s.created_at DESC LIMIT 1",
+                [path.to_string_lossy()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(store_err)?;
+        id.map(|id| id.parse().map_err(|e| StoreError(format!("{e}"))))
+            .transpose()
+    }
+}
+
+fn session_row(r: &Row<'_>) -> rusqlite::Result<Session> {
+    let text = |i: usize| r.get::<_, String>(i);
+    let bad = |i: usize, e: String| {
+        rusqlite::Error::FromSqlConversionFailure(i, rusqlite::types::Type::Text, e.into())
+    };
+    Ok(Session {
+        id: text(0)?
+            .parse()
+            .map_err(|e: forge_api::InvalidId| bad(0, e.to_string()))?,
+        project_id: text(1)?
+            .parse()
+            .map_err(|e: forge_api::InvalidId| bad(1, e.to_string()))?,
+        title: text(2)?,
+        agent_profile: text(3)?,
+        state: from_wire(&text(4)?).map_err(|e| bad(4, e))?,
+        mode: from_wire(&text(5)?).map_err(|e| bad(5, e))?,
+        sandbox: from_wire(&text(6)?).map_err(|e| bad(6, e))?,
+        branch: text(7)?,
+        usage: Usage {
+            input_tokens: r.get::<_, i64>(8)?.max(0) as u64,
+            output_tokens: r.get::<_, i64>(9)?.max(0) as u64,
+            cost_usd: r.get(10)?,
+        },
+        created_at: text(11)?.parse().map_err(|e| bad(11, format!("{e}")))?,
+        updated_at: text(12)?.parse().map_err(|e| bad(12, format!("{e}")))?,
+    })
+}
+
+/// An enum's wire spelling, as stored in text columns.
+fn wire<T: Serialize>(value: T) -> String {
+    match serde_json::to_value(value) {
+        Ok(serde_json::Value::String(s)) => s,
+        other => unreachable!("expected a string enum, got {other:?}"),
+    }
+}
+
+fn from_wire<T: DeserializeOwned>(text: &str) -> Result<T, String> {
+    serde_json::from_value(serde_json::Value::String(text.to_owned())).map_err(|e| e.to_string())
+}
+
+fn store_err(e: rusqlite::Error) -> StoreError {
+    StoreError(e.to_string())
 }
 
 /// Apply pending migrations, tracking progress in `PRAGMA user_version`.
@@ -200,6 +410,61 @@ mod tests {
         drop(conn);
         let err = Db::open(&path).err().unwrap();
         assert!(format!("{err:#}").contains("newer"), "{err:#}");
+    }
+
+    #[test]
+    fn sessions_round_trip() {
+        use forge_api::model::{Mode, SandboxTier};
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("forge.db")).unwrap();
+        let project = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(db.upsert_project("/p".into(), "p".into(), vec![repo("p", "main")]))
+            .unwrap();
+        let session = Session {
+            id: SessionId::new(),
+            project_id: project.id.clone(),
+            title: "t".into(),
+            agent_profile: "fake".into(),
+            state: SessionState::Provisioning,
+            mode: Mode::AcceptEdits,
+            sandbox: SandboxTier::Unsandboxed,
+            branch: "feat/t".into(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
+            usage: Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_usd: None,
+            },
+        };
+        let wt = WorktreeRecord {
+            repo: "p".into(),
+            path: "/p/.worktrees/feat/t".into(),
+        };
+        db.insert(&session, std::slice::from_ref(&wt)).unwrap();
+        assert_eq!(db.get(&session.id).unwrap(), Some(session.clone()));
+        assert_eq!(
+            db.worktrees(&session.id).unwrap(),
+            std::slice::from_ref(&wt)
+        );
+        assert_eq!(db.live_owner(&wt.path).unwrap(), Some(session.id.clone()));
+        assert_eq!(
+            db.in_states(&[SessionState::Provisioning]).unwrap().len(),
+            1
+        );
+
+        let at = Timestamp::now();
+        db.set_state(&session.id, SessionState::Done, at).unwrap();
+        let done = db.get(&session.id).unwrap().unwrap();
+        assert_eq!((done.state, done.updated_at), (SessionState::Done, at));
+        assert_eq!(db.live_owner(&wt.path).unwrap(), None);
+        assert_eq!(db.list(&project.id, None).unwrap().len(), 1);
+        assert!(
+            db.list(&project.id, Some(&[SessionState::Ready]))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

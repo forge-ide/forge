@@ -33,7 +33,7 @@ function fakeConnection(list: () => Promise<Project[]>) {
 
 const connected: ConnectionState = {
   kind: "connected",
-  hello: { daemonVersion: "0.0.0", apiVersion: "0.1.0", platform: "linux", sandboxTiers: [] },
+  hello: { daemonVersion: "0.0.0", apiVersion: "0.2.0", platform: "linux", sandboxTiers: [] },
 };
 
 const settle = () => new Promise((r) => setTimeout(r, 0));

@@ -16,7 +16,7 @@ One Cargo workspace for the daemon and CLI, and one pnpm workspace for the UI. E
 | `forge-sandbox` | Isolation backends behind one `Sandbox` trait |
 | `forge-policy` | Rules, modes, guards, classifier |
 | `forge-hooks` | Hook runner and plugin loader |
-| `forge-git` | Worktrees, branches, shadow refs (gitoxide, falling back to the git CLI) |
+| `forge-git` | Worktrees, branches, shadow refs (the git CLI today; gitoxide where speed matters) |
 | `forge-review` | Changesets, comment threads, GitHub sync |
 | `forge-lsp` | Language server lifecycle and routing |
 | `forge-mcp` | MCP hub and Forge's own MCP server |
@@ -78,7 +78,7 @@ JSON-RPC 2.0 over WebSocket, with requests for commands and server-pushed notifi
 | `mcp.*` | `servers`, `install`, `authorize` |
 | `events.*` | `subscribe`, `query`, `replay` |
 
-**Subscriptions.** A client subscribes to topics (`session/<id>`, `approvals`, `board`). Each notification carries a monotonically increasing sequence number, so a client that reconnects asks for everything after its last number instead of reloading.
+**Subscriptions.** A client subscribes to topics (`session/<id>`, `project/<id>`, `approvals`, `board`). Each notification carries the event's position in the daemon-wide event stream, a cursor that increases across every session and survives restarts, so a client that reconnects asks for everything after its last cursor instead of reloading. An event reaches a subscription once even when several of its topics match, so the cursor strictly increases within a subscription.
 
 ## Session manager
 
@@ -87,15 +87,16 @@ Each session is a supervised Tokio task that owns one agent connection, one set 
 | State | Meaning | Moves to |
 | --- | --- | --- |
 | Provisioning | Creating worktrees, starting the sandbox, launching the agent | Ready, Failed |
-| Ready | Agent connected, waiting for a prompt | Working |
-| Working | Agent is running a turn | Waiting, Ready, Paused, Failed |
+| Ready | Agent connected, waiting for a prompt | Working, Done |
+| Working | Agent is running a turn | Review (turn ended normally), Ready (cancelled or stopped early), Waiting, Paused, Failed |
 | Waiting | Blocked on an approval or a question for the human | Working, Paused |
 | Paused | Stopped by the human, a budget cap, or the Auto circuit breaker | Working, Done |
 | Review | Agent reported done; checks ran; changeset ready | Working (changes requested), Done |
 | Done | Shipped or abandoned; worktrees kept until cleanup | — |
-| Failed | Unrecoverable error; transcript and worktrees kept | Provisioning (retry) |
+| Failed | Unrecoverable error; transcript and worktrees kept | Provisioning (retry), Done |
 
-- **Persistence.** Session metadata lives in SQLite; transcripts and checkpoints in `.forge/sessions/<id>/`. On daemon restart, sessions that were Working come back as Paused with a note, never resumed silently.
+- **Persistence.** Session metadata lives in SQLite; transcripts and checkpoints in `.forge/sessions/<id>/`. On daemon restart, sessions that were Working or Waiting come back as Paused and sessions that were Provisioning as Failed, each with a note, never resumed silently.
+- **Prompts and close.** A prompt is accepted in Ready, Review, and Paused; if the agent process is gone (it crashed, or the daemon restarted), the session starts a fresh one first. `session.close` is accepted in Ready, Review, Paused, and Failed; it stops the agent and keeps the worktrees.
 - **Resume.** Uses ACP session loading when the agent supports it. Otherwise Forge starts a fresh agent session primed with the task, the plan, and a summary of the transcript.
 - **Concurrency limits** per project (default 5 sessions) and per machine, so parallel agents don't exhaust memory.
 - **Budgets.** Token and cost meters update from ACP usage reports; crossing a cap moves the session to Paused.
@@ -106,9 +107,9 @@ Each session is a supervised Tokio task that owns one agent connection, one set 
 
 - **Launch.** The agent profile names a command (`claude-code-acp`, `codex-acp`, `gemini --acp`). It runs inside the session's sandbox and speaks JSON-RPC over stdio.
 - **Negotiation.** Forge advertises file-system and terminal capabilities and records what the agent advertises (session loading, plans, modes, slash commands). The UI hides features an agent doesn't support.
-- **File access.** File reads and writes requested over ACP resolve against the session's worktrees only. Writes pass the policy engine and the pre- and post-edit hooks.
+- **File access.** File reads and writes requested over ACP resolve against the session's worktrees only. Reads follow symlinks and must land inside a worktree; writes may not pass through a symlink or touch `.git`. Writes pass the policy engine and the pre- and post-edit hooks.
 - **Terminals.** ACP terminal requests become processes in the sandbox; output streams to the UI and the event log.
-- **Permission requests** go straight to the policy engine. An "ask" result becomes an approval-inbox item; the agent waits on the response.
+- **Permission requests** go straight to the policy engine. An "ask" result becomes an approval-inbox item; the agent waits on the response. Until the policy engine exists, every request is denied with that reason, and the request and denial are logged.
 - **MCP hand-off.** At session start Forge passes the MCP hub's per-session endpoint, so every MCP tool call is visible and policy-checked.
 - **Updates.** Plan updates, tool-call progress, and message chunks become session events for the board and timeline.
 
@@ -140,7 +141,7 @@ macOS uses Seatbelt profiles for Light and Standard and a lightweight VM for Con
 
 **Isolation details**
 
-- **Filesystem.** Read-write: the session's worktrees and a scratch dir. Read-only: toolchains and caches (`~/.cargo`, `~/.npm`, `~/.rustup`). Hidden: the rest of `$HOME`, including `~/.ssh` and other projects.
+- **Filesystem.** Read-write: the session's worktrees and a scratch dir. Read-only: toolchains and caches (`~/.cargo`, `~/.npm`, `~/.rustup`). Hidden: the rest of `$HOME`, including `~/.ssh` and other projects. Worktrees sit inside the main checkout (`<repo>/.worktrees/`), so the main checkout stays read-only or hidden and other sessions' worktrees beside it are hidden.
 - **Network.** All egress goes through a per-session proxy that enforces the allowlist (package registries, the model API, approved hosts) and logs every connection. Light tier, which can't redirect traffic, blocks network except the model API.
 - **Secrets.** Never written into the sandbox's environment by default. Profiles name secrets from the OS keyring or a vault; the proxy injects them as request headers, so the agent never sees the raw value.
 - **Git credentials** stay outside: pushes go through `forged`, never from inside the sandbox.
@@ -216,13 +217,16 @@ Forge runs hooks itself, outside the agent, so the same hook works for every age
 
 Each session gets its own git worktree in every repo it touches, on its own branch, so parallel agents never share a working directory.
 
-- **Location.** `~/.local/share/forge/worktrees/<project>/<session>/<repo>/`, outside the repos themselves so editors and file watchers don't pick them up.
-- **Branches.** `forge/<session-slug>` from the base branch the task names. The human renames or squashes at ship time.
-- **Multi-repo sessions.** A session declares its repos up front; the agent may request another mid-session, which is an approval. Worktrees are created together and the agent's working directory is a parent folder linking them, so paths like `api/src/...` and `web/src/...` work.
+- **Location.** `<repo>/.worktrees/<branch>/`, inside each repo, so a project's worktrees live with it. Forge adds `/.worktrees/` to the repo's `.git/info/exclude` (shared by its worktrees) rather than editing tracked ignore files. Tools that don't read git's ignore rules, such as some test runners and linters run from the main checkout, can see worktree copies; repos exclude `.worktrees/` in those tools' config.
+- **Repo paths.** Each repo path from `forge.toml` is resolved, following symlinks, and must still be inside the project root before any worktree is created.
+- **Branches.** Named by the user's convention, never by the tool or with IDs: a format such as `{type}/{slug}` (the default), where the type comes from a conventional prefix in the session title (`fix: retry loop` → `fix/retry-loop`) and defaults to the first configured type (`feat`, `fix`, `bug` by default). `session.create` may also name the branch outright. Created from the repo's base branch; the human renames or squashes at ship time.
+- **Name collisions.** If the branch or its worktree already exists in any repo, Forge asks the user instead of picking another name: `session.create` fails with `Conflict`, and the client asks whether to choose another name, reuse the existing branch (when no worktree has it checked out), adopt the existing worktree (when no live session owns it), or cancel. A worktree owned by a live session is never shared.
+- **Hooks.** The repo's git hooks never run for Forge's git commands, since checking out a worktree would otherwise run `post-checkout` from the repo.
+- **Multi-repo sessions.** A session declares its repos up front; the agent may request another mid-session, which is an approval. Each repo gets a worktree with the same name on the same branch, created together; a collision in any repo is a collision for all. The agent's working directory is the first repo's worktree, and it may use the others by path; a parent folder linking them comes with multi-repo support.
 - **Shared caches.** Build output (`target/`, `node_modules/`) is per worktree by default; sccache and pnpm's store keep rebuilds cheap.
 - **Overlap detection.** On every edit event, Forge compares the touched paths against other live sessions in the same repo. A hit marks both sessions on the board and suggests a merge order. Conflicts are resolved at ship time by rebasing the later changeset.
 - **Pushes** happen only from the daemon, with the user's credentials, after review.
-- **Cleanup.** Done and abandoned sessions keep their worktrees for 7 days (configurable), then `git worktree remove`; branches stay until deleted.
+- **Cleanup.** Done and abandoned sessions keep their worktrees for 7 days (configurable), then `git worktree remove`; branches stay until deleted. A failed provision removes the worktrees and branches it created.
 
 ## Review store
 
@@ -284,10 +288,10 @@ pub struct Event {
 }
 ```
 
-- **Storage.** JSONL per session in `.forge/sessions/<id>/events.jsonl` is the source of truth, easy to read and diff. SQLite holds an index (kind, time, tool, path) plus FTS5 full-text search over messages and tool output.
+- **Storage.** JSONL per session in `.forge/sessions/<id>/events.jsonl` is the source of truth, easy to read and diff; each line is the event plus its `streamSeq`. SQLite holds an index (kind, time, tool, path, stream cursor) plus FTS5 full-text search over messages and tool output. `.forge/sessions/` gets its own `.gitignore` so logs never show in git.
 - **Redaction** runs before write: secret patterns and values the vault injected are replaced with placeholders, so transcripts are safe to share.
 - **Replay.** The timeline steps through events; jumping to a checkpoint event shows the worktree at that point from its shadow ref.
-- **Streaming.** The daemon API's subscriptions are this log, filtered by topic; sequence numbers make reconnects lossless.
+- **Streaming.** The daemon API's subscriptions are this log, filtered by topic. Every event gets the next daemon-wide stream cursor when it is appended; a subscription with `afterSeq` replays from the index, then switches to live events with nothing missed or repeated. Each JSONL line records its cursor, so rebuilding the index keeps it. A client whose cursor is ahead of the stream (say, after the data directory was replaced) is refused and resubscribes from scratch.
 - **OpenTelemetry.** Optional exporter maps a session to a trace, each agent turn to a span, and tool calls and decisions to child spans with cost and latency attributes.
 - **Retention.** Configurable per project; deleting a session removes its log, index rows, and shadow refs together.
 

@@ -1,4 +1,4 @@
-//! API tests against a real daemon: every M1 method and its error paths.
+//! API tests against a real daemon: project and subscription methods and their error paths.
 
 mod common;
 
@@ -322,7 +322,7 @@ async fn unknown_and_unimplemented_methods_are_method_not_found() {
     let home = temp_home();
     let daemon = Daemon::start(home.path());
     let mut client = daemon.client().await;
-    for method in ["nope.nothing", "session.create"] {
+    for method in ["nope.nothing", "session.rewind"] {
         match client.call_raw(method, json!({})).await {
             Err(ClientError::Rpc { code, .. }) => {
                 assert_eq!(code, codes::METHOD_NOT_FOUND, "{method}")

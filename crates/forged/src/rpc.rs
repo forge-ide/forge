@@ -1,49 +1,119 @@
 //! JSON-RPC request handling and method dispatch.
 
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
-use forge_api::events::{EVENT_NOTIFICATION, Topic};
+use forge_api::events::{EVENT_NOTIFICATION, EventNotification, Topic, TurnSource};
 use forge_api::methods::*;
 use forge_api::model::{Platform, Project};
 use forge_api::rpc::{JSONRPC_VERSION, Notification, Request, Response, RpcError, codes};
 use forge_api::{API_VERSION, ApiError, SubscriptionId};
-use forge_events::Hub;
+use forge_config::Paths;
+use forge_events::{EventLog, Query};
+use forge_session::SessionManager;
 use serde_json::Value;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::db::Db;
-use crate::projects;
+use crate::{projects, sessions};
+
+/// Most events one `events.query` returns.
+const MAX_QUERY_LIMIT: u32 = 1000;
 
 /// Daemon-wide state shared by every connection.
 pub struct State {
     pub db: Db,
-    pub hub: Hub,
+    pub log: Arc<EventLog>,
+    pub sessions: Arc<SessionManager>,
+    pub paths: Paths,
+}
+
+/// Work to run once a request's response is queued, such as replaying events to a new
+/// subscription, which the client can only match up after it has the subscription ID.
+pub type Deferred = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// The bounded queue of messages to one client. A client that stops reading fills it, and is
+/// then disconnected rather than allowed to hold memory or stall event delivery.
+#[derive(Clone)]
+pub struct Outbox {
+    tx: mpsc::Sender<String>,
+    /// Cancelled to drop the connection.
+    pub drop: CancellationToken,
+    replay_timeout: Duration,
+}
+
+impl Outbox {
+    pub fn new(tx: mpsc::Sender<String>, replay_timeout: Duration) -> Self {
+        Self {
+            tx,
+            drop: CancellationToken::new(),
+            replay_timeout,
+        }
+    }
+
+    /// Queue `text` without waiting. A full queue drops the connection. Returns whether it was
+    /// queued.
+    pub fn send(&self, text: String) -> bool {
+        match self.tx.try_send(text) {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!("client is not reading; dropping the connection");
+                self.drop.cancel();
+                false
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+        }
+    }
+
+    /// Queue `text`, waiting for room for a while; for replays, which can outrun the queue.
+    async fn send_patiently(&self, text: String) -> bool {
+        match tokio::time::timeout(self.replay_timeout, self.tx.send(text)).await {
+            Ok(Ok(())) => true,
+            Ok(Err(_)) => false,
+            Err(_) => {
+                tracing::warn!("client stopped reading during replay; dropping the connection");
+                self.drop.cancel();
+                false
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct Subs {
+    ids: HashSet<SubscriptionId>,
+    /// Set once the connection is gone; later subscriptions are removed at once.
+    closed: bool,
 }
 
 /// Per-connection state.
 pub struct Conn {
-    /// Serialized messages to write to this client.
-    pub outgoing: mpsc::UnboundedSender<String>,
-    subs: Mutex<HashSet<SubscriptionId>>,
+    pub outbox: Outbox,
+    subs: Mutex<Subs>,
 }
 
 impl Conn {
-    pub fn new(outgoing: mpsc::UnboundedSender<String>) -> Self {
+    pub fn new(outbox: Outbox) -> Self {
         Self {
-            outgoing,
+            outbox,
             subs: Mutex::default(),
         }
     }
 
-    /// Drop every subscription this connection made.
+    /// Drop every subscription this connection made, now and later.
     pub fn close(&self, state: &State) {
-        for id in self.lock_subs().drain() {
-            state.hub.unsubscribe(&id);
+        let mut subs = self.lock_subs();
+        subs.closed = true;
+        for id in subs.ids.drain() {
+            state.log.hub().unsubscribe(&id);
         }
     }
 
-    fn lock_subs(&self) -> std::sync::MutexGuard<'_, HashSet<SubscriptionId>> {
+    fn lock_subs(&self) -> MutexGuard<'_, Subs> {
         self.subs.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
@@ -67,37 +137,45 @@ impl From<anyhow::Error> for HandlerError {
     }
 }
 
-/// Handle one text frame; returns the response to send.
-pub async fn handle_text(state: &State, conn: &Conn, text: &str) -> Response {
+impl From<forge_events::LogError> for HandlerError {
+    fn from(e: forge_events::LogError) -> Self {
+        match e {
+            forge_events::LogError::UnknownSession(id) => {
+                ApiError::not_found(format!("session {id}")).into()
+            }
+            other => HandlerError::Internal(other.into()),
+        }
+    }
+}
+
+/// Handle one text frame; returns the response to send and any work to run after it.
+pub async fn handle_text(state: &State, conn: &Conn, text: &str) -> (Response, Option<Deferred>) {
     let value: Value = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(e) => {
-            return Response::err(
-                Value::Null,
-                RpcError::protocol(codes::PARSE_ERROR, e.to_string()),
-            );
+            let error = RpcError::protocol(codes::PARSE_ERROR, e.to_string());
+            return (Response::err(Value::Null, error), None);
         }
     };
     let id = value.get("id").cloned().unwrap_or(Value::Null);
     let request: Request = match serde_json::from_value(value) {
         Ok(r) => r,
         Err(e) => {
-            return Response::err(
-                id,
-                RpcError::protocol(codes::INVALID_REQUEST, e.to_string()),
-            );
+            let error = RpcError::protocol(codes::INVALID_REQUEST, e.to_string());
+            return (Response::err(id, error), None);
         }
     };
     if request.jsonrpc != JSONRPC_VERSION {
-        return Response::err(
-            id,
-            RpcError::protocol(codes::INVALID_REQUEST, "jsonrpc must be \"2.0\""),
-        );
+        let error = RpcError::protocol(codes::INVALID_REQUEST, "jsonrpc must be \"2.0\"");
+        return (Response::err(id, error), None);
     }
-    match dispatch(state, conn, &request.method, request.params).await {
+    let mut deferred = None;
+    let response = match dispatch(state, conn, &request.method, request.params, &mut deferred).await
+    {
         Ok(result) => Response::ok(request.id, result),
         Err(error) => Response::err(request.id, error),
-    }
+    };
+    (response, deferred)
 }
 
 async fn dispatch(
@@ -105,7 +183,9 @@ async fn dispatch(
     conn: &Conn,
     method: &str,
     params: Value,
+    deferred: &mut Option<Deferred>,
 ) -> Result<Value, RpcError> {
+    let manager = &state.sessions;
     match method {
         ServerHello::NAME => run::<ServerHello>(params, async |_| Ok(hello())).await,
         ProjectOpen::NAME => {
@@ -117,15 +197,59 @@ async fn dispatch(
         ProjectGet::NAME => {
             run::<ProjectGet>(params, async |p| get_project(state, p.project_id).await).await
         }
+        SessionCreate::NAME => {
+            run::<SessionCreate>(params, async |p| sessions::create(state, p).await).await
+        }
+        SessionBranchPreview::NAME => {
+            run::<SessionBranchPreview>(params, async |p| sessions::branch_preview(state, p).await)
+                .await
+        }
+        SessionPrompt::NAME => {
+            run::<SessionPrompt>(params, async |p| {
+                let turn_id = manager
+                    .prompt(&p.session_id, p.text, TurnSource::Human)
+                    .await?;
+                Ok(TurnResult { turn_id })
+            })
+            .await
+        }
+        SessionCancel::NAME => {
+            run::<SessionCancel>(params, async |p| {
+                manager.cancel(&p.session_id).await?;
+                Ok(Empty {})
+            })
+            .await
+        }
+        SessionGet::NAME => {
+            run::<SessionGet>(params, async |p| Ok(manager.get(&p.session_id).await?)).await
+        }
+        SessionList::NAME => {
+            run::<SessionList>(params, async |p| {
+                get_project(state, p.project_id.clone()).await?;
+                Ok(manager.list(&p.project_id, p.states).await?)
+            })
+            .await
+        }
+        SessionClose::NAME => {
+            run::<SessionClose>(params, async |p| {
+                let reason = sessions::close_reason(p.outcome);
+                manager.close(&p.session_id, reason).await?;
+                Ok(Empty {})
+            })
+            .await
+        }
         EventsSubscribe::NAME => {
-            run::<EventsSubscribe>(params, async |p| subscribe(state, conn, p).await).await
+            run::<EventsSubscribe>(params, async |p| {
+                let (result, replay) = subscribe(state, conn, p).await?;
+                *deferred = Some(replay);
+                Ok(result)
+            })
+            .await
         }
         EventsUnsubscribe::NAME => {
             run::<EventsUnsubscribe>(params, async |p| unsubscribe(state, conn, p)).await
         }
-        EventsQuery::NAME => {
-            run::<EventsQuery>(params, async |p| Err(no_session(&p.session_id))).await
-        }
+        EventsQuery::NAME => run::<EventsQuery>(params, async |p| query(state, p).await).await,
         name if METHOD_NAMES.contains(&name) => Err(RpcError::protocol(
             codes::METHOD_NOT_FOUND,
             format!("{name} is part of API {API_VERSION} but not implemented by this daemon yet"),
@@ -170,7 +294,7 @@ fn hello() -> HelloResult {
         daemon_version: env!("CARGO_PKG_VERSION").to_owned(),
         api_version: API_VERSION.to_owned(),
         platform: Platform::current(),
-        // No tier is available until forge-sandbox implements them (M3).
+        // No sandbox tier is implemented yet; sessions can only run unsandboxed, by opt-in.
         sandbox_tiers: Vec::new(),
     }
 }
@@ -182,16 +306,53 @@ async fn get_project(state: &State, id: forge_api::ProjectId) -> Result<Project,
     }
 }
 
-/// Sessions arrive in M2; until then no session ID exists.
-fn no_session(id: &forge_api::SessionId) -> HandlerError {
-    ApiError::not_found(format!("session {id}")).into()
+async fn query(
+    state: &State,
+    params: EventsQueryParams,
+) -> Result<Vec<forge_api::events::Event>, HandlerError> {
+    if params.limit == 0 || params.limit > MAX_QUERY_LIMIT {
+        return Err(
+            ApiError::validation(format!("limit must be between 1 and {MAX_QUERY_LIMIT}")).into(),
+        );
+    }
+    let log = state.log.clone();
+    let session = params.session_id;
+    let query = Query {
+        kinds: params.kinds,
+        text: params.text.filter(|t| !t.trim().is_empty()),
+        before: params.before,
+        limit: params.limit,
+    };
+    let events = tokio::task::spawn_blocking(move || log.query(&session, &query))
+        .await
+        .map_err(anyhow::Error::from)??;
+    Ok(events)
 }
 
+/// Events held back from a new subscription until its response and replay are sent.
+enum Gate {
+    Holding(Vec<EventNotification>),
+    /// Live delivery; skip anything at or before this cursor, which replay already sent.
+    Open(u64),
+}
+
+fn notification_text(note: &EventNotification) -> Option<String> {
+    let params = serde_json::to_value(note).ok()?;
+    serde_json::to_string(&Notification {
+        jsonrpc: JSONRPC_VERSION.into(),
+        method: EVENT_NOTIFICATION.into(),
+        params,
+    })
+    .ok()
+}
+
+/// Register the subscription now, holding live events back; the returned work replays events
+/// after `afterSeq` and then opens the gate, so the client sees each event once, in order.
 async fn subscribe(
     state: &State,
     conn: &Conn,
     params: EventsSubscribeParams,
-) -> Result<SubscribeResult, HandlerError> {
+) -> Result<(SubscribeResult, Deferred), HandlerError> {
     if params.topics.is_empty() {
         return Err(ApiError::validation("topics must not be empty").into());
     }
@@ -199,33 +360,118 @@ async fn subscribe(
         match topic {
             Topic::Board | Topic::Approvals => {}
             Topic::Project(id) => {
-                if state.db.get_project(id.clone()).await?.is_none() {
-                    return Err(ApiError::not_found(format!("project {id}")).into());
-                }
+                get_project(state, id.clone()).await?;
             }
-            Topic::Session(id) => return Err(no_session(id)),
+            Topic::Session(id) => {
+                state.sessions.get(id).await?;
+            }
         }
     }
-    // `afterSeq` replay needs the event log, which lands in M2. Until then there is nothing to replay.
-    let outgoing = conn.outgoing.clone();
-    let id = state.hub.subscribe(
+    let head = state.log.head();
+    if let Some(after) = params.after_seq
+        && after > head
+    {
+        return Err(ApiError::validation(format!(
+            "afterSeq {after} is ahead of the event stream (latest {head}); resubscribe without afterSeq"
+        ))
+        .into());
+    }
+
+    let gate = Arc::new(Mutex::new(Gate::Holding(Vec::new())));
+    let topics: HashSet<Topic> = params.topics.iter().cloned().collect();
+    let (deliver_gate, outbox) = (gate.clone(), conn.outbox.clone());
+    let id = state.log.hub().subscribe(
         params.topics,
         Box::new(move |note| {
-            let Ok(params) = serde_json::to_value(note) else {
-                return true;
-            };
-            let message = Notification {
-                jsonrpc: JSONRPC_VERSION.into(),
-                method: EVENT_NOTIFICATION.into(),
-                params,
-            };
-            serde_json::to_string(&message).is_ok_and(|text| outgoing.send(text).is_ok())
+            let mut gate = lock(&deliver_gate);
+            match &mut *gate {
+                Gate::Holding(held) => {
+                    held.push(note);
+                    true
+                }
+                Gate::Open(after) if note.seq <= *after => true,
+                Gate::Open(_) => notification_text(&note).is_some_and(|t| outbox.send(t)),
+            }
         }),
     );
-    conn.lock_subs().insert(id.clone());
-    Ok(SubscribeResult {
-        subscription_id: id,
-    })
+    {
+        let mut subs = conn.lock_subs();
+        if subs.closed {
+            // The connection went away while this request ran.
+            state.log.hub().unsubscribe(&id);
+        } else {
+            subs.ids.insert(id.clone());
+        }
+    }
+
+    let (log, outbox, sub_id) = (state.log.clone(), conn.outbox.clone(), id.clone());
+    let after = params.after_seq;
+    let replay: Deferred = Box::pin(async move {
+        let mut last = after.unwrap_or(head);
+        if let Some(after) = after {
+            let replayed = tokio::task::spawn_blocking(move || log.replay(&topics, after)).await;
+            let replayed = match replayed {
+                Ok(Ok(events)) => events,
+                Ok(Err(e)) => {
+                    tracing::error!(error = %e, "replaying events");
+                    outbox.drop.cancel();
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "replaying events");
+                    outbox.drop.cancel();
+                    return;
+                }
+            };
+            for r in replayed {
+                let note = EventNotification {
+                    subscription_id: sub_id.clone(),
+                    topic: r.topic,
+                    seq: r.stream_seq,
+                    event: r.event,
+                };
+                let Some(text) = notification_text(&note) else {
+                    continue;
+                };
+                if !outbox.send_patiently(text).await {
+                    return;
+                }
+                last = r.stream_seq;
+            }
+        }
+        // Flush what arrived meanwhile, then switch to live delivery.
+        loop {
+            let held = {
+                let mut gate = lock(&gate);
+                match &mut *gate {
+                    Gate::Holding(held) if held.is_empty() => {
+                        *gate = Gate::Open(last);
+                        return;
+                    }
+                    Gate::Holding(held) => std::mem::take(held),
+                    Gate::Open(_) => return,
+                }
+            };
+            for note in held {
+                if note.seq <= last {
+                    continue;
+                }
+                let Some(text) = notification_text(&note) else {
+                    continue;
+                };
+                if !outbox.send_patiently(text).await {
+                    return;
+                }
+                last = note.seq;
+            }
+        }
+    });
+    Ok((
+        SubscribeResult {
+            subscription_id: id,
+        },
+        replay,
+    ))
 }
 
 fn unsubscribe(
@@ -234,9 +480,13 @@ fn unsubscribe(
     params: EventsUnsubscribeParams,
 ) -> Result<Empty, HandlerError> {
     let id = params.subscription_id;
-    if !conn.lock_subs().remove(&id) {
+    if !conn.lock_subs().ids.remove(&id) {
         return Err(ApiError::not_found(format!("subscription {id} on this connection")).into());
     }
-    state.hub.unsubscribe(&id);
+    state.log.hub().unsubscribe(&id);
     Ok(Empty {})
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
 }

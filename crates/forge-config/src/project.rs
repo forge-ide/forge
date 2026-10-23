@@ -7,6 +7,7 @@ use std::path::{Component, Path};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::branches::BranchConfig;
 use crate::{ConfigError, read_toml};
 
 pub const PROJECT_CONFIG_FILE: &str = "forge.toml";
@@ -27,6 +28,9 @@ pub struct ProjectConfig {
     pub budgets: Budgets,
     #[serde(default)]
     pub sessions: SessionLimits,
+    /// Overrides the user's branch naming for this project.
+    #[serde(default, skip_serializing_if = "BranchConfig::is_empty")]
+    pub branches: BranchConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -105,6 +109,7 @@ impl ProjectConfig {
             }],
             budgets: Budgets::default(),
             sessions: SessionLimits::default(),
+            branches: BranchConfig::default(),
         }
     }
 
@@ -182,6 +187,7 @@ impl ProjectConfig {
         if self.sessions.max_concurrent == 0 {
             problems.push("sessions.max_concurrent must be at least 1".to_owned());
         }
+        problems.extend(self.branches.validate("branches"));
         if problems.is_empty() {
             Ok(())
         } else {
@@ -287,8 +293,9 @@ worktree_retention_days = 7
         config.repos[1].path = "../elsewhere".into();
         config.sessions.max_concurrent = 0;
         config.budgets.session_usd = Some(-1.0);
+        config.branches.types = Some(vec![]);
         let problems = config.validate().unwrap_err();
-        assert_eq!(problems.len(), 5, "{problems:#?}");
+        assert_eq!(problems.len(), 6, "{problems:#?}");
     }
 
     #[test]

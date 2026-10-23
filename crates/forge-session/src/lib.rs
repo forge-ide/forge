@@ -1,12 +1,13 @@
 //! Session lifecycle and supervision.
+//!
+//! [`SessionManager`] creates sessions (branch, worktrees, agent), runs their turns, and moves
+//! them through the state machine in [`state`], persisting each change through a
+//! [`SessionStore`] and recording it in the event log.
 
-/// This crate's package name.
-pub const NAME: &str = env!("CARGO_PKG_NAME");
+pub mod manager;
+pub mod naming;
+pub mod state;
+pub mod store;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn name_matches_package() {
-        assert_eq!(super::NAME, "forge-session");
-    }
-}
+pub use manager::{AgentResolver, CreateRequest, SessionError, SessionManager};
+pub use store::{SessionStore, StoreError, WorktreeRecord};
