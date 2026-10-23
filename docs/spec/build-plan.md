@@ -71,7 +71,7 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 
 ### M3: Sandbox
 
-- [ ] `Sandbox` trait and tiers: Light and Standard on Linux, Seatbelt Light and Standard on macOS, opt-in Unsandboxed. (Linux tiers pass the escape suite; Seatbelt has not run on macOS yet.)
+- [x] `Sandbox` trait and tiers: Light and Standard on Linux, Seatbelt Light and Standard on macOS, opt-in Unsandboxed.
 - [ ] Per-session egress proxy with allowlist and connection log.
 - [x] Read-only toolchain mounts; hidden `$HOME`.
 - [x] Environment allowlist for every tier; worktree git metadata the daemon doesn't trust.
