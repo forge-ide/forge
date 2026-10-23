@@ -10,6 +10,7 @@ use forge_api::{ApiError, ErrorKind, ProjectId};
 use forge_config::{
     AgentProfileConfig, BranchRules, ConfigError, Paths, ProfileSandbox, ProjectConfig, UserConfig,
 };
+use forge_sandbox::proxy::Allowlist;
 use forge_sandbox::{Sandbox, TierStatus};
 use forge_session::{AgentLaunch, AgentResolver, CreateRequest, SessionError};
 
@@ -35,6 +36,7 @@ pub async fn create(state: &State, params: SessionCreateParams) -> Result<Sessio
         &params.agent_profile,
         &state.sandbox.tiers(),
     )?;
+    allowlist(&profile, &params.agent_profile)?;
     let (config, rules) = branch_rules(state, &root).await?;
     let branch = match params.branch {
         Some(branch) => branch,
@@ -186,6 +188,7 @@ impl AgentResolver for ProfileResolver {
             .map_err(|e| ApiError::validation(e.to_string()))?
             .ok_or_else(|| ApiError::not_found(format!("agent profile {id:?}")))?;
         sandbox_tier(Some(session.sandbox), &profile, id, &self.sandbox.tiers())?;
+        let network = allowlist(&profile, id)?;
         let mut argv = profile.command.ok_or_else(|| {
             ApiError::new(
                 ErrorKind::AgentUnavailable,
@@ -211,8 +214,15 @@ impl AgentResolver for ProfileResolver {
         Ok(AgentLaunch {
             command: AgentCommand { argv, env: vec![] },
             read_only,
+            network,
         })
     }
+}
+
+/// The profile's `[network] allow`, as the egress proxy's allowlist.
+fn allowlist(profile: &AgentProfileConfig, id: &str) -> Result<Allowlist, ApiError> {
+    Allowlist::new(&profile.network.allow)
+        .map_err(|e| ApiError::validation(format!("agent profile {id:?}: network.allow: {e}")))
 }
 
 /// The user config's extra read-only paths, refusing any that would expose a protected dir:

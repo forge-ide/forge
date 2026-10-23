@@ -62,6 +62,8 @@ pub enum EventPayload {
     Edit(EditBody),
     #[serde(rename = "terminal.output")]
     TerminalOutput(TerminalOutputBody),
+    #[serde(rename = "network")]
+    Network(NetworkBody),
     #[serde(rename = "checkpoint")]
     Checkpoint(CheckpointBody),
     #[serde(rename = "review.thread")]
@@ -89,6 +91,7 @@ impl EventPayload {
             EventPayload::ApprovalDecided(_) => EventKind::ApprovalDecided,
             EventPayload::Edit(_) => EventKind::Edit,
             EventPayload::TerminalOutput(_) => EventKind::TerminalOutput,
+            EventPayload::Network(_) => EventKind::Network,
             EventPayload::Checkpoint(_) => EventKind::Checkpoint,
             EventPayload::ReviewThread(_) => EventKind::ReviewThread,
             EventPayload::Usage(_) => EventKind::Usage,
@@ -128,6 +131,8 @@ pub enum EventKind {
     Edit,
     #[serde(rename = "terminal.output")]
     TerminalOutput,
+    #[serde(rename = "network")]
+    Network,
     #[serde(rename = "checkpoint")]
     Checkpoint,
     #[serde(rename = "review.thread")]
@@ -295,6 +300,23 @@ pub struct TerminalOutputBody {
     pub chunk: String,
 }
 
+/// One connection through the session's egress proxy, logged when it closes, or at once when
+/// it is denied.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkBody {
+    pub host: String,
+    pub port: u16,
+    /// `allow` or `deny`; the proxy never asks.
+    pub verdict: Verdict,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reason: Option<String>,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    pub duration_ms: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckpointBody {
@@ -443,6 +465,40 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&body).unwrap()["ref"],
             "refs/forge/x/cp/1"
+        );
+    }
+
+    #[test]
+    fn network_event_matches_spec() {
+        let payload = EventPayload::Network(NetworkBody {
+            host: "crates.io".into(),
+            port: 443,
+            verdict: Verdict::Deny,
+            reason: Some("not on the allowlist".into()),
+            bytes_sent: 0,
+            bytes_received: 0,
+            duration_ms: 1,
+        });
+        assert_eq!(payload.kind(), EventKind::Network);
+        let value = serde_json::to_value(&payload).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "kind": "network",
+                "body": {
+                    "host": "crates.io",
+                    "port": 443,
+                    "verdict": "deny",
+                    "reason": "not on the allowlist",
+                    "bytesSent": 0,
+                    "bytesReceived": 0,
+                    "durationMs": 1
+                }
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<EventPayload>(value).unwrap(),
+            payload
         );
     }
 

@@ -94,6 +94,7 @@ pub fn generate() -> String {
         .add::<ApprovalDecidedBody>()
         .add::<EditBody>()
         .add::<TerminalOutputBody>()
+        .add::<NetworkBody>()
         .add::<CheckpointBody>()
         .add::<ThreadChange>()
         .add::<ReviewThreadBody>()

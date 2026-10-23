@@ -134,6 +134,7 @@ Every event has the envelope `{ seq, sessionId, at, kind, parent?, body }`. `par
 | `approval.decided` | `{ approvalId, decision, remember? }` | `session/<id>`, `project/<id>`, `approvals` |
 | `edit` | `{ path, kind, additions, deletions }` | `session/<id>` |
 | `terminal.output` | `{ terminalId, chunk }` (streamed) | `session/<id>` |
+| `network` | `{ host, port, verdict: 'allow' \| 'deny', reason?, bytesSent, bytesReceived, durationMs }` (one per connection through the egress proxy: when it closes, or at once when denied) | `session/<id>` |
 | `checkpoint` | `{ checkpointId, turnId, ref }` | `session/<id>` |
 | `review.thread` | `{ threadId, change: 'created' \| 'reply' \| 'resolved' \| 'outdated' }` | `session/<id>` |
 | `usage` | `{ inputTokens, outputTokens, costUsd? }` (cumulative) | `session/<id>`, `project/<id>`, `board` |
@@ -207,7 +208,7 @@ env_secrets = ["ANTHROPIC_API_KEY"]  # keyring names, injected via proxy
 allow = ["api.anthropic.com", "crates.io", "static.crates.io", "registry.npmjs.org"]
 ```
 
-`sandbox` defaults to `standard`; `allow_unsandboxed` defaults to `false`. The profile ID is the file name and may use only letters, digits, `-`, and `_`.
+`sandbox` defaults to `standard`; `allow_unsandboxed` defaults to `false`. `[network] allow` lists the hosts the session's egress proxy lets through, on ports 80 and 443: plain host names, matched exactly (ignoring case and a trailing dot), with no scheme, port, path, wildcard, or IP address; anything else fails `session.create` with `ValidationFailed`. An empty or missing list means no network. The profile ID is the file name and may use only letters, digits, `-`, and `_`.
 
 **`policy.toml`** (managed, user, or `.forge/policy.toml`)
 

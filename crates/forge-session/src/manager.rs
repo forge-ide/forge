@@ -13,11 +13,13 @@ use forge_acp::{AcpClient, AcpError, AgentCommand, DenyAll, EventSink, Root, Wor
 use forge_api::events::{
     EventPayload, PromptBody, SessionStateBody, TurnEndedBody, TurnSource, TurnStartedBody,
 };
+use forge_api::events::{NetworkBody, Verdict};
 use forge_api::methods::{BranchCollision, CollisionResolution};
 use forge_api::model::{Mode, Project, SandboxTier, Session, SessionState, Usage};
 use forge_api::{ApiError, ErrorData, ErrorKind, ProjectId, SessionId, Timestamp, TurnId};
 use forge_events::EventLog;
 use forge_git::{CreateMode, GitError, Worktrees, worktree_path};
+use forge_sandbox::proxy::{Allowlist, Connection, Limits, Proxy, ProxyConfig, PublicDns};
 use forge_sandbox::{Sandbox, Spec, WorktreeMount};
 use futures_util::future::BoxFuture;
 
@@ -57,6 +59,8 @@ pub struct AgentLaunch {
     /// Paths the sandbox shows read-only besides its defaults: the agent program and the
     /// user config's extra read-only paths.
     pub read_only: Vec<PathBuf>,
+    /// Hosts the session's egress proxy lets through.
+    pub network: Allowlist,
 }
 
 /// Finds how to start a session's agent from its profile. The daemon implements it from
@@ -404,7 +408,7 @@ impl SessionManager {
             self.dirs.clone(),
             session.clone(),
         );
-        let setup = tokio::task::spawn_blocking(move || {
+        let found = tokio::task::spawn_blocking(move || {
             let launch = agents.launch(&record).map_err(|e| e.detail().to_owned())?;
             let records = store.worktrees(&record.id).map_err(|e| e.to_string())?;
             // Unsandboxed sessions mount nothing, so their worktree links aren't checked.
@@ -428,12 +432,21 @@ impl SessionManager {
                 })
                 .collect();
             let workspace = Workspace::new(roots).map_err(|e| e.to_string())?;
+            Ok::<_, String>((launch, worktrees, workspace))
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        let (launch, worktrees, workspace) = found;
+        let proxy = self.start_proxy(session, launch.network).await?;
+        let record = session.clone();
+        let setup = tokio::task::spawn_blocking(move || {
             let spec = Spec {
                 tier: record.sandbox,
                 worktrees,
                 scratch: dirs.sessions.join(record.id.to_string()),
                 home: dirs.home,
                 read_only: launch.read_only,
+                proxy: Some(proxy),
             };
             let sandbox = sandbox
                 .prepare(spec)
@@ -454,6 +467,40 @@ impl SessionManager {
             .await
             .map(Arc::new)
             .map_err(|e| format!("starting the agent: {e}"))
+    }
+
+    /// Start the session's egress proxy, logging each connection as a `network` event. The
+    /// sandbox keeps it running; it stops with the agent.
+    async fn start_proxy(&self, session: &Session, allow: Allowlist) -> Result<Arc<Proxy>, String> {
+        let (log, id) = (self.log.clone(), session.id.clone());
+        let runtime = tokio::runtime::Handle::current();
+        let record =
+            move |c: Connection| {
+                let (log, id) = (log.clone(), id.clone());
+                runtime.spawn(async move {
+                let body = NetworkBody {
+                    host: c.host,
+                    port: c.port,
+                    verdict: if c.allowed { Verdict::Allow } else { Verdict::Deny },
+                    reason: c.reason,
+                    bytes_sent: c.bytes_sent,
+                    bytes_received: c.bytes_received,
+                    duration_ms: u64::try_from(c.duration.as_millis()).unwrap_or(u64::MAX),
+                };
+                if let Err(e) = log.emit(&id, None, EventPayload::Network(body)).await {
+                    tracing::error!(session_id = %id, error = %e, "logging a network connection");
+                }
+            });
+            };
+        Proxy::start(ProxyConfig {
+            allow,
+            resolver: Arc::new(PublicDns),
+            log: Arc::new(record),
+            limits: Limits::default(),
+        })
+        .await
+        .map(Arc::new)
+        .map_err(|e| format!("starting the egress proxy: {e}"))
     }
 
     /// Move to Working and record the turn's start and prompt. The caller holds the lock.

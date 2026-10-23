@@ -28,6 +28,17 @@ pub struct Policy {
     /// TCP ports the command may connect to, on any address (Light).
     #[serde(default)]
     pub connect_ports: Vec<u16>,
+    /// Forward a loopback port to the egress proxy's Unix socket (Standard).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forward: Option<Forward>,
+}
+
+/// Inside a network namespace, forward `127.0.0.1:<port>` to the proxy's socket.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Forward {
+    pub port: u16,
+    pub socket: PathBuf,
 }
 
 impl Policy {
@@ -51,6 +62,10 @@ mod tests {
             read: vec!["/usr".into()],
             write: vec!["/w".into()],
             connect_ports: vec![],
+            forward: Some(Forward {
+                port: 3128,
+                socket: "/run/forge-proxy.sock".into(),
+            }),
         };
         assert_eq!(Policy::from_json(&policy.to_json()).unwrap(), policy);
         assert!(Policy::from_json(r#"{"mode":"light","extra":1}"#).is_err());
