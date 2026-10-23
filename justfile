@@ -40,6 +40,11 @@ fmt-check: install
     cargo fmt --all -- --check
     pnpm fmt:check
 
+# Regenerate the desktop icon set from apps/desktop/assets/icon-source.png.
+icons: install
+    pnpm --filter @forge/desktop tauri icon assets/icon-source.png -o src-tauri/icons
+    rm -rf apps/desktop/src-tauri/icons/{android,ios,Square*.png,StoreLogo.png,64x64.png}
+
 # Regenerate TypeScript types and JSON Schemas from Rust types.
 gen:
     @echo "just gen: nothing to generate until forge-api has types (M1)"
