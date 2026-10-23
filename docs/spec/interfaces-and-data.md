@@ -210,7 +210,7 @@ allow = ["api.anthropic.com", "crates.io", "static.crates.io", "registry.npmjs.o
 
 `sandbox` defaults to `standard`; `allow_unsandboxed` defaults to `false`. `[network] allow` lists the hosts the session's egress proxy lets through, on ports 80 and 443: plain host names, matched exactly (ignoring case and a trailing dot), with no scheme, port, path, wildcard, or IP address; anything else fails `session.create` with `ValidationFailed`. An empty or missing list means no network. `env_secrets` may name only secrets Forge knows how to inject (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`; anything else is `ValidationFailed`). Each is read at launch from the OS keyring, service `forge`, account the secret's name; one that is missing fails the session with the command that stores it (`secret-tool store --label='Forge NAME' service forge account NAME` on Linux, `security add-generic-password -s forge -a NAME -w` on macOS). The profile ID is the file name and may use only letters, digits, `-`, and `_`.
 
-**`policy.toml`** (managed, user, or `.forge/policy.toml`)
+**`policy.toml`** (managed: `/etc/forge/managed.toml` on Linux, `/Library/Application Support/Forge/managed.toml` on macOS; user: `~/.config/forge/policy.toml`; project: `<root>/.forge/policy.toml`)
 
 ```toml
 [[deny]]
@@ -229,7 +229,9 @@ modes = ["accept-edits", "auto"]
 paths = [".env*", "**/*.pem", "Cargo.lock"]   # edits denied unless the task says otherwise
 ```
 
-Rule matching: `exec` patterns are globs over the space-joined argv; `edit` patterns are gitignore-style globs over repo-relative paths. A rule applies in every mode unless it lists `modes`.
+Every key is optional; a missing file has no rules. Each rule needs at least one `exec` or `edit` pattern; `modes`, if present, must be non-empty.
+
+Rule matching: `exec` patterns are globs over the space-joined argv, with the program reduced to its file name; `*` matches any run of characters (including `/` and spaces), and `\*` and `\\` are a literal `*` and `\`. Allow rules match only a single simple command; deny and ask rules match any simple command in a line, and ask instead when only an expansion could make them match (component-architecture.md, Policy engine). `edit` and `protected` patterns are gitignore-style globs over repo-relative paths: a pattern without a `/` (other than a trailing one) matches at any depth, one with a `/` or a leading `/` is anchored at the repo root, `*` and `?` stop at `/` while `**` crosses directories, a pattern matching a directory matches everything under it, and `!` negation is not supported; matching ignores case on macOS. Patterns may not use `..`. A rule applies in every mode unless it lists `modes`. Protected paths add to the built-in list (`.env`, `.env.*`, `*.pem`, `*.key`, `.forge/`). Lower layers only tighten: a deny or ask in any layer beats an allow in any other.
 
 ## Hook I/O and plugin manifest
 
@@ -399,4 +401,4 @@ CREATE VIRTUAL TABLE events_fts USING fts5(session_id UNINDEXED, seq UNINDEXED, 
 | `<data>/agents/` | Agent adapter installs |
 | `$XDG_RUNTIME_DIR/forge/forged.sock` (macOS: `<data>/forged.sock`) | API socket, mode 0600 |
 
-`<data>` is `~/.local/share/forge` on Linux (or `$XDG_DATA_HOME/forge`) and `~/Library/Application Support/Forge` on macOS. The daemon log is `<data>/forged.log` when the app starts the daemon. `FORGE_DATA_DIR`, `FORGE_RUNTIME_DIR` (the socket's directory), and `FORGE_CONFIG_DIR` override the data, socket, and user config locations; tests always set them.
+`<data>` is `~/.local/share/forge` on Linux (or `$XDG_DATA_HOME/forge`) and `~/Library/Application Support/Forge` on macOS. The daemon log is `<data>/forged.log` when the app starts the daemon. `FORGE_DATA_DIR`, `FORGE_RUNTIME_DIR` (the socket's directory), and `FORGE_CONFIG_DIR` override the data, socket, and user config locations, and `FORGE_MANAGED_POLICY` the managed policy file; tests always set them. The managed policy constrains agents, not the user, who controls the daemon's environment.

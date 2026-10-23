@@ -1,0 +1,47 @@
+# Conflicts between layers: a lower layer never loosens a higher one.
+
+# Managed: no direct network tools; package installs need a human.
+[[managed.deny]]
+exec = ["curl*", "wget*"]
+reason = "Use the egress proxy's allowlist"
+
+[[managed.ask]]
+exec = ["pnpm add*", "npm install*"]
+reason = "New dependencies need review"
+
+# User: tries to allow what managed asks about, and allows some read-only commands.
+[[user.allow]]
+exec = ["pnpm add*", "git status*", "ls*"]
+
+[[user.ask]]
+edit = ["src/new.rs"]
+
+# Project: tries to allow what managed denies, protects generated code, and allows make in
+# Auto only.
+[[project.allow]]
+exec = ["curl*"]
+edit = ["src/new.rs"]
+
+[[project.allow]]
+exec = ["make*"]
+modes = ["auto"]
+
+[project.protected]
+paths = ["generated/"]
+
+# Remembered for the session.
+[[session]]
+verdict = "allow"
+action = { type = "exec", argv = ["npm", "install", "left-pad"], cwd = "." }
+
+[[session]]
+verdict = "allow"
+action = { type = "exec", argv = ["just", "ci"], cwd = "." }
+
+[[session]]
+verdict = "deny"
+action = { type = "exec", argv = ["ls", "-la"], cwd = "." }
+
+[[session]]
+verdict = "allow"
+action = { type = "edit", kind = "modify", path = ".env" }

@@ -23,6 +23,7 @@ impl Env {
             data_dir: home.path().join("data"),
             runtime_dir: home.path().join("run"),
             config_dir: home.path().join("config"),
+            managed_policy: home.path().join("managed.toml"),
         };
         Self {
             home,
@@ -59,7 +60,8 @@ impl Env {
             .env("HOME", self.home.path())
             .env("FORGE_DATA_DIR", &self.paths.data_dir)
             .env("FORGE_RUNTIME_DIR", &self.paths.runtime_dir)
-            .env("FORGE_CONFIG_DIR", &self.paths.config_dir);
+            .env("FORGE_CONFIG_DIR", &self.paths.config_dir)
+            .env("FORGE_MANAGED_POLICY", &self.paths.managed_policy);
         tokio::task::spawn_blocking(move || cmd.output().unwrap())
             .await
             .unwrap()

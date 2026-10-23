@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PolicyConfig",
+  "description": "A policy file. Every key is optional; a missing file has no rules.",
+  "type": "object",
+  "properties": {
+    "allow": {
+      "description": "Actions that run without asking, unless a deny or ask rule, guard, or hook says\notherwise.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PolicyRule"
+      }
+    },
+    "ask": {
+      "description": "Actions that always need a human, even where an allow rule matches.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PolicyRule"
+      }
+    },
+    "deny": {
+      "description": "Hard denies: no later rule, hook, or mode can allow what these match.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PolicyRule"
+      }
+    },
+    "protected": {
+      "$ref": "#/$defs/ProtectedConfig"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "PolicyRule": {
+      "description": "One rule. It matches an action if any of its patterns does, in the modes it lists.",
+      "type": "object",
+      "properties": {
+        "edit": {
+          "description": "Gitignore-style globs over repo-relative paths.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "exec": {
+          "description": "Globs over the command's space-joined argv; `*` matches any run of characters and\n`\\*` a literal `*`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "modes": {
+          "description": "Modes the rule applies in; every mode when unset.",
+          "type": ["array", "null"],
+          "items": {
+            "$ref": "#/$defs/ProfileMode"
+          }
+        },
+        "reason": {
+          "description": "Shown to the human and the agent when the rule decides.",
+          "type": ["string", "null"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProfileMode": {
+      "type": "string",
+      "enum": ["ask", "accept-edits", "auto", "full-access"]
+    },
+    "ProtectedConfig": {
+      "description": "Paths agents may not edit.",
+      "type": "object",
+      "properties": {
+        "paths": {
+          "description": "Gitignore-style globs over repo-relative paths, added to the built-in list.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

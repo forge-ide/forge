@@ -39,6 +39,7 @@ pub fn forged_command(home: &Path) -> Command {
         .env("FORGE_DATA_DIR", home.join("data"))
         .env("FORGE_RUNTIME_DIR", home.join("run"))
         .env("FORGE_CONFIG_DIR", home.join("config"))
+        .env("FORGE_MANAGED_POLICY", home.join("managed.toml"))
         .env("RUST_LOG", "forged=debug")
         .stdin(Stdio::null());
     cmd

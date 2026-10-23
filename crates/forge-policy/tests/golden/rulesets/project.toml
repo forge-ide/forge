@@ -1,0 +1,22 @@
+# A typical project policy, based on the spec's examples.
+[[project.deny]]
+exec = ["git push --force*", "git reset --hard origin*", "rm -rf /*"]
+reason = "Destructive or history-rewriting"
+
+[[project.ask]]
+edit = ["**/migrations/**", ".github/workflows/**"]
+reason = "Schema and CI changes need a human"
+
+[[project.allow]]
+exec = ["cargo test*", "cargo clippy*", "pnpm test*", "just *"]
+modes = ["accept-edits", "auto"]
+
+[[project.ask]]
+exec = ["pnpm add*"]
+reason = "New dependencies need review"
+
+[[project.allow]]
+exec = ["ls*", "cat *", "git status*", "git diff*", "rg *"]
+
+[project.protected]
+paths = ["Cargo.lock"]
