@@ -1,12 +1,8 @@
 //! Event log and search index.
+//!
+//! M1 has only the subscription hub: it routes published events to every subscription whose
+//! topics match. The JSONL log, SQLite index, and `afterSeq` replay land with sessions in M2.
 
-/// This crate's package name.
-pub const NAME: &str = env!("CARGO_PKG_NAME");
+pub mod hub;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn name_matches_package() {
-        assert_eq!(super::NAME, "forge-events");
-    }
-}
+pub use hub::{Hub, Subscriber};
