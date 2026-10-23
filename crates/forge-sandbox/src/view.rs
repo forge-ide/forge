@@ -23,9 +23,6 @@ pub const SYSTEM_READ_ONLY: &[&str] = &[
     "/opt",
     "/private/var/db/timezone",
     "/private/var/select",
-    // The OS cryptex holding dyld's shared cache; dyld can't start any program without it.
-    "/private/preboot/Cryptexes",
-    "/System/Volumes/Preboot/Cryptexes",
 ];
 
 /// Toolchain and cache directories visible read-only, when they exist: `CARGO_HOME` (default

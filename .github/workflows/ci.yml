@@ -75,29 +75,6 @@ jobs:
 
       - uses: extractions/setup-just@v4
 
-      # TEMPORARY diagnostics for the Seatbelt profile; remove before merging.
-      - name: Seatbelt startup diagnostics
-        if: runner.os == 'macOS'
-        run: |
-          set +e
-          cargo build --quiet -p forge-sandbox --bin forge-sandbox-probe
-          P="$PWD/target/debug/forge-sandbox-probe"
-          core='(version 1)(deny default)(allow process-exec process-fork)(allow file-map-executable)(allow sysctl-read)(allow file-read-metadata file-test-existence)'
-          mach_all='(allow mach-lookup)'
-          mach_list='(allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo") (global-name "com.apple.system.logger") (global-name "com.apple.system.notification_center"))'
-          sys="(allow file-read* (subpath \"/usr\") (subpath \"/System\") (subpath \"/Library\") (subpath \"/bin\") (subpath \"$P\") (literal \"/private/etc/hosts\"))"
-          try() { sandbox-exec -p "$2" "$P" read /etc/hosts >/dev/null 2>&1; echo "$1: exit $?"; }
-          try "A all reads, all mach" "$core$mach_all(allow file-read*)"
-          try "B all reads, listed mach" "$core$mach_list(allow file-read*)"
-          try "C system reads, all mach" "$core$mach_all$sys"
-          try "D C + root dir" "$core$mach_all$sys(allow file-read* (literal \"/\"))"
-          try "E C + /dev" "$core$mach_all$sys(allow file-read* (subpath \"/dev\"))"
-          try "F C + /private" "$core$mach_all$sys(allow file-read* (subpath \"/private\"))"
-          try "G C + /private/var/db" "$core$mach_all$sys(allow file-read* (subpath \"/private/var/db\"))"
-          try "H C + /Volumes" "$core$mach_all$sys(allow file-read* (subpath \"/Volumes\"))"
-          try "I C + /System/Volumes/Preboot as literal path" "$core$mach_all$sys(allow file-read* (prefix \"/System/Volumes/Preboot\"))"
-          try "J C + root dir + /dev + /private/var/db" "$core$mach_all$sys(allow file-read* (literal \"/\") (subpath \"/dev\") (subpath \"/private/var/db\"))"
-
       - run: just test-sandbox
 
       # Seatbelt reports what it denied only to the unified log.
