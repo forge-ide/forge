@@ -1,0 +1,17 @@
+[package]
+name = "forge-desktop"
+description = "Tauri 2 shell for the Forge UI; no business logic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+tauri.workspace = true
+
+[lints]
+workspace = true

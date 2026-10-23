@@ -1,0 +1,11 @@
+[package]
+name = "forge-events"
+description = "Event log and search index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

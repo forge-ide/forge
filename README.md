@@ -4,7 +4,7 @@ A desktop development environment for directing and reviewing coding agents.
 
 Agents (Claude Code, Codex, Gemini CLI, or anything that speaks ACP) do the writing inside sandboxed git worktrees. You review their work the way you'd review a teammate's pull request: comment on lines, request changes, and ship when it's right.
 
-> **Status:** pre-alpha. Nothing is built yet; this repo holds the spec and the plan for v0.1.
+> **Status:** pre-alpha. The repo skeleton (M0) is in place; nothing works yet. See the plan for v0.1.
 
 ## What's here
 
@@ -24,13 +24,15 @@ Rust daemon (`forged`) + Tauri 2 desktop app with SolidJS and CodeMirror 6. Linu
 
 ## Getting started
 
-Development starts at milestone M0 in [`build-plan.md`](docs/spec/build-plan.md). Once M0 lands:
+You need Rust (rustup picks up `rust-toolchain.toml`), Node 24 with `corepack enable` (for pnpm), `just`, and on Linux the WebKitGTK 4.1 dev packages and bubblewrap.
 
 ```sh
-just dev   # run the daemon and the app
+just dev   # run the app with hot reload (starts the daemon once M1 lands)
 just ci    # everything CI runs
 ```
 
+Milestones are in [`build-plan.md`](docs/spec/build-plan.md).
+
 ## License
 
-Apache-2.0 (assumed; see the decisions table in `build-plan.md`).
+[Apache-2.0](LICENSE).

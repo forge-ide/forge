@@ -1,0 +1,9 @@
+target/
+dist/
+pnpm-lock.yaml
+packages/client/src/generated/
+docs/schemas/
+apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/icons/
+# Hand-written prose; prettier would reflow tables and wireframes.
+*.md

@@ -22,7 +22,8 @@ One Cargo workspace for the daemon and CLI, and one pnpm workspace for the UI. E
 | `forge-mcp` | MCP hub and Forge's own MCP server |
 | `forge-events` | Event log, search index, OpenTelemetry export |
 | `forge-config` | Project, workspace, and agent-profile config, with layering |
-| `apps/desktop` | Tauri 2 shell; minimal Rust, no business logic |
+| `forge-fake-agent` | Scripted ACP agent that replays a YAML script of steps, for tests |
+| `apps/desktop` | Tauri 2 shell; minimal Rust, no business logic. Its `src-tauri` crate (`forge-desktop`) is a Cargo workspace member |
 | `packages/ui` | SolidJS app |
 | `packages/client` | Typed daemon client generated from `forge-api` |
 | `packages/editor` | CodeMirror 6 extensions: diff, comments, agent-file schemas |

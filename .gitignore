@@ -1,0 +1,8 @@
+/target/
+node_modules/
+dist/
+*.tsbuildinfo
+apps/desktop/src-tauri/gen/schemas/
+
+.claude/settings.local.json
+.DS_Store

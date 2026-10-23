@@ -12,7 +12,7 @@ Items marked **assumed** are defaults chosen so work can start; change them befo
 | Linux desktop | Wayland and X11, WebKitGTK 4.1 | Assumed |
 | UI | Tauri 2, SolidJS, TypeScript, CodeMirror 6 | Decided |
 | Rust | Stable, pinned in `rust-toolchain.toml`, edition 2024 | Assumed |
-| Node | Current LTS pinned in `.nvmrc`; pnpm pinned via `packageManager` | Assumed |
+| Node | Node 24 LTS pinned in `.nvmrc`; pnpm pinned via `packageManager` | Decided |
 | Task runner | `just` | Assumed |
 | Sandbox, Linux | Light: Landlock + seccomp. Standard: bubblewrap | Decided |
 | Sandbox, macOS | Light and Standard: Seatbelt profiles. Container: Podman machine | Assumed |
@@ -21,7 +21,7 @@ Items marked **assumed** are defaults chosen so work can start; change them befo
 | Git hosting in v0.1 | Push the branch with the user's git credentials; PR creation is v0.2 | Assumed |
 | GitHub auth (v0.2) | Reuse `gh auth token` if present, else OAuth device flow | Assumed |
 | Auto mode in v0.1 | Rules only; classifier is v0.2 | Decided |
-| License | Apache-2.0 | Assumed |
+| License | Apache-2.0 | Decided |
 | Telemetry | None in v0.1 | Assumed |
 
 **v0.1 scope limits:** one repo per project and one active session at a time, but every data structure and API is built for many, so v0.2 removes limits instead of rewriting.
@@ -32,12 +32,12 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 
 ### M0: Repo skeleton and CI
 
-- [ ] Cargo workspace with every crate from the component architecture as a stub with one passing test.
-- [ ] pnpm workspace: `apps/desktop`, `packages/ui`, `packages/client`, `packages/editor`.
-- [ ] Tauri app opens a window showing a placeholder Solid page.
-- [ ] `justfile` with `build`, `test`, `lint`, `fmt`, `ci`, `dev`.
+- [x] Cargo workspace with every crate from the component architecture as a stub with one passing test.
+- [x] pnpm workspace: `apps/desktop`, `packages/ui`, `packages/client`, `packages/editor`.
+- [x] Tauri app opens a window showing a placeholder Solid page.
+- [x] `justfile` with `build`, `test`, `lint`, `fmt`, `ci`, `dev`.
 - [ ] CI on Linux and macOS runs `just ci`: rustfmt, clippy with warnings as errors, cargo tests, eslint, TypeScript check, vitest.
-- [ ] `AGENTS.md`, `LICENSE`, `README.md` at the root.
+- [x] `AGENTS.md`, `LICENSE`, `README.md` at the root.
 
 **Done when:** `just ci` passes locally and in CI on both platforms, and `just dev` opens the app.
 
