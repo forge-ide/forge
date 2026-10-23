@@ -23,9 +23,46 @@ pub(crate) fn from_daemon() -> Vec<(String, String)> {
     passthrough(std::env::vars())
 }
 
+/// Whether `name` can be an environment variable's name: not empty, and no `=` or NUL, either
+/// of which would make the entry mean something else to the process (`PATH=x=` is read as a
+/// second `PATH` by shells).
+pub fn is_valid_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains(['=', '\0'])
+}
+
+/// The variables from a command's own `env` (which an agent chooses for its terminals) that
+/// may reach it: valid names whose value has no NUL, and none the sandbox sets itself, so the
+/// sandbox's `PATH`, `HOME`, `TMPDIR`, and proxy variables always stand.
+pub(crate) fn extra(
+    sandbox: &[(String, String)],
+    env: &[(String, String)],
+) -> Vec<(String, String)> {
+    env.iter()
+        .filter(|(k, v)| {
+            is_valid_name(k) && !v.contains('\0') && !sandbox.iter().any(|(s, _)| s == k)
+        })
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extra_variables_never_replace_the_sandboxs_or_smuggle_names() {
+        let pair = |k: &str, v: &str| (k.to_owned(), v.to_owned());
+        let sandbox = vec![pair("PATH", "/usr/bin"), pair("HOME", "/s/home")];
+        let env = vec![
+            pair("PATH", "/agent"),
+            pair("PATH=/agent:/usr/bin", ""),
+            pair("", "x"),
+            pair("NUL\0", "x"),
+            pair("BAD_VALUE", "a\0b"),
+            pair("RUST_LOG", "debug"),
+        ];
+        assert_eq!(extra(&sandbox, &env), [pair("RUST_LOG", "debug")]);
+    }
 
     #[test]
     fn only_allowlisted_variables_pass() {

@@ -560,8 +560,21 @@ impl Handlers {
         }
         .map_err(path_error)?;
         let id = tool_call_id();
-        let mut argv = vec![req.command.clone()];
-        argv.extend(req.args.iter().cloned());
+        let env: Vec<(String, String)> = req
+            .env
+            .iter()
+            .map(|v| (v.name.clone(), v.value.clone()))
+            .collect();
+        if let Some((bad, _)) = env
+            .iter()
+            .find(|(k, v)| !forge_sandbox::is_valid_name(k) || v.contains('\0'))
+        {
+            return Err(agent_client_protocol::Error::new(
+                -32602,
+                format!("invalid environment variable {bad:?}"),
+            ));
+        }
+        let argv = terminal_argv(&req.command, &req.args, &env);
         self.sink
             .emit(EventPayload::ToolCall(ToolCallBody {
                 tool_call_id: id.clone(),
@@ -572,11 +585,6 @@ impl Handlers {
                 title: format!("Run {}", argv.join(" ")),
             }))
             .await;
-        let env: Vec<(String, String)> = req
-            .env
-            .iter()
-            .map(|v| (v.name.clone(), v.value.clone()))
-            .collect();
         let limit = req
             .output_byte_limit
             .and_then(|n| usize::try_from(n).ok())
@@ -741,6 +749,23 @@ impl Handlers {
     }
 }
 
+/// The argv a terminal request runs, as policy sees it. Extra environment variables come first
+/// as `env NAME=value ...`, since they can change what runs (`PATH`, `BASH_ENV`, `LD_PRELOAD`)
+/// and an `exec` action has no other place for them. The sandbox keeps its own variables
+/// whatever the agent sets.
+fn terminal_argv(command: &str, args: &[String], env: &[(String, String)]) -> Vec<String> {
+    let mut argv = Vec::with_capacity(env.len() + args.len() + 2);
+    if !env.is_empty() {
+        argv.push("env".to_owned());
+        argv.extend(env.iter().map(|(k, v)| format!("{k}={v}")));
+        // So a program named like an assignment or an option still reads as the program.
+        argv.push("--".to_owned());
+    }
+    argv.push(command.to_owned());
+    argv.extend(args.iter().cloned());
+    argv
+}
+
 /// The [`Action`] a permission request describes, when it maps to one.
 fn permission_action(req: &RequestPermissionRequest, workspace: &Workspace) -> Option<Action> {
     let fields = &req.tool_call.fields;
@@ -752,8 +777,10 @@ fn permission_action(req: &RequestPermissionRequest, workspace: &Workspace) -> O
                     .iter()
                     .filter_map(|v| v.as_str().map(str::to_owned))
                     .collect(),
+                // A command string is a shell line, which is what the agent's shell runs;
+                // splitting it here would keep its quotes inside the words.
                 Some(serde_json::Value::String(cmd)) => {
-                    cmd.split_whitespace().map(str::to_owned).collect()
+                    vec!["sh".to_owned(), "-c".to_owned(), cmd.clone()]
                 }
                 _ => return None,
             };
@@ -832,4 +859,76 @@ fn io_error(e: impl std::fmt::Display) -> agent_client_protocol::Error {
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn permission(raw: serde_json::Value) -> RequestPermissionRequest {
+        let fields = acp::ToolCallUpdateFields::new()
+            .kind(acp::ToolKind::Execute)
+            .raw_input(raw);
+        RequestPermissionRequest::new(
+            acp::SessionId::new("s"),
+            acp::ToolCallUpdate::new("t", fields),
+            vec![],
+        )
+    }
+
+    fn workspace() -> (tempfile::TempDir, Workspace) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let ws = Workspace::new(vec![crate::Root {
+            name: "repo".into(),
+            path: root,
+        }])
+        .unwrap();
+        (dir, ws)
+    }
+
+    fn argv(action: Option<Action>) -> Vec<String> {
+        match action {
+            Some(Action::Exec { argv, .. }) => argv,
+            other => panic!("not an exec: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn command_strings_become_shell_lines() {
+        let (_dir, ws) = workspace();
+        let line = r#"git -C "a b" commit -m 'x y'"#;
+        let req = permission(serde_json::json!({ "command": line }));
+        assert_eq!(argv(permission_action(&req, &ws)), ["sh", "-c", line]);
+    }
+
+    #[test]
+    fn argv_arrays_are_kept_as_given() {
+        let (_dir, ws) = workspace();
+        let req = permission(serde_json::json!({ "argv": ["git", "-C", "a b", "status"] }));
+        assert_eq!(
+            argv(permission_action(&req, &ws)),
+            ["git", "-C", "a b", "status"]
+        );
+        let req = permission(serde_json::json!({ "command": ["ls", "-la"] }));
+        assert_eq!(argv(permission_action(&req, &ws)), ["ls", "-la"]);
+    }
+
+    #[test]
+    fn terminal_env_shows_as_an_env_prefix() {
+        let args = vec!["test".to_owned()];
+        assert_eq!(terminal_argv("cargo", &args, &[]), ["cargo", "test"]);
+        let env = vec![
+            ("PATH".to_owned(), "./bin".to_owned()),
+            ("RUST_LOG".to_owned(), "debug".to_owned()),
+        ];
+        assert_eq!(
+            terminal_argv("cargo", &args, &env),
+            ["env", "PATH=./bin", "RUST_LOG=debug", "--", "cargo", "test"]
+        );
+        assert_eq!(
+            terminal_argv("FOO=bar", &[], &env[..1]),
+            ["env", "PATH=./bin", "--", "FOO=bar"]
+        );
+    }
 }

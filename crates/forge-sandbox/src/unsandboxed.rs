@@ -60,7 +60,7 @@ impl SessionSandbox for Unsandboxed {
             .current_dir(cwd)
             .env_clear()
             .envs(self.env.iter().map(|(k, v)| (k, v)))
-            .envs(env.iter().map(|(k, v)| (k, v)));
+            .envs(crate::env::extra(&self.env, env));
         cmd
     }
 }

@@ -3,9 +3,12 @@
 //! `unsafe` code, which rules out `Command::pre_exec`.
 //!
 //! ```text
-//! forge-sandbox-exec light|standard <policy-json> -- <program> [args...]
+//! forge-sandbox-exec light|standard <policy-json> [--env NAME=value]... -- <program> [args...]
 //! forge-sandbox-exec check-light
 //! ```
+//!
+//! `--env` variables are set on the command only, after the restrictions apply, so a loader
+//! variable such as `LD_PRELOAD` can't run code in the helper before it restricts itself.
 
 use std::ffi::OsString;
 use std::process::ExitCode;
@@ -34,7 +37,8 @@ fn run(args: Vec<OsString>) -> Result<Never, (u8, String)> {
     let usage = || {
         (
             SETUP_FAILED,
-            "usage: forge-sandbox-exec light|standard <policy-json> -- <program> [args...]"
+            "usage: forge-sandbox-exec light|standard <policy-json> [--env NAME=value]... -- \
+             <program> [args...]"
                 .to_owned(),
         )
     };
@@ -46,8 +50,21 @@ fn run(args: Vec<OsString>) -> Result<Never, (u8, String)> {
     }
     let policy = args.next().ok_or_else(usage)?;
     let policy = Policy::from_json(&policy.to_string_lossy()).map_err(|e| (SETUP_FAILED, e))?;
-    if args.next().as_deref() != Some("--".as_ref()) {
-        return Err(usage());
+    let mut extra: Vec<(String, String)> = Vec::new();
+    loop {
+        match args.next() {
+            Some(a) if a == "--" => break,
+            Some(a) if a == "--env" => {
+                let pair = args.next().ok_or_else(usage)?;
+                let pair = pair.to_str().ok_or_else(usage)?;
+                let (name, value) = pair.split_once('=').ok_or_else(usage)?;
+                // The launcher filtered these already; this holds even if it didn't.
+                if crate::env::is_valid_name(name) && std::env::var_os(name).is_none() {
+                    extra.push((name.to_owned(), value.to_owned()));
+                }
+            }
+            _ => return Err(usage()),
+        }
     }
     let program = args.next().ok_or_else(usage)?;
     let expected = match mode.to_str() {
@@ -68,6 +85,7 @@ fn run(args: Vec<OsString>) -> Result<Never, (u8, String)> {
         start_forwarder(forward).map_err(|e| (SETUP_FAILED, e))?;
         let status = std::process::Command::new(&program)
             .args(args)
+            .envs(extra)
             .status()
             .map_err(|e| {
                 (
@@ -77,7 +95,7 @@ fn run(args: Vec<OsString>) -> Result<Never, (u8, String)> {
             })?;
         std::process::exit(exit_code(status));
     }
-    let err = exec(program.clone(), args.collect());
+    let err = exec(program.clone(), args.collect(), extra);
     Err((
         EXEC_FAILED,
         format!("running {}: {err}", program.to_string_lossy()),
@@ -155,7 +173,17 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
         .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
 }
 
-fn exec(program: OsString, args: Vec<OsString>) -> std::io::Error {
+fn exec(program: OsString, args: Vec<OsString>, env: Vec<(String, String)>) -> std::io::Error {
     use std::os::unix::process::CommandExt;
-    std::process::Command::new(program).args(args).exec()
+    std::process::Command::new(program)
+        .args(args)
+        .envs(env)
+        .exec()
+}
+
+/// The helper arguments that pass `env` to the command it runs.
+pub fn env_args(env: &[(String, String)]) -> Vec<String> {
+    env.iter()
+        .flat_map(|(k, v)| ["--env".to_owned(), format!("{k}={v}")])
+        .collect()
 }
