@@ -107,7 +107,7 @@ Each session is a supervised Tokio task that owns one agent connection, one set 
 
 - **Launch.** The agent profile names a command (`claude-code-acp`, `codex-acp`, `gemini --acp`). It runs inside the session's sandbox and speaks JSON-RPC over stdio.
 - **Negotiation.** Forge advertises file-system and terminal capabilities and records what the agent advertises (session loading, plans, modes, slash commands). The UI hides features an agent doesn't support.
-- **File access.** File reads and writes requested over ACP resolve against the session's worktrees only. Reads follow symlinks and must land inside a worktree; writes may not pass through a symlink or touch `.git`. Writes pass the policy engine and the pre- and post-edit hooks.
+- **File access.** File reads and writes requested over ACP resolve against the session's worktrees only. Reads follow symlinks and must land inside a worktree; writes may not pass through a symlink or touch a `.git` at any depth, in any spelling a case-insensitive filesystem would resolve to it. Writes pass the policy engine and the pre- and post-edit hooks.
 - **Terminals.** ACP terminal requests become processes in the sandbox; output streams to the UI and the event log.
 - **Permission requests** go straight to the policy engine. An "ask" result becomes an approval-inbox item; the agent waits on the response. Until the policy engine exists, every request is denied with that reason, and the request and denial are logged.
 - **MCP hand-off.** At session start Forge passes the MCP hub's per-session endpoint, so every MCP tool call is visible and policy-checked.

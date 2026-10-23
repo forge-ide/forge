@@ -230,9 +230,11 @@ impl EventLog {
         };
         let mut line = serde_json::to_string(&record).expect("events serialize");
         line.push('\n');
-        log.file
-            .write_all(line.as_bytes())
-            .map_err(io(format!("writing {}", log.path.display())))?;
+        if let Err(e) = log.file.write_all(line.as_bytes()) {
+            // Don't leave half a line for the next event to land after.
+            let _ = log.file.set_len(log.offset);
+            return Err(io(format!("writing {}", log.path.display()))(e));
+        }
         if let Err(e) = index(&mut lock(&self.conn), &event, stream_seq, log.offset) {
             // Keep the file and the index in step: drop the line the index doesn't know about.
             let _ = log.file.set_len(log.offset);

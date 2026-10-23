@@ -24,6 +24,8 @@ pub enum GitError {
     NotARepo(PathBuf),
     #[error("{0:?} is not a valid branch name")]
     InvalidBranch(String),
+    #[error("base branch {0:?} is not a valid branch name")]
+    InvalidBase(String),
     #[error("base branch {0:?} has no commits to start a worktree from")]
     NoBase(String),
     #[error("branch {branch:?} is checked out at {path}")]
@@ -134,13 +136,11 @@ impl Worktrees for GitCli {
     }
 
     fn validate_branch(&self, repo: &Path, branch: &str) -> Result<(), GitError> {
-        let invalid = || GitError::InvalidBranch(branch.to_owned());
-        if branch.starts_with('-') || branch.split('/').any(|c| c.starts_with('.')) {
-            return Err(invalid());
+        if is_branch_name(repo, branch) {
+            Ok(())
+        } else {
+            Err(GitError::InvalidBranch(branch.to_owned()))
         }
-        git(repo, &["check-ref-format", &format!("refs/heads/{branch}")])
-            .map(drop)
-            .map_err(|_| invalid())
     }
 
     fn inspect(&self, repo: &Path, branch: &str) -> Result<NameUse, GitError> {
@@ -170,19 +170,22 @@ impl Worktrees for GitCli {
         if mode == CreateMode::Adopt {
             return self.adopt(repo, branch, &path);
         }
-        if mode == CreateMode::New
-            && git(
-                repo,
-                &[
-                    "rev-parse",
-                    "--verify",
-                    "--quiet",
-                    &format!("{base}^{{commit}}"),
-                ],
-            )
-            .is_err()
-        {
-            return Err(GitError::NoBase(base.to_owned()));
+        if mode == CreateMode::New {
+            // The base comes from forge.toml, which a cloned repo controls.
+            if !is_branch_name(repo, base) {
+                return Err(GitError::InvalidBase(base.to_owned()));
+            }
+            let commit = format!("{base}^{{commit}}");
+            let args = [
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "--end-of-options",
+                &commit,
+            ];
+            if git(repo, &args).is_err() {
+                return Err(GitError::NoBase(base.to_owned()));
+            }
         }
         let used = self.inspect(repo, branch)?;
         if let Some(at) = used.checked_out_at {
@@ -194,8 +197,22 @@ impl Worktrees for GitCli {
         exclude_worktrees_dir(repo)?;
         let target = path.to_string_lossy().into_owned();
         let result = match mode {
-            CreateMode::New => git(repo, &["worktree", "add", "-b", branch, &target, base]),
-            _ => git(repo, &["worktree", "add", &target, branch]),
+            CreateMode::New => git(
+                repo,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    branch,
+                    "--end-of-options",
+                    &target,
+                    base,
+                ],
+            ),
+            _ => git(
+                repo,
+                &["worktree", "add", "--end-of-options", &target, branch],
+            ),
         };
         match result {
             Ok(_) => canonical(&path),
@@ -278,6 +295,13 @@ impl GitCli {
             let _ = git(repo, &["branch", "-D", branch]);
         }
     }
+}
+
+/// A name git accepts for a branch that can't be mistaken for an option or a hidden path.
+fn is_branch_name(repo: &Path, name: &str) -> bool {
+    !name.starts_with('-')
+        && !name.split('/').any(|c| c.starts_with('.'))
+        && git(repo, &["check-ref-format", &format!("refs/heads/{name}")]).is_ok()
 }
 
 fn branch_exists(repo: &Path, branch: &str) -> Result<bool, GitError> {
@@ -511,6 +535,23 @@ mod tests {
             Err(GitError::NoBase(_))
         ));
         assert!(!worktree_path(&empty, "feat/z").exists());
+    }
+
+    #[test]
+    fn base_branches_cannot_smuggle_options() {
+        let (_dir, repo) = repo();
+        for base in ["--orphan", "-f", "main --force", ""] {
+            let result = GitCli.create(&repo, "feat/opt", base, CreateMode::New);
+            assert!(
+                matches!(result, Err(GitError::InvalidBase(_))),
+                "{base:?}: {result:?}"
+            );
+            assert!(!worktree_path(&repo, "feat/opt").exists());
+            assert!(!GitCli.inspect(&repo, "feat/opt").unwrap().branch_exists);
+        }
+        GitCli
+            .create(&repo, "feat/opt", "main", CreateMode::New)
+            .unwrap();
     }
 
     #[test]

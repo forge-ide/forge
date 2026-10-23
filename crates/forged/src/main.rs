@@ -27,7 +27,10 @@ fn main() -> ExitCode {
         .and_then(|rt| {
             rt.block_on(async {
                 let paths = Paths::from_env()?;
-                forged::run(paths, shutdown_signal()).await
+                // Install the handlers before the socket exists, so a client that sees the
+                // socket can always stop the daemon cleanly.
+                let shutdown = shutdown_signal()?;
+                forged::run(paths, shutdown).await
             })
         });
     match result {
@@ -39,15 +42,15 @@ fn main() -> ExitCode {
     }
 }
 
-/// Resolves on SIGINT or SIGTERM.
-async fn shutdown_signal() {
+/// Registers SIGINT and SIGTERM handlers now; the future resolves when either arrives.
+fn shutdown_signal() -> anyhow::Result<impl std::future::Future<Output = ()>> {
     use tokio::signal::unix::{SignalKind, signal};
-    let Ok(mut term) = signal(SignalKind::terminate()) else {
-        let _ = tokio::signal::ctrl_c().await;
-        return;
-    };
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        _ = term.recv() => {}
-    }
+    let mut term = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    Ok(async move {
+        tokio::select! {
+            _ = interrupt.recv() => {}
+            _ = term.recv() => {}
+        }
+    })
 }

@@ -172,7 +172,7 @@ format = "{type}/{slug}"
 types = ["feat", "fix", "bug"]
 ```
 
-`[budgets]` keys are optional (unset means no cap); `[sessions]` defaults to the values shown. Repo paths must be relative and stay inside the project root, even after following symlinks. `[branches]` is optional: `format` must contain `{slug}` and may contain `{type}`; `types` are lowercase letters, digits, and hyphens, and the first is used when a title names none.
+`[budgets]` keys are optional (unset means no cap); `[sessions]` defaults to the values shown. Repo paths must be relative and stay inside the project root, even after following symlinks. `base_branch` must be a branch name: no spaces and no leading `-`. `[branches]` is optional: `format` must contain `{slug}` and may contain `{type}`; `types` are lowercase letters, digits, and hyphens, and the first is used when a title names none.
 
 **`~/.config/forge/config.toml`** (user config; every key optional)
 

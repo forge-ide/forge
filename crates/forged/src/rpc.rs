@@ -407,7 +407,9 @@ async fn subscribe(
     let (log, outbox, sub_id) = (state.log.clone(), conn.outbox.clone(), id.clone());
     let after = params.after_seq;
     let replay: Deferred = Box::pin(async move {
-        let mut last = after.unwrap_or(head);
+        // Without `afterSeq` nothing is replayed, and every event held since registering is
+        // new to the client, including any appended between reading `head` and registering.
+        let mut last = after.unwrap_or(0);
         if let Some(after) = after {
             let replayed = tokio::task::spawn_blocking(move || log.replay(&topics, after)).await;
             let replayed = match replayed {
@@ -439,32 +441,7 @@ async fn subscribe(
                 last = r.stream_seq;
             }
         }
-        // Flush what arrived meanwhile, then switch to live delivery.
-        loop {
-            let held = {
-                let mut gate = lock(&gate);
-                match &mut *gate {
-                    Gate::Holding(held) if held.is_empty() => {
-                        *gate = Gate::Open(last);
-                        return;
-                    }
-                    Gate::Holding(held) => std::mem::take(held),
-                    Gate::Open(_) => return,
-                }
-            };
-            for note in held {
-                if note.seq <= last {
-                    continue;
-                }
-                let Some(text) = notification_text(&note) else {
-                    continue;
-                };
-                if !outbox.send_patiently(text).await {
-                    return;
-                }
-                last = note.seq;
-            }
-        }
+        open_gate(&gate, last, &outbox).await;
     });
     Ok((
         SubscribeResult {
@@ -472,6 +449,36 @@ async fn subscribe(
         },
         replay,
     ))
+}
+
+/// Send the events held while the subscription was set up, skipping any at or before `last`
+/// (already replayed), then switch the gate to live delivery.
+async fn open_gate(gate: &Mutex<Gate>, mut last: u64, outbox: &Outbox) {
+    loop {
+        let held = {
+            let mut gate = lock(gate);
+            match &mut *gate {
+                Gate::Holding(held) if held.is_empty() => {
+                    *gate = Gate::Open(last);
+                    return;
+                }
+                Gate::Holding(held) => std::mem::take(held),
+                Gate::Open(_) => return,
+            }
+        };
+        for note in held {
+            if note.seq <= last {
+                continue;
+            }
+            let Some(text) = notification_text(&note) else {
+                continue;
+            };
+            if !outbox.send_patiently(text).await {
+                return;
+            }
+            last = note.seq;
+        }
+    }
 }
 
 fn unsubscribe(
@@ -489,4 +496,62 @@ fn unsubscribe(
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use forge_api::events::{Event, EventPayload};
+    use forge_api::model::Usage;
+    use forge_api::{SessionId, Timestamp};
+
+    use super::*;
+
+    fn note(seq: u64) -> EventNotification {
+        EventNotification {
+            subscription_id: SubscriptionId::new(),
+            topic: Topic::Board,
+            seq,
+            event: Event {
+                seq,
+                session_id: SessionId::new(),
+                at: Timestamp::now(),
+                parent: None,
+                payload: EventPayload::Usage(Usage {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cost_usd: None,
+                }),
+            },
+        }
+    }
+
+    fn sent(rx: &mut mpsc::Receiver<String>) -> Vec<u64> {
+        let mut seqs = Vec::new();
+        while let Ok(text) = rx.try_recv() {
+            let value: Value = serde_json::from_str(&text).unwrap();
+            seqs.push(value["params"]["seq"].as_u64().unwrap());
+        }
+        seqs
+    }
+
+    #[tokio::test]
+    async fn opening_the_gate_sends_held_events_newer_than_the_cursor() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let outbox = Outbox::new(tx, Duration::from_secs(1));
+
+        // A fresh subscription starts from 0: everything held is new to the client.
+        let gate = Mutex::new(Gate::Holding(vec![note(7), note(8)]));
+        open_gate(&gate, 0, &outbox).await;
+        assert_eq!(sent(&mut rx), [7, 8]);
+        assert!(matches!(*lock(&gate), Gate::Open(8)));
+
+        // After a replay up to 7, only what came later is sent.
+        let gate = Mutex::new(Gate::Holding(vec![note(6), note(7), note(8)]));
+        open_gate(&gate, 7, &outbox).await;
+        assert_eq!(sent(&mut rx), [8]);
+
+        let gate = Mutex::new(Gate::Holding(Vec::new()));
+        open_gate(&gate, 5, &outbox).await;
+        assert!(matches!(*lock(&gate), Gate::Open(5)));
+    }
 }

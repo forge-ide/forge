@@ -1,7 +1,8 @@
 //! Confines the paths an agent asks for to the session's worktrees.
 //!
 //! Reads resolve symlinks and must land inside a root. Writes must name a path inside a root
-//! with no symlink anywhere below the root, and never touch a repository's `.git`. On the wire
+//! with no symlink anywhere below the root, and never touch a `.git` at any depth, however it
+//! is spelled. On the wire
 //! paths are relative to the root, with forward slashes.
 
 use std::path::{Component, Path, PathBuf};
@@ -106,7 +107,7 @@ impl Workspace {
         if rel.as_os_str().is_empty() {
             return Err(PathError::Outside(path.to_path_buf()));
         }
-        if rel.components().next() == Some(Component::Normal(".git".as_ref())) {
+        if touches_git_dir(rel) {
             return Err(PathError::GitDir(path.to_path_buf()));
         }
         let mut current = root.path.clone();
@@ -134,7 +135,7 @@ impl Workspace {
             .iter()
             .find_map(|r| real.strip_prefix(&r.path).ok().map(|rel| (r, rel)))
             .ok_or_else(|| PathError::Outside(asked.to_path_buf()))?;
-        if rel.components().next() == Some(Component::Normal(".git".as_ref())) {
+        if touches_git_dir(rel) {
             return Err(PathError::GitDir(asked.to_path_buf()));
         }
         Ok(Resolved {
@@ -155,6 +156,24 @@ impl Workspace {
             (true, false) => format!("{}/{}", root.name, rel.join("/")),
         }
     }
+}
+
+/// Whether any component of `rel` names a `.git` file or directory, including spellings that
+/// a case-insensitive filesystem (the macOS default) or HFS+, which ignores some zero-width
+/// characters, would resolve to one.
+fn touches_git_dir(rel: &Path) -> bool {
+    rel.components().any(|c| match c {
+        Component::Normal(name) => name.to_str().is_some_and(|name| {
+            let visible: String = name.chars().filter(|c| !is_hfs_ignorable(*c)).collect();
+            visible.eq_ignore_ascii_case(".git")
+        }),
+        _ => false,
+    })
+}
+
+/// Characters HFS+ drops when comparing names (the set git guards against, CVE-2014-9390).
+fn is_hfs_ignorable(c: char) -> bool {
+    matches!(c, '\u{200c}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{206a}'..='\u{206f}' | '\u{feff}')
 }
 
 fn require_absolute(path: &Path) -> Result<(), PathError> {
@@ -289,6 +308,29 @@ mod tests {
             };
             assert!(ok, "{}: {err:?}", path.display());
         }
+    }
+
+    #[test]
+    fn git_dirs_are_blocked_whatever_the_spelling() {
+        let fx = fixture();
+        // Case-insensitive filesystems (macOS by default) and HFS+, which ignores some
+        // zero-width characters, would resolve these to the real `.git`.
+        for name in [
+            ".GIT/config",
+            ".Git/hooks/pre-commit",
+            "\u{200c}.git/config",
+            ".gi\u{feff}t/x",
+        ] {
+            let err = fx.ws.resolve_write(&fx.root.join(name)).unwrap_err();
+            assert!(matches!(err, PathError::GitDir(_)), "{name:?}: {err:?}");
+        }
+        // Names that merely contain `.git` are fine.
+        fx.ws
+            .resolve_write(&fx.root.join(".github/workflows/ci.yml"))
+            .unwrap();
+        fx.ws
+            .resolve_write(&fx.root.join("src/.gitignore"))
+            .unwrap();
     }
 
     #[test]

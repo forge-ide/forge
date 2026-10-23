@@ -174,6 +174,13 @@ impl ProjectConfig {
             }
             if repo.base_branch.trim().is_empty() {
                 problems.push(format!("{at}.base_branch must not be empty"));
+            } else if repo.base_branch.starts_with('-')
+                || repo.base_branch.contains(char::is_whitespace)
+            {
+                problems.push(format!(
+                    "{at}.base_branch {:?} must be a branch name, without spaces or a leading '-'",
+                    repo.base_branch
+                ));
             }
         }
         for (key, value) in [
@@ -296,6 +303,19 @@ worktree_retention_days = 7
         config.branches.types = Some(vec![]);
         let problems = config.validate().unwrap_err();
         assert_eq!(problems.len(), 6, "{problems:#?}");
+    }
+
+    #[test]
+    fn base_branches_must_look_like_branches() {
+        for bad in ["--orphan", "-f", "main --force"] {
+            let mut config = ProjectConfig::single_repo("x", "main");
+            config.repos[0].base_branch = bad.into();
+            let problems = config.validate().unwrap_err();
+            assert!(problems[0].contains("base_branch"), "{bad}: {problems:?}");
+        }
+        let mut config = ProjectConfig::single_repo("x", "main");
+        config.repos[0].base_branch = "release/1.0".into();
+        config.validate().unwrap();
     }
 
     #[test]
