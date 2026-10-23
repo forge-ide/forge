@@ -297,12 +297,13 @@ fn stub_dir(root: &Path) -> PathBuf {
     let dir = root.join("stubs");
     std::fs::create_dir_all(&dir).unwrap();
     for name in STUBS {
-        // Each stub logs the name built into it, whatever it was run as. Fields end with \x1f
-        // and records with \x1e, so any argv round-trips.
+        // Each stub logs the name built into it, whatever it was run as, to its own file in the
+        // log dir: stubs in a pipeline run at once, and a shared file would interleave their
+        // records. Fields end with \x1f, so any argv round-trips.
         let script = format!(
             "#!/bin/sh\n\
-             {{ printf '%s\\037' {name}; for a in \"$@\"; do printf '%s\\037' \"$a\"; done; \
-             printf '\\036'; }} >> \"$FORGE_ORACLE_LOG\"\n"
+             {{ printf '%s\\037' {name}; for a in \"$@\"; do printf '%s\\037' \"$a\"; done; }} \
+             > \"$FORGE_ORACLE_LOG/$$\"\n"
         );
         let path = dir.join(name);
         std::fs::write(&path, script).unwrap();
@@ -313,7 +314,8 @@ fn stub_dir(root: &Path) -> PathBuf {
 
 fn run(script: &str, root: &Path, stubs: &Path) -> Run {
     let log = root.join("log");
-    let _ = std::fs::remove_file(&log);
+    let _ = std::fs::remove_dir_all(&log);
+    std::fs::create_dir_all(&log).unwrap();
     let work = root.join("work");
     let mut child = Command::new("bash")
         .arg("-c")
@@ -336,16 +338,23 @@ fn run(script: &str, root: &Path, stubs: &Path) -> Run {
         }
         std::thread::sleep(Duration::from_millis(2));
     }
-    let text = std::fs::read(&log).unwrap_or_default();
-    let ran = String::from_utf8_lossy(&text)
-        .split('\u{1e}')
-        .filter(|r| !r.is_empty())
-        .map(|r| {
-            let mut fields: Vec<String> = r.split('\u{1f}').map(str::to_owned).collect();
+    // A background job (`cmd &`, `coproc`) may outlive the shell; give it time to log.
+    if script.contains('&') || script.contains("coproc") {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut ran: Vec<Vec<String>> = std::fs::read_dir(&log)
+        .unwrap()
+        .map(|entry| {
+            let text = std::fs::read(entry.unwrap().path()).unwrap();
+            let mut fields: Vec<String> = String::from_utf8_lossy(&text)
+                .split('\u{1f}')
+                .map(str::to_owned)
+                .collect();
             fields.pop();
             fields
         })
         .collect();
+    ran.sort();
     Run { ran }
 }
 
