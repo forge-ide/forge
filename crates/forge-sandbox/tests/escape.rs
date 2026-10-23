@@ -11,14 +11,18 @@ use std::time::Duration;
 
 use forge_api::model::SandboxTier;
 use forge_sandbox::proxy::{
-    Allowlist, BoxFuture, Connection, Limits, Proxy, ProxyConfig, PublicDns, Resolve,
+    Allowlist, BoxFuture, Connection, Limits, PlainUpstream, Proxy, ProxyConfig, PublicDns,
+    Resolve, SecretRoute,
 };
+use forge_sandbox::secrets::{PLACEHOLDER, Secret};
 use forge_sandbox::{SessionSandbox, Spec, WorktreeMount};
 use tempfile::TempDir;
 
 const PROBE: &str = env!("CARGO_BIN_EXE_forge-sandbox-probe");
 const HELPER: &str = env!("CARGO_BIN_EXE_forge-sandbox-exec");
 const SECRET: &str = "FORGE_ESCAPE_TEST_SECRET";
+/// The value the proxy injects on the Anthropic route.
+const ROUTE_SECRET: &str = "sk-escape-route";
 
 /// A home with an SSH key, a repo inside it with two session worktrees, a stand-in daemon
 /// process and socket, and listeners outside the sandbox.
@@ -37,6 +41,8 @@ struct Fixture {
     tcp: TcpListener,
     udp: UdpSocket,
     proxy: Arc<Proxy>,
+    /// Request heads the stand-in upstream received.
+    upstream_requests: Arc<std::sync::Mutex<Vec<String>>>,
     connections: Arc<std::sync::Mutex<Vec<Connection>>>,
 }
 
@@ -50,7 +56,7 @@ impl Resolve for TestDns {
         host: &'a str,
         port: u16,
     ) -> BoxFuture<'a, Result<Vec<std::net::SocketAddr>, String>> {
-        if host == "allowed.test" {
+        if host == "allowed.test" || host == "api.anthropic.com" {
             let addr = self.0;
             return Box::pin(async move { Ok(vec![addr]) });
         }
@@ -92,7 +98,33 @@ impl Fixture {
         let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
         let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upstream_addr = upstream.local_addr().unwrap();
-        tokio::spawn(async move { while upstream.accept().await.is_ok() {} });
+        let upstream_requests: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let record = upstream_requests.clone();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut stream, _)) = upstream.accept().await {
+                let record = record.clone();
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !head.ends_with(b"\r\n\r\n") {
+                        match stream.read(&mut byte).await {
+                            Ok(1) => head.push(byte[0]),
+                            _ => return,
+                        }
+                    }
+                    record
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&head).into_owned());
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                });
+            }
+        });
         let connections: Arc<std::sync::Mutex<Vec<Connection>>> = Arc::default();
         let log = connections.clone();
         let proxy = Proxy::start(ProxyConfig {
@@ -100,12 +132,18 @@ impl Fixture {
             resolver: Arc::new(TestDns(upstream_addr)),
             log: Arc::new(move |c| log.lock().unwrap().push(c)),
             limits: Limits::default(),
+            routes: vec![SecretRoute {
+                secret: forge_sandbox::secrets::known("ANTHROPIC_API_KEY").unwrap(),
+                value: Secret::new(ROUTE_SECRET),
+            }],
+            upstream: Some(Arc::new(PlainUpstream)),
         })
         .await
         .unwrap();
         Fixture {
             proxy: Arc::new(proxy),
             connections,
+            upstream_requests,
             _socket: UnixListener::bind(&socket).unwrap(),
             _bus: UnixListener::bind(&bus).unwrap(),
             tcp,
@@ -305,6 +343,21 @@ fn escapes(fx: &Fixture) -> Vec<(&'static str, Escape)> {
             Read(format!("/proc/{}/environ", fx.daemon.id())),
         ));
     }
+    // The real keyring, where Forge's secrets live, on machines that have one: the login
+    // keychain file on macOS, and the session bus that reaches the Secret Service on Linux.
+    let real = |var: &str, rest: &str| std::env::var_os(var).map(|v| PathBuf::from(v).join(rest));
+    if cfg!(target_os = "macos")
+        && let Some(keychain) = real("HOME", "Library/Keychains/login.keychain-db")
+        && keychain.exists()
+    {
+        list.push(("read the login keychain", Read(s(keychain))));
+    }
+    if cfg!(target_os = "linux")
+        && let Some(bus) = real("XDG_RUNTIME_DIR", "bus")
+        && bus.exists()
+    {
+        list.push(("connect to the real session bus", Unix(s(bus))));
+    }
     list
 }
 
@@ -374,6 +427,20 @@ async fn proxy_checks(sb: &dyn SessionSandbox, fx: &Fixture) {
         let (code, _) = probe(sb, cwd, "proxy-connect", target).await;
         assert_eq!(code, 1, "the proxy let {target} through");
     }
+    // The secret's route: the agent sends the placeholder, the host gets the real value.
+    let (code, stderr) = probe(sb, cwd, "route-get", "ANTHROPIC_BASE_URL").await;
+    assert_eq!(code, 0, "the secret's route should work: {stderr}");
+    let requests = fx.upstream_requests.lock().unwrap().clone();
+    let routed = requests
+        .iter()
+        .find(|r| r.starts_with("GET /v1/models "))
+        .unwrap_or_else(|| panic!("the route's request never arrived: {requests:?}"));
+    assert!(routed.contains("Host: api.anthropic.com\r\n"), "{routed}");
+    assert!(
+        routed.contains(&format!("x-api-key: {ROUTE_SECRET}\r\n")),
+        "{routed}"
+    );
+    assert!(!routed.contains(PLACEHOLDER), "{routed}");
     let log = fx.connections.lock().unwrap().clone();
     for target in &refused {
         let (host, port) = target.rsplit_once(':').unwrap();

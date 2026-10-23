@@ -88,6 +88,7 @@ async fn open_state(db: db::Db, paths: Paths) -> anyhow::Result<Arc<rpc::State>>
             sandbox: sandbox.clone(),
             paths: paths.clone(),
             home: home.clone(),
+            secrets: Arc::new(forge_sandbox::secrets::Keyring::system()),
         }),
         sandbox.clone(),
         forge_session::SandboxDirs {

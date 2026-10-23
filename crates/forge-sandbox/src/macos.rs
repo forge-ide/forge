@@ -32,7 +32,6 @@ const MACH_SERVICES: &[&str] = &[
     "com.apple.logd",
     "com.apple.diagnosticd",
     "com.apple.CoreServices.coreservicesd",
-    "com.apple.SecurityServer",
 ];
 
 pub struct Seatbelt {
@@ -87,8 +86,8 @@ impl Sandbox for Seatbelt {
                 env.push(("TMPDIR".into(), view.scratch_tmp.display().to_string()));
                 env.extend(view.toolchain_env.iter().cloned());
                 let port = spec.proxy.as_ref().map(|p| p.port());
-                if let Some(port) = port {
-                    env.extend(crate::proxy::env(&format!("http://127.0.0.1:{port}")));
+                if let Some(proxy) = &spec.proxy {
+                    env.extend(proxy.env(&format!("http://127.0.0.1:{}", proxy.port())));
                 }
                 Ok(Arc::new(SeatbeltSession {
                     tier: spec.tier,

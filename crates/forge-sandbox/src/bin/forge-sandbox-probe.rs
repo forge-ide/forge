@@ -4,7 +4,7 @@
 //! ```text
 //! forge-sandbox-probe read <file> | list <dir> | write <file>
 //!                     connect-tcp <addr:port> | connect-unix <path> | udp <addr:port>
-//!                     signal <pid> | proxy-connect <host:port>
+//!                     signal <pid> | proxy-connect <host:port> | route-get <base-url-var>
 //! ```
 
 use std::process::ExitCode;
@@ -28,6 +28,7 @@ fn main() -> ExitCode {
         }
         "signal" => signal(target),
         "proxy-connect" => proxy_connect(target),
+        "route-get" => route_get(target),
         _ => {
             eprintln!("forge-sandbox-probe: unknown action {action:?}");
             return ExitCode::from(2);
@@ -74,5 +75,31 @@ fn proxy_connect(target: &str) -> std::io::Result<()> {
         Ok(())
     } else {
         Err(std::io::Error::other(format!("proxy refused: {status}")))
+    }
+}
+
+/// `GET <base>/v1/models` on the base URL in the variable `var`, sending the placeholder in
+/// `ANTHROPIC_API_KEY` as the key; succeeds on a 200 reply.
+fn route_get(var: &str) -> std::io::Result<()> {
+    use std::io::{Read, Write};
+    let base =
+        std::env::var(var).map_err(|_| std::io::Error::other(format!("{var} is not set")))?;
+    let rest = base
+        .strip_prefix("http://")
+        .ok_or_else(|| std::io::Error::other("not http"))?;
+    let (addr, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+    let mut stream = std::net::TcpStream::connect(addr)?;
+    write!(
+        stream,
+        "GET /{path}/v1/models HTTP/1.1\r\nHost: {addr}\r\nx-api-key: {key}\r\n\r\n"
+    )?;
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply)?;
+    let status = reply.lines().next().unwrap_or_default().to_owned();
+    if status.starts_with("HTTP/1.1 200") {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!("route refused: {status}")))
     }
 }

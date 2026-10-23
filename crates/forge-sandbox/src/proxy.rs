@@ -10,6 +10,14 @@
 //!
 //! It listens on a loopback TCP port (Light, Seatbelt, Unsandboxed) and, when a backend asks,
 //! on a Unix socket that bubblewrap binds into a Standard sandbox.
+//!
+//! It also serves one route per injected secret (see [`crate::secrets`]): a plain-HTTP request
+//! to `/_forge/<token>/<route>/<path>` is sent over TLS to that secret's fixed host as
+//! `/<path>`, with the secret's header set to the real value. The agent only ever holds a
+//! placeholder. `<token>` is random per proxy and reaches the sandbox only in the base-URL
+//! variables, so other local programs (or a web page rebinding a name to loopback) can't use
+//! the route; requests must also name a loopback `Host`, carry no browser `Origin` or
+//! `Sec-Fetch-*` headers, use `GET` or `POST`, and stay on the secret's allowed paths.
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -23,6 +31,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixListener};
 use tokio::sync::Semaphore;
 use tokio::task::{JoinHandle, JoinSet};
+
+use crate::secrets::{KnownSecret, PLACEHOLDER, Secret};
 
 /// Longest request head the proxy reads before giving up.
 const MAX_HEAD: usize = 16 * 1024;
@@ -206,6 +216,99 @@ pub struct ProxyConfig {
     pub resolver: Arc<dyn Resolve>,
     pub log: ConnectionLog,
     pub limits: Limits,
+    /// Secrets to inject, each on its own route.
+    pub routes: Vec<SecretRoute>,
+    /// Secures the connection to a route's host; required when there are routes.
+    pub upstream: Option<Arc<dyn Upstream>>,
+}
+
+/// A secret and its value, served on the secret's route.
+#[derive(Clone, Debug)]
+pub struct SecretRoute {
+    pub secret: &'static KnownSecret,
+    pub value: Secret,
+}
+
+/// A connection to a route's host, ready for the rewritten request.
+pub trait UpstreamStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> UpstreamStream for T {}
+
+/// Turns a TCP connection to a route's host into the stream the request goes over.
+pub trait Upstream: Send + Sync + 'static {
+    fn wrap<'a>(
+        &'a self,
+        host: &'a str,
+        tcp: TcpStream,
+    ) -> BoxFuture<'a, std::io::Result<Box<dyn UpstreamStream>>>;
+}
+
+/// TLS with the OS's trusted roots, verifying the route's host name.
+pub struct Tls {
+    connector: tokio_rustls::TlsConnector,
+}
+
+impl Tls {
+    /// The shared client, loading the OS's trusted roots on first use; a failure is retried
+    /// on the next call. Blocking.
+    pub fn shared() -> Result<Arc<Tls>, String> {
+        static TLS: std::sync::OnceLock<Arc<Tls>> = std::sync::OnceLock::new();
+        if let Some(tls) = TLS.get() {
+            return Ok(tls.clone());
+        }
+        let tls = (|| {
+            let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+            let found = rustls_native_certs::load_native_certs();
+            for cert in found.certs {
+                let _ = roots.add(cert);
+            }
+            if roots.is_empty() {
+                return Err(format!(
+                    "no trusted root certificates found on this machine ({} errors)",
+                    found.errors.len()
+                ));
+            }
+            let config = tokio_rustls::rustls::ClientConfig::builder_with_provider(Arc::new(
+                tokio_rustls::rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .map_err(|e| e.to_string())?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+            Ok(Arc::new(Tls {
+                connector: tokio_rustls::TlsConnector::from(Arc::new(config)),
+            }))
+        })()?;
+        Ok(TLS.get_or_init(|| tls).clone())
+    }
+}
+
+impl Upstream for Tls {
+    fn wrap<'a>(
+        &'a self,
+        host: &'a str,
+        tcp: TcpStream,
+    ) -> BoxFuture<'a, std::io::Result<Box<dyn UpstreamStream>>> {
+        Box::pin(async move {
+            let name = tokio_rustls::rustls::pki_types::ServerName::try_from(host.to_owned())
+                .map_err(std::io::Error::other)?;
+            let stream = self.connector.connect(name, tcp).await?;
+            Ok(Box::new(stream) as Box<dyn UpstreamStream>)
+        })
+    }
+}
+
+/// No TLS: the request goes over the TCP connection as is. Only for tests, against a local
+/// stand-in for a route's host.
+pub struct PlainUpstream;
+
+impl Upstream for PlainUpstream {
+    fn wrap<'a>(
+        &'a self,
+        _host: &'a str,
+        tcp: TcpStream,
+    ) -> BoxFuture<'a, std::io::Result<Box<dyn UpstreamStream>>> {
+        Box::pin(async move { Ok(Box::new(tcp) as Box<dyn UpstreamStream>) })
+    }
 }
 
 /// Bounds that keep a misbehaving sandbox from wearing down the daemon the proxy runs in.
@@ -244,6 +347,8 @@ struct Shared {
     config: ProxyConfig,
     slots: Arc<Semaphore>,
     denials: Mutex<Denials>,
+    /// The secret path segment every route request must start with.
+    token: String,
 }
 
 /// Denials logged in the current one-second window, and those dropped since the last logged.
@@ -266,7 +371,9 @@ impl Proxy {
     pub async fn start(config: ProxyConfig) -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
+        let token = random_token().await?;
         let state = Arc::new(Shared {
+            token,
             slots: Arc::new(Semaphore::new(config.limits.max_connections)),
             config,
             denials: Mutex::new(Denials {
@@ -327,6 +434,16 @@ impl Drop for Proxy {
             let _ = std::fs::remove_file(socket);
         }
     }
+}
+
+/// 128 random bits, as hex.
+async fn random_token() -> std::io::Result<String> {
+    let mut bytes = [0u8; 16];
+    tokio::fs::File::open("/dev/urandom")
+        .await?
+        .read_exact(&mut bytes)
+        .await?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -432,6 +549,13 @@ enum Request {
         port: u16,
         head: Vec<u8>,
     },
+    /// A secret's route; `head` is the request rewritten for the secret's host, with the
+    /// secret in it.
+    Route { host: String, head: Vec<u8> },
+    /// `/_forge/...` without this proxy's token, or for a route this session doesn't have.
+    UnknownRoute,
+    /// A request on a secret's route that may not carry it.
+    RouteRefused { host: String, reason: String },
 }
 
 async fn serve<S>(mut client: S, state: &Shared)
@@ -441,7 +565,7 @@ where
     let config = &state.config;
     let started = Instant::now();
     let (request, rest) = match tokio::time::timeout(HEAD_TIMEOUT, read_head(&mut client)).await {
-        Ok(Ok((head, rest))) => match parse(&head) {
+        Ok(Ok((head, rest))) => match parse(&head, &config.routes, &state.token) {
             Ok(request) => (request, rest),
             Err(why) => {
                 // Nothing to log against a host: the client didn't name one.
@@ -453,6 +577,11 @@ where
     };
     let (host, port) = match &request {
         Request::Connect { host, port } | Request::Http { host, port, .. } => (host.clone(), *port),
+        Request::Route { host, .. } | Request::RouteRefused { host, .. } => (host.clone(), 443),
+        Request::UnknownRoute => {
+            let _ = respond(&mut client, 404, "no such route").await;
+            return;
+        }
     };
     let deny = |reason: String| Connection {
         host: host.clone(),
@@ -463,12 +592,30 @@ where
         bytes_received: 0,
         duration: started.elapsed(),
     };
-    if let Err(why) = config.allow.check(&host, port) {
+    if let Request::RouteRefused { reason, .. } = &request {
+        let _ = respond(&mut client, 403, reason).await;
+        log_denial(state, deny(reason.clone()));
+        return;
+    }
+    // A route's host is fixed by the secret, not by the allowlist.
+    let routed = matches!(request, Request::Route { .. });
+    if !routed && let Err(why) = config.allow.check(&host, port) {
         let _ = respond(&mut client, 403, &why).await;
         log_denial(state, deny(why));
         return;
     }
     let upstream = match connect(config, &host, port).await {
+        Ok(tcp) if routed => match &config.upstream {
+            Some(upstream) => upstream
+                .wrap(&host, tcp)
+                .await
+                .map_err(|e| format!("securing the connection to {host}: {e}")),
+            None => Err(format!("no TLS client to reach {host} with")),
+        },
+        Ok(tcp) => Ok(Box::new(tcp) as Box<dyn UpstreamStream>),
+        Err(why) => Err(why),
+    };
+    let mut upstream = match upstream {
         Ok(stream) => stream,
         Err(why) => {
             let _ = respond(&mut client, 502, &why).await;
@@ -476,7 +623,6 @@ where
             return;
         }
     };
-    let mut upstream = upstream;
     let mut sent = rest.len() as u64;
     match &request {
         Request::Connect { .. } => {
@@ -488,12 +634,13 @@ where
                 return;
             }
         }
-        Request::Http { head, .. } => {
+        Request::Http { head, .. } | Request::Route { head, .. } => {
             sent += head.len() as u64;
             if upstream.write_all(head).await.is_err() {
                 return;
             }
         }
+        Request::UnknownRoute | Request::RouteRefused { .. } => unreachable!("answered above"),
     }
     if !rest.is_empty() && upstream.write_all(&rest).await.is_err() {
         return;
@@ -574,7 +721,7 @@ async fn read_head<S: AsyncRead + Unpin>(client: &mut S) -> std::io::Result<(Vec
     }
 }
 
-fn parse(head: &[u8]) -> Result<Request, String> {
+fn parse(head: &[u8], routes: &[SecretRoute], token: &str) -> Result<Request, String> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
     match req.parse(head) {
@@ -586,6 +733,41 @@ fn parse(head: &[u8]) -> Result<Request, String> {
     if method.eq_ignore_ascii_case("CONNECT") {
         let (host, port) = split_authority(target, None)?;
         return Ok(Request::Connect { host, port });
+    }
+    if let Some(routed) = target.strip_prefix("/_forge/") {
+        let Some(routed) = routed.strip_prefix(token).and_then(|r| r.strip_prefix('/')) else {
+            return Ok(Request::UnknownRoute);
+        };
+        let (name, path) = match routed.find('/') {
+            Some(i) => (&routed[..i], &routed[i..]),
+            None => (routed, "/"),
+        };
+        let Some(route) = routes.iter().find(|r| r.secret.route == name) else {
+            return Ok(Request::UnknownRoute);
+        };
+        let refuse = |reason: String| {
+            Ok(Request::RouteRefused {
+                host: route.secret.host.to_owned(),
+                reason,
+            })
+        };
+        if let Err(why) = route_caller_ok(req.headers) {
+            return refuse(why);
+        }
+        if !matches!(method, "GET" | "POST") {
+            return refuse(format!("{method} is not allowed on a secret's route"));
+        }
+        if !route.secret.allows_path(path) {
+            return refuse(format!(
+                "{} may only be sent to {}",
+                route.secret.name,
+                route.secret.paths.join(", ")
+            ));
+        }
+        return Ok(Request::Route {
+            host: route.secret.host.to_owned(),
+            head: route_head(method, path, req.headers, route),
+        });
     }
     let Some(rest) = target.strip_prefix("http://") else {
         return Err("only CONNECT and absolute http:// requests are proxied".into());
@@ -615,6 +797,64 @@ fn parse(head: &[u8]) -> Result<Request, String> {
         port,
         head: out,
     })
+}
+
+/// Why a route request's headers show it isn't from a sandboxed client, if they do: its `Host`
+/// must be loopback (a page rebinding its own name to 127.0.0.1 still sends that name), and a
+/// browser's `Origin` and `Sec-Fetch-*` headers are refused.
+fn route_caller_ok(headers: &[httparse::Header<'_>]) -> Result<(), String> {
+    let mut host = None;
+    for h in headers {
+        let name = h.name.to_ascii_lowercase();
+        if name == "origin" || name.starts_with("sec-fetch-") {
+            return Err(format!(
+                "{} requests are refused on a secret's route",
+                h.name
+            ));
+        }
+        if name == "host" {
+            host = Some(String::from_utf8_lossy(h.value).to_ascii_lowercase());
+        }
+    }
+    let host = host.ok_or("a Host header is required on a secret's route")?;
+    let name = match host.rsplit_once(':') {
+        Some((name, port)) if port.chars().all(|c| c.is_ascii_digit()) => name,
+        _ => host.as_str(),
+    };
+    if matches!(name, "127.0.0.1" | "localhost" | "[::1]") {
+        Ok(())
+    } else {
+        Err(format!("Host {host:?} is not loopback"))
+    }
+}
+
+/// The request for a route's host: the path without the route, its own `Host`, and the
+/// secret's header carrying the real value in place of whatever the client sent.
+fn route_head(
+    method: &str,
+    path: &str,
+    headers: &[httparse::Header<'_>],
+    route: &SecretRoute,
+) -> Vec<u8> {
+    let secret = route.secret;
+    let mut out = format!("{method} {path} HTTP/1.1\r\nHost: {}\r\n", secret.host).into_bytes();
+    for h in headers {
+        let name = h.name.to_ascii_lowercase();
+        let dropped = matches!(
+            name.as_str(),
+            "host" | "connection" | "proxy-connection" | "proxy-authorization"
+        ) || name == secret.header.name();
+        if dropped {
+            continue;
+        }
+        out.extend_from_slice(h.name.as_bytes());
+        out.extend_from_slice(b": ");
+        out.extend_from_slice(h.value);
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(secret.header.line(route.value.expose()).as_bytes());
+    out.extend_from_slice(b"Connection: close\r\n\r\n");
+    out
 }
 
 /// `host:port`, with `default` when the port is missing.
@@ -661,6 +901,7 @@ async fn respond<S: AsyncWrite + Unpin>(
     let status = match code {
         400 => "Bad Request",
         403 => "Forbidden",
+        404 => "Not Found",
         _ => "Bad Gateway",
     };
     let body = format!("forge egress proxy: {why}\n");
@@ -672,8 +913,27 @@ async fn respond<S: AsyncWrite + Unpin>(
     client.shutdown().await
 }
 
-/// The proxy URL a sandboxed process should use.
-pub(crate) fn env(url: &str) -> Vec<(String, String)> {
+impl Proxy {
+    /// The variables that point a sandboxed process at this proxy, reached at `url`: the proxy
+    /// variables, and for each secret a placeholder value and the base URL of its route.
+    pub fn env(&self, url: &str) -> Vec<(String, String)> {
+        let mut vars = proxy_vars(url);
+        for route in &self.state.config.routes {
+            let secret = route.secret;
+            vars.push((secret.name.to_owned(), PLACEHOLDER.to_owned()));
+            vars.push((
+                secret.base_url_var.to_owned(),
+                format!(
+                    "{url}/_forge/{}/{}{}",
+                    self.state.token, secret.route, secret.base_url_suffix
+                ),
+            ));
+        }
+        vars
+    }
+}
+
+fn proxy_vars(url: &str) -> Vec<(String, String)> {
     let mut vars = Vec::new();
     for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
         vars.push((name.to_owned(), url.to_owned()));
@@ -719,6 +979,27 @@ mod tests {
     }
 
     async fn harness_with(allow: &[&str], resolver: Arc<dyn Resolve>, limits: Limits) -> Harness {
+        harness_full(allow, resolver, limits, vec![]).await
+    }
+
+    /// Serving `routes`, with no TLS to their hosts.
+    async fn routed(resolver: Arc<dyn Resolve>, routes: Vec<SecretRoute>) -> Harness {
+        harness_full(&[], resolver, Limits::default(), routes).await
+    }
+
+    fn route(name: &str, value: &str) -> SecretRoute {
+        SecretRoute {
+            secret: crate::secrets::known(name).unwrap(),
+            value: Secret::new(value),
+        }
+    }
+
+    async fn harness_full(
+        allow: &[&str],
+        resolver: Arc<dyn Resolve>,
+        limits: Limits,
+        routes: Vec<SecretRoute>,
+    ) -> Harness {
         let log: Arc<Mutex<Vec<Connection>>> = Arc::default();
         let sink = log.clone();
         let proxy = Proxy::start(ProxyConfig {
@@ -726,6 +1007,8 @@ mod tests {
             resolver,
             log: Arc::new(move |c| lock(&sink).push(c)),
             limits,
+            routes,
+            upstream: Some(Arc::new(PlainUpstream)),
         })
         .await
         .unwrap();
@@ -1100,5 +1383,158 @@ mod tests {
         let mut rest = Vec::new();
         let ended = tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut rest)).await;
         assert!(ended.is_ok(), "the tunnel outlived the proxy");
+    }
+
+    #[tokio::test]
+    async fn routes_send_the_real_secret_to_the_fixed_host_only() {
+        let (addr, seen) = upstream().await;
+        let resolver = Arc::new(Mapped(HashMap::from([("api.anthropic.com".into(), addr)])));
+        // No allowlist at all: a route's host is fixed by the secret.
+        let h = routed(resolver, vec![route("ANTHROPIC_API_KEY", "sk-real")]).await;
+        let request = format!(
+            "POST /_forge/{}/anthropic/v1/messages?beta=1 HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nX-Api-Key: {PLACEHOLDER}\r\nContent-Length: 2\r\n\r\nhi",
+            h.proxy.state.token,
+            h.proxy.port()
+        );
+        let reply = exchange(h.proxy.port(), request.as_bytes()).await;
+        assert_eq!(reply, "pong");
+        let got = String::from_utf8(lock(&seen).clone()).unwrap();
+        assert!(
+            got.starts_with("POST /v1/messages?beta=1 HTTP/1.1\r\nHost: api.anthropic.com\r\n"),
+            "{got}"
+        );
+        assert!(got.contains("x-api-key: sk-real\r\n"), "{got}");
+        assert!(
+            !got.contains(PLACEHOLDER) && !got.contains("127.0.0.1"),
+            "{got}"
+        );
+        assert!(
+            got.contains("Content-Length: 2\r\n") && got.ends_with("hi"),
+            "{got}"
+        );
+        let log = logged(&h, 1).await;
+        assert!(log[0].allowed);
+        assert_eq!(
+            (log[0].host.as_str(), log[0].port),
+            ("api.anthropic.com", 443)
+        );
+        assert!(!format!("{log:?}{:?}", h.proxy).contains("sk-real"));
+    }
+
+    #[tokio::test]
+    async fn bearer_routes_replace_the_authorization_header() {
+        let (addr, seen) = upstream().await;
+        let resolver = Arc::new(Mapped(HashMap::from([("api.openai.com".into(), addr)])));
+        let h = routed(resolver, vec![route("OPENAI_API_KEY", "sk-open")]).await;
+        let request = format!(
+            "GET /_forge/{}/openai/v1/models HTTP/1.1\r\nHost: localhost:3128\r\nauthorization: Bearer {PLACEHOLDER}\r\n\r\n",
+            h.proxy.state.token
+        );
+        assert_eq!(exchange(h.proxy.port(), request.as_bytes()).await, "pong");
+        let got = String::from_utf8(lock(&seen).clone()).unwrap();
+        assert!(got.starts_with("GET /v1/models HTTP/1.1\r\n"), "{got}");
+        assert_eq!(
+            got.to_ascii_lowercase().matches("authorization:").count(),
+            1,
+            "{got}"
+        );
+        assert!(got.contains("Authorization: Bearer sk-open\r\n"), "{got}");
+    }
+
+    #[tokio::test]
+    async fn routes_a_session_lacks_are_not_found() {
+        let (addr, seen) = upstream().await;
+        let resolver = Arc::new(Mapped(HashMap::from([("api.openai.com".into(), addr)])));
+        let h = routed(resolver, vec![route("ANTHROPIC_API_KEY", "sk-real")]).await;
+        let token = h.proxy.state.token.clone();
+        for path in [
+            format!("/_forge/{token}/openai/v1/models"),
+            format!("/_forge/{token}/nope"),
+            format!("/_forge/{token}"),
+            // Without the token, even an existing route is not there.
+            "/_forge/anthropic/v1/messages".to_owned(),
+            "/_forge/0000/anthropic/v1/messages".to_owned(),
+            "/_forge/".to_owned(),
+        ] {
+            let request = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+            let reply = exchange(h.proxy.port(), request.as_bytes()).await;
+            assert!(reply.starts_with("HTTP/1.1 404"), "{path}: {reply}");
+            assert!(!reply.contains(&token), "{reply}");
+        }
+        assert!(lock(&seen).is_empty());
+    }
+
+    #[tokio::test]
+    async fn env_points_clients_at_their_routes_with_placeholders() {
+        let h = routed(
+            Arc::new(PublicDns),
+            vec![
+                route("ANTHROPIC_API_KEY", "sk-a"),
+                route("OPENAI_API_KEY", "sk-o"),
+            ],
+        )
+        .await;
+        let env: HashMap<String, String> =
+            h.proxy.env("http://127.0.0.1:3128").into_iter().collect();
+        assert_eq!(env["ANTHROPIC_API_KEY"], PLACEHOLDER);
+        assert_eq!(env["OPENAI_API_KEY"], PLACEHOLDER);
+        let token = &h.proxy.state.token;
+        assert_eq!(token.len(), 32);
+        assert_eq!(
+            env["ANTHROPIC_BASE_URL"],
+            format!("http://127.0.0.1:3128/_forge/{token}/anthropic")
+        );
+        assert_eq!(
+            env["OPENAI_BASE_URL"],
+            format!("http://127.0.0.1:3128/_forge/{token}/openai/v1")
+        );
+        assert_eq!(env["HTTPS_PROXY"], "http://127.0.0.1:3128");
+        assert!(!env.contains_key("GOOGLE_GEMINI_BASE_URL"));
+        assert!(!env.values().any(|v| v.starts_with("sk-")));
+    }
+
+    #[test]
+    fn tls_loads_the_systems_trusted_roots() {
+        assert!(Tls::shared().is_ok(), "{:?}", Tls::shared().err());
+    }
+
+    /// Requests that know the token but don't look like a sandboxed client, or that would use
+    /// the secret for something other than inference, are refused and logged.
+    #[tokio::test]
+    async fn route_requests_from_browsers_or_for_other_uses_are_refused() {
+        let (addr, seen) = upstream().await;
+        let resolver = Arc::new(Mapped(HashMap::from([("api.anthropic.com".into(), addr)])));
+        let h = routed(resolver, vec![route("ANTHROPIC_API_KEY", "sk-real")]).await;
+        let base = format!("/_forge/{}/anthropic", h.proxy.state.token);
+        let cases = [
+            // A page that rebound its name to 127.0.0.1 still sends that name.
+            format!("POST {base}/v1/messages HTTP/1.1\r\nHost: evil.example:8080\r\n\r\n"),
+            format!("POST {base}/v1/messages HTTP/1.1\r\n\r\n"),
+            format!(
+                "POST {base}/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1\r\n\r\n"
+            ),
+            format!(
+                "POST {base}/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nSec-Fetch-Site: cross-site\r\n\r\n"
+            ),
+            format!("TRACE {base}/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"),
+            format!("DELETE {base}/v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"),
+            format!("POST {base}/v1/organizations/api_keys HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"),
+            format!("POST {base}/v1/messages/../organizations HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"),
+            format!(
+                "POST {base}/v1/messages/%2E%2E/organizations HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+            ),
+        ];
+        for request in &cases {
+            let reply = exchange(h.proxy.port(), request.as_bytes()).await;
+            assert!(reply.starts_with("HTTP/1.1 403"), "{request}: {reply}");
+        }
+        assert!(lock(&seen).is_empty(), "nothing reached the secret's host");
+        let log = logged(&h, cases.len()).await;
+        assert_eq!(log.len(), cases.len());
+        assert!(
+            log.iter()
+                .all(|c| !c.allowed && c.host == "api.anthropic.com"),
+            "{log:?}"
+        );
     }
 }

@@ -19,7 +19,9 @@ use forge_api::model::{Mode, Project, SandboxTier, Session, SessionState, Usage}
 use forge_api::{ApiError, ErrorData, ErrorKind, ProjectId, SessionId, Timestamp, TurnId};
 use forge_events::EventLog;
 use forge_git::{CreateMode, GitError, Worktrees, worktree_path};
-use forge_sandbox::proxy::{Allowlist, Connection, Limits, Proxy, ProxyConfig, PublicDns};
+use forge_sandbox::proxy::{
+    Allowlist, Connection, Limits, Proxy, ProxyConfig, PublicDns, SecretRoute, Tls, Upstream,
+};
 use forge_sandbox::{Sandbox, Spec, WorktreeMount};
 use futures_util::future::BoxFuture;
 
@@ -61,6 +63,8 @@ pub struct AgentLaunch {
     pub read_only: Vec<PathBuf>,
     /// Hosts the session's egress proxy lets through.
     pub network: Allowlist,
+    /// Secrets the proxy injects, with their values from the keyring.
+    pub secrets: Vec<SecretRoute>,
 }
 
 /// Finds how to start a session's agent from its profile. The daemon implements it from
@@ -432,12 +436,23 @@ impl SessionManager {
                 })
                 .collect();
             let workspace = Workspace::new(roots).map_err(|e| e.to_string())?;
-            Ok::<_, String>((launch, worktrees, workspace))
+            // Only sessions with secrets need TLS to the secrets' hosts.
+            let upstream = if launch.secrets.is_empty() {
+                None
+            } else {
+                let tls = Tls::shared()
+                    .map_err(|e| format!("loading TLS roots for secret injection: {e}"))?;
+                Some(tls as Arc<dyn Upstream>)
+            };
+            Ok::<_, String>((launch, worktrees, workspace, upstream))
         })
         .await
         .map_err(|e| e.to_string())??;
-        let (launch, worktrees, workspace) = found;
-        let proxy = self.start_proxy(session, launch.network).await?;
+        let (mut launch, worktrees, workspace, upstream) = found;
+        let secrets = std::mem::take(&mut launch.secrets);
+        let proxy = self
+            .start_proxy(session, launch.network.clone(), secrets, upstream)
+            .await?;
         let record = session.clone();
         let setup = tokio::task::spawn_blocking(move || {
             let spec = Spec {
@@ -471,7 +486,13 @@ impl SessionManager {
 
     /// Start the session's egress proxy, logging each connection as a `network` event. The
     /// sandbox keeps it running; it stops with the agent.
-    async fn start_proxy(&self, session: &Session, allow: Allowlist) -> Result<Arc<Proxy>, String> {
+    async fn start_proxy(
+        &self,
+        session: &Session,
+        allow: Allowlist,
+        routes: Vec<SecretRoute>,
+        upstream: Option<Arc<dyn Upstream>>,
+    ) -> Result<Arc<Proxy>, String> {
         let (log, id) = (self.log.clone(), session.id.clone());
         let runtime = tokio::runtime::Handle::current();
         let record =
@@ -497,6 +518,8 @@ impl SessionManager {
             resolver: Arc::new(PublicDns),
             log: Arc::new(record),
             limits: Limits::default(),
+            routes,
+            upstream,
         })
         .await
         .map(Arc::new)

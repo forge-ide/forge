@@ -76,7 +76,7 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 - [x] Read-only toolchain mounts; hidden `$HOME`.
 - [x] Environment allowlist for every tier; worktree git metadata the daemon doesn't trust.
 - [x] Sandbox plumbing for per-session daemon endpoints: the proxy now (a loopback port in Light and Seatbelt; a Unix socket bound into Standard, forwarded to a loopback port inside), reusable for Forge's MCP endpoint in M6.
-- [ ] Secret injection as proxy headers from the OS keyring.
+- [x] Secret injection as proxy headers from the OS keyring.
 
 **Done when:** the escape suite (quality-and-safety.md) passes on both platforms for Light and Standard, and the fake agent's M2 test passes inside each tier.
 

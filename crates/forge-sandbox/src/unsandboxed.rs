@@ -31,10 +31,7 @@ impl Unsandboxed {
             }
         }
         if let Some(proxy) = &proxy {
-            env.extend(crate::proxy::env(&format!(
-                "http://127.0.0.1:{}",
-                proxy.port()
-            )));
+            env.extend(proxy.env(&format!("http://127.0.0.1:{}", proxy.port())));
         }
         Self { env, _proxy: proxy }
     }
