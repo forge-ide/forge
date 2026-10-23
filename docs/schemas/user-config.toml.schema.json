@@ -12,6 +12,9 @@
       "description": "Agent profile ID used when neither the session nor the project names one.",
       "type": ["string", "null"]
     },
+    "sandbox": {
+      "$ref": "#/$defs/SandboxConfig"
+    },
     "ui": {
       "$ref": "#/$defs/UiConfig",
       "default": {
@@ -32,6 +35,20 @@
         "types": {
           "description": "Branch types a title may start with, as in `fix: retry loop`. The first is used when the\ntitle names none. Default `[\"feat\", \"fix\", \"bug\"]`.",
           "type": ["array", "null"],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "SandboxConfig": {
+      "description": "What sandboxed sessions may see beyond the defaults.",
+      "type": "object",
+      "properties": {
+        "read_only": {
+          "description": "Absolute paths visible read-only inside every sandbox, such as an agent's install dir\nor an extra toolchain. Lives in the user config, never in a repo's files, so a cloned\nrepo can't widen its own sandbox. May not be `/`, the home dir itself, or contain\nForge's own data or runtime dirs.",
+          "type": "array",
           "items": {
             "type": "string"
           }

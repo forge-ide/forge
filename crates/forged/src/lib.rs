@@ -70,11 +70,30 @@ async fn open_state(db: db::Db, paths: Paths) -> anyhow::Result<Arc<rpc::State>>
         )
         .context("opening the event log")?,
     );
+    let helper = std::env::current_exe()
+        .context("locating forged")?
+        .with_file_name(forge_sandbox::HELPER);
+    let sandbox = tokio::task::spawn_blocking(move || forge_sandbox::system(helper))
+        .await
+        .context("probing sandbox tiers")?;
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| paths.data_dir.clone());
     let sessions = forge_session::SessionManager::new(
         Arc::new(db.clone()),
         log.clone(),
         Arc::new(forge_git::GitCli),
-        Arc::new(sessions::ProfileResolver { db: db.clone() }),
+        Arc::new(sessions::ProfileResolver {
+            db: db.clone(),
+            sandbox: sandbox.clone(),
+            paths: paths.clone(),
+            home: home.clone(),
+        }),
+        sandbox.clone(),
+        forge_session::SandboxDirs {
+            sessions: paths.data_dir.join("sessions"),
+            home,
+        },
     );
     sessions
         .recover()
@@ -84,6 +103,7 @@ async fn open_state(db: db::Db, paths: Paths) -> anyhow::Result<Arc<rpc::State>>
         db,
         log,
         sessions,
+        sandbox,
         paths,
     }))
 }

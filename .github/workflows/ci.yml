@@ -45,3 +45,34 @@ jobs:
       - uses: extractions/setup-just@v4
 
       - run: just ci
+
+  sandbox:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Standard needs bubblewrap and unprivileged user namespaces, which Ubuntu's AppArmor
+      # restricts by default. Light needs Landlock ABI 6 (Linux 6.12+); the kernel is printed
+      # so a failure there is easy to read.
+      - name: Prepare Linux sandbox prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          uname -r
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: extractions/setup-just@v4
+
+      - run: just test-sandbox

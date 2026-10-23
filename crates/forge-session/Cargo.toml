@@ -12,6 +12,7 @@ forge-acp.workspace = true
 forge-api.workspace = true
 forge-events.workspace = true
 forge-git.workspace = true
+forge-sandbox.workspace = true
 futures-util.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

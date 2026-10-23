@@ -7,5 +7,30 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+forge-api.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock.workspace = true
+libc.workspace = true
+seccompiler.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bin]]
+name = "forge-sandbox-exec"
+path = "src/bin/forge-sandbox-exec.rs"
+
+[[bin]]
+name = "forge-sandbox-probe"
+path = "src/bin/forge-sandbox-probe.rs"
+
 [lints]
 workspace = true

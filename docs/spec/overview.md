@@ -237,6 +237,7 @@ v0.1 proves the review loop with one agent at a time; v0.2 adds parallel agents 
 - Editor with tree-sitter and LSP for Rust, TypeScript, Python, and Go.
 - Markdown preview and editing; lint for `AGENTS.md` and `CLAUDE.md`.
 - Hooks on pre and post tool call (shell only); secret-scan and protected-path guards.
+- Agent commits through a minimal Forge MCP endpoint offering `git_commit` (the full MCP hub is v0.2).
 - Session timeline with checkpoints and rewind.
 
 **Gate:** two weeks of real work in Forge without falling back to the agent's own terminal UI.

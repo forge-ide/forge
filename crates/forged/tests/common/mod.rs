@@ -7,7 +7,10 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use forge_api::client::{Client, ClientError};
-use forge_api::{ApiError, ErrorKind};
+use forge_api::events::{Event, EventNotification, EventPayload, Topic};
+use forge_api::methods::*;
+use forge_api::model::{Mode, Project, SandboxTier, SessionState};
+use forge_api::{ApiError, ErrorKind, SessionId};
 use tempfile::TempDir;
 
 pub struct Daemon {
@@ -66,7 +69,14 @@ pub fn expect_exit(home: &Path) -> std::process::Output {
 
 impl Daemon {
     pub fn start(home: &Path) -> Self {
-        let child = forged_command(home).spawn().unwrap();
+        Self::start_with(home, |_| {})
+    }
+
+    /// Start with `adjust` applied to the command first, e.g. to change `PATH`.
+    pub fn start_with(home: &Path, adjust: impl FnOnce(&mut Command)) -> Self {
+        let mut cmd = forged_command(home);
+        adjust(&mut cmd);
+        let child = cmd.spawn().unwrap();
         let mut daemon = Daemon {
             child,
             home: home.to_path_buf(),
@@ -167,22 +177,41 @@ pub fn git_repo_with_commit(parent: &Path, name: &str) -> PathBuf {
     path
 }
 
-/// The fake agent binary, built on first use. Cargo only exposes a package's own binaries to
-/// its tests, so build it next to `forged` with the same profile.
+/// The fake agent binary, built on first use.
 pub fn fake_agent() -> &'static Path {
     static BIN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    BIN.get_or_init(|| {
-        let forged = Path::new(env!("CARGO_BIN_EXE_forged"));
-        let mut cmd = Command::new(env!("CARGO"));
-        cmd.args(["build", "--quiet", "-p", "forge-fake-agent"]);
-        if forged.parent().and_then(|p| p.file_name()) == Some("release".as_ref()) {
-            cmd.arg("--release");
-        }
-        assert!(cmd.status().unwrap().success(), "building forge-fake-agent");
-        let bin = forged.with_file_name("forge-fake-agent");
-        assert!(bin.exists(), "{} missing after build", bin.display());
-        bin
+    BIN.get_or_init(|| build_sibling("forge-fake-agent", &["forge-fake-agent"])[0].clone())
+}
+
+/// Build the sandbox helper next to `forged`, where the daemon looks for it, and return the
+/// helper and the escape probe.
+pub fn sandbox_bins() -> &'static [PathBuf] {
+    static BINS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    BINS.get_or_init(|| {
+        build_sibling(
+            "forge-sandbox",
+            &["forge-sandbox-exec", "forge-sandbox-probe"],
+        )
     })
+}
+
+/// Cargo only exposes a package's own binaries to its tests, so build `package` next to
+/// `forged` with the same profile and return the paths of `bins`.
+fn build_sibling(package: &str, bins: &[&str]) -> Vec<PathBuf> {
+    let forged = Path::new(env!("CARGO_BIN_EXE_forged"));
+    let mut cmd = Command::new(env!("CARGO"));
+    cmd.args(["build", "--quiet", "-p", package]);
+    if forged.parent().and_then(|p| p.file_name()) == Some("release".as_ref()) {
+        cmd.arg("--release");
+    }
+    assert!(cmd.status().unwrap().success(), "building {package}");
+    bins.iter()
+        .map(|bin| {
+            let path = forged.with_file_name(bin);
+            assert!(path.exists(), "{} missing after build", path.display());
+            path
+        })
+        .collect()
 }
 
 /// Write `.forge/agents/<id>.toml` running the fake agent on `script` (YAML text), unsandboxed.
@@ -224,4 +253,101 @@ pub fn expect_api_error(
         Err(ClientError::Api(err)) if err.kind() == kind => err,
         other => panic!("expected {kind:?}, got {other:?}"),
     }
+}
+
+pub async fn hello_tiers(client: &mut Client) -> Vec<SandboxTier> {
+    client
+        .call::<ServerHello>(&HelloParams {
+            client: "test".into(),
+            api_version: forge_api::API_VERSION.into(),
+        })
+        .await
+        .unwrap()
+        .sandbox_tiers
+}
+
+pub async fn open(client: &mut Client, repo: &Path) -> Project {
+    client
+        .call::<ProjectOpen>(&ProjectOpenParams {
+            path: repo.to_str().unwrap().to_owned(),
+        })
+        .await
+        .unwrap()
+}
+
+pub fn create_params(project: &Project, title: &str, prompt: &str) -> SessionCreateParams {
+    SessionCreateParams {
+        project_id: project.id.clone(),
+        agent_profile: "fake".into(),
+        title: title.into(),
+        prompt: prompt.into(),
+        mode: Mode::AcceptEdits,
+        sandbox: Some(SandboxTier::Unsandboxed),
+        branch: None,
+        on_collision: None,
+    }
+}
+
+pub async fn subscribe(client: &mut Client, topics: Vec<Topic>, after_seq: Option<u64>) {
+    client
+        .call::<EventsSubscribe>(&EventsSubscribeParams { topics, after_seq })
+        .await
+        .unwrap();
+}
+
+/// Read notifications until one satisfies `done` (inclusive), failing after 30 s.
+pub async fn collect_until(
+    client: &mut Client,
+    mut done: impl FnMut(&Event) -> bool,
+) -> Vec<EventNotification> {
+    let mut seen = Vec::new();
+    let result = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let note = client.next_event().await.unwrap();
+            let stop = done(&note.event);
+            seen.push(note);
+            if stop {
+                return;
+            }
+        }
+    })
+    .await;
+    if result.is_err() {
+        let kinds: Vec<_> = seen.iter().map(|n| n.event.payload.kind()).collect();
+        panic!("timed out; events so far: {kinds:?}");
+    }
+    seen
+}
+
+pub fn entered(state: SessionState) -> impl FnMut(&Event) -> bool {
+    move |e| matches!(&e.payload, EventPayload::SessionState(b) if b.to == state)
+}
+
+pub async fn wait_for_state(client: &mut Client, session: &SessionId, state: SessionState) {
+    subscribe(client, vec![Topic::Session(session.clone())], Some(0)).await;
+    let mut done = entered(state);
+    collect_until(client, |e| &e.session_id == session && done(e)).await;
+}
+
+pub async fn all_events(client: &mut Client, session: &SessionId) -> Vec<Event> {
+    client
+        .call::<EventsQuery>(&EventsQueryParams {
+            session_id: session.clone(),
+            kinds: None,
+            text: None,
+            before: None,
+            limit: 1000,
+        })
+        .await
+        .unwrap()
+}
+
+pub fn transitions(events: &[Event]) -> Vec<(SessionState, SessionState)> {
+    events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::SessionState(b) => Some((b.from, b.to)),
+            _ => None,
+        })
+        .collect()
 }

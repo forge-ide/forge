@@ -15,7 +15,8 @@ Items marked **assumed** are defaults chosen so work can start; change them befo
 | Node | Node 24 LTS pinned in `.nvmrc`; pnpm pinned via `packageManager` | Decided |
 | Task runner | `just` | Assumed |
 | Sandbox, Linux | Light: Landlock + seccomp. Standard: bubblewrap | Decided |
-| Sandbox, macOS | Light and Standard: Seatbelt profiles. Container: Podman machine | Assumed |
+| Sandbox, macOS | Light and Standard: one Seatbelt profile. Container: Podman machine | Decided (Seatbelt); Assumed (Container) |
+| Agent commits | Through Forge's `git_commit` MCP tool, run by the daemon; the shared git dir is read-only inside the sandbox | Decided |
 | Agents in v0.1 | Claude Code, Codex, Gemini CLI, all through ACP | Decided |
 | Languages in v0.1 | Rust, TypeScript, Python, Go | Decided |
 | Git hosting in v0.1 | Push the branch with the user's git credentials; PR creation is v0.2 | Assumed |
@@ -70,12 +71,16 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 
 ### M3: Sandbox
 
-- [ ] `Sandbox` trait and tiers: Light and Standard on Linux, Seatbelt Light and Standard on macOS, opt-in Unsandboxed.
+- [ ] `Sandbox` trait and tiers: Light and Standard on Linux, Seatbelt Light and Standard on macOS, opt-in Unsandboxed. (Linux tiers pass the escape suite; Seatbelt has not run on macOS yet.)
 - [ ] Per-session egress proxy with allowlist and connection log.
-- [ ] Read-only toolchain mounts; hidden `$HOME`.
+- [x] Read-only toolchain mounts; hidden `$HOME`.
+- [x] Environment allowlist for every tier; worktree git metadata the daemon doesn't trust.
+- [ ] Sandbox plumbing for per-session daemon endpoints: the proxy, and Forge's MCP endpoint in M6.
 - [ ] Secret injection as proxy headers from the OS keyring.
 
 **Done when:** the escape suite (quality-and-safety.md) passes on both platforms for Light and Standard, and the fake agent's M2 test passes inside each tier.
+
+**Later:** cgroup limits for CPU, memory, and process count per session (they also close the gap where a process that leaves its process group outlives a Light or Seatbelt kill).
 
 ### M4: Policy engine, guards, hooks, approvals
 
@@ -85,6 +90,7 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 - [ ] Shell hook runtime for `tool.pre`, `tool.post`, `edit.pre`, `edit.post`, `task.done`.
 - [ ] Modes: Ask, Accept edits, rules-only Auto, Full access.
 - [ ] `approval.list`, `approval.decide`; ACP permission requests wait on them.
+- [ ] `commit.pre` shell hook; default deny rules for manual git commands that write shared state (`git commit*`, `git push*`, `git stash*`, `git branch*`), with a reason pointing agents at `git_commit`.
 
 **Done when:** the policy golden tests pass, and an API test shows an Ask decision blocking the fake agent until `approval.decide` arrives.
 
@@ -96,6 +102,7 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 - [ ] Agent profiles for Claude Code, Codex, and Gemini CLI.
 - [ ] Native shim that sets each agent's own permission mode so it defers to Forge's policy.
 - [ ] `agent.list` with install and auth status; UI prompts to install or sign in.
+- [ ] Each agent's shim allows Forge's `git_commit` tool and tells the agent to commit with it; the smoke task checks a real agent commits through it.
 
 **Done when:** each of the three agents completes the scripted smoke task ("add a function and a unit test") in each sample repo under Accept-edits mode, following the manual checklist in `docs/smoke.md`.
 
@@ -108,6 +115,7 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 - [ ] Changes since last review; per-hunk revert.
 - [ ] Review pane UI (ui-screens.md).
 - [ ] `review.ship` with `push-branch` and `merge-local`.
+- [ ] Minimal per-session Forge MCP endpoint with `git_commit`, passed to the agent at ACP session start; the daemon commits on the session branch after policy and the `commit.pre` hook, sharing commit code with checkpoints and ship.
 
 **Done when:** an end-to-end test drives the fake agent through change → comment → request changes → agent reply → thread resolved; the review pane meets the large-diff performance target on WebKitGTK and macOS.
 

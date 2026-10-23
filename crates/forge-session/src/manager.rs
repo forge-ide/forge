@@ -6,7 +6,7 @@
 //! when a prompt arrives and it is gone (after a crash or a daemon restart).
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use forge_acp::{AcpClient, AcpError, AgentCommand, DenyAll, EventSink, Root, Workspace};
@@ -18,6 +18,7 @@ use forge_api::model::{Mode, Project, SandboxTier, Session, SessionState, Usage}
 use forge_api::{ApiError, ErrorData, ErrorKind, ProjectId, SessionId, Timestamp, TurnId};
 use forge_events::EventLog;
 use forge_git::{CreateMode, GitError, Worktrees, worktree_path};
+use forge_sandbox::{Sandbox, Spec, WorktreeMount};
 use futures_util::future::BoxFuture;
 
 use crate::naming::{RepoName, decide};
@@ -49,10 +50,29 @@ impl From<forge_events::LogError> for SessionError {
     }
 }
 
-/// Finds the command for a session's agent profile. The daemon implements it from config.
+/// How to start a session's agent.
+#[derive(Clone, Debug)]
+pub struct AgentLaunch {
+    pub command: AgentCommand,
+    /// Paths the sandbox shows read-only besides its defaults: the agent program and the
+    /// user config's extra read-only paths.
+    pub read_only: Vec<PathBuf>,
+}
+
+/// Finds how to start a session's agent from its profile. The daemon implements it from
+/// config.
 pub trait AgentResolver: Send + Sync + 'static {
     /// Blocking; may read config files.
-    fn command(&self, session: &Session) -> Result<AgentCommand, ApiError>;
+    fn launch(&self, session: &Session) -> Result<AgentLaunch, ApiError>;
+}
+
+/// Where sandboxes put their session-private dirs, and whose home they hide.
+#[derive(Clone, Debug)]
+pub struct SandboxDirs {
+    /// Each session's scratch dir is `<sessions>/<session id>`.
+    pub sessions: PathBuf,
+    /// The user's home.
+    pub home: PathBuf,
 }
 
 /// What `session.create` asks for, with the branch name already chosen and the profile and
@@ -84,6 +104,8 @@ pub struct SessionManager {
     log: Arc<EventLog>,
     git: Arc<dyn Worktrees>,
     agents: Arc<dyn AgentResolver>,
+    sandbox: Arc<dyn Sandbox>,
+    dirs: SandboxDirs,
     live: Mutex<HashMap<SessionId, Arc<Live>>>,
     /// Serializes creates, so two sessions never claim the same branch name.
     create_lock: tokio::sync::Mutex<()>,
@@ -95,12 +117,16 @@ impl SessionManager {
         log: Arc<EventLog>,
         git: Arc<dyn Worktrees>,
         agents: Arc<dyn AgentResolver>,
+        sandbox: Arc<dyn Sandbox>,
+        dirs: SandboxDirs,
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
             log,
             git,
             agents,
+            sandbox,
+            dirs,
             live: Mutex::default(),
             create_lock: tokio::sync::Mutex::new(()),
         })
@@ -367,14 +393,34 @@ impl SessionManager {
         .unwrap_or_else(|e| Err(format!("creating worktrees: {e}")))
     }
 
-    /// Start the session's agent in its worktrees. Returns why it couldn't start.
+    /// Start the session's agent in its worktrees, inside its sandbox. Returns why it couldn't
+    /// start, including a sandbox that failed with the backend's reason and fix.
     async fn launch(self: &Arc<Self>, session: &Session) -> Result<Arc<AcpClient>, String> {
-        let (agents, store, record) = (self.agents.clone(), self.store.clone(), session.clone());
+        let (agents, store, git, sandbox, dirs, record) = (
+            self.agents.clone(),
+            self.store.clone(),
+            self.git.clone(),
+            self.sandbox.clone(),
+            self.dirs.clone(),
+            session.clone(),
+        );
         let setup = tokio::task::spawn_blocking(move || {
-            let command = agents.command(&record).map_err(|e| e.detail().to_owned())?;
-            let roots = store
-                .worktrees(&record.id)
-                .map_err(|e| e.to_string())?
+            let launch = agents.launch(&record).map_err(|e| e.detail().to_owned())?;
+            let records = store.worktrees(&record.id).map_err(|e| e.to_string())?;
+            // Unsandboxed sessions mount nothing, so their worktree links aren't checked.
+            let mut worktrees = Vec::new();
+            let sandboxed = record.sandbox != SandboxTier::Unsandboxed;
+            for w in records.iter().filter(|_| sandboxed) {
+                let repo = repo_of(&w.path, &record.branch)
+                    .ok_or_else(|| format!("{} is not a session worktree", w.path.display()))?;
+                let dirs = git.git_dirs(&repo, &w.path).map_err(|e| e.to_string())?;
+                worktrees.push(WorktreeMount {
+                    path: w.path.clone(),
+                    git_common: dirs.common,
+                    git_admin: dirs.admin,
+                });
+            }
+            let roots = records
                 .into_iter()
                 .map(|w| Root {
                     name: w.repo,
@@ -382,11 +428,21 @@ impl SessionManager {
                 })
                 .collect();
             let workspace = Workspace::new(roots).map_err(|e| e.to_string())?;
-            Ok::<_, String>((command, workspace))
+            let spec = Spec {
+                tier: record.sandbox,
+                worktrees,
+                scratch: dirs.sessions.join(record.id.to_string()),
+                home: dirs.home,
+                read_only: launch.read_only,
+            };
+            let sandbox = sandbox
+                .prepare(spec)
+                .map_err(|e| format!("starting the sandbox: {e}"))?;
+            Ok::<_, String>((launch.command, workspace, sandbox))
         })
         .await
         .map_err(|e| e.to_string())??;
-        let (command, workspace) = setup;
+        let (command, workspace, sandbox) = setup;
         let sink = Arc::new(SessionSink {
             log: self.log.clone(),
             session: session.id.clone(),
@@ -394,7 +450,7 @@ impl SessionManager {
         let permissions = Arc::new(DenyAll {
             reason: NO_POLICY.into(),
         });
-        AcpClient::start(command, workspace, sink, permissions)
+        AcpClient::start(command, workspace, sandbox, sink, permissions)
             .await
             .map(Arc::new)
             .map_err(|e| format!("starting the agent: {e}"))
@@ -635,4 +691,31 @@ fn invalid_state(session: &Session, what: &str) -> SessionError {
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// The repo a session worktree belongs to: `path` is `<repo>/.worktrees/<branch>`.
+fn repo_of(path: &Path, branch: &str) -> Option<PathBuf> {
+    let depth = Path::new(branch).components().count();
+    let repo = path.ancestors().nth(depth + 1)?.to_path_buf();
+    (worktree_path(&repo, branch) == path).then_some(repo)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repo_of_strips_the_worktree_suffix_only() {
+        let wt = Path::new("/p/repo/.worktrees/feat/x");
+        assert_eq!(repo_of(wt, "feat/x"), Some(PathBuf::from("/p/repo")));
+        assert_eq!(
+            repo_of(Path::new("/p/repo/.worktrees/x"), "x"),
+            Some("/p/repo".into())
+        );
+        assert_eq!(repo_of(wt, "x"), None);
+        assert_eq!(
+            repo_of(Path::new("/p/repo/elsewhere/feat/x"), "feat/x"),
+            None
+        );
+    }
 }

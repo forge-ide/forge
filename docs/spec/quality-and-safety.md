@@ -33,7 +33,7 @@ Each step is a one-key map or a bare name; unknown steps or keys are errors. Pat
 | Unit | `cargo test`, vitest | Policy matching, config parsing, diff mapping, thread anchoring, Solid stores |
 | Golden | `insta` snapshots | Policy decisions: a table of ~200 actions × modes × rule sets with expected verdicts |
 | Integration | Rust tests against a real `forged` in a temp dir | Every API method; every session state transition; reconnect with `afterSeq` |
-| Sandbox escape | Shell scripts run inside each tier, on Linux and macOS CI | Must fail: read `~/.ssh/id_*`, write outside the worktree, reach a non-allowlisted host, read another session's worktree, signal a daemon process |
+| Sandbox escape | A probe binary run inside each tier, on Linux and macOS CI (`just test-sandbox`); a control run without a sandbox checks every probe can detect its escape, and a tier the machine can't run fails the suite | Must fail: read `~/.ssh/id_*` or other files in the real home, write outside the worktree, reach a non-allowlisted host over TCP or UDP, read another session's worktree or write its git dir, signal a daemon process, read or write the main checkout, write the repo's `.git/hooks` or `.git/config`, connect to the daemon socket or the session bus, read a daemon process's environment. Also: the fake agent's session test passes inside each tier, and killing a Standard sandbox ends processes that left its process group |
 | End-to-end UI | WebdriverIO with `tauri-driver` on Linux; Playwright against the browser build on macOS | New session → approval → review → request changes → ship, using the fake agent |
 | Smoke | Manual checklist in `docs/smoke.md` | Each real agent, each sample repo, before every release |
 
@@ -107,7 +107,7 @@ The rule throughout: never lose work, never resume silently, and always tell the
 | Job | Runs on | Steps |
 | --- | --- | --- |
 | `check` | ubuntu-latest, macos-latest | `just ci`: fmt, clippy (warnings as errors), cargo tests, eslint, `tsc --noEmit`, vitest, generated-types drift check |
-| `sandbox` | ubuntu-latest (with unprivileged user namespaces enabled), macos-latest | Escape suite for each tier |
+| `sandbox` | ubuntu-latest (bubblewrap installed, AppArmor's unprivileged user namespace restriction lifted; Light needs a kernel with Landlock ABI 6), macos-latest | `just test-sandbox`: escape suite and sessions in each tier |
 | `e2e` | ubuntu-latest with Xvfb; macos-latest (browser build) | UI end-to-end with the fake agent |
 | `bench` | Self-hosted reference machine, nightly | Performance targets; fail on > 20% regression |
 | `release` | Tag push | Build, sign, package, publish |

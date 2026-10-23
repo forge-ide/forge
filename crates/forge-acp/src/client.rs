@@ -22,9 +22,10 @@ use forge_api::events::{
     TerminalOutputBody, ToolCallBody, ToolResultBody, Verdict,
 };
 use forge_api::model::{Action, EditKind};
+use forge_sandbox::SessionSandbox;
 use futures_util::future::BoxFuture;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::sync::{oneshot, watch};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
@@ -137,18 +138,18 @@ pub struct AcpClient {
 }
 
 impl AcpClient {
-    /// Start the agent in the workspace, initialize ACP, and open a session.
+    /// Start the agent in the workspace inside `sandbox`, initialize ACP, and open a session.
+    /// The agent's terminals run in the same sandbox.
     pub async fn start(
         command: AgentCommand,
         workspace: Workspace,
+        sandbox: Arc<dyn SessionSandbox>,
         sink: Arc<dyn EventSink>,
         permissions: Arc<dyn PermissionHandler>,
     ) -> Result<Self, AcpError> {
         let (program, args) = command.argv.split_first().ok_or(AcpError::NoCommand)?;
-        let mut child = Command::new(program)
-            .args(args)
-            .envs(command.env.iter().map(|(k, v)| (k, v)))
-            .current_dir(workspace.cwd())
+        let mut child = sandbox
+            .command(program, args, workspace.cwd(), &command.env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -167,7 +168,7 @@ impl AcpClient {
             .take()
             .map(|stderr| tokio::spawn(read_stderr(stderr, stderr_tail.clone())));
 
-        let terminals = Arc::new(Terminals::default());
+        let terminals = Arc::new(Terminals::new(sandbox));
         let turn = Arc::new(Mutex::new(None));
         let cwd = workspace.cwd().to_path_buf();
         let handlers = Arc::new(Handlers {

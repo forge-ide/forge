@@ -6,9 +6,9 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use forge_sandbox::SessionSandbox;
 use futures_util::future::BoxFuture;
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::Command;
 use tokio::sync::watch;
 
 /// Output kept when the agent doesn't set a limit.
@@ -74,13 +74,20 @@ pub enum TerminalError {
     Unknown(String),
 }
 
-/// The terminals of one agent connection.
-#[derive(Default)]
+/// The terminals of one agent connection, all run in its sandbox.
 pub struct Terminals {
+    sandbox: Arc<dyn SessionSandbox>,
     map: Mutex<HashMap<String, Arc<Terminal>>>,
 }
 
 impl Terminals {
+    pub fn new(sandbox: Arc<dyn SessionSandbox>) -> Self {
+        Self {
+            sandbox,
+            map: Mutex::default(),
+        }
+    }
+
     /// Start `program args` in `cwd` as a new process group. Returns its terminal ID.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(
@@ -94,11 +101,8 @@ impl Terminals {
         on_output: OnOutput,
         on_exit: OnExit,
     ) -> Result<String, TerminalError> {
-        let mut cmd = Command::new(program);
-        cmd.args(args)
-            .current_dir(cwd)
-            .envs(env.iter().map(|(k, v)| (k, v)))
-            .stdin(Stdio::null())
+        let mut cmd = self.sandbox.command(program, args, cwd, env);
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
@@ -312,7 +316,7 @@ mod tests {
 
     #[tokio::test]
     async fn captures_output_and_exit_and_reports_before_waking() {
-        let terminals = Terminals::default();
+        let terminals = Terminals::new(Arc::new(forge_sandbox::Unsandboxed::new()));
         let chunks = Arc::new(Mutex::new(String::new()));
         let sink = chunks.clone();
         let exited = Arc::new(Mutex::new(None));
@@ -354,7 +358,7 @@ mod tests {
 
     #[tokio::test]
     async fn kill_stops_the_whole_group() {
-        let terminals = Terminals::default();
+        let terminals = Terminals::new(Arc::new(forge_sandbox::Unsandboxed::new()));
         let dir = tempfile::tempdir().unwrap();
         let id = terminals
             .spawn(
@@ -378,7 +382,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_failures_are_errors() {
-        let terminals = Terminals::default();
+        let terminals = Terminals::new(Arc::new(forge_sandbox::Unsandboxed::new()));
         let dir = tempfile::tempdir().unwrap();
         let result = terminals.spawn(
             "t".into(),

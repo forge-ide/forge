@@ -105,7 +105,7 @@ Notifications arrive as `event` with `{ subscriptionId, topic, seq, event }`, wh
 
 Method notes:
 
-- **`server.hello`**: `sandboxTiers` lists the tiers this machine can run; it is empty until `forge-sandbox` lands (M3). Clients compare the major `apiVersion` and refuse to continue on a mismatch.
+- **`server.hello`**: `sandboxTiers` lists the tiers this machine can run, as probed when the daemon started, plus `unsandboxed`, which always runs but still needs each profile's opt-in. Clients compare the major `apiVersion` and refuse to continue on a mismatch.
 - **`project.open`**: `path` must be absolute (clients resolve relative paths). If the directory has no `forge.toml`, it must be a git repository root on a branch; the daemon writes a single-repo `forge.toml` (name from the directory, `path = "."`, `base_branch` from the current branch) and never overwrites an existing one. Reopening the same root returns the same project ID and picks up edits to `forge.toml`. Invalid config is `ValidationFailed` with every problem listed.
 - **`session.create`**: returns at once in `provisioning`; progress arrives as events, starting with `session.state` to `ready` (or `failed`, with the reason). The agent profile is `.forge/agents/<agentProfile>.toml` (`NotFound` if missing). The sandbox tier is `sandbox`, else the profile's, else `standard`; a tier this machine can't run is `SandboxUnavailable`, never a silent fallback, and `unsandboxed` also needs `allow_unsandboxed = true` in the profile. The branch is `branch`, or one derived from `title` (see `session.branchPreview`). If the branch or its worktree already exists in any repo, the call fails with `Conflict` unless `onCollision` says what the user chose: `reuse-branch` (only if no worktree has the branch checked out) or `adopt-worktree` (only if git lists it as a worktree of that branch). A worktree owned by a live session is always `Conflict`. A repo path that resolves outside the project root is `ValidationFailed`. More live sessions than `sessions.max_concurrent` is `InvalidState`. A non-empty `prompt` starts the first turn once the session is ready.
 - **`session.branchPreview`**: the branch name `session.create` would use and what already holds it in each repo, so a client can show the name and ask about collisions first. A derived name uses the `[branches]` format and types from `forge.toml`, falling back to the user config, then `{type}/{slug}` with `feat`, `fix`, `bug`. An invalid branch name, or a title with nothing to make a slug from, is `ValidationFailed`.
@@ -185,7 +185,12 @@ theme = "system"                  # system | light | dark
 [branches]                        # how session branches are named
 format = "{type}/{slug}"          # e.g. "jeff/{type}/{slug}"
 types = ["feat", "fix", "bug"]
+
+[sandbox]
+read_only = ["/home/me/.local/share/agents"]  # extra paths visible read-only in every sandbox
 ```
+
+`sandbox.read_only` entries must be absolute and not `/`; a session fails to start if one is the home dir itself or contains Forge's data or runtime dir. They live here rather than in agent profiles, which a cloned repo controls.
 
 **`.forge/agents/<id>.toml`** (agent profile)
 
@@ -287,7 +292,7 @@ scopes = ["project.read", "events.read"]
 
 ## Forge MCP tools
 
-Forge's MCP server ships in v0.2, but its tool names and schemas are fixed now so the review store and LSP host expose the right data from v0.1.
+Forge's MCP server ships in v0.2, but its tool names and schemas are fixed now so the review store and LSP host expose the right data from v0.1. v0.1 ships a minimal per-session endpoint with `git_commit` only, so agents have a commit path.
 
 | Tool | Input | Output |
 | --- | --- | --- |
@@ -302,6 +307,7 @@ Forge's MCP server ships in v0.2, but its tool names and schemas are fixed now s
 | `review_reply` | `{ threadId, body }` | `{}` |
 | `checks_run` | `{ names? }` | `{ results: { name, passed, output }[] }` |
 | `ask_human` | `{ question, options? }` | `{ answer }` (blocks until answered) |
+| `git_commit` | `{ message, paths? }` | `{ commit, branch }` (all changes, including untracked files, when `paths` is omitted; policy-checked, runs the `commit.pre` hook) |
 
 Lines and columns are 1-based. Paths are relative to the session's working directory. Tool names use underscores because some agents reject dots in MCP tool names.
 
