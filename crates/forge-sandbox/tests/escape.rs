@@ -168,9 +168,20 @@ async fn probe(
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(
         code == 0 || code == 1,
-        "probe {action} {target} did not run (exit {code}): {stderr}"
+        "probe {action} {target} did not run ({}): stderr {stderr:?}, stdout {:?}",
+        describe(output.status),
+        String::from_utf8_lossy(&output.stdout),
     );
     (code, stderr)
+}
+
+fn describe(status: std::process::ExitStatus) -> String {
+    use std::os::unix::process::ExitStatusExt;
+    match (status.code(), status.signal()) {
+        (Some(code), _) => format!("exit {code}"),
+        (None, Some(signal)) => format!("killed by signal {signal}"),
+        _ => "no status".into(),
+    }
 }
 
 async fn allowed(sandbox: &dyn SessionSandbox, cwd: &Path, action: &str, target: &Path) {

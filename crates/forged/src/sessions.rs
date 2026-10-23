@@ -218,11 +218,11 @@ impl AgentResolver for ProfileResolver {
 /// The user config's extra read-only paths, refusing any that would expose a protected dir:
 /// the home dir itself, or anything containing Forge's data or runtime dir.
 fn checked_read_only(paths: &[PathBuf], protected: &[&Path]) -> Result<Vec<PathBuf>, ApiError> {
-    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    let protected: Vec<PathBuf> = protected.iter().map(|p| canonical(p)).collect();
     for path in paths {
-        let path = canonical(path);
-        if protected.iter().any(|p| p.starts_with(&path)) {
+        let resolved = resolve(path);
+        // Compare as written and as resolved, so neither a symlink nor a missing path slips by.
+        let covers = |p: &&Path| p.starts_with(path) || resolve(p).starts_with(&resolved);
+        if protected.iter().any(covers) {
             return Err(ApiError::validation(format!(
                 "sandbox.read_only in the user config: {} would expose the home dir or Forge's own data",
                 path.display()
@@ -230,6 +230,26 @@ fn checked_read_only(paths: &[PathBuf], protected: &[&Path]) -> Result<Vec<PathB
         }
     }
     Ok(paths.to_vec())
+}
+
+/// `path` with its deepest existing ancestor canonicalized and the rest appended, so paths
+/// that don't exist yet compare consistently with ones that do (`/home` is an automount on
+/// macOS; `/var` is `/private/var`).
+fn resolve(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut current = path;
+    loop {
+        if let Ok(real) = std::fs::canonicalize(current) {
+            return rest.iter().rev().fold(real, |acc, c| acc.join(c));
+        }
+        match (current.parent(), current.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_owned());
+                current = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
 }
 
 /// `program` as an absolute, canonical path, looked up in `PATH` when it has no slash.
@@ -269,6 +289,19 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn missing_paths_resolve_through_their_existing_ancestors() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().canonicalize().unwrap();
+        let link = real.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(resolve(&link.join("a/b")), real.join("a/b"));
+        assert_eq!(resolve(Path::new("/")), PathBuf::from("/"));
+        // Protecting a missing dir behind a symlink still refuses its resolved parent.
+        let protected = link.join("data/forge");
+        assert!(checked_read_only(&[real.join("data")], &[&protected]).is_err());
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! macOS backend: one Seatbelt profile, through `sandbox-exec`, for both Light and Standard.
 //! Seatbelt has no cheaper, weaker mode worth offering, so the two tiers are the same here.
 //!
-//! The profile denies by default. It allows reading system directories, toolchains, the
+//! The profile denies by default. It allows mapping executable code (dyld needs it to load any
+//! binary; reading is still limited), reading system directories, toolchains, the
 //! session's worktrees, and each repo's git dir; writing only the worktrees, their own git dirs,
 //! and the session's scratch dirs; signals only within the sandbox; and no network. File
 //! metadata stays readable everywhere so path lookups work, but contents outside the allowed
@@ -132,6 +133,7 @@ fn profile(view: &View) -> String {
         "(version 1)\n\
          (deny default)\n\
          (allow process-exec)\n\
+         (allow file-map-executable)\n\
          (allow process-fork)\n\
          (allow signal (target same-sandbox))\n\
          (allow process-info* (target same-sandbox))\n\
