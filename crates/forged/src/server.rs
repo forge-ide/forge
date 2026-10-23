@@ -201,6 +201,7 @@ mod tests {
             data_dir: dir.path().join("data"),
             runtime_dir: dir.path().join("run"),
             config_dir: dir.path().join("config"),
+            managed_policy: dir.path().join("managed.toml"),
         };
         crate::dirs::ensure_private(&paths.data_dir).unwrap();
         let socket = paths.socket();

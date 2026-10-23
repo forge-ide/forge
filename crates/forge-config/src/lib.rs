@@ -10,12 +10,14 @@ use serde::de::DeserializeOwned;
 pub mod agent;
 pub mod branches;
 pub mod paths;
+pub mod policy;
 pub mod project;
 pub mod user;
 
 pub use agent::{AGENTS_DIR, AgentProfileConfig, InvalidProfileId, ProfileMode, ProfileSandbox};
 pub use branches::{BranchConfig, BranchRules};
 pub use paths::{Paths, PathsError};
+pub use policy::{PROJECT_POLICY_FILE, PolicyConfig, PolicyRule, ProtectedConfig};
 pub use project::{PROJECT_CONFIG_FILE, ProjectConfig, RepoConfig};
 pub use user::{SandboxConfig, UserConfig};
 
@@ -74,6 +76,10 @@ pub fn schemas() -> Vec<(&'static str, String)> {
         (
             "agent-profile.toml.schema.json",
             render(schemars::schema_for!(AgentProfileConfig)),
+        ),
+        (
+            "policy.toml.schema.json",
+            render(schemars::schema_for!(PolicyConfig)),
         ),
     ]
 }

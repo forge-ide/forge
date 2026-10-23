@@ -77,7 +77,9 @@ Forge separates two controls, as Codex does: an approval policy (when to ask) an
 | Ask | Prompt | Prompt | Prompt |
 | Accept edits | Auto, inside worktree | Prompt | Prompt |
 | Auto | Auto | Classifier decides | Allowlist, then classifier |
-| Full access | Auto | Auto | Auto; disposable container only |
+| Full access | Auto | Auto | Auto |
+
+In v0.1, network access is the agent profile's egress allowlist in every mode, with no prompts; rules-only Auto asks for commands no rule allows, failing closed until the classifier arrives; and Full access runs on whatever sandbox tier the session uses, with deny rules, guards, and hooks still applying. The full table per action type is in component-architecture.md (Policy engine).
 
 **How Auto works**
 
@@ -233,7 +235,7 @@ v0.1 proves the review loop with one agent at a time; v0.2 adds parallel agents 
 - Linux and macOS; single-repo projects; one active session, still in its own worktree.
 - ACP client with Claude Code, Codex, and Gemini CLI.
 - Review pane: changeset, split and unified diff, inline comments batched back to the agent, per-hunk revert, changes since last review.
-- Modes: Ask, Accept edits, and a rules-only Auto (hard denies + sandbox, no classifier yet).
+- Modes: Ask, Accept edits, a rules-only Auto (hard denies, rules, and the sandbox; no classifier yet, so it asks where no rule decides), and Full access.
 - Editor with tree-sitter and LSP for Rust, TypeScript, Python, and Go.
 - Markdown preview and editing; lint for `AGENTS.md` and `CLAUDE.md`.
 - Hooks on pre and post tool call (shell only); secret-scan and protected-path guards.

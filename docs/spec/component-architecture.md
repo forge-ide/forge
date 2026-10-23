@@ -156,34 +156,48 @@ macOS uses one Seatbelt profile (through `sandbox-exec`) for both Light and Stan
 
 ## Policy engine
 
-Every action an agent wants to take becomes an `Action` and gets exactly one `Decision`: allow, deny, or ask, always with a reason and the rule that produced it.
+Every action an agent wants to take becomes an `Action` and gets exactly one `Decision`: allow, deny, or ask, always with a reason and the rule that produced it. `forge-policy` implements it; the session supplies the mode on every decision, so a mode change applies to the next action.
 
 ```rust
-pub enum Action {
-    Edit { path: PathBuf, kind: EditKind },
-    Exec { argv: Vec<String>, cwd: PathBuf },
+pub enum Action {                          // forge-api, as on the wire
+    Edit { path: String, kind: EditKind },  // repo-relative path
+    Exec { argv: Vec<String>, cwd: String },
     Network { host: String, port: u16 },
-    McpCall { server: String, tool: String, args: Value },
-    Git { op: GitOp },
+    Mcp { server: String, tool: String, args: Value },
+    Git { op: String },                     // e.g. "commit", from git_commit
+}
+
+pub struct Request {
+    pub action: Action,
+    pub content: Option<String>,            // an edit's proposed text; scanned for secrets
 }
 
 pub struct Decision {
     pub verdict: Verdict,   // Allow | Deny | Ask
     pub reason: String,
-    pub source: RuleSource, // which layer and rule decided
+    pub source: Source,     // which layer and rule decided, e.g. "project:deny[2]"
 }
 ```
 
 **Evaluation order** (first match wins; later steps never loosen earlier ones)
 
-1. **Hard denies** from org, user, then project policy.
-2. **Guards:** secret scan, protected paths, new-dependency check, injection flags on content the agent fetched.
-3. **Pre-tool hooks** (allow, deny, or ask, or modify the arguments).
-4. **Explicit allow and ask rules** for the session's mode.
-5. **Classifier**, in Auto mode only, for whatever is still undecided.
-6. **Mode default:** Ask mode asks; Accept-edits allows edits in the worktree and asks for the rest.
+1. **Hard denies:** the built-in git rule, then `[[deny]]` rules from the managed, user, and project layers, then denials remembered for the session.
+2. **Guards:** edits outside the worktree or inside `.git`, protected paths (denied), commands whose program Forge can't tell (asks), then secret scan of the edit's content or the command line (asks). A deny rule or the git rule that an expansion could complete asks here too. New-dependency check and injection flags on fetched content come later (v0.2).
+3. **Pre-tool hooks** (allow, deny, or ask, or rewrite a command's argv). A rewritten command goes through steps 1 and 2 again.
+4. **Explicit ask and allow rules** for the session's mode, from every layer, plus allows remembered for the session. Ask beats allow whichever layers they come from, and a hook's allow doesn't override an ask rule either.
+5. **Classifier**, in Auto mode only, for whatever is still undecided. v0.1 has none, so this step passes.
+6. **Mode default:**
 
-**Rules** are TOML, layered org → user → project → session:
+| Action | Ask | Accept edits | Auto (rules-only) | Full access |
+| --- | --- | --- | --- | --- |
+| edit (create, modify, delete in a worktree) | ask | allow | allow | allow |
+| exec | ask | ask | ask | allow |
+| mcp | ask | ask | ask | allow |
+| git (`git_commit`) | ask | ask | allow | allow |
+
+Rules-only Auto asks for commands no rule allows: without a classifier it fails closed, so until v0.2 it differs from Accept edits only for git operations. Full access allows anything that passes the deny rules, guards, and hooks, on whatever tier the session runs. Network is not decided here in v0.1: the egress proxy's allowlist is the whole network policy, and a `Network` action is always denied with that reason. "Entering Auto drops broad allow rules" (overview) has no effect until there is a classifier, since rules-only Auto never allows by default.
+
+**Rules** are TOML, layered built-in → managed → user → project → session:
 
 ```toml
 [[deny]]
@@ -195,9 +209,23 @@ exec = ["cargo test*", "pnpm test*"]
 modes = ["accept-edits", "auto"]
 ```
 
-**Classifier interface.** A trait taking the action, recent transcript turns, the task, and the project's rules files, and returning a verdict and a reason. Backends: an API model, a local model, or none. Timeout or error means Ask, never Allow. A per-session counter enforces the circuit breaker.
+- **Layers.** Managed policy is `/etc/forge/managed.toml` on Linux and `/Library/Application Support/Forge/managed.toml` on macOS; user policy is `~/.config/forge/policy.toml`; project policy is `<root>/.forge/policy.toml`, read from the project root, never from a session's worktree, so an agent's edits to it take effect only after review and merge. Files are read when the agent launches; an invalid file in any layer fails the launch with the parse error. The session layer holds decisions remembered from approvals, matching the exact argv or path.
+- **Lower layers only tighten.** A deny in any layer wins over every allow, and an ask in any layer wins over every allow, so a lower layer's allow only fills a gap the mode default would ask about.
+- **Commands.** An `exec` pattern matches the space-joined argv with the program reduced to its file name (`/usr/bin/git` → `git`). Argv elements are words as given, never re-split. A shell's `-c` script (wherever `-c` sits among its options; also `su -c`, `script -c`, `watch`, a literal `eval`, PowerShell's `-Command`, fish's `-C`) is parsed with a small tokenizer for the shell's closed grammar: operators and `{ }`/`( )` groups split simple commands; reserved words (`if`, `then`, `!`, `do`, ...) are skipped; arithmetic commands (`(( ... ))`, `for (( ...; ...; ... ))`) are not commands; redirections are dropped with their targets; heredoc bodies are data; quoting, including `$'...'`, is removed; a carriage return is an ordinary character, as in bash; and comments are skipped. Every command substitution, backtick, and process substitution is parsed as a script too, wherever it appears: inside `${...}`, arithmetic, double quotes, or an unquoted heredoc body. Builtins that run code are parsed the same way: a literal `eval`, `trap`'s handler, and the commands given to `bind -x`, `complete -C`, and `mapfile`/`readarray -C`; `enable -f` (which loads a shared object) and `hash -p` (which makes a name run another program) are opaque. `coproc NAME { ... }` names its coprocess before the group. A shell with no script (reading commands from standard input, as in `curl ... | sh` or `bash <<< ...`), a shell whose script file is an expansion (`bash <(...)`), and `source` or `.` of an expansion are opaque: they turn data into code. `xargs` and `parallel` supply arguments Forge can't see, so the command they run gets an expanded tail, and the `{}` of `find -exec` and the `-I` string of `xargs` count as expansions. Each simple command then has its variable assignments and wrappers stripped (`env`, including `env -S`; `timeout`, `xargs`, `sudo`, `nice`, `strace`, `chroot`, `parallel`, `find -exec`, ...). An argv element containing shell syntax also has the joined argv parsed as a line for deny and ask rules, in case an agent described a shell line as an argv.
+    - **Deny and ask rules** match the whole line or any simple command in it, so `env FOO=1 timeout 5 sh -c 'g""it >/dev/null push'` meets a `git push*` deny while `grep -rn "git push" docs/` and a heredoc that writes `git push` into a file don't.
+    - **Expansions.** A word is literal only where the shell passes exactly its text; everything a shell expands ends the literal part: parameters (`$X`, `${...}`), command substitutions and backticks, arithmetic, `$'\x..'` escapes by code, and unquoted brace expansion (`{a,b}`, `{1..3}`; `{}` alone is literal), glob characters (`*`, `?`, `[...]`; a lone `[` is the test command), and a `~` at the start of a word or after `=` or `:` (`X=~/y`, `--opt=~/y`). A command with an expansion in an argument keeps its literal prefix, down to the character (`rm -rf target/` for `rm -rf target/*`). A deny or ask rule whose pattern that prefix already completes matches for certain (`git push --force $X` against `git push --force*`); one that some expansion could complete asks instead (`rm -rf $DIR` or `rm -rf ~` against `rm -rf /*`); a deny that matches for certain elsewhere in the line still denies. A command whose program Forge can't tell (an expansion in command position, `eval` of an expansion, an alias, an unclosed quote or heredoc, shells nested more than four deep, an encoded PowerShell command) meets the opaque-command guard, which asks in every mode, Full access included. In short, uncertainty asks: it never allows and never denies outright.
+    - **Allow rules** match only a line that is exactly one simple command: no shell syntax or redirection; no variable assignment or wrapper in front; no interpreter running inline code (`python -c`, `node -e`, `awk`); no option that makes a read-only-looking tool run another program (`rg --pre`, `find -exec` or `-delete`, `git -c`, `git grep -O`, `tar -I`, `sed` without `--sandbox`, pagers and editors); no shell inside a shell; no shell that reads startup files from the sandbox's writable home (`zsh`, `fish`, `csh`, and `tcsh` always; `bash -l`, `-i`, `--rcfile`; PowerShell without `-NoProfile`); only ASCII spaces and tabs between words; and a program word that is a plain name (`cargo`, `pg_dump`, `g++`) found through `PATH`, or such a name in a system directory such as `/usr/bin`, never one the agent could have written (`./cargo`) or a word a shell would expand (`ls*`, `~/bin/x`); and every word literal, since an expansion in an argument can pick an option that runs code (`rg ${X:---pre=./x}`): `cargo test $FLAGS` and `ls *.rs` ask in Accept edits and Auto even where `cargo test*` and `ls*` are allowed, while `ls src/` matches. So neither `cargo test && curl evil.example` nor `./cargo test` matches `cargo test*`.
+    - **Checked against bash.** A test runs a corpus of scripts (every input from the security reviews, plus generated combinations of quoting and expansion forms with operators, groups, wrappers, and heredocs) under a real `bash -c` with stub programs that record what ran under a built-in identity, so a program run by another name or path still shows as itself. It checks that every program bash ran appears as a simple command whose literal words match, or the line is opaque; that a line judged simple ran exactly its argv, word for word; and that whatever bash ran that a deny rule names gets Deny or Ask in Full access. Scripts known to get past policy are listed in the test with the reason, and the test fails if one stops missing or any other script misses.
+    - **Full access.** In Full access, the policy engine's job is early, well-worded refusals of what a human has said never to run; the sandbox is the security boundary. The engine understands the shell's closed grammar and collects every command substitution wherever it appears. What it can't know, it doesn't guess: a command whose program is an expansion; an `eval`, `trap`, `alias`, or `hash -p` built from one; a shell reading its script from data; or an unclosed quote is opaque and asks even in Full access, and an expansion in an argument that a deny or ask rule could complete asks too. In no mode does uncertainty produce Allow. Three things stay outside the engine's sight and are bounded by the sandbox instead: a program that runs its arguments and isn't in the wrapper list (`ssh`, `docker`, build tools); a command whose meaning depends on a value computed at run time (a variable holding `a[$(...)]` evaluated as arithmetic, a file or symlink the agent wrote earlier); and shells other than bash, whose scripts are matched best effort and never allowed. Each of these can at most run, inside the sandbox, a command a deny rule would have named; none can turn an Ask into an Allow in the other modes.
+    - **Limits.** Matching is lexical and best effort. The wrapper list is open-ended; commands that run what the parser can't see (`ssh host cmd`, `docker run`, build tools that take shell strings) are left to the sandbox. "Found through `PATH`" trusts the sandbox's `PATH`, which agents can't change and which must not contain relative entries such as `.`; toolchains installed outside the system directories and named by absolute path (`~/.cargo/bin/cargo`) never match allow rules and fall to the mode default. A pattern is a prefix match when it ends in `*`: `cargo test*` also matches `cargo test-evil`, so write `cargo test` and `cargo test *` to allow exactly the subcommand. Build and test tools run code from the worktree (`build.rs`, package scripts, the justfile), so allowing them means trusting the worktree, and allowing an interpreter (`python *`) allows any code it can run.
+- **Built-in git rule.** Denies, in every mode, git commands that write the repo's shared state: every `commit` and `push`, `stash` except `stash list` and `stash show`, and `branch` except its listing forms (no arguments, `--list` with patterns, `-a`, `-r`, `-v`, `--show-current`, `--contains`, `--merged`, and similar). It looks past git's global options (`-C dir`, `-c key=value`, `--git-dir=...`), treats `git-commit` and the like from git's exec path as the subcommand, refuses any alias defined on the command line (`git -c alias.ci=commit ci`) or config file included there (`-c include.path=...`), and checks every simple command in a line. When an expansion picks the subcommand (`git $SUB`) or decides a `stash` or `branch` (`git stash $ACTION`), it asks instead. The reason points agents at `git_commit`. Other ref- and config-writing commands (`git checkout -b`, `git tag`, `git config`, ...) and git configuration in the environment are left to the read-only shared git dir.
+- **Protected paths.** Edits to them are denied in every mode. Built in: `.env`, `.env.*`, `*.pem`, `*.key`, and `.forge/`; each layer's `[protected] paths` adds more. Tasks will be able to lift a protection for one session once tasks exist.
+- **Secret scan.** A built-in, non-configurable list: private-key blocks, AWS access key IDs, GitHub, GitLab, npm, PyPI, and Hugging Face tokens, and Anthropic, OpenAI, Google, Slack, Stripe, and SendGrid keys, plus the exact values of secrets the session's proxy injects. A match in an edit's content or a command line makes the action ask, naming only the kinds found, never the text.
+- **Edit paths are lexical.** The engine normalizes `.` and `..` but never touches the filesystem, so whoever asks for a decision resolves symlinks first and passes the path that will really be written: otherwise a link the agent planted (`notes.txt -> .env`) would carry an allowed edit to a protected file. ACP writes already refuse any symlink below the worktree root.
 
-**Decision records** go to the event log, and the timeline shows them inline with the action they decided.
+**Classifier interface.** A trait taking the action, recent transcript turns, the task, and the project's rules files, and returning a verdict and a reason. Backends: an API model, a local model, or none (v0.1). Timeout or error means Ask, never Allow. A per-session counter enforces the circuit breaker.
+
+**Decision records** go to the event log, and the timeline shows them inline with the action they decided. A decision's `source` is `<layer>:<list>[<index>]` for a file rule, `session:allow` or `session:deny` for a remembered one, `builtin:git-shared-state`, `guard:outside-worktree`, `guard:protected-path`, `guard:opaque-command`, `guard:secret-scan`, `hook:<name>`, `classifier`, `mode:<mode>`, or `network:allowlist`.
 
 ## Hooks and plugins
 
@@ -232,7 +260,7 @@ Each session gets its own git worktree in every repo it touches, on its own bran
 - **Multi-repo sessions.** A session declares its repos up front; the agent may request another mid-session, which is an approval. Each repo gets a worktree with the same name on the same branch, created together; a collision in any repo is a collision for all. The agent's working directory is the first repo's worktree, and it may use the others by path; a parent folder linking them comes with multi-repo support.
 - **Shared caches.** Build output (`target/`, `node_modules/`) is per worktree by default; sccache and pnpm's store keep rebuilds cheap.
 - **Overlap detection.** On every edit event, Forge compares the touched paths against other live sessions in the same repo. A hit marks both sessions on the board and suggests a merge order. Conflicts are resolved at ship time by rebasing the later changeset.
-- **Agent commits.** Agents don't run `git commit` themselves: inside the sandbox the shared git dir is read-only, and a default deny rule refuses manual git commands that write shared state (`commit`, `push`, `stash`, `branch`). Instead Forge's MCP server offers `git_commit`, which the daemon runs on the session branch after the policy check and the `commit.pre` hook. Read-only git commands stay allowed.
+- **Agent commits.** Agents don't run `git commit` themselves: inside the sandbox the shared git dir is read-only, and the policy engine's built-in git rule refuses manual git commands that write shared state (`commit`, `push`, `stash`, `branch`). Instead Forge's MCP server offers `git_commit`, which the daemon runs on the session branch after the policy check and the `commit.pre` hook. Read-only git commands stay allowed, including `git stash list` and the listing forms of `git branch`.
 - **Untrusted worktree metadata.** Whatever runs in a worktree can rewrite its `.git` file and its own git dir (`commondir`, `gitdir`, `config.worktree`), so the daemon never takes git configuration from them. It finds a worktree's git dirs by following the `.git` link only when it names a directory under the repo's own `worktrees/` whose `gitdir` file points back at that worktree, and its git commands on a session's work use the repo's shared git dir, a daemon-owned index, and explicit refs, never the agent's index.
 - **Pushes** happen only from the daemon, with the user's credentials, after review.
 - **Cleanup.** Done and abandoned sessions keep their worktrees for 7 days (configurable), then `git worktree remove`; branches stay until deleted. A failed provision removes the worktrees and branches it created.
@@ -324,7 +352,8 @@ forge.toml                 # project: name, repos, default agent, budgets
 ~/.config/forge/
   config.toml              # user defaults, keymaps, theme
   policy.toml              # user rules
-/etc/forge/managed.toml    # org-managed policy (read-only to users)
+/etc/forge/managed.toml    # org-managed policy, read-only to users
+                           # (macOS: /Library/Application Support/Forge/managed.toml)
 ```
 
 - **Layering.** Managed → user → project → session for policy, where lower layers can only tighten. For preferences (model, theme, keymaps) the most specific layer wins.
