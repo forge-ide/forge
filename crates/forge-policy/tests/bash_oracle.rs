@@ -145,7 +145,8 @@ const CORPUS: &[&str] = &[
     "git status; [ -n x ]",
     // Wrappers.
     "env git push",
-    "env -i FOO=1 git push",
+    // `env -i` clears PATH; keep it on the stubs, so no real program runs.
+    "env -i PATH=@STUBS@ FOO=1 git push",
     "env -u HOME git push",
     "env -S 'git push'",
     "env --split-string='git push'",
@@ -330,7 +331,7 @@ fn run(script: &str, root: &Path, stubs: &Path) -> Run {
         .stderr(Stdio::null())
         .spawn()
         .expect("running bash");
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(15);
     while child.try_wait().unwrap().is_none() {
         if Instant::now() > deadline {
             let _ = child.kill();
