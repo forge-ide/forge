@@ -75,6 +75,23 @@ jobs:
 
       - uses: extractions/setup-just@v4
 
+      # TEMPORARY diagnostics for the Seatbelt profile; remove before merging.
+      - name: Seatbelt startup diagnostics
+        if: runner.os == 'macOS'
+        run: |
+          cargo build --quiet -p forge-sandbox --bin forge-sandbox-probe
+          P="$PWD/target/debug/forge-sandbox-probe"
+          base='(version 1)(allow process-exec process-fork)(allow file-map-executable)(allow sysctl-read)(allow mach-lookup)(allow file-read-metadata file-test-existence)'
+          echo "== all reads allowed"
+          sandbox-exec -p "(version 1)(deny default)$base(allow file-read*)" "$P" read /etc/hosts; echo "exit $?"
+          echo "== reads reported"
+          sandbox-exec -p "(version 1)(deny default (with report))$base(allow file-read* (with report))" "$P" read /etc/hosts; echo "exit $?"
+          echo "== only /usr /System /Library allowed, denials reported"
+          sandbox-exec -p "(version 1)(deny default (with report))$base(allow file-read* (subpath \"/usr\") (subpath \"/System\") (subpath \"/Library\") (subpath \"$P\") (literal \"/etc/hosts\") (literal \"/private/etc/hosts\"))" "$P" read /etc/hosts; echo "exit $?"
+          sleep 2
+          log show --last 3m --style compact --predicate 'eventMessage CONTAINS "forge-sandbox-p"' \
+            | grep -E "allow|deny" | sed -E 's/^.*(allow|deny)/\1/' | sort | uniq -c | sort -rn | head -150
+
       - run: just test-sandbox
 
       # Seatbelt reports what it denied only to the unified log.
