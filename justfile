@@ -63,12 +63,12 @@ _gen-into client schemas: install
 
 # Sandbox escape suite for this platform.
 test-sandbox:
-    @echo "just test-sandbox: the escape suite lands in M3" >&2
+    @echo "just test-sandbox: the sandbox escape suite is not implemented yet" >&2
     @exit 1
 
 # UI end-to-end tests with the fake agent.
 test-e2e:
-    @echo "just test-e2e: end-to-end tests land in M6" >&2
+    @echo "just test-e2e: end-to-end tests are not implemented yet" >&2
     @exit 1
 
 # Everything CI runs.

@@ -12,6 +12,8 @@ class FakeTransport implements DaemonTransport {
   connects = 0;
   /** Accept requests but never answer them, like a daemon that dies mid-call. */
   holdReplies = false;
+  /** Refuse `afterSeq`, like a daemon whose event stream was replaced. */
+  rejectAfterSeq = false;
   /** Leave `connect()` pending until the test resolves it from `pendingConnects`. */
   holdConnects = false;
   pendingConnects: (() => void)[] = [];
@@ -64,6 +66,18 @@ class FakeTransport implements DaemonTransport {
   }
 
   private reply(req: Request) {
+    if (req.method === "events.subscribe" && this.rejectAfterSeq && "afterSeq" in req.params) {
+      this.emit({
+        jsonrpc: "2.0",
+        id: req.id,
+        error: {
+          code: -32008,
+          message: "ValidationFailed: afterSeq is ahead of the event stream",
+          data: { kind: "ValidationFailed", detail: "afterSeq is ahead", retryable: false },
+        },
+      });
+      return;
+    }
     let result: unknown = {};
     if (req.method === "server.hello") {
       result = {
@@ -190,6 +204,37 @@ describe("DaemonConnection", () => {
     transport.push(note("sub_2", 3));
     expect(seen).toEqual([1, 2, 3]);
     expect(states.map((s) => s.kind)).toEqual(["connected", "reconnecting", "connected"]);
+  });
+
+  it("starts over when the daemon no longer knows the last seq", async () => {
+    const transport = new FakeTransport();
+    const conn = new DaemonConnection(transport);
+    const seen: number[] = [];
+    let resets = 0;
+    conn.subscribe(
+      ["board"],
+      (n) => seen.push(n.seq),
+      () => resets++,
+    );
+    conn.start();
+    await vi.runAllTimersAsync();
+    transport.push(note("sub_1", 5));
+
+    transport.drop();
+    transport.rejectAfterSeq = true;
+    transport.up = true;
+    await vi.runAllTimersAsync();
+    expect(conn.state.kind).toBe("connected");
+    const params = transport.subscribeRequests().map((r) => r.params);
+    expect(params).toEqual([
+      { topics: ["board"] },
+      { topics: ["board"], afterSeq: 5 },
+      { topics: ["board"] },
+    ]);
+    expect(resets).toBe(1);
+    // The new stream's numbering starts over and is delivered.
+    transport.push(note("sub_2", 1));
+    expect(seen).toEqual([5, 1]);
   });
 
   it("retries when the connection drops before hello is answered", async () => {

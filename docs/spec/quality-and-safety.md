@@ -26,6 +26,8 @@ steps:
   - end_turn
 ```
 
+Each step is a one-key map or a bare name; unknown steps or keys are errors. Paths are relative to the session's working directory. Implemented so far: `expect_prompt` (a glob where `*` matches anything), `plan`, `read`, `write` with `content` (the whole new file), `exec`, `request_permission` (`action: exec` with `argv`, or `action: edit` with `path`), `expect_permission`, `message`, `end_turn`, and `sleep_ms` (waits, unless the turn is cancelled first; for tests that act mid-turn). `write` with `patch`, `expect_review_comments`, and `reply_thread` arrive with the review store. A cancelled turn resumes the script after that turn's `end_turn`. A failed expectation fails the turn with an error.
+
 | Layer | Tooling | Required coverage |
 | --- | --- | --- |
 | Unit | `cargo test`, vitest | Policy matching, config parsing, diff mapping, thread anchoring, Solid stores |
@@ -84,10 +86,10 @@ The rule throughout: never lose work, never resume silently, and always tell the
 | --- | --- |
 | Agent process crashes | Checkpoint the worktree, mark the session Paused with the exit code and last stderr lines, offer Resume (reload the ACP session or start fresh with a summary) |
 | Agent hangs (no ACP traffic for 5 min while Working) | Send ACP cancel; if no response in 30 s, kill it and treat as a crash |
-| Daemon crashes or restarts | On start, Working and Waiting sessions become Paused with "Interrupted by daemon restart"; pending approvals are cancelled and the agent is told on resume |
+| Daemon crashes or restarts | On start, Working and Waiting sessions become Paused and Provisioning sessions Failed, with "Interrupted by daemon restart"; pending approvals are cancelled and the agent is told on resume |
 | UI disconnects | Daemon keeps running sessions; approvals wait; UI reconnects with `afterSeq` |
 | Sandbox fails to start | Session goes Failed with the backend's error and a suggested fix (missing bubblewrap, unprivileged user namespaces disabled); never falls back to a weaker tier silently |
-| Worktree creation fails | Failed with the git error; partial worktrees removed |
+| Worktree creation fails | Failed with the git error; partial worktrees, and branches the attempt created, removed |
 | Rewind or checkpoint git error | Abort the operation, leave the worktree untouched, show the error |
 | Ship conflicts with the base branch | Show the conflicting files; offer "Ask agent to rebase" (a new turn) or manual resolution in the editor |
 | Disk below 1 GB free | Pause all Working sessions and refuse new ones until space is freed |

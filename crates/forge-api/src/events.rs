@@ -380,11 +380,18 @@ impl fmt::Display for Topic {
 }
 
 /// Params of the `event` notification the daemon pushes to subscribers.
+///
+/// Each event reaches a subscription at most once, even when several of its topics match, so
+/// `seq` strictly increases within a subscription.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct EventNotification {
     pub subscription_id: SubscriptionId,
+    /// The first of the event's topics that the subscription includes.
     pub topic: Topic,
+    /// The daemon-wide stream cursor: increases across every session and topic and survives
+    /// restarts. `events.subscribe { afterSeq }` resumes after it. Not the event's own `seq`,
+    /// which counts within its session.
     pub seq: u64,
     pub event: Event,
 }

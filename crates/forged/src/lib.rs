@@ -13,6 +13,7 @@ mod dirs;
 mod projects;
 mod rpc;
 mod server;
+mod sessions;
 
 /// Start the daemon and serve until `shutdown` resolves.
 pub async fn run(paths: Paths, shutdown: impl Future<Output = ()>) -> anyhow::Result<()> {
@@ -34,15 +35,55 @@ pub async fn run(paths: Paths, shutdown: impl Future<Output = ()>) -> anyhow::Re
     };
     tracing::info!(socket = %socket.display(), "listening");
 
-    let state = Arc::new(rpc::State {
-        db,
-        hub: forge_events::Hub::new(),
-    });
-    server::serve(listener, &socket, state, shutdown).await;
+    let state = match open_state(db, paths).await {
+        Ok(state) => state,
+        Err(e) => {
+            let _ = std::fs::remove_file(&socket);
+            return Err(e);
+        }
+    };
+    server::serve(
+        listener,
+        &socket,
+        state.clone(),
+        server::Limits::default(),
+        shutdown,
+    )
+    .await;
+    state.sessions.shutdown().await;
 
     if let Err(e) = std::fs::remove_file(&socket) {
         tracing::warn!(error = %e, "removing socket on shutdown");
     }
     tracing::info!("stopped");
     Ok(())
+}
+
+/// The event log and session manager over an open database, with interrupted sessions
+/// recovered.
+async fn open_state(db: db::Db, paths: Paths) -> anyhow::Result<Arc<rpc::State>> {
+    let log = Arc::new(
+        forge_events::EventLog::open(
+            db.shared(),
+            Arc::new(forge_events::Hub::new()),
+            Box::new(forge_events::NoRedaction),
+        )
+        .context("opening the event log")?,
+    );
+    let sessions = forge_session::SessionManager::new(
+        Arc::new(db.clone()),
+        log.clone(),
+        Arc::new(forge_git::GitCli),
+        Arc::new(sessions::ProfileResolver { db: db.clone() }),
+    );
+    sessions
+        .recover()
+        .await
+        .map_err(|e| anyhow::anyhow!("recovering sessions: {e}"))?;
+    Ok(Arc::new(rpc::State {
+        db,
+        log,
+        sessions,
+        paths,
+    }))
 }

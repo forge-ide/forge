@@ -4,7 +4,7 @@ The contracts every crate and the UI build against. Rust types in `forge-api` ar
 
 ## Conventions
 
-- **IDs** are ULIDs with a type prefix: `prj_`, `ses_`, `trn_` (turn), `chk_` (checkpoint), `apr_` (approval), `thr_` (thread), `cmt_` (comment), `hnk_` (hunk), `sub_` (event subscription). Events use a per-session sequence number instead.
+- **IDs** are ULIDs with a type prefix: `prj_`, `ses_`, `trn_` (turn), `chk_` (checkpoint), `apr_` (approval), `thr_` (thread), `cmt_` (comment), `hnk_` (hunk), `sub_` (event subscription). Events use a per-session sequence number instead, plus a daemon-wide stream cursor on notifications.
 - **Wire format:** JSON with camelCase fields. Rust types use snake_case with `#[serde(rename_all = "camelCase")]`.
 - **Times** are RFC 3339 in UTC. **Paths** on the wire are repo-relative with forward slashes; absolute paths never cross the API, with two exceptions: `Project.root` and the `path` param of `project.open`, which identify the project on the user's machine.
 - **Versioning:** `server.hello` returns the API version (semver). Adding a field or method is a minor bump; removing or changing one is major. Clients ignore unknown fields.
@@ -62,6 +62,9 @@ type Thread = { id: string; sessionId: string; path: string;
   range: { startLine: number; endLine: number }; checkpointId: string;
   status: 'open' | 'resolved' | 'outdated'; comments: Comment[] };
 type Comment = { id: string; author: 'human' | 'agent'; body: string; createdAt: string };
+type CollisionResolution = 'reuse-branch' | 'adopt-worktree';
+type BranchCollision = { repo: string;
+  kind: 'branch-exists' | 'worktree-exists' | 'owned-by-live-session'; sessionId?: string };
 ```
 
 | Method | Params | Result |
@@ -71,7 +74,8 @@ type Comment = { id: string; author: 'human' | 'agent'; body: string; createdAt:
 | `project.list` | `{}` | `Project[]` |
 | `project.get` | `{ projectId }` | `Project` |
 | `agent.list` | `{}` | `AgentProfile[]` |
-| `session.create` | `{ projectId, agentProfile, title, prompt, mode, sandbox? }` | `Session` |
+| `session.create` | `{ projectId, agentProfile, title, prompt, mode, sandbox?, branch?, onCollision? }` | `Session` |
+| `session.branchPreview` | `{ projectId, title, branch? }` | `{ branch, collisions: BranchCollision[] }` |
 | `session.prompt` | `{ sessionId, text }` | `{ turnId }` |
 | `session.cancel` | `{ sessionId }` | `{}` |
 | `session.setMode` | `{ sessionId, mode, sandbox? }` | `Session` |
@@ -97,13 +101,17 @@ type Comment = { id: string; author: 'human' | 'agent'; body: string; createdAt:
 | `events.unsubscribe` | `{ subscriptionId }` | `{}` |
 | `events.query` | `{ sessionId, kinds?, text?, before?, limit }` | `Event[]` |
 
-Notifications arrive as `event` with `{ subscriptionId, topic, seq, event }`. Topics: `board`, `approvals`, `session/<id>`, `project/<id>`.
+Notifications arrive as `event` with `{ subscriptionId, topic, seq, event }`, where `seq` is the stream cursor (see `events.subscribe`). Topics: `board`, `approvals`, `session/<id>`, `project/<id>`.
 
 Method notes:
 
 - **`server.hello`**: `sandboxTiers` lists the tiers this machine can run; it is empty until `forge-sandbox` lands (M3). Clients compare the major `apiVersion` and refuse to continue on a mismatch.
 - **`project.open`**: `path` must be absolute (clients resolve relative paths). If the directory has no `forge.toml`, it must be a git repository root on a branch; the daemon writes a single-repo `forge.toml` (name from the directory, `path = "."`, `base_branch` from the current branch) and never overwrites an existing one. Reopening the same root returns the same project ID and picks up edits to `forge.toml`. Invalid config is `ValidationFailed` with every problem listed.
-- **`events.subscribe`**: `topics` must be non-empty, and `project/<id>` and `session/<id>` must exist (`NotFound` otherwise). A connection can only unsubscribe its own subscriptions, and they end when it disconnects. The meaning of `seq` and `afterSeq` across multi-session topics is settled with the event log in M2.
+- **`session.create`**: returns at once in `provisioning`; progress arrives as events, starting with `session.state` to `ready` (or `failed`, with the reason). The agent profile is `.forge/agents/<agentProfile>.toml` (`NotFound` if missing). The sandbox tier is `sandbox`, else the profile's, else `standard`; a tier this machine can't run is `SandboxUnavailable`, never a silent fallback, and `unsandboxed` also needs `allow_unsandboxed = true` in the profile. The branch is `branch`, or one derived from `title` (see `session.branchPreview`). If the branch or its worktree already exists in any repo, the call fails with `Conflict` unless `onCollision` says what the user chose: `reuse-branch` (only if no worktree has the branch checked out) or `adopt-worktree` (only if git lists it as a worktree of that branch). A worktree owned by a live session is always `Conflict`. A repo path that resolves outside the project root is `ValidationFailed`. More live sessions than `sessions.max_concurrent` is `InvalidState`. A non-empty `prompt` starts the first turn once the session is ready.
+- **`session.branchPreview`**: the branch name `session.create` would use and what already holds it in each repo, so a client can show the name and ask about collisions first. A derived name uses the `[branches]` format and types from `forge.toml`, falling back to the user config, then `{type}/{slug}` with `feat`, `fix`, `bug`. An invalid branch name, or a title with nothing to make a slug from, is `ValidationFailed`.
+- **`session.prompt`**: accepted in `ready`, `review`, and `paused` (`InvalidState` otherwise); returns once the turn has started. **`session.cancel`**: only in `working`; the turn ends with stop reason `cancelled` and the session returns to `ready`. **`session.close`**: in `ready`, `review`, `paused`, or `failed`; stops the agent, keeps the worktrees, and moves to `done`.
+- **`events.subscribe`**: `topics` must be non-empty, and `project/<id>` and `session/<id>` must exist (`NotFound` otherwise). A connection can only unsubscribe its own subscriptions, and they end when it disconnects. Notification `seq` is the daemon-wide stream cursor, not the event's own `seq`: it increases across all sessions and topics and survives restarts. With `afterSeq`, every matching event after that cursor is replayed first, then live events follow with none missed or repeated; replayed events arrive after the subscribe response. An `afterSeq` ahead of the stream (for example, from before the data directory was replaced) is `ValidationFailed`; the client resubscribes without it and reloads. Each event reaches a subscription once, naming the first of its topics that the subscription includes.
+- **`events.query`**: `limit` is 1 to 1000. Returns the newest matching events below `before`, oldest first. `text` matches as a phrase.
 - **Methods not yet implemented** return the standard JSON-RPC `-32601` (method not found) with a message naming the method.
 
 ## Events
@@ -112,7 +120,7 @@ Every event has the envelope `{ seq, sessionId, at, kind, parent?, body }`. `par
 
 | Kind | Body | Topic |
 | --- | --- | --- |
-| `session.state` | `{ from, to, reason? }` | `session/<id>`, `board` |
+| `session.state` | `{ from, to, reason? }` | `session/<id>`, `project/<id>`, `board` |
 | `turn.started` | `{ turnId, source: 'human' \| 'review' \| 'hook' }` | `session/<id>` |
 | `turn.ended` | `{ turnId, stopReason }` | `session/<id>` |
 | `prompt` | `{ turnId, text }` | `session/<id>` |
@@ -122,16 +130,18 @@ Every event has the envelope `{ seq, sessionId, at, kind, parent?, body }`. `par
 | `tool.result` | `{ toolCallId, status, output? }` (output truncated, redacted) | `session/<id>` |
 | `policy.decision` | `{ toolCallId, verdict, reason, source }` | `session/<id>` |
 | `hook.run` | `{ hook, event, verdict?, durationMs, exitCode }` | `session/<id>` |
-| `approval.requested` | `{ approvalId, action, reason }` | `session/<id>`, `approvals` |
-| `approval.decided` | `{ approvalId, decision, remember? }` | `session/<id>`, `approvals` |
+| `approval.requested` | `{ approvalId, action, reason }` | `session/<id>`, `project/<id>`, `approvals` |
+| `approval.decided` | `{ approvalId, decision, remember? }` | `session/<id>`, `project/<id>`, `approvals` |
 | `edit` | `{ path, kind, additions, deletions }` | `session/<id>` |
 | `terminal.output` | `{ terminalId, chunk }` (streamed) | `session/<id>` |
 | `checkpoint` | `{ checkpointId, turnId, ref }` | `session/<id>` |
 | `review.thread` | `{ threadId, change: 'created' \| 'reply' \| 'resolved' \| 'outdated' }` | `session/<id>` |
-| `usage` | `{ inputTokens, outputTokens, costUsd? }` (cumulative) | `session/<id>`, `board` |
+| `usage` | `{ inputTokens, outputTokens, costUsd? }` (cumulative) | `session/<id>`, `project/<id>`, `board` |
 | `error` | `ErrorData` | `session/<id>` |
 
-Streamed kinds (`agent.message`, `terminal.output`) are coalesced in the JSONL log every 250 ms so the log stays readable; subscribers still get each chunk.
+Streamed kinds (`agent.message`, `terminal.output`) are logged one chunk per event, exactly as subscribers receive them, so replay matches live delivery. Coalescing them in the JSONL log (every 250 ms, for readability) is planned; it must keep each chunk's `seq` and stream cursor so replay stays lossless.
+
+`project/<id>` carries the `board` and `approvals` kinds for that project's sessions.
 
 ## Config file schemas
 
@@ -156,9 +166,13 @@ project_daily_usd = 50.0
 [sessions]
 max_concurrent = 5
 worktree_retention_days = 7
+
+[branches]                        # overrides the user config's [branches], per key
+format = "{type}/{slug}"
+types = ["feat", "fix", "bug"]
 ```
 
-`[budgets]` keys are optional (unset means no cap); `[sessions]` defaults to the values shown. Repo paths must be relative and stay inside the project root.
+`[budgets]` keys are optional (unset means no cap); `[sessions]` defaults to the values shown. Repo paths must be relative and stay inside the project root, even after following symlinks. `base_branch` must be a branch name: no spaces and no leading `-`. `[branches]` is optional: `format` must contain `{slug}` and may contain `{type}`; `types` are lowercase letters, digits, and hyphens, and the first is used when a title names none.
 
 **`~/.config/forge/config.toml`** (user config; every key optional)
 
@@ -167,6 +181,10 @@ default_agent = "claude"          # used when neither session nor project names 
 
 [ui]
 theme = "system"                  # system | light | dark
+
+[branches]                        # how session branches are named
+format = "{type}/{slug}"          # e.g. "jeff/{type}/{slug}"
+types = ["feat", "fix", "bug"]
 ```
 
 **`.forge/agents/<id>.toml`** (agent profile)
@@ -183,6 +201,8 @@ env_secrets = ["ANTHROPIC_API_KEY"]  # keyring names, injected via proxy
 [network]
 allow = ["api.anthropic.com", "crates.io", "static.crates.io", "registry.npmjs.org"]
 ```
+
+`sandbox` defaults to `standard`; `allow_unsandboxed` defaults to `false`. The profile ID is the file name and may use only letters, digits, `-`, and `_`.
 
 **`policy.toml`** (managed, user, or `.forge/policy.toml`)
 
@@ -225,7 +245,7 @@ where = "sandbox"            # or "daemon"
   "event": "tool.pre",
   "sessionId": "ses_01J...",
   "projectRoot": "/home/jeff/src/forge",
-  "worktree": "/home/jeff/.local/share/forge/worktrees/forge/ses_01J.../forge",
+  "worktree": "/home/jeff/src/forge/.worktrees/feat/retry-backoff",
   "mode": "accept-edits",
   "action": { "type": "exec", "argv": ["npm", "install", "left-pad"], "cwd": "." }
 }
@@ -289,7 +309,7 @@ Lines and columns are 1-based. Paths are relative to the session's working direc
 
 One SQLite database per user at `~/.local/share/forge/forge.db` (macOS: `~/Library/Application Support/Forge/forge.db`), in WAL mode, with migrations in `crates/forged/migrations/` run on daemon start. The JSONL event logs remain the source of truth for events; SQLite indexes them.
 
-The schema below is the v0.1 target. Each milestone adds the tables it uses as a new numbered migration (M1 adds `projects` and `repos`); progress is tracked in `PRAGMA user_version`, and a daemon refuses to start on a database newer than it knows.
+The schema below is the v0.1 target. Each milestone adds the tables it uses as a new numbered migration (M1 adds `projects` and `repos`; M2 adds `sessions`, `worktrees`, `events_index`, and `events_fts`); progress is tracked in `PRAGMA user_version`, and a daemon refuses to start on a database newer than it knows.
 
 ```sql
 CREATE TABLE projects (
@@ -311,11 +331,13 @@ CREATE TABLE sessions (
   cost_usd REAL, last_seq INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
+CREATE INDEX sessions_by_project ON sessions (project_id, state);
 CREATE TABLE worktrees (
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   repo_name TEXT NOT NULL, path TEXT NOT NULL,
   PRIMARY KEY (session_id, repo_name)
 );
+CREATE INDEX worktrees_by_path ON worktrees (path);
 CREATE TABLE checkpoints (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -353,6 +375,7 @@ CREATE TABLE comments (
 CREATE TABLE events_index (
   session_id TEXT NOT NULL, seq INTEGER NOT NULL, kind TEXT NOT NULL,
   at TEXT NOT NULL, tool TEXT, path TEXT, byte_offset INTEGER NOT NULL,
+  stream_seq INTEGER NOT NULL UNIQUE,   -- daemon-wide cursor; see events.subscribe
   PRIMARY KEY (session_id, seq)
 );
 CREATE VIRTUAL TABLE events_fts USING fts5(session_id UNINDEXED, seq UNINDEXED, text);
@@ -363,8 +386,8 @@ CREATE VIRTUAL TABLE events_fts USING fts5(session_id UNINDEXED, seq UNINDEXED, 
 | Path | Contents |
 | --- | --- |
 | `<project>/.forge/` | Checked-in config, tasks, hooks (see Config in component-architecture.md) |
-| `<project>/.forge/sessions/<id>/events.jsonl` | Event log (gitignored) |
-| `<data>/worktrees/<project>/<session>/<repo>/` | Session worktrees |
+| `<project>/.forge/sessions/<id>/events.jsonl` | Event log, one event per line with its `streamSeq` (ignored by `.forge/sessions/.gitignore`) |
+| `<repo>/.worktrees/<branch>/` | Session worktrees (excluded in `.git/info/exclude`) |
 | `<data>/servers/` | Installed language servers |
 | `<data>/agents/` | Agent adapter installs |
 | `$XDG_RUNTIME_DIR/forge/forged.sock` (macOS: `<data>/forged.sock`) | API socket, mode 0600 |

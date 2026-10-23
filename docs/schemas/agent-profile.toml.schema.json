@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AgentProfileConfig",
+  "description": "An agent profile file.",
+  "type": "object",
+  "properties": {
+    "agent": {
+      "description": "Adapter registry key, e.g. `claude-code`.",
+      "type": "string"
+    },
+    "allow_unsandboxed": {
+      "description": "Allow sessions with this profile to run without a sandbox. Off unless set here.",
+      "type": "boolean",
+      "default": false
+    },
+    "command": {
+      "description": "Command that starts the agent speaking ACP on stdio; overrides the registry default.",
+      "type": ["array", "null"],
+      "items": {
+        "type": "string"
+      }
+    },
+    "env_secrets": {
+      "description": "Keyring entries to inject through the egress proxy, never into the environment.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "mode": {
+      "description": "Default mode for sessions with this profile.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProfileMode"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "model": {
+      "description": "Model to request, if the agent supports choosing one.",
+      "type": ["string", "null"]
+    },
+    "network": {
+      "$ref": "#/$defs/NetworkConfig",
+      "default": {}
+    },
+    "sandbox": {
+      "description": "Default sandbox tier for sessions with this profile. Default `standard`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProfileSandbox"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": ["agent"],
+  "$defs": {
+    "NetworkConfig": {
+      "type": "object",
+      "properties": {
+        "allow": {
+          "description": "Hosts the agent may reach through the egress proxy.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProfileMode": {
+      "type": "string",
+      "enum": ["ask", "accept-edits", "auto", "full-access"]
+    },
+    "ProfileSandbox": {
+      "type": "string",
+      "enum": ["light", "standard", "container", "unsandboxed"]
+    }
+  }
+}

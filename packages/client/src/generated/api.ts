@@ -1,6 +1,6 @@
 // Generated from crates/forge-api by `just gen`. Do not edit.
 
-export const API_VERSION = "0.1.0";
+export const API_VERSION = "0.2.0";
 
 export const EVENT_NOTIFICATION = "event";
 
@@ -375,10 +375,21 @@ export type Topic = "board" | "approvals" | `session/${string}` | `project/${str
 
 /**
  * Params of the `event` notification the daemon pushes to subscribers.
+ *
+ * Each event reaches a subscription at most once, even when several of its topics match, so
+ * `seq` strictly increases within a subscription.
  */
 export type EventNotification = {
   subscriptionId: SubscriptionId;
+  /**
+   * The first of the event's topics that the subscription includes.
+   */
   topic: Topic;
+  /**
+   * The daemon-wide stream cursor: increases across every session and topic and survives
+   * restarts. `events.subscribe { afterSeq }` resumes after it. Not the event's own `seq`,
+   * which counts within its session.
+   */
   seq: number;
   event: Event;
 };
@@ -422,7 +433,42 @@ export type SessionCreateParams = {
   prompt: string;
   mode: Mode;
   sandbox?: SandboxTier;
+  /**
+   * Full branch name; derived from `title` and the configured format when omitted.
+   */
+  branch?: string;
+  /**
+   * What to do when the branch or worktree name is already taken. Without it, a collision
+   * fails with `Conflict` so the client can ask the user.
+   */
+  onCollision?: CollisionResolution;
 };
+
+/**
+ * The user's answer to a branch or worktree name collision.
+ */
+export type CollisionResolution = "reuse-branch" | "adopt-worktree";
+
+export type BranchPreviewParams = { projectId: ProjectId; title: string; branch?: string };
+
+/**
+ * The branch a new session would use, and what already holds that name.
+ */
+export type BranchPreview = { branch: string; collisions: Array<BranchCollision> };
+
+export type BranchCollision = {
+  /**
+   * Repo name from `forge.toml`.
+   */
+  repo: string;
+  kind: CollisionKind;
+  /**
+   * The live session that owns the worktree, for `owned-by-live-session`.
+   */
+  sessionId?: SessionId;
+};
+
+export type CollisionKind = "branch-exists" | "worktree-exists" | "owned-by-live-session";
 
 export type SessionPromptParams = { sessionId: SessionId; text: string };
 
@@ -538,6 +584,7 @@ export type Methods = {
   "session.get": { params: SessionIdParams; result: Session };
   "session.list": { params: SessionListParams; result: Array<Session> };
   "session.close": { params: SessionCloseParams; result: Empty };
+  "session.branchPreview": { params: BranchPreviewParams; result: BranchPreview };
   "approval.list": { params: ApprovalListParams; result: Array<Approval> };
   "approval.decide": { params: ApprovalDecideParams; result: Empty };
   "review.changeset": { params: ReviewChangesetParams; result: Changeset };

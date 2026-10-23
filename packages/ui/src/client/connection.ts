@@ -3,6 +3,7 @@
 
 import {
   API_VERSION,
+  DaemonError,
   RpcClient,
   type EventNotification,
   type HelloResult,
@@ -27,6 +28,7 @@ export type Subscription = { unsubscribe(): void };
 type Sub = {
   topics: Topic[];
   onEvent: (n: EventNotification) => void;
+  onReset: (() => void) | undefined;
   lastSeq?: number;
   serverId?: string | undefined;
   closed: boolean;
@@ -99,9 +101,17 @@ export class DaemonConnection {
     return this.rpc.call(method, params);
   }
 
-  /** Subscribe now if connected, and again after every reconnect. */
-  subscribe(topics: Topic[], onEvent: (n: EventNotification) => void): Subscription {
-    const sub: Sub = { topics, onEvent, closed: false };
+  /**
+   * Subscribe now if connected, and again after every reconnect. `onReset` runs when the
+   * daemon can't resume from the last event seen (its event stream was replaced), so the
+   * subscriber should reload its state; events then start over.
+   */
+  subscribe(
+    topics: Topic[],
+    onEvent: (n: EventNotification) => void,
+    onReset?: () => void,
+  ): Subscription {
+    const sub: Sub = { topics, onEvent, onReset, closed: false };
     this.subs.add(sub);
     if (this.current.kind === "connected" && this.rpc) {
       void this.resubscribe(this.rpc, sub).catch(() => undefined);
@@ -153,11 +163,22 @@ export class DaemonConnection {
   }
 
   private async resubscribe(rpc: RpcClient, sub: Sub): Promise<void> {
-    const params =
-      sub.lastSeq === undefined
-        ? { topics: sub.topics }
-        : { topics: sub.topics, afterSeq: sub.lastSeq };
-    const { subscriptionId } = await rpc.call("events.subscribe", params);
+    let subscriptionId: string;
+    try {
+      const params =
+        sub.lastSeq === undefined
+          ? { topics: sub.topics }
+          : { topics: sub.topics, afterSeq: sub.lastSeq };
+      ({ subscriptionId } = await rpc.call("events.subscribe", params));
+    } catch (err) {
+      // The daemon refuses a cursor ahead of its stream: start over without it.
+      const stale =
+        sub.lastSeq !== undefined && err instanceof DaemonError && err.kind === "ValidationFailed";
+      if (!stale) throw err;
+      delete sub.lastSeq;
+      sub.onReset?.();
+      ({ subscriptionId } = await rpc.call("events.subscribe", { topics: sub.topics }));
+    }
     if (sub.closed) {
       void rpc.call("events.unsubscribe", { subscriptionId }).catch(() => undefined);
       return;

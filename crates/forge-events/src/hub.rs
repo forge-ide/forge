@@ -45,17 +45,18 @@ impl Hub {
         self.lock().remove(id).is_some()
     }
 
-    /// Deliver `event` to every subscription that includes `topic`.
-    pub fn publish(&self, topic: &Topic, event: &Event) {
+    /// Deliver `event`, published on `topics`, once to every subscription that includes any of
+    /// them, naming the first that matches. `stream_seq` is the event's daemon-wide cursor.
+    pub fn publish(&self, topics: &[Topic], stream_seq: u64, event: &Event) {
         let mut subs = self.lock();
         subs.retain(|id, sub| {
-            if !sub.topics.contains(topic) {
+            let Some(topic) = topics.iter().find(|t| sub.topics.contains(t)) else {
                 return true;
-            }
+            };
             (sub.deliver)(EventNotification {
                 subscription_id: id.clone(),
                 topic: topic.clone(),
-                seq: event.seq,
+                seq: stream_seq,
                 event: event.clone(),
             })
         });
@@ -120,14 +121,21 @@ mod tests {
         let board_id = hub.subscribe([Topic::Board, Topic::Session(session.clone())], board_sub);
         hub.subscribe([Topic::Approvals], approvals_sub);
 
-        hub.publish(&Topic::Board, &event(&session, 1));
-        hub.publish(&Topic::Session(session.clone()), &event(&session, 2));
+        let both = [Topic::Session(session.clone()), Topic::Board];
+        hub.publish(&both, 10, &event(&session, 1));
+        hub.publish(&[Topic::Board], 11, &event(&session, 2));
+        hub.publish(&[Topic::Approvals], 12, &event(&session, 3));
 
+        // Once per subscription, even though two of its topics matched.
         let board = board.lock().unwrap();
         assert_eq!(board.len(), 2);
         assert_eq!(board[0].subscription_id, board_id);
-        assert_eq!(board[1].seq, 2);
-        assert!(approvals.lock().unwrap().is_empty());
+        assert_eq!(board[0].topic, Topic::Session(session.clone()));
+        assert_eq!((board[0].seq, board[0].event.seq), (10, 1));
+        assert_eq!((board[1].topic.clone(), board[1].seq), (Topic::Board, 11));
+        let approvals = approvals.lock().unwrap();
+        assert_eq!(approvals.len(), 1);
+        assert_eq!(approvals[0].seq, 12);
     }
 
     #[test]
@@ -139,7 +147,7 @@ mod tests {
         hub.subscribe([Topic::Board], Box::new(|_| false));
         assert_eq!(hub.len(), 2);
 
-        hub.publish(&Topic::Board, &event(&session, 1));
+        hub.publish(&[Topic::Board], 1, &event(&session, 1));
         assert_eq!(hub.len(), 1);
         assert!(hub.unsubscribe(&id));
         assert!(!hub.unsubscribe(&id));

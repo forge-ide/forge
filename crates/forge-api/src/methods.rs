@@ -67,6 +67,63 @@ pub struct SessionCreateParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub sandbox: Option<SandboxTier>,
+    /// Full branch name; derived from `title` and the configured format when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub branch: Option<String>,
+    /// What to do when the branch or worktree name is already taken. Without it, a collision
+    /// fails with `Conflict` so the client can ask the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub on_collision: Option<CollisionResolution>,
+}
+
+/// The user's answer to a branch or worktree name collision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum CollisionResolution {
+    /// Check out the existing branch in a new worktree.
+    ReuseBranch,
+    /// Use the existing worktree, which no live session owns.
+    AdoptWorktree,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchPreviewParams {
+    pub project_id: ProjectId,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub branch: Option<String>,
+}
+
+/// The branch a new session would use, and what already holds that name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchPreview {
+    pub branch: String,
+    pub collisions: Vec<BranchCollision>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchCollision {
+    /// Repo name from `forge.toml`.
+    pub repo: String,
+    pub kind: CollisionKind,
+    /// The live session that owns the worktree, for `owned-by-live-session`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub session_id: Option<SessionId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum CollisionKind {
+    BranchExists,
+    WorktreeExists,
+    OwnedByLiveSession,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -373,6 +430,7 @@ methods! {
     SessionGet = "session.get": SessionIdParams => Session;
     SessionList = "session.list": SessionListParams => Vec<Session>;
     SessionClose = "session.close": SessionCloseParams => Empty;
+    SessionBranchPreview = "session.branchPreview": BranchPreviewParams => BranchPreview;
     ApprovalList = "approval.list": ApprovalListParams => Vec<Approval>;
     ApprovalDecide = "approval.decide": ApprovalDecideParams => Empty;
     ReviewChangeset = "review.changeset": ReviewChangesetParams => Changeset;
@@ -403,7 +461,7 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), METHOD_NAMES.len());
-        assert_eq!(METHOD_NAMES.len(), 30);
+        assert_eq!(METHOD_NAMES.len(), 31);
     }
 
     #[test]
