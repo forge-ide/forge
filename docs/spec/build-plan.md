@@ -36,7 +36,7 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 - [x] pnpm workspace: `apps/desktop`, `packages/ui`, `packages/client`, `packages/editor`.
 - [x] Tauri app opens a window showing a placeholder Solid page.
 - [x] `justfile` with `build`, `test`, `lint`, `fmt`, `ci`, `dev`.
-- [ ] CI on Linux and macOS runs `just ci`: rustfmt, clippy with warnings as errors, cargo tests, eslint, TypeScript check, vitest.
+- [x] CI on Linux and macOS runs `just ci`: rustfmt, clippy with warnings as errors, cargo tests, eslint, TypeScript check, vitest.
 - [x] `AGENTS.md`, `LICENSE`, `README.md` at the root.
 
 **Done when:** `just ci` passes locally and in CI on both platforms, and `just dev` opens the app.
