@@ -32,6 +32,8 @@ pub enum GitError {
     CheckedOut { branch: String, path: PathBuf },
     #[error("{path} is not a worktree of branch {branch:?}")]
     NotAWorktree { path: PathBuf, branch: String },
+    #[error("{path} is not a link to one of the repo's worktrees: {reason}")]
+    BadWorktreeLink { path: PathBuf, reason: String },
     #[error("git {args}: {stderr}")]
     Command { args: String, stderr: String },
     #[error("{context}: {source}")]
@@ -76,6 +78,15 @@ pub struct Worktree {
     pub branch: Option<String>,
 }
 
+/// The git dirs a worktree uses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitDirs {
+    /// The repo's shared git dir, `<repo>/.git`.
+    pub common: PathBuf,
+    /// The worktree's own git dir, `<common>/worktrees/<name>`.
+    pub admin: PathBuf,
+}
+
 /// Worktree and branch management, behind a trait so callers can be tested with fakes.
 pub trait Worktrees: Send + Sync {
     /// Resolve `path` (relative, from `forge.toml`) under `project_root`, following symlinks,
@@ -95,6 +106,10 @@ pub trait Worktrees: Send + Sync {
     fn remove(&self, repo: &Path, path: &Path, force: bool) -> Result<(), GitError>;
     /// Delete a branch, even if it isn't merged.
     fn delete_branch(&self, repo: &Path, branch: &str) -> Result<(), GitError>;
+    /// The git dirs of `worktree`, a worktree of `repo`. The worktree's `.git` file is
+    /// writable by whatever runs in it, so it is believed only when it names a dir under the
+    /// repo's own `worktrees/` whose `gitdir` file points back at it.
+    fn git_dirs(&self, repo: &Path, worktree: &Path) -> Result<GitDirs, GitError>;
 }
 
 /// Where the worktree for `branch` lives in `repo`.
@@ -257,6 +272,38 @@ impl Worktrees for GitCli {
 
     fn delete_branch(&self, repo: &Path, branch: &str) -> Result<(), GitError> {
         git(repo, &["branch", "-D", "--", branch]).map(drop)
+    }
+
+    fn git_dirs(&self, repo: &Path, worktree: &Path) -> Result<GitDirs, GitError> {
+        let common = git(repo, &["rev-parse", "--git-common-dir"])?;
+        let common = canonical(&repo.join(common.trim()))?;
+        let link = worktree.join(".git");
+        let bad = |reason: &str| GitError::BadWorktreeLink {
+            path: link.clone(),
+            reason: reason.to_owned(),
+        };
+        let meta = link.symlink_metadata().map_err(|_| bad("it is missing"))?;
+        if !meta.is_file() {
+            return Err(bad("it is not a regular file"));
+        }
+        let text = std::fs::read_to_string(&link).map_err(|_| bad("it can't be read"))?;
+        let target = text
+            .strip_prefix("gitdir:")
+            .map(str::trim)
+            .ok_or_else(|| bad("it has no gitdir line"))?;
+        let admin = std::fs::canonicalize(worktree.join(target))
+            .map_err(|_| bad("its gitdir does not exist"))?;
+        if admin.parent() != Some(common.join("worktrees").as_path()) {
+            return Err(bad("its gitdir is not under the repo's worktrees dir"));
+        }
+        let back = std::fs::read_to_string(admin.join("gitdir"))
+            .map_err(|_| bad("its gitdir has no back link"))?;
+        let back = std::fs::canonicalize(admin.join(back.trim()))
+            .map_err(|_| bad("its gitdir's back link does not exist"))?;
+        if back != canonical(&link)? {
+            return Err(bad("its gitdir belongs to another worktree"));
+        }
+        Ok(GitDirs { common, admin })
     }
 }
 
@@ -552,6 +599,46 @@ mod tests {
         GitCli
             .create(&repo, "feat/opt", "main", CreateMode::New)
             .unwrap();
+    }
+
+    #[test]
+    fn git_dirs_follow_the_worktree_link_only_when_it_points_back() {
+        let (_dir, repo) = repo();
+        let git = GitCli;
+        let mine = git
+            .create(&repo, "feat/mine", "main", CreateMode::New)
+            .unwrap();
+        let other = git
+            .create(&repo, "feat/other", "main", CreateMode::New)
+            .unwrap();
+        let dirs = git.git_dirs(&repo, &mine).unwrap();
+        assert_eq!(dirs.common, repo.join(".git"));
+        assert_eq!(dirs.admin.parent().unwrap(), repo.join(".git/worktrees"));
+        let other_admin = git.git_dirs(&repo, &other).unwrap().admin;
+        assert_ne!(dirs.admin, other_admin);
+
+        // The worktree's .git file is the agent's to rewrite. Pointing it at another
+        // session's git dir, or anywhere else, must not be believed.
+        let link = mine.join(".git");
+        std::fs::write(&link, format!("gitdir: {}\n", other_admin.display())).unwrap();
+        assert!(matches!(
+            git.git_dirs(&repo, &mine),
+            Err(GitError::BadWorktreeLink { .. })
+        ));
+        let fake = mine.join("fake");
+        std::fs::create_dir(&fake).unwrap();
+        std::fs::write(fake.join("gitdir"), format!("{}\n", link.display())).unwrap();
+        std::fs::write(&link, format!("gitdir: {}\n", fake.display())).unwrap();
+        assert!(matches!(
+            git.git_dirs(&repo, &mine),
+            Err(GitError::BadWorktreeLink { .. })
+        ));
+        std::fs::remove_file(&link).unwrap();
+        std::fs::create_dir(&link).unwrap();
+        assert!(matches!(
+            git.git_dirs(&repo, &mine),
+            Err(GitError::BadWorktreeLink { .. })
+        ));
     }
 
     #[test]

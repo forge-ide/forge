@@ -1,12 +1,215 @@
 //! Isolation backends behind one Sandbox trait.
+//!
+//! A [`Sandbox`] knows which tiers this machine can run. [`Sandbox::prepare`] turns a session's
+//! [`Spec`] (its worktrees, scratch dir, and extra read-only paths) into a [`SessionSandbox`],
+//! which wraps every process the session starts, the agent and each terminal command, so they
+//! all see the same filesystem view, environment, and network.
+//!
+//! Backends:
+//! - Light on Linux: Landlock and seccomp, applied by the `forge-sandbox-exec` helper to itself
+//!   before it execs the command.
+//! - Standard on Linux: bubblewrap with user, mount, PID, network, IPC, and UTS namespaces, plus
+//!   the helper's seccomp filter inside.
+//! - Light and Standard on macOS: one Seatbelt profile through `sandbox-exec`.
+//! - Unsandboxed: no isolation; only the environment allowlist applies.
 
-/// This crate's package name.
-pub const NAME: &str = env!("CARGO_PKG_NAME");
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn name_matches_package() {
-        assert_eq!(super::NAME, "forge-sandbox");
+use forge_api::model::SandboxTier;
+use tokio::process::Command;
+
+mod env;
+pub mod policy;
+mod unsandboxed;
+mod view;
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+
+/// Runs the helper binary's modes. Not for use outside `forge-sandbox-exec`.
+#[doc(hidden)]
+pub mod helper;
+
+pub use env::{PASSTHROUGH_VARS, is_passed_through};
+pub use unsandboxed::Unsandboxed;
+pub use view::{SYSTEM_READ_ONLY, View, toolchains};
+
+/// File name of the helper binary, installed next to `forged`.
+pub const HELPER: &str = "forge-sandbox-exec";
+
+/// Why a tier can't run on this machine, and what would fix it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unavailable {
+    pub reason: String,
+    pub fix: String,
+}
+
+impl std::fmt::Display for Unavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}; {}", self.reason, self.fix)
+    }
+}
+
+/// Whether one tier can run here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TierStatus {
+    pub tier: SandboxTier,
+    /// `None` when the tier works.
+    pub unavailable: Option<Unavailable>,
+}
+
+impl TierStatus {
+    pub fn available(tier: SandboxTier) -> Self {
+        Self {
+            tier,
+            unavailable: None,
+        }
+    }
+
+    pub fn unavailable(
+        tier: SandboxTier,
+        reason: impl Into<String>,
+        fix: impl Into<String>,
+    ) -> Self {
+        Self {
+            tier,
+            unavailable: Some(Unavailable {
+                reason: reason.into(),
+                fix: fix.into(),
+            }),
+        }
+    }
+
+    pub fn is_available(&self) -> bool {
+        self.unavailable.is_none()
+    }
+}
+
+/// A session worktree and the git metadata it needs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorktreeMount {
+    /// The worktree; read-write.
+    pub path: PathBuf,
+    /// The main repo's git dir (`<repo>/.git`); read-only, so the agent can't plant hooks or
+    /// config that run later in the user's own git.
+    pub git_common: PathBuf,
+    /// This worktree's own git dir (`<repo>/.git/worktrees/<name>`); read-write, for its index
+    /// and HEAD.
+    pub git_admin: PathBuf,
+}
+
+/// Everything a session's sandbox is built from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Spec {
+    pub tier: SandboxTier,
+    pub worktrees: Vec<WorktreeMount>,
+    /// Session-private directory; the sandbox's home and temp dirs are created inside it.
+    pub scratch: PathBuf,
+    /// The user's real home directory, hidden inside the sandbox.
+    pub home: PathBuf,
+    /// Extra paths visible read-only: the agent program and the user config's
+    /// `[sandbox] read_only` entries.
+    pub read_only: Vec<PathBuf>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SandboxError {
+    #[error("the {tier} sandbox tier is not available: {why}")]
+    Unavailable { tier: String, why: Unavailable },
+    #[error("{context}: {source}")]
+    Io {
+        context: String,
+        source: std::io::Error,
+    },
+    #[error("{0}")]
+    Invalid(String),
+}
+
+impl SandboxError {
+    pub(crate) fn io(context: impl Into<String>, source: std::io::Error) -> Self {
+        Self::Io {
+            context: context.into(),
+            source,
+        }
+    }
+}
+
+/// Isolation backends for this machine.
+pub trait Sandbox: Send + Sync + 'static {
+    /// Every tier this backend knows, with whether it works here.
+    fn tiers(&self) -> Vec<TierStatus>;
+
+    /// Build the sandbox for one session. Blocking: creates the session's scratch dirs.
+    fn prepare(&self, spec: Spec) -> Result<Arc<dyn SessionSandbox>, SandboxError>;
+}
+
+/// One session's sandbox. Every process the session starts goes through [`Self::command`].
+pub trait SessionSandbox: Send + Sync + 'static {
+    fn tier(&self) -> SandboxTier;
+
+    /// A command that runs `program args` in `cwd` inside the sandbox, with the sandbox's
+    /// environment plus `env`. The caller sets stdio and the process group.
+    fn command(
+        &self,
+        program: &str,
+        args: &[String],
+        cwd: &Path,
+        env: &[(String, String)],
+    ) -> Command;
+}
+
+/// The wire name of a tier, as in `server.hello`.
+pub fn tier_name(tier: SandboxTier) -> &'static str {
+    match tier {
+        SandboxTier::Light => "light",
+        SandboxTier::Standard => "standard",
+        SandboxTier::Container => "container",
+        SandboxTier::Unsandboxed => "unsandboxed",
+    }
+}
+
+/// The backends for this platform, with their availability probed once now. `helper` is the
+/// `forge-sandbox-exec` binary. Blocking: runs a short probe per tier.
+pub fn system(helper: PathBuf) -> Arc<dyn Sandbox> {
+    #[cfg(target_os = "linux")]
+    {
+        Arc::new(linux::Linux::probe(helper))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = helper;
+        Arc::new(macos::Seatbelt::probe())
+    }
+}
+
+/// Fails a tier this backend doesn't implement.
+pub(crate) fn not_implemented(tier: SandboxTier) -> TierStatus {
+    TierStatus::unavailable(
+        tier,
+        format!("the {} tier is not implemented yet", tier_name(tier)),
+        "choose light or standard",
+    )
+}
+
+/// The status for `tier` in `statuses`, or an error saying why it can't run.
+pub(crate) fn require(statuses: &[TierStatus], tier: SandboxTier) -> Result<(), SandboxError> {
+    match statuses.iter().find(|s| s.tier == tier) {
+        Some(TierStatus {
+            unavailable: None, ..
+        }) => Ok(()),
+        Some(TierStatus {
+            unavailable: Some(why),
+            ..
+        }) => Err(SandboxError::Unavailable {
+            tier: tier_name(tier).to_owned(),
+            why: why.clone(),
+        }),
+        None => Err(SandboxError::Unavailable {
+            tier: tier_name(tier).to_owned(),
+            why: not_implemented(tier).unavailable.expect("unavailable"),
+        }),
     }
 }

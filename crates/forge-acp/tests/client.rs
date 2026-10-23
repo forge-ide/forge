@@ -82,7 +82,7 @@ impl Fixture {
         let deny = Arc::new(DenyAll {
             reason: "no policy".into(),
         });
-        AcpClient::start(command, workspace, self.sink.clone(), deny)
+        AcpClient::start(command, workspace, unsandboxed(), self.sink.clone(), deny)
             .await
             .unwrap()
     }
@@ -271,7 +271,7 @@ async fn an_agent_that_dies_reports_its_exit() {
     let deny = Arc::new(DenyAll {
         reason: String::new(),
     });
-    let err = AcpClient::start(command, workspace, fx.sink.clone(), deny)
+    let err = AcpClient::start(command, workspace, unsandboxed(), fx.sink.clone(), deny)
         .await
         .err()
         .expect("start fails");
@@ -283,4 +283,8 @@ async fn an_agent_that_dies_reports_its_exit() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+fn unsandboxed() -> Arc<dyn forge_sandbox::SessionSandbox> {
+    Arc::new(forge_sandbox::Unsandboxed::new())
 }

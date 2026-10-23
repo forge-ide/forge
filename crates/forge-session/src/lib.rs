@@ -9,5 +9,7 @@ pub mod naming;
 pub mod state;
 pub mod store;
 
-pub use manager::{AgentResolver, CreateRequest, SessionError, SessionManager};
+pub use manager::{
+    AgentLaunch, AgentResolver, CreateRequest, SandboxDirs, SessionError, SessionManager,
+};
 pub use store::{SessionStore, StoreError, WorktreeRecord};

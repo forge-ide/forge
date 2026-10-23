@@ -61,10 +61,11 @@ _gen-into client schemas: install
     cargo run --quiet -p forge-config --bin forge-config-schemas -- {{schemas}}
     pnpm exec prettier --log-level warn --ignore-path /dev/null --write {{client}} {{schemas}}
 
-# Sandbox escape suite for this platform.
+# Sandbox escape suite and sessions inside each tier, for this platform. A tier this machine
+# can't run fails the suite instead of being skipped.
 test-sandbox:
-    @echo "just test-sandbox: the sandbox escape suite is not implemented yet" >&2
-    @exit 1
+    cargo test -p forge-sandbox --test escape -- --include-ignored
+    cargo test -p forged --test sandbox -- --include-ignored
 
 # UI end-to-end tests with the fake agent.
 test-e2e:

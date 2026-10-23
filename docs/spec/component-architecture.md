@@ -128,24 +128,31 @@ The sandbox is the backstop: whatever the agent does, inside or outside ACP, it 
 | Container | Rootless Podman, devcontainer image per stack | Full access; untrusted repos |
 | Unsandboxed | None: the agent runs as a normal user process | Opt-in only; for users who accept the risk |
 
-macOS uses Seatbelt profiles for Light and Standard and a lightweight VM for Container.
+macOS uses one Seatbelt profile (through `sandbox-exec`) for both Light and Standard, since Seatbelt has no cheaper, weaker mode worth offering, and a lightweight VM for Container.
+
+**Availability.** `forged` probes each tier once at startup: Light checks that Landlock and seccomp apply, Standard runs bubblewrap with its namespaces, and macOS runs `sandbox-exec` with a trivial profile. `server.hello` lists the tiers that passed, plus `unsandboxed`. A tier that failed is refused with the probe's reason and a suggested fix (install bubblewrap; the sysctl or AppArmor setting that blocks unprivileged user namespaces; a kernel without Landlock ABI 6), never swapped for another.
+
+**One sandbox per session.** Every process a session starts, the agent and each terminal command, runs in its own instance of the session's sandbox, with the same filesystem view, environment, and network. Light applies Landlock and seccomp through a small helper binary, `forge-sandbox-exec`, installed next to `forged`, which restricts itself and then execs the command. Standard runs that helper inside bubblewrap for its seccomp filter. Killing a Standard command's process group kills its PID namespace, so nothing it started survives, even a process that left the group; Light and Seatbelt have no PID namespace, so such a process outlives the kill until cgroup limits arrive.
 
 **Unsandboxed tier.** Available, but Forge steers users away from it:
 
 - Off by default. Enabling it takes an explicit setting per agent profile or project, never a global default, and org-managed policy can forbid it.
 - Sessions running unsandboxed show a persistent warning badge on the board, in the session header, and in the review pane.
 - Choosing it for Auto or Full access asks for confirmation each time a session starts.
-- What still applies: the policy engine, hooks, and guards for every action routed through ACP and the MCP hub; the egress proxy, if the user keeps it on; pushes only from the daemon; and review from the worktree's git diff.
+- What still applies: the policy engine, hooks, and guards for every action routed through ACP and the MCP hub; the environment allowlist; the egress proxy, if the user keeps it on; pushes only from the daemon; and review from the worktree's git diff.
 - What no longer applies: limits on anything the agent does with its own tools outside ACP. It can read all of `$HOME`, including `~/.ssh`, and reach any host.
 - The session start screen offers a one-click switch to Standard and says what would change.
 
 **Isolation details**
 
-- **Filesystem.** Read-write: the session's worktrees and a scratch dir. Read-only: toolchains and caches (`~/.cargo`, `~/.npm`, `~/.rustup`). Hidden: the rest of `$HOME`, including `~/.ssh` and other projects. Worktrees sit inside the main checkout (`<repo>/.worktrees/`), so the main checkout stays read-only or hidden and other sessions' worktrees beside it are hidden.
-- **Network.** All egress goes through a per-session proxy that enforces the allowlist (package registries, the model API, approved hosts) and logs every connection. Light tier, which can't redirect traffic, blocks network except the model API.
+- **Filesystem.** Read-write: the session's worktrees, each worktree's own git dir (`<repo>/.git/worktrees/<name>/`, for its index and HEAD), and a session scratch dir (`<data>/sessions/<id>/`) holding the sandbox's home and temp dirs. Read-only: system directories, toolchains and caches (`CARGO_HOME`, `RUSTUP_HOME`, `~/.npm`), the agent program, the repo's shared git dir (`<repo>/.git`), and any paths in the user config's `[sandbox] read_only`. Hidden: the rest of `$HOME`, including `~/.ssh` and other projects, the main checkout, other sessions' worktrees beside it, and Forge's own data and runtime dirs. Standard mounts the scratch home over `$HOME`; Light and Seatbelt point `HOME` and `TMPDIR` at the scratch dirs, so tools that hardcode `/tmp` fail there. Extra read-only paths live in the user config, never in a repo's files, so a cloned repo can't widen its own sandbox. Seatbelt keeps file metadata readable everywhere so path lookups work, so on macOS the names of hidden files (such as those in `~/.ssh`) are visible, though their contents are not.
+- **Git inside the sandbox.** The shared git dir is read-only so the agent can't plant hooks or config that later run in the user's own git, move other branches, or damage the object store. `git status`, `diff`, `log`, `show`, and `blame` work; commands that write shared state (`commit`, `stash`, `branch`) fail. Agents commit through Forge's `git_commit` tool instead (see Worktrees and git).
+- **Network.** All egress goes through a per-session proxy that enforces the allowlist (package registries, the model API, approved hosts) and logs every connection; until the proxy lands, sandboxed sessions have no network at all. Standard has only loopback in its network namespace and reaches the proxy through a Unix socket bound in. Light on Linux can't redirect traffic or filter by address: Landlock lets it connect over TCP only to the proxy's port (on any address) and bind no port, and seccomp refuses UDP, raw, netlink, and Unix-domain sockets; the residual risk is a direct connection to a remote address on that one port number, with DNS unavailable, so it needs a literal IP. Seatbelt allows connecting only to the proxy's port on localhost.
+- **Environment.** Sandboxed processes inherit only `PATH`, `USER`, `LOGNAME`, `LANG`, `LANGUAGE`, `LC_*`, `TZ`, and `TERM`, plus what Forge sets (`HOME`, `TMPDIR`, `CARGO_HOME`, `RUSTUP_HOME`, and later the proxy variables); everything else, such as `SSH_AUTH_SOCK`, `DBUS_SESSION_BUS_ADDRESS`, and any token, is dropped. Unsandboxed sessions get the same allowlist with the real `HOME` and `TMPDIR`.
+- **Processes and kernel.** Signals reach only processes in the same sandbox (Landlock scoping in Light, the PID namespace in Standard, Seatbelt's `same-sandbox`). seccomp in both Linux tiers refuses tracing, the kernel keyring, BPF, io_uring, mounts and namespaces, modules, and terminal input injection.
 - **Secrets.** Never written into the sandbox's environment by default. Profiles name secrets from the OS keyring or a vault; the proxy injects them as request headers, so the agent never sees the raw value.
 - **Git credentials** stay outside: pushes go through `forged`, never from inside the sandbox.
-- **Resources.** cgroup limits for CPU, memory, and process count per session.
+- **Resources.** cgroup limits for CPU, memory, and process count per session (planned; not in v0.1's sandbox milestone).
 
 ## Policy engine
 
@@ -225,6 +232,8 @@ Each session gets its own git worktree in every repo it touches, on its own bran
 - **Multi-repo sessions.** A session declares its repos up front; the agent may request another mid-session, which is an approval. Each repo gets a worktree with the same name on the same branch, created together; a collision in any repo is a collision for all. The agent's working directory is the first repo's worktree, and it may use the others by path; a parent folder linking them comes with multi-repo support.
 - **Shared caches.** Build output (`target/`, `node_modules/`) is per worktree by default; sccache and pnpm's store keep rebuilds cheap.
 - **Overlap detection.** On every edit event, Forge compares the touched paths against other live sessions in the same repo. A hit marks both sessions on the board and suggests a merge order. Conflicts are resolved at ship time by rebasing the later changeset.
+- **Agent commits.** Agents don't run `git commit` themselves: inside the sandbox the shared git dir is read-only, and a default deny rule refuses manual git commands that write shared state (`commit`, `push`, `stash`, `branch`). Instead Forge's MCP server offers `git_commit`, which the daemon runs on the session branch after the policy check and the `commit.pre` hook. Read-only git commands stay allowed.
+- **Untrusted worktree metadata.** Whatever runs in a worktree can rewrite its `.git` file and its own git dir (`commondir`, `gitdir`, `config.worktree`), so the daemon never takes git configuration from them. It finds a worktree's git dirs by following the `.git` link only when it names a directory under the repo's own `worktrees/` whose `gitdir` file points back at that worktree, and its git commands on a session's work use the repo's shared git dir, a daemon-owned index, and explicit refs, never the agent's index.
 - **Pushes** happen only from the daemon, with the user's credentials, after review.
 - **Cleanup.** Done and abandoned sessions keep their worktrees for 7 days (configurable), then `git worktree remove`; branches stay until deleted. A failed provision removes the worktrees and branches it created.
 
@@ -271,6 +280,9 @@ Agents never connect to MCP servers directly. They connect to one per-session en
 | `checks_run` | Run the task's acceptance checks |
 | `browser_open`, `browser_screenshot` | Drive the built-in preview of a dev server |
 | `ask_human` | Put a question in the approvals inbox and wait |
+| `git_commit` | Commit the session's changes on its branch, after policy and the `commit.pre` hook |
+
+v0.1 ships a minimal per-session endpoint offering only `git_commit`, so agents have a commit path; the hub and the rest of Forge's tools arrive in v0.2.
 
 ## Event log
 

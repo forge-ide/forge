@@ -15,6 +15,7 @@ forge-api.workspace = true
 forge-config.workspace = true
 forge-events.workspace = true
 forge-git.workspace = true
+forge-sandbox.workspace = true
 forge-session.workspace = true
 futures-util.workspace = true
 rusqlite.workspace = true
@@ -28,6 +29,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 forge-api = { workspace = true, features = ["client"] }
+forge-sandbox.workspace = true
 tempfile.workspace = true
 
 [lints]

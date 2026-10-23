@@ -1,0 +1,443 @@
+//! Linux backends: Light (Landlock and seccomp) and Standard (bubblewrap).
+
+pub mod landlock;
+pub mod seccomp;
+
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::Arc;
+
+use forge_api::model::SandboxTier;
+use tokio::process::Command;
+
+use crate::policy::{Mode, Policy};
+use crate::{
+    Sandbox, SandboxError, SessionSandbox, Spec, TierStatus, Unsandboxed, View, not_implemented,
+    require,
+};
+
+/// Devices every sandboxed process may read and write.
+const DEVICES_RW: &[&str] = &["/dev/null", "/dev/zero", "/dev/full"];
+/// Devices every sandboxed process may read.
+const DEVICES_RO: &[&str] = &["/dev/urandom", "/dev/random"];
+
+/// The Linux backends, with availability probed once.
+pub struct Linux {
+    helper: PathBuf,
+    bwrap: Option<PathBuf>,
+    statuses: Vec<TierStatus>,
+}
+
+impl Linux {
+    /// Probe each tier. Blocking.
+    pub fn probe(helper: PathBuf) -> Self {
+        let bwrap = find_in_path("bwrap");
+        let statuses = vec![
+            probe_light(&helper),
+            probe_standard(&helper, bwrap.as_deref()),
+            not_implemented(SandboxTier::Container),
+            TierStatus::available(SandboxTier::Unsandboxed),
+        ];
+        for status in &statuses {
+            if let Some(why) = &status.unavailable {
+                tracing::info!(tier = crate::tier_name(status.tier), %why, "sandbox tier unavailable");
+            }
+        }
+        Self {
+            helper,
+            bwrap,
+            statuses,
+        }
+    }
+}
+
+impl Sandbox for Linux {
+    fn tiers(&self) -> Vec<TierStatus> {
+        self.statuses.clone()
+    }
+
+    fn prepare(&self, spec: Spec) -> Result<Arc<dyn SessionSandbox>, SandboxError> {
+        require(&self.statuses, spec.tier)?;
+        match spec.tier {
+            SandboxTier::Unsandboxed => Ok(Arc::new(Unsandboxed::new())),
+            SandboxTier::Light => Ok(Arc::new(Light::new(
+                self.helper.clone(),
+                &View::new(&spec)?,
+            ))),
+            SandboxTier::Standard => {
+                let bwrap = self.bwrap.clone().expect("probed");
+                Ok(Arc::new(Bwrap::new(
+                    bwrap,
+                    self.helper.clone(),
+                    &View::new(&spec)?,
+                )))
+            }
+            SandboxTier::Container => unreachable!("never available"),
+        }
+    }
+}
+
+/// Light: the helper applies Landlock and seccomp to itself, then execs the command.
+struct Light {
+    helper: PathBuf,
+    policy: String,
+    env: Vec<(String, String)>,
+}
+
+impl Light {
+    fn new(helper: PathBuf, view: &View) -> Self {
+        let mut read = view.read_only();
+        read.extend(["/proc", "/sys"].iter().map(PathBuf::from));
+        read.extend(DEVICES_RO.iter().map(PathBuf::from));
+        read.push(helper.clone());
+        let mut write = view.read_write();
+        write.extend(DEVICES_RW.iter().map(PathBuf::from));
+        let policy = Policy {
+            mode: Mode::Light,
+            read,
+            write,
+            connect_ports: vec![],
+        };
+        let mut env = crate::env::from_daemon();
+        env.push(("HOME".into(), view.scratch_home.display().to_string()));
+        env.push(("TMPDIR".into(), view.scratch_tmp.display().to_string()));
+        env.extend(view.toolchain_env.iter().cloned());
+        Self {
+            helper,
+            policy: policy.to_json(),
+            env,
+        }
+    }
+}
+
+impl SessionSandbox for Light {
+    fn tier(&self) -> SandboxTier {
+        SandboxTier::Light
+    }
+
+    fn command(
+        &self,
+        program: &str,
+        args: &[String],
+        cwd: &Path,
+        env: &[(String, String)],
+    ) -> Command {
+        let mut cmd = Command::new(&self.helper);
+        cmd.arg("light")
+            .arg(&self.policy)
+            .arg("--")
+            .arg(program)
+            .args(args)
+            .current_dir(cwd)
+            .env_clear()
+            .envs(self.env.iter().map(|(k, v)| (k, v)))
+            .envs(env.iter().map(|(k, v)| (k, v)));
+        cmd
+    }
+}
+
+/// Standard: bubblewrap builds the filesystem view in fresh namespaces (no network but
+/// loopback, its own PID space), and the helper adds the seccomp filter inside.
+struct Bwrap {
+    bwrap: PathBuf,
+    helper: PathBuf,
+    args: Vec<String>,
+    policy: String,
+    env: Vec<(String, String)>,
+}
+
+impl Bwrap {
+    fn new(bwrap: PathBuf, helper: PathBuf, view: &View) -> Self {
+        let args = bwrap_args(view, &helper);
+        let policy = Policy {
+            mode: Mode::Standard,
+            read: vec![],
+            write: vec![],
+            connect_ports: vec![],
+        };
+        let mut env = crate::env::from_daemon();
+        env.push(("HOME".into(), view.home.display().to_string()));
+        env.push(("TMPDIR".into(), "/tmp".into()));
+        env.extend(view.toolchain_env.iter().cloned());
+        Self {
+            bwrap,
+            helper,
+            args,
+            policy: policy.to_json(),
+            env,
+        }
+    }
+}
+
+impl SessionSandbox for Bwrap {
+    fn tier(&self) -> SandboxTier {
+        SandboxTier::Standard
+    }
+
+    fn command(
+        &self,
+        program: &str,
+        args: &[String],
+        cwd: &Path,
+        env: &[(String, String)],
+    ) -> Command {
+        let mut cmd = Command::new(&self.bwrap);
+        cmd.args(&self.args)
+            .arg("--chdir")
+            .arg(cwd)
+            .arg("--")
+            .arg(&self.helper)
+            .arg("standard")
+            .arg(&self.policy)
+            .arg("--")
+            .arg(program)
+            .args(args)
+            .env_clear()
+            .envs(self.env.iter().map(|(k, v)| (k, v)))
+            .envs(env.iter().map(|(k, v)| (k, v)));
+        cmd
+    }
+}
+
+/// bubblewrap's arguments for `view`, before `--chdir`. Later mounts cover earlier ones, so the
+/// scratch home goes over the real home first and everything visible inside it comes after.
+fn bwrap_args(view: &View, helper: &Path) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-user",
+        "--unshare-pid",
+        "--unshare-net",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--unshare-cgroup-try",
+        "--hostname",
+        "forge-sandbox",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    for path in &view.system {
+        bind(&mut args, "--ro-bind", path, path);
+    }
+    args.extend(["--proc", "/proc", "--dev", "/dev"].map(str::to_owned));
+    bind(&mut args, "--bind", &view.scratch_tmp, Path::new("/tmp"));
+    bind(&mut args, "--bind", &view.scratch_home, &view.home);
+    for path in view.toolchains.iter().chain(&view.extra) {
+        bind(&mut args, "--ro-bind", path, path);
+    }
+    for w in &view.worktrees {
+        bind(&mut args, "--ro-bind", &w.git_common, &w.git_common);
+        bind(&mut args, "--bind", &w.git_admin, &w.git_admin);
+        bind(&mut args, "--bind", &w.path, &w.path);
+    }
+    bind(&mut args, "--ro-bind", helper, helper);
+    args
+}
+
+fn bind(args: &mut Vec<String>, flag: &str, src: &Path, dst: &Path) {
+    args.push(flag.to_owned());
+    args.push(src.display().to_string());
+    args.push(dst.display().to_string());
+}
+
+fn find_in_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+fn probe_light(helper: &Path) -> TierStatus {
+    let tier = SandboxTier::Light;
+    if !helper.is_file() {
+        return missing_helper(tier, helper);
+    }
+    match run(std::process::Command::new(helper).arg("check-light")) {
+        Ok(()) => TierStatus::available(tier),
+        Err(stderr) => TierStatus::unavailable(
+            tier,
+            format!("Landlock and seccomp could not be applied ({stderr})"),
+            "the light tier needs Landlock ABI 6 or newer (Linux 6.12+) enabled at boot (\"landlock\" in the kernel's lsm= list); use the standard tier instead",
+        ),
+    }
+}
+
+fn probe_standard(helper: &Path, bwrap: Option<&Path>) -> TierStatus {
+    let tier = SandboxTier::Standard;
+    if !helper.is_file() {
+        return missing_helper(tier, helper);
+    }
+    let Some(bwrap) = bwrap else {
+        return TierStatus::unavailable(
+            tier,
+            "bubblewrap (bwrap) is not installed",
+            "install the bubblewrap package (for example `sudo apt install bubblewrap`), then restart forged",
+        );
+    };
+    let probe = run(std::process::Command::new(bwrap).args([
+        "--die-with-parent",
+        "--unshare-user",
+        "--unshare-pid",
+        "--unshare-net",
+        "--unshare-ipc",
+        "--ro-bind",
+        "/",
+        "/",
+        "--",
+        "/bin/sh",
+        "-c",
+        "exit 0",
+    ]));
+    match probe {
+        Ok(()) => TierStatus::available(tier),
+        Err(stderr) => TierStatus::unavailable(
+            tier,
+            format!("bubblewrap could not create its namespaces ({stderr})"),
+            userns_fix(|p| std::fs::read_to_string(p).ok()),
+        ),
+    }
+}
+
+fn missing_helper(tier: SandboxTier, helper: &Path) -> TierStatus {
+    TierStatus::unavailable(
+        tier,
+        format!("the sandbox helper {} is missing", helper.display()),
+        format!(
+            "reinstall Forge; forged expects {} next to its own executable",
+            crate::HELPER
+        ),
+    )
+}
+
+/// What to do when unprivileged user namespaces are blocked, from the sysctls that block them.
+fn userns_fix(read: impl Fn(&str) -> Option<String>) -> String {
+    let is = |path: &str, value: &str| read(path).is_some_and(|v| v.trim() == value);
+    if is(
+        "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
+        "1",
+    ) {
+        "AppArmor restricts unprivileged user namespaces: run `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` (persist it in /etc/sysctl.d/), or install an AppArmor profile that lets bwrap use them".into()
+    } else if is("/proc/sys/kernel/unprivileged_userns_clone", "0") {
+        "unprivileged user namespaces are disabled: run `sudo sysctl -w kernel.unprivileged_userns_clone=1` (persist it in /etc/sysctl.d/)".into()
+    } else if is("/proc/sys/user/max_user_namespaces", "0") {
+        "user namespaces are disabled: run `sudo sysctl -w user.max_user_namespaces=15000` (persist it in /etc/sysctl.d/)".into()
+    } else {
+        "enable unprivileged user namespaces for bubblewrap, or use the light tier".into()
+    }
+}
+
+/// Run a probe to completion; its trimmed stderr on failure.
+fn run(cmd: &mut std::process::Command) -> Result<(), String> {
+    let output = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .env_clear()
+        .output()
+        .map_err(|e| e.to_string())?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    Err(if stderr.is_empty() {
+        format!("exited with {}", output.status)
+    } else {
+        stderr
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::WorktreeMount;
+
+    fn view() -> View {
+        View {
+            system: vec!["/usr".into()],
+            toolchains: vec!["/home/u/.cargo".into()],
+            toolchain_env: vec![],
+            extra: vec![],
+            worktrees: vec![WorktreeMount {
+                path: "/home/u/repo/.worktrees/feat/x".into(),
+                git_common: "/home/u/repo/.git".into(),
+                git_admin: "/home/u/repo/.git/worktrees/x".into(),
+            }],
+            home: "/home/u".into(),
+            scratch_home: "/data/sessions/s/home".into(),
+            scratch_tmp: "/data/sessions/s/tmp".into(),
+        }
+    }
+
+    fn position(args: &[String], window: &[&str]) -> usize {
+        args.windows(window.len())
+            .position(|w| w.iter().zip(window).all(|(a, b)| a == b))
+            .unwrap_or_else(|| panic!("{window:?} not in {args:?}"))
+    }
+
+    #[test]
+    fn bwrap_hides_home_and_the_main_checkout() {
+        let args = bwrap_args(&view(), Path::new("/opt/forge/forge-sandbox-exec"));
+        for flag in [
+            "--unshare-user",
+            "--unshare-pid",
+            "--unshare-net",
+            "--die-with-parent",
+        ] {
+            assert!(args.iter().any(|a| a == flag), "{flag}");
+        }
+        let home = position(&args, &["--bind", "/data/sessions/s/home", "/home/u"]);
+        let cargo = position(&args, &["--ro-bind", "/home/u/.cargo", "/home/u/.cargo"]);
+        let git = position(
+            &args,
+            &["--ro-bind", "/home/u/repo/.git", "/home/u/repo/.git"],
+        );
+        let admin = position(
+            &args,
+            &[
+                "--bind",
+                "/home/u/repo/.git/worktrees/x",
+                "/home/u/repo/.git/worktrees/x",
+            ],
+        );
+        let wt = position(
+            &args,
+            &[
+                "--bind",
+                "/home/u/repo/.worktrees/feat/x",
+                "/home/u/repo/.worktrees/feat/x",
+            ],
+        );
+        // The scratch home goes first, so what is visible inside home covers it.
+        assert!(home < cargo && cargo < git && git < admin && admin < wt);
+        // The main checkout and the real home are never bound.
+        assert!(!args.iter().any(|a| a == "/home/u/repo" || a == "/"));
+    }
+
+    #[test]
+    fn userns_fixes_name_the_blocking_setting() {
+        let apparmor = userns_fix(|p| {
+            (p == "/proc/sys/kernel/apparmor_restrict_unprivileged_userns").then(|| "1\n".into())
+        });
+        assert!(
+            apparmor.contains("apparmor_restrict_unprivileged_userns=0"),
+            "{apparmor}"
+        );
+        let debian =
+            userns_fix(|p| (p == "/proc/sys/kernel/unprivileged_userns_clone").then(|| "0".into()));
+        assert!(debian.contains("unprivileged_userns_clone=1"), "{debian}");
+        let max = userns_fix(|p| (p == "/proc/sys/user/max_user_namespaces").then(|| "0".into()));
+        assert!(max.contains("max_user_namespaces"), "{max}");
+        assert!(userns_fix(|_| None).contains("user namespaces"));
+    }
+
+    #[test]
+    fn a_missing_helper_makes_sandboxed_tiers_unavailable() {
+        let linux = Linux::probe("/no/such/forge-sandbox-exec".into());
+        for status in linux.tiers() {
+            match status.tier {
+                SandboxTier::Unsandboxed => assert!(status.is_available()),
+                _ => assert!(!status.is_available(), "{:?}", status.tier),
+            }
+        }
+    }
+}

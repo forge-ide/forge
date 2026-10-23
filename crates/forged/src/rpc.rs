@@ -29,6 +29,7 @@ pub struct State {
     pub db: Db,
     pub log: Arc<EventLog>,
     pub sessions: Arc<SessionManager>,
+    pub sandbox: Arc<dyn forge_sandbox::Sandbox>,
     pub paths: Paths,
 }
 
@@ -187,7 +188,7 @@ async fn dispatch(
 ) -> Result<Value, RpcError> {
     let manager = &state.sessions;
     match method {
-        ServerHello::NAME => run::<ServerHello>(params, async |_| Ok(hello())).await,
+        ServerHello::NAME => run::<ServerHello>(params, async |_| Ok(hello(state))).await,
         ProjectOpen::NAME => {
             run::<ProjectOpen>(params, async |p| projects::open(&state.db, &p.path).await).await
         }
@@ -289,13 +290,18 @@ async fn run<M: Method>(
     }
 }
 
-fn hello() -> HelloResult {
+fn hello(state: &State) -> HelloResult {
     HelloResult {
         daemon_version: env!("CARGO_PKG_VERSION").to_owned(),
         api_version: API_VERSION.to_owned(),
         platform: Platform::current(),
-        // No sandbox tier is implemented yet; sessions can only run unsandboxed, by opt-in.
-        sandbox_tiers: Vec::new(),
+        sandbox_tiers: state
+            .sandbox
+            .tiers()
+            .into_iter()
+            .filter(|t| t.is_available())
+            .map(|t| t.tier)
+            .collect(),
     }
 }
 

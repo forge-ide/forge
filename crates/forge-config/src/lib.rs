@@ -17,7 +17,7 @@ pub use agent::{AGENTS_DIR, AgentProfileConfig, InvalidProfileId, ProfileMode, P
 pub use branches::{BranchConfig, BranchRules};
 pub use paths::{Paths, PathsError};
 pub use project::{PROJECT_CONFIG_FILE, ProjectConfig, RepoConfig};
-pub use user::UserConfig;
+pub use user::{SandboxConfig, UserConfig};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {

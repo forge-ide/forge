@@ -16,15 +16,19 @@ forge-config = { path = "crates/forge-config" }
 forge-events = { path = "crates/forge-events" }
 forge-fake-agent = { path = "crates/forge-fake-agent" }
 forge-git = { path = "crates/forge-git" }
+forge-sandbox = { path = "crates/forge-sandbox" }
 forge-session = { path = "crates/forge-session" }
 
 agent-client-protocol = { version = "3.5.0", default-features = false }
 anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
+landlock = "0.4.7"
+libc = "0.2.191"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 rustix = { version = "1.1.5", features = ["fs", "process"] }
 schemars = "1.2.3"
+seccompiler = "0.5.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 serde_norway = "0.9.42"

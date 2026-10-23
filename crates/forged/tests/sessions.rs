@@ -3,14 +3,14 @@
 
 mod common;
 
-use std::path::Path;
-use std::time::Duration;
-
-use common::{Daemon, expect_api_error, fake_profile, git, git_repo_with_commit, temp_home};
+use common::{
+    Daemon, all_events, collect_until, create_params, entered, expect_api_error, fake_profile, git,
+    git_repo_with_commit, hello_tiers, open, subscribe, temp_home, transitions, wait_for_state,
+};
 use forge_api::client::Client;
 use forge_api::events::{Event, EventKind, EventNotification, EventPayload, Topic};
 use forge_api::methods::*;
-use forge_api::model::{Action, Mode, Project, SandboxTier, Session, SessionState};
+use forge_api::model::{Action, Project, SandboxTier, Session, SessionState};
 use forge_api::{ErrorKind, SessionId};
 
 const EDIT_AND_RUN: &str = r#"
@@ -32,92 +32,6 @@ steps:
   - sleep_ms: 60000
   - end_turn
 "#;
-
-async fn open(client: &mut Client, repo: &Path) -> Project {
-    client
-        .call::<ProjectOpen>(&ProjectOpenParams {
-            path: repo.to_str().unwrap().to_owned(),
-        })
-        .await
-        .unwrap()
-}
-
-fn create_params(project: &Project, title: &str, prompt: &str) -> SessionCreateParams {
-    SessionCreateParams {
-        project_id: project.id.clone(),
-        agent_profile: "fake".into(),
-        title: title.into(),
-        prompt: prompt.into(),
-        mode: Mode::AcceptEdits,
-        sandbox: Some(SandboxTier::Unsandboxed),
-        branch: None,
-        on_collision: None,
-    }
-}
-
-async fn subscribe(client: &mut Client, topics: Vec<Topic>, after_seq: Option<u64>) {
-    client
-        .call::<EventsSubscribe>(&EventsSubscribeParams { topics, after_seq })
-        .await
-        .unwrap();
-}
-
-/// Read notifications until one satisfies `done` (inclusive), failing after 30 s.
-async fn collect_until(
-    client: &mut Client,
-    mut done: impl FnMut(&Event) -> bool,
-) -> Vec<EventNotification> {
-    let mut seen = Vec::new();
-    let result = tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            let note = client.next_event().await.unwrap();
-            let stop = done(&note.event);
-            seen.push(note);
-            if stop {
-                return;
-            }
-        }
-    })
-    .await;
-    if result.is_err() {
-        let kinds: Vec<_> = seen.iter().map(|n| n.event.payload.kind()).collect();
-        panic!("timed out; events so far: {kinds:?}");
-    }
-    seen
-}
-
-fn entered(state: SessionState) -> impl FnMut(&Event) -> bool {
-    move |e| matches!(&e.payload, EventPayload::SessionState(b) if b.to == state)
-}
-
-async fn wait_for_state(client: &mut Client, session: &SessionId, state: SessionState) {
-    subscribe(client, vec![Topic::Session(session.clone())], Some(0)).await;
-    let mut done = entered(state);
-    collect_until(client, |e| &e.session_id == session && done(e)).await;
-}
-
-async fn all_events(client: &mut Client, session: &SessionId) -> Vec<Event> {
-    client
-        .call::<EventsQuery>(&EventsQueryParams {
-            session_id: session.clone(),
-            kinds: None,
-            text: None,
-            before: None,
-            limit: 1000,
-        })
-        .await
-        .unwrap()
-}
-
-fn transitions(events: &[Event]) -> Vec<(SessionState, SessionState)> {
-    events
-        .iter()
-        .filter_map(|e| match &e.payload {
-            EventPayload::SessionState(b) => Some((b.from, b.to)),
-            _ => None,
-        })
-        .collect()
-}
 
 #[tokio::test]
 async fn fake_agent_edits_two_files_and_runs_a_command_in_a_worktree() {
@@ -374,15 +288,25 @@ async fn sessions_need_an_available_sandbox_tier() {
     let mut client = daemon.client().await;
     let project = open(&mut client, &repo).await;
 
-    for tier in [None, Some(SandboxTier::Standard), Some(SandboxTier::Light)] {
+    // Tiers this machine can't run are refused with the reason and a fix, never swapped for
+    // another. The tiers it can run are covered by the sandbox tests.
+    let available = hello_tiers(&mut client).await;
+    for tier in [
+        SandboxTier::Standard,
+        SandboxTier::Light,
+        SandboxTier::Container,
+    ] {
+        if available.contains(&tier) {
+            continue;
+        }
         let mut params = create_params(&project, "x", "go");
-        params.sandbox = tier;
-        // `fake` defaults to unsandboxed, so name a tier the daemon can't run yet.
+        params.sandbox = Some(tier);
         params.agent_profile = "strict".into();
-        expect_api_error(
+        let err = expect_api_error(
             client.call::<SessionCreate>(&params).await,
             ErrorKind::SandboxUnavailable,
         );
+        assert!(err.detail().contains("not available"), "{}", err.detail());
     }
     let mut params = create_params(&project, "x", "go");
     params.agent_profile = "strict".into();

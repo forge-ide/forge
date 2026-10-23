@@ -33,6 +33,10 @@ async fn hello_reports_versions_and_platform() {
     assert_eq!(hello.api_version, API_VERSION);
     assert_eq!(hello.daemon_version, env!("CARGO_PKG_VERSION"));
     assert_eq!(hello.platform, forge_api::model::Platform::current());
+    // Unsandboxed always runs (behind each profile's opt-in); the container tier doesn't yet.
+    use forge_api::model::SandboxTier;
+    assert!(hello.sandbox_tiers.contains(&SandboxTier::Unsandboxed));
+    assert!(!hello.sandbox_tiers.contains(&SandboxTier::Container));
 }
 
 #[tokio::test]
