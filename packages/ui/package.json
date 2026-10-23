@@ -10,6 +10,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@forge/client": "workspace:*",
+    "@tauri-apps/api": "2.12.4",
     "solid-js": "1.9.17"
   },
   "devDependencies": {

@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UserConfig",
+  "description": "The user config file. Every key is optional; a missing file means all defaults.",
+  "type": "object",
+  "properties": {
+    "default_agent": {
+      "description": "Agent profile ID used when neither the session nor the project names one.",
+      "type": ["string", "null"]
+    },
+    "ui": {
+      "$ref": "#/$defs/UiConfig",
+      "default": {
+        "theme": "system"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "Theme": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": ["light", "dark"]
+        },
+        {
+          "description": "Follow the OS setting.",
+          "type": "string",
+          "const": "system"
+        }
+      ]
+    },
+    "UiConfig": {
+      "type": "object",
+      "properties": {
+        "theme": {
+          "$ref": "#/$defs/Theme",
+          "default": "system"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
