@@ -154,13 +154,15 @@ impl SessionSandbox for Light {
         let mut cmd = Command::new(&self.helper);
         cmd.arg("light")
             .arg(&self.policy)
+            .args(crate::helper::env_args(&crate::env::extra(&self.env, env)))
             .arg("--")
             .arg(program)
             .args(args)
             .current_dir(cwd)
+            // The helper gets only the sandbox's variables; the command's own are applied
+            // after the restrictions are.
             .env_clear()
-            .envs(self.env.iter().map(|(k, v)| (k, v)))
-            .envs(env.iter().map(|(k, v)| (k, v)));
+            .envs(self.env.iter().map(|(k, v)| (k, v)));
         cmd
     }
 }
@@ -238,12 +240,14 @@ impl SessionSandbox for Bwrap {
             .arg(&self.helper)
             .arg("standard")
             .arg(&self.policy)
+            .args(crate::helper::env_args(&crate::env::extra(&self.env, env)))
             .arg("--")
             .arg(program)
             .args(args)
+            // bubblewrap and the helper inside it get only the sandbox's variables; the
+            // command's own are applied after the restrictions are.
             .env_clear()
-            .envs(self.env.iter().map(|(k, v)| (k, v)))
-            .envs(env.iter().map(|(k, v)| (k, v)));
+            .envs(self.env.iter().map(|(k, v)| (k, v)));
         cmd
     }
 }

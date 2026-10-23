@@ -35,7 +35,7 @@ mod macos;
 #[doc(hidden)]
 pub mod helper;
 
-pub use env::{PASSTHROUGH_VARS, is_passed_through};
+pub use env::{PASSTHROUGH_VARS, is_passed_through, is_valid_name};
 pub use unsandboxed::Unsandboxed;
 pub use view::{SYSTEM_READ_ONLY, View, toolchains};
 
@@ -156,7 +156,12 @@ pub trait SessionSandbox: Send + Sync + 'static {
     fn tier(&self) -> SandboxTier;
 
     /// A command that runs `program args` in `cwd` inside the sandbox, with the sandbox's
-    /// environment plus `env`. The caller sets stdio and the process group.
+    /// environment plus `env`. `env` (which an agent chooses for its terminals) can't replace
+    /// any variable the sandbox sets (`PATH`, `HOME`, `TMPDIR`, the proxy variables, ...), and
+    /// entries with an empty name or a name containing `=` or NUL are dropped. Its variables
+    /// reach only the sandboxed command, never the launcher that sets the sandbox up, where a
+    /// loader variable such as `LD_PRELOAD` would run code before any restriction applies.
+    /// The caller sets stdio and the process group.
     fn command(
         &self,
         program: &str,

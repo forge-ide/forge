@@ -396,6 +396,12 @@ async fn escape_suite(tier: SandboxTier) {
     allowed(sb, &cwd, "list", Path::new("/usr")).await;
 
     proxy_checks(sb, &fx).await;
+    env_checks(sb, &fx).await;
+    #[cfg(target_os = "linux")]
+    assert!(
+        !preload_escapes(sb, &fx).await,
+        "LD_PRELOAD ran agent code outside the {tier:?} sandbox"
+    );
 
     let mut escaped = Vec::new();
     for (name, escape) in escapes(&fx) {
@@ -452,6 +458,142 @@ async fn proxy_checks(sb: &dyn SessionSandbox, fx: &Fixture) {
     }
 }
 
+/// Variables the sandbox sets, which a command's own environment (agent-chosen, for ACP
+/// terminals) must not override.
+const PINNED: &[&str] = &[
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "ANTHROPIC_BASE_URL",
+];
+
+/// A command's extra environment reaches it, but never replaces what the sandbox set: an agent
+/// that could set `PATH` would pick which program runs, and one that could set `HOME` or the
+/// proxy variables would step outside the sandbox's view of the world. This holds in every
+/// tier, Unsandboxed included.
+async fn env_checks(sb: &dyn SessionSandbox, fx: &Fixture) {
+    let run = async |env: &[(String, String)]| {
+        let output = sb
+            .command("/usr/bin/env", &[], &fx.mine.path, env)
+            .stdin(Stdio::null())
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success(), "env did not run: {output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let vars: std::collections::HashMap<String, String> = stdout
+            .lines()
+            .filter_map(|l| l.split_once('='))
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+        vars
+    };
+    let baseline = run(&[]).await;
+    for key in [
+        "PATH",
+        "HOME",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ANTHROPIC_BASE_URL",
+    ] {
+        assert!(baseline.contains_key(key), "the sandbox should set {key}");
+    }
+    let mut env: Vec<(String, String)> = PINNED
+        .iter()
+        .map(|k| ((*k).to_owned(), format!("/agent/{k}")))
+        .collect();
+    env.push(("FORGE_AGENT_VAR".into(), "set".into()));
+    let seen = run(&env).await;
+    assert_eq!(seen.get("FORGE_AGENT_VAR").map(String::as_str), Some("set"));
+    for key in PINNED {
+        if let Some(value) = baseline.get(*key) {
+            assert_eq!(
+                seen.get(*key),
+                Some(value),
+                "the command's environment replaced {key}"
+            );
+        }
+    }
+
+    // A name with `=` in it would reach the process as a second `PATH=...` entry, which
+    // shells read instead of the real one.
+    let sneaky = vec![("PATH=/agent/bin:/usr/bin".to_owned(), String::new())];
+    let output = sb
+        .command(
+            "/bin/sh",
+            &["-c".into(), "printf %s \"$PATH\"".into()],
+            &fx.mine.path,
+            &sneaky,
+        )
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        baseline["PATH"],
+        "a variable named PATH=... replaced PATH for the shell"
+    );
+}
+
+/// Where the preloaded library's constructor tries to write: the hidden home.
+#[cfg(target_os = "linux")]
+fn preload_target(fx: &Fixture) -> PathBuf {
+    fx.home.join("preload-escaped")
+}
+
+/// Build a shared library in the worktree whose constructor writes `target`, and return its
+/// path. Needs a C compiler, as the sandbox CI hosts have.
+#[cfg(target_os = "linux")]
+fn preload_library(fx: &Fixture) -> PathBuf {
+    let dir = &fx.mine.path;
+    let source = dir.join("preload.c");
+    std::fs::write(
+        &source,
+        format!(
+            "#include <fcntl.h>\n#include <unistd.h>\n\
+             __attribute__((constructor)) static void escape(void) {{\n\
+             int fd = open(\"{}\", O_WRONLY | O_CREAT, 0644);\n\
+             if (fd >= 0) close(fd);\n}}\n",
+            preload_target(fx).display()
+        ),
+    )
+    .unwrap();
+    let library = dir.join("preload.so");
+    let status = Command::new("cc")
+        .args(["-shared", "-fPIC", "-o"])
+        .arg(&library)
+        .arg(&source)
+        .status()
+        .expect("the preload check needs a C compiler (cc)");
+    assert!(status.success(), "building the preload library failed");
+    library
+}
+
+/// Whether a command run with the agent's `LD_PRELOAD` got its library to write outside the
+/// sandbox. Agent variables must reach only the sandboxed command, never the launcher that
+/// sets the sandbox up, where the loader would run the library before any restriction.
+#[cfg(target_os = "linux")]
+async fn preload_escapes(sb: &dyn SessionSandbox, fx: &Fixture) -> bool {
+    let target = preload_target(fx);
+    let _ = std::fs::remove_file(&target);
+    let library = preload_library(fx);
+    let env = vec![("LD_PRELOAD".to_owned(), library.display().to_string())];
+    let _ = sb
+        .command("/bin/true", &[], &fx.mine.path, &env)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .unwrap();
+    let escaped = target.exists();
+    let _ = std::fs::remove_file(&target);
+    escaped
+}
+
 /// The suite's control: without a sandbox every escape works, so a probe that fails for some
 /// other reason can't pass as a blocked escape.
 #[tokio::test]
@@ -459,6 +601,12 @@ async fn every_escape_works_without_a_sandbox() {
     let fx = Fixture::new().await;
     let sandbox = fx.sandbox(SandboxTier::Unsandboxed);
     proxy_checks(sandbox.as_ref(), &fx).await;
+    env_checks(sandbox.as_ref(), &fx).await;
+    #[cfg(target_os = "linux")]
+    assert!(
+        preload_escapes(sandbox.as_ref(), &fx).await,
+        "the preload library should write outside when nothing confines it"
+    );
     let mut blocked = Vec::new();
     for (name, escape) in escapes(&fx) {
         if !attempt(sandbox.as_ref(), &fx, &escape).await {
