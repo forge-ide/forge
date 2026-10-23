@@ -10,11 +10,17 @@ use std::sync::Arc;
 use forge_api::model::SandboxTier;
 use tokio::process::Command;
 
-use crate::policy::{Mode, Policy};
+use crate::policy::{Forward, Mode, Policy};
+use crate::proxy::Proxy;
 use crate::{
     Sandbox, SandboxError, SessionSandbox, Spec, TierStatus, Unsandboxed, View, not_implemented,
     require,
 };
+
+/// Where a Standard sandbox sees the egress proxy's socket, and the loopback port the helper
+/// forwards to it inside the network namespace.
+const PROXY_SOCKET: &str = "/run/forge-proxy.sock";
+const PROXY_PORT: u16 = 3128;
 
 /// Devices every sandboxed process may read and write.
 const DEVICES_RW: &[&str] = &["/dev/null", "/dev/zero", "/dev/full"];
@@ -59,17 +65,31 @@ impl Sandbox for Linux {
     fn prepare(&self, spec: Spec) -> Result<Arc<dyn SessionSandbox>, SandboxError> {
         require(&self.statuses, spec.tier)?;
         match spec.tier {
-            SandboxTier::Unsandboxed => Ok(Arc::new(Unsandboxed::new())),
+            SandboxTier::Unsandboxed => Ok(Arc::new(Unsandboxed::with_proxy(spec.proxy))),
             SandboxTier::Light => Ok(Arc::new(Light::new(
                 self.helper.clone(),
                 &View::new(&spec)?,
+                spec.proxy,
             ))),
             SandboxTier::Standard => {
+                let view = View::new(&spec)?;
+                let socket = match &spec.proxy {
+                    Some(proxy) => {
+                        let path = spec.scratch.join("proxy.sock");
+                        proxy
+                            .serve_unix(&path)
+                            .map_err(|e| SandboxError::io("starting the egress proxy socket", e))?;
+                        Some(path)
+                    }
+                    None => None,
+                };
                 let bwrap = self.bwrap.clone().expect("probed");
                 Ok(Arc::new(Bwrap::new(
                     bwrap,
                     self.helper.clone(),
-                    &View::new(&spec)?,
+                    &view,
+                    socket.as_deref(),
+                    spec.proxy,
                 )))
             }
             SandboxTier::Container => unreachable!("never available"),
@@ -82,30 +102,42 @@ struct Light {
     helper: PathBuf,
     policy: String,
     env: Vec<(String, String)>,
+    _proxy: Option<Arc<Proxy>>,
 }
 
 impl Light {
-    fn new(helper: PathBuf, view: &View) -> Self {
+    fn new(helper: PathBuf, view: &View, proxy: Option<Arc<Proxy>>) -> Self {
         let mut read = view.read_only();
         read.extend(["/proc", "/sys"].iter().map(PathBuf::from));
         read.extend(DEVICES_RO.iter().map(PathBuf::from));
         read.push(helper.clone());
         let mut write = view.read_write();
         write.extend(DEVICES_RW.iter().map(PathBuf::from));
+        // Landlock can only filter TCP by port, so the proxy's port is reachable on any
+        // address; DNS and every other port and socket type are not.
+        let connect_ports = proxy.iter().map(|p| p.port()).collect();
         let policy = Policy {
             mode: Mode::Light,
             read,
             write,
-            connect_ports: vec![],
+            connect_ports,
+            forward: None,
         };
         let mut env = crate::env::from_daemon();
         env.push(("HOME".into(), view.scratch_home.display().to_string()));
         env.push(("TMPDIR".into(), view.scratch_tmp.display().to_string()));
         env.extend(view.toolchain_env.iter().cloned());
+        if let Some(proxy) = &proxy {
+            env.extend(crate::proxy::env(&format!(
+                "http://127.0.0.1:{}",
+                proxy.port()
+            )));
+        }
         Self {
             helper,
             policy: policy.to_json(),
             env,
+            _proxy: proxy,
         }
     }
 }
@@ -144,27 +176,47 @@ struct Bwrap {
     args: Vec<String>,
     policy: String,
     env: Vec<(String, String)>,
+    _proxy: Option<Arc<Proxy>>,
 }
 
 impl Bwrap {
-    fn new(bwrap: PathBuf, helper: PathBuf, view: &View) -> Self {
-        let args = bwrap_args(view, &helper);
+    /// `socket` is the egress proxy's Unix socket, bound into the sandbox when there is one.
+    fn new(
+        bwrap: PathBuf,
+        helper: PathBuf,
+        view: &View,
+        socket: Option<&Path>,
+        proxy: Option<Arc<Proxy>>,
+    ) -> Self {
+        let mut args = bwrap_args(view, &helper);
+        let forward = socket.map(|socket| {
+            bind(&mut args, "--bind", socket, Path::new(PROXY_SOCKET));
+            Forward {
+                port: PROXY_PORT,
+                socket: PROXY_SOCKET.into(),
+            }
+        });
+        let mut env = crate::env::from_daemon();
+        env.push(("HOME".into(), view.home.display().to_string()));
+        env.push(("TMPDIR".into(), "/tmp".into()));
+        env.extend(view.toolchain_env.iter().cloned());
+        if forward.is_some() {
+            env.extend(crate::proxy::env(&format!("http://127.0.0.1:{PROXY_PORT}")));
+        }
         let policy = Policy {
             mode: Mode::Standard,
             read: vec![],
             write: vec![],
             connect_ports: vec![],
+            forward,
         };
-        let mut env = crate::env::from_daemon();
-        env.push(("HOME".into(), view.home.display().to_string()));
-        env.push(("TMPDIR".into(), "/tmp".into()));
-        env.extend(view.toolchain_env.iter().cloned());
         Self {
             bwrap,
             helper,
             args,
             policy: policy.to_json(),
             env,
+            _proxy: proxy,
         }
     }
 }

@@ -15,6 +15,7 @@ use std::sync::Arc;
 use forge_api::model::SandboxTier;
 use tokio::process::Command;
 
+use crate::proxy::Proxy;
 use crate::{
     Sandbox, SandboxError, SessionSandbox, Spec, TierStatus, Unsandboxed, View, not_implemented,
     require,
@@ -78,17 +79,22 @@ impl Sandbox for Seatbelt {
     fn prepare(&self, spec: Spec) -> Result<Arc<dyn SessionSandbox>, SandboxError> {
         require(&self.statuses, spec.tier)?;
         match spec.tier {
-            SandboxTier::Unsandboxed => Ok(Arc::new(Unsandboxed::new())),
+            SandboxTier::Unsandboxed => Ok(Arc::new(Unsandboxed::with_proxy(spec.proxy))),
             SandboxTier::Light | SandboxTier::Standard => {
                 let view = View::new(&spec)?;
                 let mut env = crate::env::from_daemon();
                 env.push(("HOME".into(), view.scratch_home.display().to_string()));
                 env.push(("TMPDIR".into(), view.scratch_tmp.display().to_string()));
                 env.extend(view.toolchain_env.iter().cloned());
+                let port = spec.proxy.as_ref().map(|p| p.port());
+                if let Some(port) = port {
+                    env.extend(crate::proxy::env(&format!("http://127.0.0.1:{port}")));
+                }
                 Ok(Arc::new(SeatbeltSession {
                     tier: spec.tier,
-                    profile: profile(&view),
+                    profile: profile(&view, port),
                     env,
+                    _proxy: spec.proxy,
                 }))
             }
             SandboxTier::Container => unreachable!("never available"),
@@ -100,6 +106,7 @@ struct SeatbeltSession {
     tier: SandboxTier,
     profile: String,
     env: Vec<(String, String)>,
+    _proxy: Option<Arc<Proxy>>,
 }
 
 impl SessionSandbox for SeatbeltSession {
@@ -127,8 +134,9 @@ impl SessionSandbox for SeatbeltSession {
     }
 }
 
-/// The Seatbelt profile for `view`. Paths are canonical already (`/var` is `/private/var`).
-fn profile(view: &View) -> String {
+/// The Seatbelt profile for `view`, reaching the network only through the egress proxy on
+/// `proxy_port`. Paths are canonical already (`/var` is `/private/var`).
+fn profile(view: &View, proxy_port: Option<u16>) -> String {
     let mut p = String::from(
         "(version 1)\n\
          (deny default)\n\
@@ -167,6 +175,12 @@ fn profile(view: &View) -> String {
         p.push_str(&format!("  (literal {})\n", quote(dev)));
     }
     p.push_str(")\n");
+    if let Some(port) = proxy_port {
+        p.push_str(&format!(
+            "(allow system-socket (socket-domain AF_INET) (socket-domain AF_INET6))\n\
+             (allow network-outbound (remote ip \"localhost:{port}\"))\n"
+        ));
+    }
     p
 }
 
@@ -209,7 +223,7 @@ mod tests {
             scratch_home: "/private/var/s/home".into(),
             scratch_tmp: "/private/var/s/tmp".into(),
         };
-        let p = profile(&view);
+        let p = profile(&view, None);
         assert!(p.starts_with("(version 1)\n(deny default)"));
         let writes = &p[p.find("(allow file-write*").unwrap()..];
         let writes = &writes[..writes.find(")\n(").unwrap()];
@@ -218,6 +232,9 @@ mod tests {
         assert!(!writes.contains("\"/Users/u/repo/.git\""));
         assert!(!p.contains("(subpath \"/Users/u\")"));
         assert!(!p.contains("network"));
+        let with_proxy = profile(&view, Some(41234));
+        assert!(with_proxy.contains("(allow network-outbound (remote ip \"localhost:41234\"))"));
+        assert_eq!(with_proxy.matches("network-outbound").count(), 1);
     }
 
     #[test]

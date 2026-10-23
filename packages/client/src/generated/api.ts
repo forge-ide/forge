@@ -1,6 +1,6 @@
 // Generated from crates/forge-api by `just gen`. Do not edit.
 
-export const API_VERSION = "0.2.0";
+export const API_VERSION = "0.3.0";
 
 export const EVENT_NOTIFICATION = "event";
 
@@ -247,6 +247,7 @@ export type Event = {
   | { kind: "approval.decided"; body: ApprovalDecidedBody }
   | { kind: "edit"; body: EditBody }
   | { kind: "terminal.output"; body: TerminalOutputBody }
+  | { kind: "network"; body: NetworkBody }
   | { kind: "checkpoint"; body: CheckpointBody }
   | { kind: "review.thread"; body: ReviewThreadBody }
   | { kind: "usage"; body: Usage }
@@ -271,6 +272,7 @@ export type EventPayload =
   | { kind: "approval.decided"; body: ApprovalDecidedBody }
   | { kind: "edit"; body: EditBody }
   | { kind: "terminal.output"; body: TerminalOutputBody }
+  | { kind: "network"; body: NetworkBody }
   | { kind: "checkpoint"; body: CheckpointBody }
   | { kind: "review.thread"; body: ReviewThreadBody }
   | { kind: "usage"; body: Usage }
@@ -294,6 +296,7 @@ export type EventKind =
   | "approval.decided"
   | "edit"
   | "terminal.output"
+  | "network"
   | "checkpoint"
   | "review.thread"
   | "usage"
@@ -361,6 +364,23 @@ export type ApprovalDecidedBody = {
 export type EditBody = { path: string; kind: EditKind; additions: number; deletions: number };
 
 export type TerminalOutputBody = { terminalId: string; chunk: string };
+
+/**
+ * One connection through the session's egress proxy, logged when it closes, or at once when
+ * it is denied.
+ */
+export type NetworkBody = {
+  host: string;
+  port: number;
+  /**
+   * `allow` or `deny`; the proxy never asks.
+   */
+  verdict: Verdict;
+  reason?: string;
+  bytesSent: number;
+  bytesReceived: number;
+  durationMs: number;
+};
 
 export type CheckpointBody = { checkpointId: CheckpointId; turnId: TurnId; ref: string };
 

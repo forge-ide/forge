@@ -10,6 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use forge_api::model::SandboxTier;
+use forge_sandbox::proxy::{
+    Allowlist, BoxFuture, Connection, Limits, Proxy, ProxyConfig, PublicDns, Resolve,
+};
 use forge_sandbox::{SessionSandbox, Spec, WorktreeMount};
 use tempfile::TempDir;
 
@@ -33,10 +36,30 @@ struct Fixture {
     bus: PathBuf,
     tcp: TcpListener,
     udp: UdpSocket,
+    proxy: Arc<Proxy>,
+    connections: Arc<std::sync::Mutex<Vec<Connection>>>,
+}
+
+/// `allowed.test` resolves to a listener on this machine; every other name goes through real
+/// DNS with the proxy's public-address check, so allowlisting `localhost` is still refused.
+struct TestDns(std::net::SocketAddr);
+
+impl Resolve for TestDns {
+    fn resolve<'a>(
+        &'a self,
+        host: &'a str,
+        port: u16,
+    ) -> BoxFuture<'a, Result<Vec<std::net::SocketAddr>, String>> {
+        if host == "allowed.test" {
+            let addr = self.0;
+            return Box::pin(async move { Ok(vec![addr]) });
+        }
+        PublicDns.resolve(host, port)
+    }
 }
 
 impl Fixture {
-    fn new() -> Self {
+    async fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let home = root.join("home");
@@ -66,10 +89,26 @@ impl Fixture {
         let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
         udp.set_read_timeout(Some(Duration::from_millis(300)))
             .unwrap();
+        let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        tokio::spawn(async move { while upstream.accept().await.is_ok() {} });
+        let connections: Arc<std::sync::Mutex<Vec<Connection>>> = Arc::default();
+        let log = connections.clone();
+        let proxy = Proxy::start(ProxyConfig {
+            allow: Allowlist::new(["allowed.test", "localhost"]).unwrap(),
+            resolver: Arc::new(TestDns(upstream_addr)),
+            log: Arc::new(move |c| log.lock().unwrap().push(c)),
+            limits: Limits::default(),
+        })
+        .await
+        .unwrap();
         Fixture {
+            proxy: Arc::new(proxy),
+            connections,
             _socket: UnixListener::bind(&socket).unwrap(),
             _bus: UnixListener::bind(&bus).unwrap(),
-            tcp: TcpListener::bind("127.0.0.1:0").unwrap(),
+            tcp,
             udp,
             _dir: dir,
             root,
@@ -100,6 +139,7 @@ impl Fixture {
                 scratch: self.root.join("data/sessions/s1"),
                 home: self.home.clone(),
                 read_only: vec![PathBuf::from(PROBE)],
+                proxy: Some(self.proxy.clone()),
             })
             .unwrap()
     }
@@ -290,7 +330,7 @@ async fn attempt(sandbox: &dyn SessionSandbox, fx: &Fixture, escape: &Escape) ->
 }
 
 async fn escape_suite(tier: SandboxTier) {
-    let fx = Fixture::new();
+    let fx = Fixture::new().await;
     let sandbox = fx.sandbox(tier);
     let sb = sandbox.as_ref();
     let cwd = fx.mine.path.clone();
@@ -301,6 +341,8 @@ async fn escape_suite(tier: SandboxTier) {
     allowed(sb, &cwd, "write", &fx.mine.git_admin.join("forge-probe")).await;
     allowed(sb, &cwd, "read", &fx.repo.join(".git/HEAD")).await;
     allowed(sb, &cwd, "list", Path::new("/usr")).await;
+
+    proxy_checks(sb, &fx).await;
 
     let mut escaped = Vec::new();
     for (name, escape) in escapes(&fx) {
@@ -314,12 +356,42 @@ async fn escape_suite(tier: SandboxTier) {
     );
 }
 
+/// The egress proxy is the way out: an allowlisted host works through it, and it refuses
+/// hosts off the allowlist, allowlisted names that resolve to private addresses, IP literals,
+/// and other ports, logging each refusal. This holds in every tier, Unsandboxed included.
+async fn proxy_checks(sb: &dyn SessionSandbox, fx: &Fixture) {
+    let cwd = &fx.mine.path;
+    let (code, stderr) = probe(sb, cwd, "proxy-connect", "allowed.test:443").await;
+    assert_eq!(code, 0, "an allowlisted host should be reachable: {stderr}");
+    let tcp = fx.tcp.local_addr().unwrap();
+    let refused = [
+        "blocked.test:443".to_owned(),
+        "localhost:443".to_owned(),
+        format!("127.0.0.1:{}", tcp.port()),
+        "allowed.test:22".to_owned(),
+    ];
+    for target in &refused {
+        let (code, _) = probe(sb, cwd, "proxy-connect", target).await;
+        assert_eq!(code, 1, "the proxy let {target} through");
+    }
+    let log = fx.connections.lock().unwrap().clone();
+    for target in &refused {
+        let (host, port) = target.rsplit_once(':').unwrap();
+        assert!(
+            log.iter()
+                .any(|c| c.host == host && c.port.to_string() == port && !c.allowed),
+            "{target} was not logged as denied: {log:?}"
+        );
+    }
+}
+
 /// The suite's control: without a sandbox every escape works, so a probe that fails for some
 /// other reason can't pass as a blocked escape.
 #[tokio::test]
 async fn every_escape_works_without_a_sandbox() {
-    let fx = Fixture::new();
+    let fx = Fixture::new().await;
     let sandbox = fx.sandbox(SandboxTier::Unsandboxed);
+    proxy_checks(sandbox.as_ref(), &fx).await;
     let mut blocked = Vec::new();
     for (name, escape) in escapes(&fx) {
         if !attempt(sandbox.as_ref(), &fx, &escape).await {
@@ -350,7 +422,7 @@ async fn standard_escapes_fail() {
 #[tokio::test]
 #[ignore = "needs a sandbox-capable host; run `just test-sandbox`"]
 async fn killing_a_standard_sandbox_reaches_detached_processes() {
-    let fx = Fixture::new();
+    let fx = Fixture::new().await;
     let sandbox = fx.sandbox(SandboxTier::Standard);
     let marker = format!("{}", 3_000_000 + std::process::id());
     let script = format!("setsid sleep {marker} & sleep {marker}");

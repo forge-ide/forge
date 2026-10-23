@@ -1,28 +1,42 @@
 //! The opt-in tier with no isolation. Only the environment allowlist applies.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use forge_api::model::SandboxTier;
 use tokio::process::Command;
 
 use crate::SessionSandbox;
+use crate::proxy::Proxy;
 
 /// Runs commands as normal user processes, with the allowlisted environment, the real `HOME`,
-/// and the daemon's `TMPDIR`.
+/// and the daemon's `TMPDIR`. With a proxy, the proxy variables point at it; nothing makes a
+/// process use it.
 #[derive(Clone, Debug)]
 pub struct Unsandboxed {
     env: Vec<(String, String)>,
+    _proxy: Option<Arc<Proxy>>,
 }
 
 impl Unsandboxed {
     pub fn new() -> Self {
+        Self::with_proxy(None)
+    }
+
+    pub fn with_proxy(proxy: Option<Arc<Proxy>>) -> Self {
         let mut env = crate::env::from_daemon();
         for name in ["HOME", "TMPDIR"] {
             if let Ok(value) = std::env::var(name) {
                 env.push((name.to_owned(), value));
             }
         }
-        Self { env }
+        if let Some(proxy) = &proxy {
+            env.extend(crate::proxy::env(&format!(
+                "http://127.0.0.1:{}",
+                proxy.port()
+            )));
+        }
+        Self { env, _proxy: proxy }
     }
 }
 

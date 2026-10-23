@@ -4,7 +4,7 @@
 //! ```text
 //! forge-sandbox-probe read <file> | list <dir> | write <file>
 //!                     connect-tcp <addr:port> | connect-unix <path> | udp <addr:port>
-//!                     signal <pid>
+//!                     signal <pid> | proxy-connect <host:port>
 //! ```
 
 use std::process::ExitCode;
@@ -27,6 +27,7 @@ fn main() -> ExitCode {
             std::net::UdpSocket::bind("0.0.0.0:0").and_then(|s| s.send_to(b"x", target).map(drop))
         }
         "signal" => signal(target),
+        "proxy-connect" => proxy_connect(target),
         _ => {
             eprintln!("forge-sandbox-probe: unknown action {action:?}");
             return ExitCode::from(2);
@@ -49,4 +50,29 @@ fn signal(pid: &str) -> std::io::Result<()> {
         .and_then(rustix::process::Pid::from_raw)
         .ok_or_else(|| std::io::Error::other("not a pid"))?;
     rustix::process::test_kill_process(pid).map_err(std::io::Error::from)
+}
+
+/// Ask the proxy in `HTTPS_PROXY` to tunnel to `target`; succeeds on a 200 reply.
+fn proxy_connect(target: &str) -> std::io::Result<()> {
+    use std::io::{Read, Write};
+    let url = std::env::var("HTTPS_PROXY")
+        .map_err(|_| std::io::Error::other("HTTPS_PROXY is not set"))?;
+    let addr = url
+        .strip_prefix("http://")
+        .unwrap_or(&url)
+        .trim_end_matches('/');
+    let mut stream = std::net::TcpStream::connect(addr)?;
+    write!(
+        stream,
+        "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n"
+    )?;
+    let mut reply = [0u8; 256];
+    let n = stream.read(&mut reply)?;
+    let reply = String::from_utf8_lossy(&reply[..n]);
+    let status = reply.lines().next().unwrap_or_default().to_owned();
+    if status.starts_with("HTTP/1.1 200") {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!("proxy refused: {status}")))
+    }
 }

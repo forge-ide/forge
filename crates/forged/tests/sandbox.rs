@@ -15,13 +15,13 @@ use common::{
 #[cfg(target_os = "linux")]
 use forge_api::ErrorKind;
 use forge_api::SessionId;
-use forge_api::events::{Event, EventPayload};
+use forge_api::events::{Event, EventPayload, Verdict};
 use forge_api::methods::*;
 use forge_api::model::{SandboxTier, SessionState};
 
 /// Edits two files and runs one command, as in the session tests, then tries to read an SSH
-/// key from the real home through a terminal.
-fn script(key: &Path) -> String {
+/// key from the real home and to reach a host off the allowlist, through terminals.
+fn script(key: &Path, probe: &Path) -> String {
     format!(
         r#"
 steps:
@@ -32,10 +32,12 @@ steps:
   - write: {{ path: src/lib.txt, content: "one\ntwo\n" }}
   - exec: ["sh", "-c", "cat hello.txt"]
   - exec: ["sh", "-c", "cat {} || echo key-hidden"]
+  - exec: ["{}", "proxy-connect", "blocked.example:443"]
   - message: "Done."
   - end_turn
 "#,
-        key.display()
+        key.display(),
+        probe.display()
     )
 }
 
@@ -56,12 +58,18 @@ fn setup(tier: &str) -> Setup {
     let scripts = home.path().join("scripts");
     std::fs::create_dir_all(&scripts).unwrap();
     let script_path = scripts.join("fake.yaml");
-    std::fs::write(&script_path, script(&key)).unwrap();
+    let probe = &sandbox_bins()[1];
+    std::fs::write(&script_path, script(&key, probe)).unwrap();
     std::fs::create_dir_all(repo.join(".forge/agents")).unwrap();
+    let opt_in = if tier == "unsandboxed" {
+        "allow_unsandboxed = true\n"
+    } else {
+        ""
+    };
     std::fs::write(
         repo.join(".forge/agents/fake.toml"),
         format!(
-            "agent = \"fake\"\ncommand = [{:?}, {:?}]\nsandbox = \"{tier}\"\n",
+            "agent = \"fake\"\ncommand = [{:?}, {:?}]\nsandbox = \"{tier}\"\n{opt_in}[network]\nallow = [\"allowed.example\"]\n",
             common::fake_agent().to_str().unwrap(),
             script_path.to_str().unwrap(),
         ),
@@ -70,7 +78,11 @@ fn setup(tier: &str) -> Setup {
     std::fs::write(repo.join(".git/info/exclude"), ".forge/\n").unwrap();
     std::fs::write(
         home.path().join("config/config.toml"),
-        format!("[sandbox]\nread_only = [{:?}]\n", scripts.to_str().unwrap()),
+        format!(
+            "[sandbox]\nread_only = [{:?}, {:?}]\n",
+            scripts.to_str().unwrap(),
+            probe.to_str().unwrap()
+        ),
     )
     .unwrap();
     Setup { home, repo, key }
@@ -127,17 +139,33 @@ async fn fake_agent_in(tier: SandboxTier) {
     assert_eq!(edited, ["hello.txt", "src/lib.txt"]);
     let output = terminal_output(&events);
     assert!(output.contains("hello"), "the command ran: {output:?}");
-    assert!(output.contains("key-hidden"), "{output:?}");
-    assert!(
-        !output.contains("PRIVATE KEY"),
-        "the SSH key leaked: {output:?}"
-    );
+    if tier != SandboxTier::Unsandboxed {
+        assert!(output.contains("key-hidden"), "{output:?}");
+        assert!(
+            !output.contains("PRIVATE KEY"),
+            "the SSH key leaked: {output:?}"
+        );
+    }
+    assert!(output.contains("proxy refused: HTTP/1.1 403"), "{output:?}");
+    let denied = events.iter().find_map(|e| match &e.payload {
+        EventPayload::Network(b) if b.host == "blocked.example" => Some(b.clone()),
+        _ => None,
+    });
+    let denied = denied.expect("the refused connection is in the event log");
+    assert_eq!((denied.port, denied.verdict), (443, Verdict::Deny));
+    assert!(denied.reason.unwrap_or_default().contains("allowlist"));
     let worktree = s.repo.join(".worktrees/feat/add-greeting");
     assert_eq!(
         std::fs::read_to_string(worktree.join("hello.txt")).unwrap(),
         "hello\n"
     );
     assert!(s.key.exists());
+}
+
+/// Unsandboxed sessions get the egress proxy too; nothing forces them to use it.
+#[tokio::test]
+async fn fake_agent_edits_and_runs_a_command_unsandboxed() {
+    fake_agent_in(SandboxTier::Unsandboxed).await;
 }
 
 #[tokio::test]
@@ -257,4 +285,26 @@ fn which(program: &str) -> PathBuf {
         .map(|d| d.join(program))
         .find(|p| p.is_file())
         .unwrap_or_else(|| panic!("{program} not on PATH"))
+}
+
+/// Allowlist entries are plain host names; anything else fails `session.create` at once.
+#[tokio::test]
+async fn network_allowlists_must_be_host_names() {
+    let s = setup("unsandboxed");
+    let profile = s.repo.join(".forge/agents/fake.toml");
+    let text = std::fs::read_to_string(&profile).unwrap();
+    std::fs::write(
+        &profile,
+        text.replace("\"allowed.example\"", "\"https://*.example.com:443\""),
+    )
+    .unwrap();
+    let daemon = Daemon::start(s.home.path());
+    let mut client = daemon.client().await;
+    let project = open(&mut client, &s.repo).await;
+    let params = create_params(&project, "x", "go");
+    let err = common::expect_api_error(
+        client.call::<SessionCreate>(&params).await,
+        forge_api::ErrorKind::ValidationFailed,
+    );
+    assert!(err.detail().contains("network.allow"), "{}", err.detail());
 }

@@ -189,6 +189,7 @@ mod tests {
             scratch: root.join("scratch"),
             home: root.join("home"),
             read_only: vec![root.join("missing"), root.join("home/.cargo")],
+            proxy: None,
         }
     }
 

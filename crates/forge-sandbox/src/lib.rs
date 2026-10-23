@@ -21,6 +21,7 @@ use tokio::process::Command;
 
 mod env;
 pub mod policy;
+pub mod proxy;
 mod unsandboxed;
 mod view;
 
@@ -102,7 +103,7 @@ pub struct WorktreeMount {
 }
 
 /// Everything a session's sandbox is built from.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Spec {
     pub tier: SandboxTier,
     pub worktrees: Vec<WorktreeMount>,
@@ -113,6 +114,9 @@ pub struct Spec {
     /// Extra paths visible read-only: the agent program and the user config's
     /// `[sandbox] read_only` entries.
     pub read_only: Vec<PathBuf>,
+    /// The session's egress proxy, the only way out to the network. Without one a sandboxed
+    /// session has no network at all. The sandbox keeps it running while it lives.
+    pub proxy: Option<Arc<proxy::Proxy>>,
 }
 
 #[derive(Debug, thiserror::Error)]
