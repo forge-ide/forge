@@ -541,12 +541,14 @@ async fn env_checks(sb: &dyn SessionSandbox, fx: &Fixture) {
 }
 
 /// Where the preloaded library's constructor tries to write: the hidden home.
+#[cfg(target_os = "linux")]
 fn preload_target(fx: &Fixture) -> PathBuf {
     fx.home.join("preload-escaped")
 }
 
 /// Build a shared library in the worktree whose constructor writes `target`, and return its
 /// path. Needs a C compiler, as the sandbox CI hosts have.
+#[cfg(target_os = "linux")]
 fn preload_library(fx: &Fixture) -> PathBuf {
     let dir = &fx.mine.path;
     let source = dir.join("preload.c");
