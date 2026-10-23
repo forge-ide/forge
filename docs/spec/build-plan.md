@@ -47,7 +47,7 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 - [x] `forge-api` types for the v0.1 method set, with TypeScript generated into `packages/client`.
 - [x] `server.hello`, `project.open`, `project.list`, `project.get`, `events.subscribe`, `events.query`.
 - [x] SQLite with migrations; `forge-config` loads and validates `forge.toml` and user config.
-- [x] UI shows the project list and connection status, and reconnects with `afterSeq`.
+- [x] UI shows the project list and connection status, and reconnects with `afterSeq` (client side only: the UI resubscribes with `afterSeq`, but the daemon has no events to replay until M2).
 
 **Done when:** `forge project open .` returns the project, and a CI check fails if generated TypeScript is out of date. The lossless-reconnect test moved to M2, because no events exist until sessions do.
 
@@ -59,6 +59,10 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 - [ ] `forge-fake-agent`: an ACP agent that replays a YAML script of steps (see quality-and-safety.md).
 - [ ] `forge-events`: JSONL log plus SQLite index; redaction hook point.
 - [ ] `session.create`, `prompt`, `cancel`, `get`, `list`, `close`.
+- [ ] Deferred from M1: `events.subscribe` replays from the event log after `afterSeq` (the daemon accepts and ignores it today).
+- [ ] Deferred from M1: connection limits in `forged` before events flow: a bounded per-connection outgoing queue that drops a client that stops reading, a WebSocket handshake timeout, and a cap on in-flight requests per connection.
+- [ ] Deferred from M1: a subscription that completes after its connection closed must be removed at once, not on the next failed send.
+- [ ] Deferred from M1: before creating a worktree, resolve each repo path from `forge.toml` and check it is still inside the project root. The config check is lexical, so a symlinked repo path can point outside the root.
 
 **Done when:** an integration test runs the fake agent to edit two files and run one command in a worktree, the session moves Provisioning → Ready → Working → Review, and every step is in the event log; and a test kills and restarts a client mid-stream, resubscribes with `afterSeq`, and loses no events. Before that test, settle what `seq` and `afterSeq` mean for topics that span sessions (`board`, `project/<id>`), since event `seq` is per session.
 

@@ -17,10 +17,15 @@ pub struct Daemon {
 }
 
 /// A temp dir laid out as a fake `$HOME` with Forge's directories overridden inside it.
+/// They are private (0700), as forged requires.
 pub fn temp_home() -> TempDir {
+    use std::os::unix::fs::DirBuilderExt;
     let dir = tempfile::tempdir().unwrap();
     for sub in ["data", "run", "config"] {
-        std::fs::create_dir(dir.path().join(sub)).unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(dir.path().join(sub))
+            .unwrap();
     }
     dir
 }
@@ -34,6 +39,29 @@ pub fn forged_command(home: &Path) -> Command {
         .env("RUST_LOG", "forged=debug")
         .stdin(Stdio::null());
     cmd
+}
+
+/// Run a forged that is expected to exit on its own; kill it and panic if it is still running
+/// after 10 s.
+pub fn expect_exit(home: &Path) -> std::process::Output {
+    let mut child = forged_command(home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "forged kept running; stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    child.wait_with_output().unwrap()
 }
 
 impl Daemon {

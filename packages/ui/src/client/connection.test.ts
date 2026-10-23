@@ -12,6 +12,9 @@ class FakeTransport implements DaemonTransport {
   connects = 0;
   /** Accept requests but never answer them, like a daemon that dies mid-call. */
   holdReplies = false;
+  /** Leave `connect()` pending until the test resolves it from `pendingConnects`. */
+  holdConnects = false;
+  pendingConnects: (() => void)[] = [];
   requests: Request[] = [];
   private message = new Set<(text: string) => void>();
   private close = new Set<(reason: string) => void>();
@@ -19,6 +22,9 @@ class FakeTransport implements DaemonTransport {
 
   connect(): Promise<void> {
     this.connects++;
+    if (this.holdConnects) {
+      return new Promise((resolve) => this.pendingConnects.push(resolve));
+    }
     return this.up ? Promise.resolve() : Promise.reject(new Error("socket missing"));
   }
 
@@ -200,6 +206,26 @@ describe("DaemonConnection", () => {
     await vi.runAllTimersAsync();
     expect(transport.connects).toBe(2);
     expect(conn.state.kind).toBe("connected");
+  });
+
+  it("abandons an in-flight attempt when retried", async () => {
+    const transport = new FakeTransport();
+    transport.holdConnects = true;
+    const conn = new DaemonConnection(transport);
+    conn.start();
+    conn.retry();
+    expect(transport.pendingConnects).toHaveLength(2);
+
+    // The retry's connect finishes first, then the stale one.
+    transport.pendingConnects[1]?.();
+    await vi.runAllTimersAsync();
+    expect(conn.state.kind).toBe("connected");
+    transport.pendingConnects[0]?.();
+    await vi.runAllTimersAsync();
+
+    expect(conn.state.kind).toBe("connected");
+    expect(transport.requests.filter((r) => r.method === "server.hello")).toHaveLength(1);
+    await expect(conn.call("project.list", {})).resolves.toEqual([]);
   });
 
   it("rejects calls while disconnected", async () => {

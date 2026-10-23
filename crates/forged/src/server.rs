@@ -13,14 +13,12 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::rpc::{Conn, State, handle_text};
 
-/// Bind the socket at `path`: directory 0700, socket 0600, replacing a stale socket from a crash.
+/// Bind the socket at `path`: private directory, socket 0600, replacing a stale socket from a crash.
 pub fn bind(path: &Path) -> anyhow::Result<UnixListener> {
     let dir = path
         .parent()
         .context("socket path has no parent directory")?;
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("restricting {}", dir.display()))?;
+    crate::dirs::ensure_private(dir)?;
 
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_socket() => {

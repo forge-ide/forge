@@ -25,7 +25,68 @@ const START_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 pub struct Bridge {
-    outgoing: Mutex<Option<mpsc::UnboundedSender<String>>>,
+    current: Mutex<Slot<Connection>>,
+    /// Serializes `daemon_connect` so two calls can't both start a daemon.
+    connecting: Mutex<()>,
+}
+
+/// One open daemon connection. The writer task ends, closing the socket, once `outgoing` is
+/// dropped; the reader holds no sender, so it can't keep the socket alive.
+struct Connection {
+    outgoing: mpsc::UnboundedSender<String>,
+    reader: tauri::async_runtime::JoinHandle<()>,
+}
+
+impl Connection {
+    /// Stop forwarding frames from this connection and let its socket close.
+    fn close(self) {
+        self.reader.abort();
+    }
+}
+
+/// Holds the current value with an ID, so a task can tell whether it still owns the slot.
+struct Slot<T> {
+    next_id: u64,
+    current: Option<(u64, T)>,
+}
+
+impl<T> Default for Slot<T> {
+    fn default() -> Self {
+        Self {
+            next_id: 1,
+            current: None,
+        }
+    }
+}
+
+impl<T> Slot<T> {
+    /// Reserve the ID the next `put` will use.
+    fn next_id(&self) -> u64 {
+        self.next_id
+    }
+
+    /// Store `value` under the reserved ID, returning the value it replaces.
+    fn put(&mut self, value: T) -> Option<T> {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.current.replace((id, value)).map(|(_, old)| old)
+    }
+
+    fn get(&self) -> Option<&T> {
+        self.current.as_ref().map(|(_, v)| v)
+    }
+
+    /// Remove the value if it is still the one stored under `id`.
+    fn take_if(&mut self, id: u64) -> Option<T> {
+        match self.current {
+            Some((current, _)) if current == id => self.current.take().map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    fn take(&mut self) -> Option<T> {
+        self.current.take().map(|(_, v)| v)
+    }
 }
 
 #[derive(Serialize)]
@@ -52,6 +113,12 @@ pub fn daemon_info() -> Result<DaemonInfo, String> {
 /// Connect to the daemon, starting it first if nothing is listening. Replaces any open connection.
 #[tauri::command]
 pub async fn daemon_connect(app: AppHandle, bridge: State<'_, Bridge>) -> Result<(), String> {
+    let _connecting = bridge.connecting.lock().await;
+    // Close the old connection first so its frames can't reach the new one.
+    if let Some(old) = bridge.current.lock().await.take() {
+        old.close();
+    }
+
     let paths = paths()?;
     let socket = paths.socket();
     let stream = match UnixStream::connect(&socket).await {
@@ -67,9 +134,6 @@ pub async fn daemon_connect(app: AppHandle, bridge: State<'_, Bridge>) -> Result
     let (mut sink, mut source) = ws.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
-    // Dropping the old sender ends the old writer, which closes that socket.
-    *bridge.outgoing.lock().await = Some(tx.clone());
-
     tauri::async_runtime::spawn(async move {
         while let Some(text) = rx.recv().await {
             if sink.send(Message::text(text)).await.is_err() {
@@ -79,7 +143,9 @@ pub async fn daemon_connect(app: AppHandle, bridge: State<'_, Bridge>) -> Result
         let _ = sink.close().await;
     });
 
-    tauri::async_runtime::spawn(async move {
+    let mut slot = bridge.current.lock().await;
+    let id = slot.next_id();
+    let reader = tauri::async_runtime::spawn(async move {
         let reason = loop {
             match source.next().await {
                 Some(Ok(Message::Text(text))) => {
@@ -93,13 +159,16 @@ pub async fn daemon_connect(app: AppHandle, bridge: State<'_, Bridge>) -> Result
             }
         };
         // Only report the close if this is still the current connection.
-        let current = app.state::<Bridge>();
-        let mut outgoing = current.outgoing.lock().await;
-        if outgoing.as_ref().is_some_and(|s| s.same_channel(&tx)) {
-            *outgoing = None;
-            drop(outgoing);
+        let bridge = app.state::<Bridge>();
+        let ended = bridge.current.lock().await.take_if(id);
+        // Dropping the connection ends its writer; this task is finishing on its own.
+        if ended.is_some() {
             let _ = app.emit(CLOSED_EVENT, reason);
         }
+    });
+    slot.put(Connection {
+        outgoing: tx,
+        reader,
     });
     Ok(())
 }
@@ -107,8 +176,9 @@ pub async fn daemon_connect(app: AppHandle, bridge: State<'_, Bridge>) -> Result
 /// Send one JSON-RPC frame to the daemon.
 #[tauri::command]
 pub async fn daemon_send(bridge: State<'_, Bridge>, text: String) -> Result<(), String> {
-    match bridge.outgoing.lock().await.as_ref() {
-        Some(tx) => tx
+    match bridge.current.lock().await.get() {
+        Some(conn) => conn
+            .outgoing
             .send(text)
             .map_err(|_| "not connected to forged".to_owned()),
         None => Err("not connected to forged".to_owned()),
@@ -117,14 +187,20 @@ pub async fn daemon_send(bridge: State<'_, Bridge>, text: String) -> Result<(), 
 
 /// Start `forged` detached from the app, logging to the data dir.
 fn start_daemon(paths: &Paths) -> Result<(), String> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     use std::os::unix::process::CommandExt;
 
-    std::fs::create_dir_all(&paths.data_dir)
+    // Private from the start; forged refuses a data dir other users can read.
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&paths.data_dir)
         .map_err(|e| format!("creating {}: {e}", paths.data_dir.display()))?;
     let log_path = paths.daemon_log();
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
+        .mode(0o600)
         .open(&log_path)
         .map_err(|e| format!("opening {}: {e}", log_path.display()))?;
     let log_err = log.try_clone().map_err(|e| e.to_string())?;
@@ -168,5 +244,33 @@ async fn wait_for_socket(socket: &Path) -> Result<UnixStream, String> {
             }
             Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Slot;
+
+    #[test]
+    fn a_replaced_owner_cannot_clear_the_slot() {
+        let mut slot = Slot::default();
+        let first = slot.next_id();
+        assert_eq!(slot.put("a"), None);
+        let second = slot.next_id();
+        assert_eq!(slot.put("b"), Some("a"));
+
+        // The first connection's reader ends late: it must not clear the second.
+        assert_eq!(slot.take_if(first), None);
+        assert_eq!(slot.get(), Some(&"b"));
+        assert_eq!(slot.take_if(second), Some("b"));
+        assert_eq!(slot.get(), None);
+    }
+
+    #[test]
+    fn take_empties_the_slot() {
+        let mut slot = Slot::default();
+        slot.put(1);
+        assert_eq!(slot.take(), Some(1));
+        assert_eq!(slot.take(), None);
     }
 }

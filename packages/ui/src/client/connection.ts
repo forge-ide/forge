@@ -51,6 +51,7 @@ export class DaemonConnection {
   private current: ConnectionState = { kind: "starting" };
   private rpc: RpcClient | undefined;
   private attempt = 0;
+  private generation = 0;
   private startedAt = 0;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private readonly subs = new Set<Sub>();
@@ -78,6 +79,8 @@ export class DaemonConnection {
   }
 
   start(): void {
+    // Any attempt still in flight belongs to the previous generation and gives up.
+    this.generation++;
     this.startedAt = Date.now();
     this.attempt = 0;
     this.setState({ kind: "starting" });
@@ -117,9 +120,12 @@ export class DaemonConnection {
   }
 
   private async tryConnect(): Promise<void> {
+    const generation = this.generation;
+    const stale = () => generation !== this.generation;
     let rpc: RpcClient | undefined;
     try {
       await this.transport.connect();
+      if (stale()) return;
       rpc = new RpcClient((text) => this.transport.send(text));
       rpc.onEvent((n) => this.route(n));
       this.rpc = rpc;
@@ -127,6 +133,7 @@ export class DaemonConnection {
         client: "forge-desktop",
         apiVersion: API_VERSION,
       });
+      if (stale()) return;
       if (majorOf(hello.apiVersion) !== majorOf(API_VERSION)) {
         this.setState({
           kind: "failed",
@@ -135,12 +142,13 @@ export class DaemonConnection {
         return;
       }
       for (const sub of this.subs) await this.resubscribe(rpc, sub);
+      if (stale()) return;
       this.attempt = 0;
       this.setState({ kind: "connected", hello });
     } catch (err) {
       rpc?.failAll(new Error("connection failed"));
       if (this.rpc === rpc) this.rpc = undefined;
-      await this.scheduleRetry(message(err));
+      if (!stale()) await this.scheduleRetry(message(err));
     }
   }
 

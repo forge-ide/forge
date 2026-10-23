@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use forge_api::ApiError;
 use forge_api::model::{Project, Repo};
-use forge_config::{PROJECT_CONFIG_FILE, ProjectConfig};
+use forge_config::{ConfigError, PROJECT_CONFIG_FILE, ProjectConfig};
 use tokio::process::Command;
 
 use crate::db::Db;
@@ -74,13 +74,37 @@ async fn load_or_create(root: &Path) -> Result<ProjectConfig, HandlerError> {
     }
 
     let config = default_config(root).await?;
-    let (dir, to_write) = (root.to_path_buf(), config.clone());
-    tokio::task::spawn_blocking(move || to_write.write_new(&dir))
+    let dir = root.to_path_buf();
+    match tokio::task::spawn_blocking(move || write_or_load(&dir, config))
         .await
         .map_err(anyhow::Error::from)?
-        .map_err(|e| anyhow::anyhow!("writing {PROJECT_CONFIG_FILE}: {e}"))?;
-    tracing::info!(root = %root.display(), "wrote default {PROJECT_CONFIG_FILE}");
-    Ok(config)
+    {
+        Ok(config) => Ok(config),
+        Err(e @ ConfigError::Io { .. }) => {
+            Err(anyhow::anyhow!("writing {PROJECT_CONFIG_FILE}: {e}").into())
+        }
+        Err(e) => Err(ApiError::validation(e.to_string()).into()),
+    }
+}
+
+/// Write the default config, or, if another `project.open` wrote one first, use that.
+fn write_or_load(root: &Path, config: ProjectConfig) -> Result<ProjectConfig, ConfigError> {
+    match config.write_new(root) {
+        Ok(()) => {
+            tracing::info!(root = %root.display(), "wrote default {PROJECT_CONFIG_FILE}");
+            Ok(config)
+        }
+        Err(ConfigError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::AlreadyExists =>
+        {
+            let path = root.join(PROJECT_CONFIG_FILE);
+            ProjectConfig::load(root)?.ok_or_else(|| ConfigError::Io {
+                path,
+                source: std::io::Error::other("disappeared while opening the project"),
+            })
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// A single-repo config for a git repository root, on its current branch.
@@ -131,4 +155,27 @@ async fn git(dir: &Path, args: &[&str]) -> Option<String> {
     let out = String::from_utf8(output.stdout).ok()?;
     let out = out.trim();
     (!out.is_empty()).then(|| out.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uses_a_config_written_concurrently() {
+        let dir = tempfile::tempdir().unwrap();
+        let theirs = ProjectConfig::single_repo("theirs", "trunk");
+        theirs.write_new(dir.path()).unwrap();
+
+        let ours = ProjectConfig::single_repo("ours", "main");
+        assert_eq!(write_or_load(dir.path(), ours).unwrap(), theirs);
+    }
+
+    #[test]
+    fn writes_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let ours = ProjectConfig::single_repo("ours", "main");
+        assert_eq!(write_or_load(dir.path(), ours.clone()).unwrap(), ours);
+        assert_eq!(ProjectConfig::load(dir.path()).unwrap(), Some(ours));
+    }
 }
