@@ -11,7 +11,12 @@ publish.workspace = true
 tauri-build.workspace = true
 
 [dependencies]
+forge-config.workspace = true
+futures-util.workspace = true
+serde.workspace = true
 tauri.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
 
 [lints]
 workspace = true

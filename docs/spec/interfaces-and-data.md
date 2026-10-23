@@ -4,9 +4,9 @@ The contracts every crate and the UI build against. Rust types in `forge-api` ar
 
 ## Conventions
 
-- **IDs** are ULIDs with a type prefix: `prj_`, `ses_`, `trn_` (turn), `chk_` (checkpoint), `apr_` (approval), `thr_` (thread), `cmt_` (comment), `hnk_` (hunk). Events use a per-session sequence number instead.
+- **IDs** are ULIDs with a type prefix: `prj_`, `ses_`, `trn_` (turn), `chk_` (checkpoint), `apr_` (approval), `thr_` (thread), `cmt_` (comment), `hnk_` (hunk), `sub_` (event subscription). Events use a per-session sequence number instead.
 - **Wire format:** JSON with camelCase fields. Rust types use snake_case with `#[serde(rename_all = "camelCase")]`.
-- **Times** are RFC 3339 in UTC. **Paths** on the wire are repo-relative with forward slashes; absolute paths never cross the API.
+- **Times** are RFC 3339 in UTC. **Paths** on the wire are repo-relative with forward slashes; absolute paths never cross the API, with two exceptions: `Project.root` and the `path` param of `project.open`, which identify the project on the user's machine.
 - **Versioning:** `server.hello` returns the API version (semver). Adding a field or method is a minor bump; removing or changing one is major. Clients ignore unknown fields.
 
 **Errors** use JSON-RPC errors with application codes and a structured `data` field:
@@ -99,6 +99,13 @@ type Comment = { id: string; author: 'human' | 'agent'; body: string; createdAt:
 
 Notifications arrive as `event` with `{ subscriptionId, topic, seq, event }`. Topics: `board`, `approvals`, `session/<id>`, `project/<id>`.
 
+Method notes:
+
+- **`server.hello`**: `sandboxTiers` lists the tiers this machine can run; it is empty until `forge-sandbox` lands (M3). Clients compare the major `apiVersion` and refuse to continue on a mismatch.
+- **`project.open`**: `path` must be absolute (clients resolve relative paths). If the directory has no `forge.toml`, it must be a git repository root on a branch; the daemon writes a single-repo `forge.toml` (name from the directory, `path = "."`, `base_branch` from the current branch) and never overwrites an existing one. Reopening the same root returns the same project ID and picks up edits to `forge.toml`. Invalid config is `ValidationFailed` with every problem listed.
+- **`events.subscribe`**: `topics` must be non-empty, and `project/<id>` and `session/<id>` must exist (`NotFound` otherwise). A connection can only unsubscribe its own subscriptions, and they end when it disconnects. The meaning of `seq` and `afterSeq` across multi-session topics is settled with the event log in M2.
+- **Methods not yet implemented** return the standard JSON-RPC `-32601` (method not found) with a message naming the method.
+
 ## Events
 
 Every event has the envelope `{ seq, sessionId, at, kind, parent?, body }`. `parent` links a decision, hook run, or result to the tool call it belongs to.
@@ -149,6 +156,17 @@ project_daily_usd = 50.0
 [sessions]
 max_concurrent = 5
 worktree_retention_days = 7
+```
+
+`[budgets]` keys are optional (unset means no cap); `[sessions]` defaults to the values shown. Repo paths must be relative and stay inside the project root.
+
+**`~/.config/forge/config.toml`** (user config; every key optional)
+
+```toml
+default_agent = "claude"          # used when neither session nor project names one
+
+[ui]
+theme = "system"                  # system | light | dark
 ```
 
 **`.forge/agents/<id>.toml`** (agent profile)
@@ -271,6 +289,8 @@ Lines and columns are 1-based. Paths are relative to the session's working direc
 
 One SQLite database per user at `~/.local/share/forge/forge.db` (macOS: `~/Library/Application Support/Forge/forge.db`), in WAL mode, with migrations in `crates/forged/migrations/` run on daemon start. The JSONL event logs remain the source of truth for events; SQLite indexes them.
 
+The schema below is the v0.1 target. Each milestone adds the tables it uses as a new numbered migration (M1 adds `projects` and `repos`); progress is tracked in `PRAGMA user_version`, and a daemon refuses to start on a database newer than it knows.
+
 ```sql
 CREATE TABLE projects (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, root TEXT NOT NULL UNIQUE,
@@ -349,4 +369,4 @@ CREATE VIRTUAL TABLE events_fts USING fts5(session_id UNINDEXED, seq UNINDEXED, 
 | `<data>/agents/` | Agent adapter installs |
 | `$XDG_RUNTIME_DIR/forge/forged.sock` (macOS: `<data>/forged.sock`) | API socket, mode 0600 |
 
-`<data>` is `~/.local/share/forge` on Linux and `~/Library/Application Support/Forge` on macOS.
+`<data>` is `~/.local/share/forge` on Linux (or `$XDG_DATA_HOME/forge`) and `~/Library/Application Support/Forge` on macOS. The daemon log is `<data>/forged.log` when the app starts the daemon. `FORGE_DATA_DIR`, `FORGE_RUNTIME_DIR` (the socket's directory), and `FORGE_CONFIG_DIR` override the data, socket, and user config locations; tests always set them.

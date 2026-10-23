@@ -27,7 +27,7 @@ Rust daemon (`forged`) + Tauri 2 desktop app with SolidJS and CodeMirror 6. Linu
 You need Rust (rustup picks up `rust-toolchain.toml`), Node 24 with `corepack enable` (for pnpm), `just`, and on Linux the WebKitGTK 4.1 dev packages and bubblewrap.
 
 ```sh
-just dev   # run the app with hot reload (starts the daemon once M1 lands)
+just dev   # run the app with hot reload; it starts forged if needed
 just ci    # everything CI runs
 ```
 

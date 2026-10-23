@@ -43,13 +43,13 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 
 ### M1: Daemon core and API
 
-- [ ] `forged` listens on the Unix socket; `forge` CLI connects. Auto-start from the app if not running.
-- [ ] `forge-api` types for the v0.1 method set, with TypeScript generated into `packages/client`.
-- [ ] `server.hello`, `project.open`, `project.list`, `project.get`, `events.subscribe`, `events.query`.
-- [ ] SQLite with migrations; `forge-config` loads and validates `forge.toml` and user config.
-- [ ] UI shows the project list and connection status, and reconnects with `afterSeq`.
+- [x] `forged` listens on the Unix socket; `forge` CLI connects. Auto-start from the app if not running.
+- [x] `forge-api` types for the v0.1 method set, with TypeScript generated into `packages/client`.
+- [x] `server.hello`, `project.open`, `project.list`, `project.get`, `events.subscribe`, `events.query`.
+- [x] SQLite with migrations; `forge-config` loads and validates `forge.toml` and user config.
+- [x] UI shows the project list and connection status, and reconnects with `afterSeq`.
 
-**Done when:** `forge project open .` returns the project; a test kills and restarts the client mid-stream and loses no events; a CI check fails if generated TypeScript is out of date.
+**Done when:** `forge project open .` returns the project, and a CI check fails if generated TypeScript is out of date. The lossless-reconnect test moved to M2, because no events exist until sessions do.
 
 ### M2: Sessions, worktrees, and the fake agent
 
@@ -60,7 +60,7 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 - [ ] `forge-events`: JSONL log plus SQLite index; redaction hook point.
 - [ ] `session.create`, `prompt`, `cancel`, `get`, `list`, `close`.
 
-**Done when:** an integration test runs the fake agent to edit two files and run one command in a worktree, the session moves Provisioning → Ready → Working → Review, and every step is in the event log.
+**Done when:** an integration test runs the fake agent to edit two files and run one command in a worktree, the session moves Provisioning → Ready → Working → Review, and every step is in the event log; and a test kills and restarts a client mid-stream, resubscribes with `afterSeq`, and loses no events. Before that test, settle what `seq` and `afterSeq` mean for topics that span sessions (`board`, `project/<id>`), since event `seq` is per session.
 
 ### M3: Sandbox
 
@@ -126,7 +126,7 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 ## Handing it to an agent
 
 1. **Put the spec in the repo.** It lives in `docs/spec/` and is committed with `AGENTS.md`. Agents read files, not links.
-2. **One task per session.** Split each milestone into tasks of roughly 400 changed lines or less, each on its own branch with its own PR. Give the agent the task, the milestone's done-when check, and the relevant spec files.
+2. **One task per session.** Give the agent the task, the milestone's done-when check, and the relevant spec files. A whole milestone can be one task on one branch.
 3. **Tests first.** Ask the agent to write the done-when check as a failing test before implementing it.
 4. **Interfaces are gated.** Any change to `forge-api`, config schemas, or SQLite migrations needs your explicit approval in the PR. Everything else can be reviewed normally.
 5. **Plan before code** for tasks touching more than two crates: have the agent post a plan and wait for approval.

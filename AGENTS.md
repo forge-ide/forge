@@ -101,7 +101,7 @@ tests/fixtures/      sample repos and fake-agent scripts
 ## Testing notes
 
 - Use `forge-fake-agent` with a YAML script for anything involving sessions. Real agents are for manual smoke tests only (`docs/smoke.md`).
-- Integration tests start a real `forged` against a temp dir with `FORGE_DATA_DIR` and `FORGE_RUNTIME_DIR` set. Never touch the real user data dir in tests.
+- Integration tests start a real `forged` against a temp dir with `FORGE_DATA_DIR`, `FORGE_RUNTIME_DIR`, and `FORGE_CONFIG_DIR` set. Never touch the real user data dir in tests.
 - Policy changes need golden test updates (`cargo insta review`); explain each changed snapshot in the PR.
 - Sandbox tests must assert that escapes fail, not just that normal work succeeds.
 

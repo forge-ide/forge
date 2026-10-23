@@ -11,8 +11,9 @@ install:
 ui-build: install
     pnpm --filter @forge/ui build
 
-# Run the desktop app with hot reload. Starting forged lands in M1.
+# Run the desktop app with hot reload. The app starts the freshly built forged if none is running.
 dev: install
+    cargo build -p forged
     pnpm --filter @forge/desktop tauri dev
 
 # Build everything in release mode.
@@ -45,23 +46,20 @@ icons: install
     pnpm --filter @forge/desktop tauri icon assets/icon-source.png -o src-tauri/icons
     rm -rf apps/desktop/src-tauri/icons/{android,ios,Square*.png,StoreLogo.png,64x64.png}
 
-generated := "packages/client/src/generated docs/schemas"
-
 # Regenerate TypeScript types and JSON Schemas from Rust types.
-gen: install
-    mkdir -p docs/schemas
-    cargo run --quiet -p forge-api --bin forge-api-gen -- packages/client/src/generated/api.ts
-    cargo run --quiet -p forge-config --bin forge-config-schemas -- docs/schemas
-    pnpm exec prettier --log-level warn --ignore-path /dev/null --write {{generated}}
+gen: (_gen-into "packages/client/src/generated" "docs/schemas")
 
-# Fail if generated files are out of date.
-gen-check: gen
-    @if [ -n "$(git status --porcelain -- {{generated}})" ]; then \
-        git status --short -- {{generated}}; \
-        git diff --stat -- {{generated}}; \
-        echo "Generated files are out of date: run 'just gen' and commit the result." >&2; \
-        exit 1; \
-    fi
+# Fail if the generated files differ from what the Rust types produce.
+gen-check: (_gen-into "target/gen-check/client" "target/gen-check/schemas")
+    @diff -ru target/gen-check/client packages/client/src/generated \
+        && diff -ru target/gen-check/schemas docs/schemas \
+        || { echo "Generated files are out of date: run 'just gen' and commit the result." >&2; exit 1; }
+
+_gen-into client schemas: install
+    rm -rf {{schemas}} && mkdir -p {{client}} {{schemas}}
+    cargo run --quiet -p forge-api --bin forge-api-gen -- {{client}}/api.ts
+    cargo run --quiet -p forge-config --bin forge-config-schemas -- {{schemas}}
+    pnpm exec prettier --log-level warn --ignore-path /dev/null --write {{client}} {{schemas}}
 
 # Sandbox escape suite for this platform.
 test-sandbox:

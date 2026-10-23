@@ -1035,8 +1035,13 @@ dependencies = [
 name = "forge-desktop"
 version = "0.0.0"
 dependencies = [
+ "forge-config",
+ "futures-util",
+ "serde",
  "tauri",
  "tauri-build",
+ "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

@@ -18,6 +18,8 @@ fn main() -> ExitCode {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("forged=info")),
         )
         .with_writer(std::io::stderr)
+        // The app redirects stderr to forged.log; keep color codes out of it.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
 
     let result = tokio::runtime::Runtime::new()
