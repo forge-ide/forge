@@ -47,6 +47,8 @@ pub struct ShimContext<'a> {
     pub mcp_url: Option<String>,
     /// Variables as the sandbox sets them for the agent.
     pub var: &'a dyn Fn(&str) -> Option<String>,
+    /// The agent's working directory, a worktree.
+    pub worktree: &'a Path,
 }
 
 /// What to start the agent with.
@@ -59,11 +61,55 @@ pub struct Shim {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("writing the {agent} shim: {source}")]
-pub struct ShimError {
-    agent: String,
-    source: std::io::Error,
+pub enum ShimError {
+    #[error("writing the {agent} shim: {source}")]
+    Write {
+        agent: String,
+        source: std::io::Error,
+    },
+    /// The worktree has config the agent would read and act on without asking, which Forge
+    /// can't outrank.
+    #[error(
+        "{agent} would run commands that {path} names without asking Forge, and Forge can't \
+         switch them off; remove {path} from the branch (or commit it elsewhere) to run {agent} \
+         in Forge"
+    )]
+    RepoConfig { agent: String, path: String },
 }
+
+/// Files in the worktree that make an agent run commands unasked, which no setting Forge can
+/// give ranks above. Gemini reads them only because Forge trusts the worktree (it starts no MCP
+/// server otherwise); codex-acp trusts every project itself.
+fn untrusted_config(agent: &str) -> &'static [&'static str] {
+    match agent {
+        "gemini" => &[".gemini/settings.json", ".gemini/.env"],
+        "codex" => &[".codex/config.toml", ".codex/hooks.json"],
+        _ => &[],
+    }
+}
+
+/// Variables Gemini reads that a repo's `.env` could otherwise set (dotenv never replaces one
+/// already set): where it reads settings, prompts, and credentials from, and what it runs.
+const GEMINI_PINNED_ENV: &[&str] = &[
+    "GEMINI_CLI_HOME",
+    "GEMINI_CLI_SYSTEM_SETTINGS_PATH",
+    "GEMINI_CLI_SYSTEM_DEFAULTS_PATH",
+    "GEMINI_CLI_TRUSTED_FOLDERS_PATH",
+    "GEMINI_SYSTEM_MD",
+    "GEMINI_WRITE_SYSTEM_MD",
+    "GEMINI_SANDBOX",
+    "GEMINI_SANDBOX_PROXY_COMMAND",
+    "GEMINI_CLI_IDE_SERVER_STDIO_COMMAND",
+    "GEMINI_CLI_IDE_SERVER_STDIO_ARGS",
+    "GEMINI_CLI_EXTENSION_REGISTRY_URI",
+    "GEMINI_CLI_AUTH_OVERRIDE",
+    "GEMINI_CLI_CUSTOM_HEADERS",
+    "GEMINI_API_KEY_AUTH_MECHANISM",
+    "GEMINI_MODEL",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_CLOUD_PROJECT",
+    "NODE_OPTIONS",
+];
 
 /// The shim for `manifest`'s agent; for an agent outside the registry, just Forge's MCP
 /// endpoint.
@@ -78,6 +124,15 @@ pub fn prepare(manifest: Option<&Manifest>, cx: &ShimContext<'_>) -> Result<Shim
     let Some(manifest) = manifest else {
         return Ok(shim);
     };
+    for path in untrusted_config(&manifest.id) {
+        // Anything at the path counts: a symlink or a directory is read through, or refused.
+        if std::fs::symlink_metadata(cx.worktree.join(path)).is_ok() {
+            return Err(ShimError::RepoConfig {
+                agent: manifest.name.clone(),
+                path: (*path).to_owned(),
+            });
+        }
+    }
     shim.setup.command_source = manifest.permissions.command;
     shim.env.extend(
         manifest
@@ -86,7 +141,7 @@ pub fn prepare(manifest: Option<&Manifest>, cx: &ShimContext<'_>) -> Result<Shim
             .iter()
             .map(|(k, v)| (k.clone(), v.clone())),
     );
-    let failed = |source| ShimError {
+    let failed = |source| ShimError::Write {
         agent: manifest.id.clone(),
         source,
     };
@@ -153,45 +208,24 @@ fn codex(shim: &mut Shim, cx: &ShimContext<'_>) {
     shim.setup.mode = Some("read-only".into());
 }
 
-/// Gemini CLI: system settings (which rank above the user's and the workspace's) and a policy
-/// file passed with `--policy` (which replaces the agent-writable `~/.gemini/policies` and
-/// ranks above the workspace's). The policy asks for every shell command, edit, write, and MCP
-/// tool at the top of its tier, above the settings-derived allows, and allows only Forge's
-/// `git_commit`.
+/// Gemini CLI: a policy file passed with `--policy`, which replaces the agent-writable
+/// `~/.gemini/policies` and ranks above the workspace's. It asks for every shell command, edit,
+/// write, and MCP tool at the top of its tier, above every settings-derived allow, and allows
+/// only Forge's `git_commit`. Gemini reads system settings only from a root-owned directory,
+/// so Forge gives it no settings at all: what a trusted repo's `.gemini/settings.json` could
+/// run is refused at launch instead (see [`untrusted_config`]).
 fn gemini(shim: &mut Shim, cx: &ShimContext<'_>) -> std::io::Result<()> {
-    let settings = json!({
-        "security": {
-            "auth": { "selectedType": "gemini-api-key" },
-            "disableAlwaysAllow": true,
-        },
-        "general": { "enableAutoUpdate": false, "defaultApprovalMode": "default" },
-        "privacy": { "usageStatisticsEnabled": false },
-        // The workspace is trusted (Gemini starts no MCP server in an untrusted folder, Forge's
-        // included), so the repo's .gemini/settings.json is merged in. Everything there that
-        // runs a command without asking is switched off here, in the tier merged last: tool
-        // discovery and calls, hooks, extensions, and MCP servers other than Forge's.
-        "tools": {
-            "exclude": ["web_fetch", "google_web_search"],
-            "discoveryCommand": "",
-            "callCommand": "",
-        },
-        "hooksConfig": { "enabled": false },
-        "admin": { "extensions": { "enabled": false } },
-        "mcp": { "allowed": [MCP_SERVER] },
-        "advanced": { "ignoreLocalEnv": true },
-        "context": { "fileName": ["GEMINI.md", "AGENTS.md"] },
-    });
-    let settings_path = cx.dir.join("gemini-settings.json");
-    write_new(&settings_path, &serde_json::to_vec_pretty(&settings)?)?;
     let policies = cx.dir.join("gemini-policies");
     std::fs::create_dir(&policies)?;
     write_new(&policies.join("forge.toml"), GEMINI_POLICY.as_bytes())?;
-    shim.env.push((
-        "GEMINI_CLI_SYSTEM_SETTINGS_PATH".into(),
-        settings_path.display().to_string(),
-    ));
     shim.args
         .extend(["--policy".into(), policies.display().to_string()]);
+    // Set, empty, so a repo's .env can't set them.
+    shim.env.extend(
+        GEMINI_PINNED_ENV
+            .iter()
+            .map(|name| ((*name).to_owned(), String::new())),
+    );
     shim.setup.mode = Some("default".into());
     // The system prompt can only be replaced, not added to; Forge's instructions go in with
     // the first prompt instead.
@@ -267,6 +301,8 @@ mod tests {
             dir,
             mcp_url: Some("http://127.0.0.1:9/_forge/tok/mcp".into()),
             var,
+            // An empty worktree: tests that need one with files pass their own.
+            worktree: Path::new("/nonexistent-forge-worktree"),
         }
     }
 
@@ -362,20 +398,16 @@ mod tests {
     }
 
     #[test]
-    fn gemini_puts_its_settings_and_policy_above_the_workspace_and_asks_for_everything() {
+    fn gemini_gets_a_policy_above_the_workspaces_and_no_settings_a_repo_could_override() {
         let dir = tempfile::tempdir().unwrap();
         let shim = prepare(manifest("gemini"), &context(dir.path(), &no_vars)).unwrap();
-        assert_eq!(
-            files(dir.path()),
-            ["gemini-policies/forge.toml", "gemini-settings.json"]
-        );
+        assert_eq!(files(dir.path()), ["gemini-policies/forge.toml"]);
         let env: std::collections::HashMap<_, _> = shim.env.iter().cloned().collect();
-        let settings_path = dir.path().join("gemini-settings.json");
-        assert_eq!(
-            env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"],
-            settings_path.display().to_string()
-        );
         assert_eq!(env["GEMINI_CLI_TRUST_WORKSPACE"], "true");
+        // Pinned empty, so a repo's .env can't point them anywhere.
+        for name in GEMINI_PINNED_ENV {
+            assert_eq!(env[*name], "", "{name}");
+        }
         assert_eq!(
             shim.args,
             [
@@ -383,22 +415,6 @@ mod tests {
                 &dir.path().join("gemini-policies").display().to_string()
             ]
         );
-        let settings: Value =
-            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
-        assert_eq!(settings["security"]["disableAlwaysAllow"], true);
-        assert_eq!(
-            settings["security"]["auth"]["selectedType"],
-            "gemini-api-key"
-        );
-        assert!(settings.get("mcpServers").is_none());
-        assert!(settings["tools"].get("allowed").is_none());
-        // What a trusted repo's settings could otherwise use to run commands unasked.
-        assert_eq!(settings["tools"]["discoveryCommand"], "");
-        assert_eq!(settings["tools"]["callCommand"], "");
-        assert_eq!(settings["hooksConfig"]["enabled"], false);
-        assert_eq!(settings["admin"]["extensions"]["enabled"], false);
-        assert_eq!(settings["mcp"]["allowed"], json!(["forge"]));
-        assert_eq!(settings["advanced"]["ignoreLocalEnv"], true);
         // The policy parses, allows only git_commit, and asks for every shell command.
         let policy: toml::Value = toml::from_str(GEMINI_POLICY).unwrap();
         let rules = policy["rule"].as_array().unwrap();
@@ -416,12 +432,62 @@ mod tests {
                     && r["argsPattern"].as_str() == Some(".*")
                     && r["decision"].as_str() == Some("ask_user"))
         );
+        // Every rule sits at the top of the user tier, above a workspace policy's (tier 3) and
+        // settings-derived allows (4.1-4.95).
+        assert!(
+            rules
+                .iter()
+                .all(|r| r["priority"].as_integer().unwrap() >= 998)
+        );
         assert_eq!(shim.setup.command_source, CommandSource::Title);
         assert_eq!(shim.setup.mode.as_deref(), Some("default"));
         assert!(first_prompt_preamble(manifest("gemini")).is_some());
         assert!(first_prompt_preamble(manifest("claude-code")).is_none());
         // A second launch into the same dir would find the files there: refused, not followed.
         assert!(prepare(manifest("gemini"), &context(dir.path(), &no_vars)).is_err());
+    }
+
+    #[test]
+    fn repo_config_an_agent_would_act_on_unasked_refuses_the_launch() {
+        for (agent, path) in [
+            ("gemini", ".gemini/settings.json"),
+            ("gemini", ".gemini/.env"),
+            ("codex", ".codex/config.toml"),
+            ("codex", ".codex/hooks.json"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let worktree = dir.path().join("wt");
+            std::fs::create_dir_all(worktree.join(path).parent().unwrap()).unwrap();
+            // A dangling symlink counts too.
+            std::os::unix::fs::symlink("/nonexistent", worktree.join(path)).unwrap();
+            let shim_dir = dir.path().join("shim");
+            std::fs::create_dir(&shim_dir).unwrap();
+            let cx = ShimContext {
+                worktree: &worktree,
+                ..context(&shim_dir, &no_vars)
+            };
+            match prepare(manifest(agent), &cx) {
+                Err(ShimError::RepoConfig { path: found, .. }) => assert_eq!(found, path),
+                other => panic!("{agent} {path}: {other:?}"),
+            }
+            assert!(files(&shim_dir).is_empty(), "nothing written");
+        }
+        // Instructions and commands a human invokes are fine, and Claude reads no repo settings.
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("wt");
+        std::fs::create_dir_all(worktree.join(".gemini/commands")).unwrap();
+        std::fs::write(worktree.join(".gemini/GEMINI.md"), "notes").unwrap();
+        std::fs::create_dir_all(worktree.join(".claude")).unwrap();
+        std::fs::write(worktree.join(".claude/settings.json"), "{}").unwrap();
+        for agent in ["gemini", "claude-code"] {
+            let shim_dir = dir.path().join(agent);
+            std::fs::create_dir(&shim_dir).unwrap();
+            let cx = ShimContext {
+                worktree: &worktree,
+                ..context(&shim_dir, &no_vars)
+            };
+            assert!(prepare(manifest(agent), &cx).is_ok(), "{agent}");
+        }
     }
 
     #[test]
@@ -434,9 +500,8 @@ mod tests {
         let none = prepare(
             None,
             &ShimContext {
-                dir: dir.path(),
                 mcp_url: None,
-                var: &no_vars,
+                ..context(dir.path(), &no_vars)
             },
         )
         .unwrap();

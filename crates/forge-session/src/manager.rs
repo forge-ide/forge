@@ -635,6 +635,7 @@ impl SessionManager {
                     dir: &shim_dir,
                     mcp_url,
                     var: &var,
+                    worktree: workspace.cwd(),
                 },
             )
             .map_err(|e| e.to_string())?;
