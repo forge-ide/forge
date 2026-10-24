@@ -875,12 +875,7 @@ impl Handlers {
             }
             GateVerdict::Cancelled => &[],
         };
-        let choice = wanted.iter().find_map(|k| {
-            req.options
-                .iter()
-                .find(|o| o.kind == *k && !saves_a_rule(&o.option_id.0))
-        });
-        let outcome = match choice {
+        let outcome = match choose(&req.options, wanted) {
             Some(option) => RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
                 option.option_id.clone(),
             )),
@@ -994,6 +989,18 @@ fn terminal_argv(command: &str, args: &[String], env: &[(String, String)]) -> Ve
     argv
 }
 
+/// The first option of the `wanted` kinds, in order, that doesn't save a rule of the agent's.
+fn choose<'a>(
+    options: &'a [acp::PermissionOption],
+    wanted: &[acp::PermissionOptionKind],
+) -> Option<&'a acp::PermissionOption> {
+    wanted.iter().find_map(|k| {
+        options
+            .iter()
+            .find(|o| o.kind == *k && !saves_a_rule(&o.option_id.0))
+    })
+}
+
 /// Whether picking permission option `id` makes the agent save a rule of its own that would
 /// let later commands run without asking Forge: Codex offers to amend its exec and network
 /// policies alongside a plain approval.
@@ -1057,10 +1064,39 @@ mod tests {
 
     #[test]
     fn options_that_save_agent_rules_are_never_picked() {
-        assert!(saves_a_rule("accept_execpolicy_amendment"));
-        assert!(saves_a_rule("apply_network_policy_amendment:0"));
-        assert!(!saves_a_rule("allow_once"));
-        assert!(!saves_a_rule("allow_for_session"));
+        use acp::{PermissionOption as Opt, PermissionOptionKind as Kind};
+        // What Codex offers for a command.
+        let codex = [
+            Opt::new("accept_execpolicy_amendment", "Always", Kind::AllowAlways),
+            Opt::new("allow_for_session", "This session", Kind::AllowAlways),
+            Opt::new("decline", "No", Kind::RejectOnce),
+        ];
+        let allow = [Kind::AllowOnce, Kind::AllowAlways];
+        assert_eq!(
+            choose(&codex, &allow).map(|o| &*o.option_id.0),
+            Some("allow_for_session")
+        );
+        let only_rules = [
+            Opt::new("accept_execpolicy_amendment", "Always", Kind::AllowAlways),
+            Opt::new(
+                "apply_network_policy_amendment:0",
+                "Host",
+                Kind::AllowAlways,
+            ),
+        ];
+        assert_eq!(choose(&only_rules, &allow), None);
+        let plain = [
+            Opt::new("always", "Always", Kind::AllowAlways),
+            Opt::new("once", "Once", Kind::AllowOnce),
+        ];
+        assert_eq!(
+            choose(&plain, &allow).map(|o| &*o.option_id.0),
+            Some("once")
+        );
+        assert_eq!(
+            choose(&codex, &[Kind::RejectOnce, Kind::RejectAlways]).map(|o| &*o.option_id.0),
+            Some("decline")
+        );
     }
 
     #[test]
