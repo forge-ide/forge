@@ -221,6 +221,9 @@ async fn dispatch(
             })
             .await
         }
+        SessionSetMode::NAME => {
+            run::<SessionSetMode>(params, async |p| sessions::set_mode(state, p).await).await
+        }
         SessionGet::NAME => {
             run::<SessionGet>(params, async |p| Ok(manager.get(&p.session_id).await?)).await
         }
@@ -235,6 +238,24 @@ async fn dispatch(
             run::<SessionClose>(params, async |p| {
                 let reason = sessions::close_reason(p.outcome);
                 manager.close(&p.session_id, reason).await?;
+                Ok(Empty {})
+            })
+            .await
+        }
+        ApprovalList::NAME => {
+            run::<ApprovalList>(params, async |p| {
+                if let Some(id) = &p.project_id {
+                    get_project(state, id.clone()).await?;
+                }
+                Ok(manager.approvals(p.project_id).await?)
+            })
+            .await
+        }
+        ApprovalDecide::NAME => {
+            run::<ApprovalDecide>(params, async |p| {
+                manager
+                    .decide(&p.approval_id, p.decision, p.remember, p.note)
+                    .await?;
                 Ok(Empty {})
             })
             .await

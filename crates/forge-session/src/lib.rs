@@ -12,4 +12,4 @@ pub mod store;
 pub use manager::{
     AgentLaunch, AgentResolver, CreateRequest, SandboxDirs, SessionError, SessionManager,
 };
-pub use store::{SessionStore, StoreError, WorktreeRecord};
+pub use store::{ApprovalOutcome, ApprovalRecord, SessionStore, StoreError, WorktreeRecord};

@@ -16,7 +16,9 @@ use tokio::sync::Notify;
 
 pub mod script;
 
-pub use script::{Expected, PermissionAction, Script, ScriptError, Step, glob_match};
+pub use script::{
+    ExecStep, Expected, PermissionAction, Script, ScriptError, Step, WriteStep, glob_match,
+};
 
 /// Script position and per-connection state.
 struct State {
@@ -188,9 +190,17 @@ async fn run_turn(
             Step::Write(w) => {
                 let req =
                     WriteTextFileRequest::new(session.clone(), resolve(&cwd, &w.path), w.content);
-                request(cx, req).await?;
+                expect(request(cx, req).await.map(drop), w.expect, "write", &w.path)?;
             }
-            Step::Exec(argv) => exec(cx, &session, &cwd, argv).await?,
+            Step::Exec(e) => {
+                let what = e.argv.join(" ");
+                expect(
+                    exec(cx, &session, &cwd, e.argv).await,
+                    e.expect,
+                    "exec",
+                    &what,
+                )?;
+            }
             Step::RequestPermission(p) => {
                 let (kind, raw) = match p.action {
                     PermissionAction::Exec => (ToolKind::Execute, json!({ "argv": p.argv })),
@@ -266,6 +276,21 @@ async fn exec(
     request(cx, TerminalOutputRequest::new(session.clone(), id.clone())).await?;
     request(cx, ReleaseTerminalRequest::new(session.clone(), id)).await?;
     Ok(())
+}
+
+/// Check a request's result against what the script expects: by default it must succeed;
+/// with `expect: deny` it must be refused, and the turn goes on.
+fn expect(
+    result: Result<(), String>,
+    want: Option<Expected>,
+    step: &str,
+    what: &str,
+) -> Result<(), String> {
+    match (result, want) {
+        (Ok(()), Some(Expected::Deny)) => Err(format!("{step} {what}: expected a refusal")),
+        (Err(_), Some(Expected::Deny)) | (Ok(()), _) => Ok(()),
+        (Err(e), _) => Err(e),
+    }
 }
 
 fn resolve(cwd: &Path, path: &str) -> PathBuf {

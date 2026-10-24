@@ -4,9 +4,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, bail};
-use forge_api::model::{Project, Repo, Session, SessionState, Usage};
-use forge_api::{ProjectId, SessionId, Timestamp};
-use forge_session::{SessionStore, StoreError, WorktreeRecord};
+use forge_api::events::Remember;
+use forge_api::model::{Approval, Mode, Project, Repo, Session, SessionState, Usage};
+use forge_api::{ApprovalId, ProjectId, SessionId, Timestamp};
+use forge_session::{ApprovalOutcome, ApprovalRecord, SessionStore, StoreError, WorktreeRecord};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -15,6 +16,7 @@ use serde::de::DeserializeOwned;
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_projects.sql"),
     include_str!("../migrations/0002_sessions.sql"),
+    include_str!("../migrations/0003_approvals.sql"),
 ];
 
 /// The daemon's database. Every call runs on the blocking pool.
@@ -299,6 +301,144 @@ impl SessionStore for Db {
         id.map(|id| id.parse().map_err(|e| StoreError(format!("{e}"))))
             .transpose()
     }
+
+    fn set_mode(&self, id: &SessionId, mode: Mode, at: Timestamp) -> Result<(), StoreError> {
+        self.lock()
+            .execute(
+                "UPDATE sessions SET mode = ?1, updated_at = ?2 WHERE id = ?3",
+                params![wire(mode), at.to_string(), id.as_str()],
+            )
+            .map(drop)
+            .map_err(store_err)
+    }
+
+    fn insert_approval(&self, approval: &Approval) -> Result<(), StoreError> {
+        let action = serde_json::to_string(&approval.action)
+            .map_err(|e| StoreError(format!("encoding an action: {e}")))?;
+        self.lock()
+            .execute(
+                "INSERT INTO approvals (id, session_id, action_json, reason, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    approval.id.as_str(),
+                    approval.session_id.as_str(),
+                    action,
+                    approval.reason,
+                    approval.created_at.to_string(),
+                ],
+            )
+            .map(drop)
+            .map_err(store_err)
+    }
+
+    fn approval(&self, id: &ApprovalId) -> Result<Option<ApprovalRecord>, StoreError> {
+        self.lock()
+            .query_row(
+                &format!(
+                    "SELECT {APPROVAL_COLUMNS}, a.decision IS NOT NULL FROM approvals a
+                     WHERE a.id = ?1"
+                ),
+                [id.as_str()],
+                |r| {
+                    Ok(ApprovalRecord {
+                        approval: approval_row(r)?,
+                        decided: r.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(store_err)
+    }
+
+    fn end_approval(
+        &self,
+        id: &ApprovalId,
+        outcome: ApprovalOutcome,
+        remember: Option<Remember>,
+        at: Timestamp,
+    ) -> Result<bool, StoreError> {
+        let changed = self
+            .lock()
+            .execute(
+                "UPDATE approvals SET decision = ?1, remember = ?2, decided_at = ?3
+                 WHERE id = ?4 AND decision IS NULL",
+                params![
+                    outcome_name(outcome),
+                    remember.map(wire),
+                    at.to_string(),
+                    id.as_str()
+                ],
+            )
+            .map_err(store_err)?;
+        Ok(changed == 1)
+    }
+
+    fn pending_approvals(&self, project: Option<&ProjectId>) -> Result<Vec<Approval>, StoreError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {APPROVAL_COLUMNS} FROM approvals a JOIN sessions s ON s.id = a.session_id
+                 WHERE a.decision IS NULL AND (?1 IS NULL OR s.project_id = ?1)
+                 ORDER BY a.created_at, a.id"
+            ))
+            .map_err(store_err)?;
+        stmt.query_map([project.map(ProjectId::as_str)], approval_row)
+            .map_err(store_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(store_err)
+    }
+
+    fn cancel_pending_approvals(&self, at: Timestamp) -> Result<Vec<Approval>, StoreError> {
+        let mut conn = self.lock();
+        let tx = conn.transaction().map_err(store_err)?;
+        let pending = {
+            let mut stmt = tx
+                .prepare(&format!(
+                    "SELECT {APPROVAL_COLUMNS} FROM approvals a WHERE a.decision IS NULL
+                     ORDER BY a.created_at, a.id"
+                ))
+                .map_err(store_err)?;
+            stmt.query_map([], approval_row)
+                .map_err(store_err)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(store_err)?
+        };
+        tx.execute(
+            "UPDATE approvals SET decision = ?1, decided_at = ?2 WHERE decision IS NULL",
+            params![outcome_name(ApprovalOutcome::Cancelled), at.to_string()],
+        )
+        .map_err(store_err)?;
+        tx.commit().map_err(store_err)?;
+        Ok(pending)
+    }
+}
+
+const APPROVAL_COLUMNS: &str = "a.id, a.session_id, a.action_json, a.reason, a.created_at";
+
+fn approval_row(r: &Row<'_>) -> rusqlite::Result<Approval> {
+    let text = |i: usize| r.get::<_, String>(i);
+    let bad = |i: usize, e: String| {
+        rusqlite::Error::FromSqlConversionFailure(i, rusqlite::types::Type::Text, e.into())
+    };
+    Ok(Approval {
+        id: text(0)?
+            .parse()
+            .map_err(|e: forge_api::InvalidId| bad(0, e.to_string()))?,
+        session_id: text(1)?
+            .parse()
+            .map_err(|e: forge_api::InvalidId| bad(1, e.to_string()))?,
+        action: serde_json::from_str(&text(2)?).map_err(|e| bad(2, e.to_string()))?,
+        reason: text(3)?,
+        created_at: text(4)?.parse().map_err(|e| bad(4, format!("{e}")))?,
+    })
+}
+
+fn outcome_name(outcome: ApprovalOutcome) -> &'static str {
+    match outcome {
+        ApprovalOutcome::Allow => "allow",
+        ApprovalOutcome::Deny => "deny",
+        ApprovalOutcome::Cancelled => "cancelled",
+    }
 }
 
 fn session_row(r: &Row<'_>) -> rusqlite::Result<Session> {
@@ -465,6 +605,81 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn approvals_end_once_and_list_while_pending() {
+        use forge_api::model::{Action, Mode, SandboxTier};
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("forge.db")).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let project = rt
+            .block_on(db.upsert_project("/p".into(), "p".into(), vec![repo("p", "main")]))
+            .unwrap();
+        let other = rt
+            .block_on(db.upsert_project("/q".into(), "q".into(), vec![repo("q", "main")]))
+            .unwrap();
+        let session = Session {
+            id: SessionId::new(),
+            project_id: project.id.clone(),
+            title: "t".into(),
+            agent_profile: "fake".into(),
+            state: SessionState::Working,
+            mode: Mode::Ask,
+            sandbox: SandboxTier::Unsandboxed,
+            branch: "feat/t".into(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
+            usage: Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_usd: None,
+            },
+        };
+        db.insert(&session, &[]).unwrap();
+        db.set_mode(&session.id, Mode::FullAccess, Timestamp::now())
+            .unwrap();
+        assert_eq!(db.get(&session.id).unwrap().unwrap().mode, Mode::FullAccess);
+
+        let approval = |argv: &str| Approval {
+            id: ApprovalId::new(),
+            session_id: session.id.clone(),
+            action: Action::Exec {
+                argv: vec![argv.into()],
+                cwd: ".".into(),
+            },
+            reason: "why".into(),
+            created_at: Timestamp::now(),
+        };
+        let (a, b) = (approval("a"), approval("b"));
+        db.insert_approval(&a).unwrap();
+        db.insert_approval(&b).unwrap();
+        assert_eq!(db.pending_approvals(None).unwrap(), [a.clone(), b.clone()]);
+        assert_eq!(db.pending_approvals(Some(&project.id)).unwrap().len(), 2);
+        assert!(db.pending_approvals(Some(&other.id)).unwrap().is_empty());
+
+        let at = Timestamp::now();
+        assert!(
+            db.end_approval(&a.id, ApprovalOutcome::Allow, Some(Remember::Session), at)
+                .unwrap()
+        );
+        assert!(
+            !db.end_approval(&a.id, ApprovalOutcome::Deny, None, at)
+                .unwrap()
+        );
+        let record = db.approval(&a.id).unwrap().unwrap();
+        assert_eq!((record.approval, record.decided), (a, true));
+        assert_eq!(
+            db.pending_approvals(None).unwrap(),
+            std::slice::from_ref(&b)
+        );
+        assert_eq!(
+            db.cancel_pending_approvals(at).unwrap(),
+            std::slice::from_ref(&b)
+        );
+        assert!(db.pending_approvals(None).unwrap().is_empty());
+        assert!(db.approval(&b.id).unwrap().unwrap().decided);
+        assert_eq!(db.approval(&ApprovalId::new()).unwrap(), None);
     }
 
     #[test]

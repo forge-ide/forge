@@ -4,12 +4,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use forge_acp::AgentCommand;
-use forge_api::methods::{BranchPreview, BranchPreviewParams, SessionCreateParams, SessionOutcome};
+use forge_api::methods::{
+    BranchPreview, BranchPreviewParams, SessionCreateParams, SessionOutcome, SessionSetModeParams,
+};
 use forge_api::model::{Project, SandboxTier, Session};
 use forge_api::{ApiError, ErrorKind, ProjectId};
 use forge_config::{
-    AgentProfileConfig, BranchRules, ConfigError, Paths, ProfileSandbox, ProjectConfig, UserConfig,
+    AgentProfileConfig, BranchRules, ConfigError, PROJECT_POLICY_FILE, Paths, PolicyConfig,
+    PolicyRule, ProfileSandbox, ProjectConfig, RuleListName, UserConfig,
 };
+use forge_policy::{Layer, Rules};
 use forge_sandbox::proxy::{Allowlist, SecretRoute};
 use forge_sandbox::secrets::{self, SecretStore};
 use forge_sandbox::{Sandbox, TierStatus};
@@ -72,6 +76,27 @@ pub async fn branch_preview(
     };
     let collisions = state.sessions.preview(&project, &branch).await?;
     Ok(BranchPreview { branch, collisions })
+}
+
+/// Change a session's mode. Its sandbox tier is fixed when it starts, so asking for another is
+/// refused.
+pub async fn set_mode(
+    state: &State,
+    params: SessionSetModeParams,
+) -> Result<Session, HandlerError> {
+    let session = state.sessions.get(&params.session_id).await?;
+    if let Some(tier) = params.sandbox
+        && tier != session.sandbox
+    {
+        return Err(ApiError::validation(format!(
+            "session {} runs in the {} sandbox tier, which can't change while it runs; start a \
+             new session for another tier",
+            session.id,
+            forge_sandbox::tier_name(session.sandbox)
+        ))
+        .into());
+    }
+    Ok(state.sessions.set_mode(&session.id, params.mode).await?)
 }
 
 pub fn close_reason(outcome: SessionOutcome) -> &'static str {
@@ -226,13 +251,48 @@ impl AgentResolver for ProfileResolver {
         })?;
         argv[0] = program.display().to_string();
         read_only.push(program);
+        let rules = Arc::new(policy_rules(&self.paths, &root)?);
         Ok(AgentLaunch {
             command: AgentCommand { argv, env: vec![] },
             read_only,
             network,
             secrets,
+            rules,
         })
     }
+
+    fn remember_in_project(
+        &self,
+        session: &Session,
+        list: RuleListName,
+        rule: PolicyRule,
+    ) -> Result<(), ApiError> {
+        let root = self
+            .db
+            .project_root(&session.project_id)
+            .map_err(|e| ApiError::new(ErrorKind::NotFound, e.to_string()))?
+            .ok_or_else(|| ApiError::not_found(format!("project {}", session.project_id)))?;
+        forge_config::append_rule(&root.join(PROJECT_POLICY_FILE), list, &rule)
+            .map_err(|e| ApiError::validation(e.to_string()))
+    }
+}
+
+/// The managed, user, and project policy files, compiled. The project's is read from its root,
+/// never a session's worktree, so an agent's edit to it counts only once merged.
+fn policy_rules(paths: &Paths, root: &Path) -> Result<Rules, ApiError> {
+    let files = [
+        (Layer::Managed, paths.managed_policy.clone()),
+        (Layer::User, paths.user_policy()),
+        (Layer::Project, root.join(PROJECT_POLICY_FILE)),
+    ];
+    let mut layers = Vec::new();
+    for (layer, path) in files {
+        let config = PolicyConfig::load(&path)
+            .map_err(|e| ApiError::validation(format!("{layer} policy: {e}")))?;
+        layers.push((layer, config));
+    }
+    let layers: Vec<(Layer, &PolicyConfig)> = layers.iter().map(|(l, c)| (*l, c)).collect();
+    Rules::compile(&layers).map_err(|e| ApiError::validation(e.to_string()))
 }
 
 /// The profile's `[network] allow`, as the egress proxy's allowlist.

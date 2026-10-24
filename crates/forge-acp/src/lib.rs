@@ -1,16 +1,16 @@
 //! ACP client.
 //!
 //! [`AcpClient`] starts an agent process and speaks ACP to it over stdio. It serves the agent's
-//! file reads and writes inside the session's [`Workspace`], runs its terminals, passes
-//! permission requests to a [`PermissionHandler`], and turns what happens into session events
-//! for an [`EventSink`].
+//! file reads and writes inside the session's [`Workspace`], runs its terminals, asks a
+//! [`Gate`] before each permission request, write, and terminal, and turns what happens into
+//! session events for an [`EventSink`].
 
 pub mod client;
 pub mod terminal;
 pub mod workspace;
 
 pub use client::{
-    AcpClient, AcpError, AgentCommand, AgentExit, DenyAll, EventSink, PermissionDecision,
-    PermissionHandler, PermissionQuery,
+    AcpClient, AcpError, AgentCommand, AgentExit, AllowAll, DenyAll, EventSink, Gate, GateKind,
+    GateRequest, GateVerdict,
 };
 pub use workspace::{PathError, Resolved, Root, Workspace};

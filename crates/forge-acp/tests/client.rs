@@ -5,9 +5,12 @@ use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use forge_acp::{AcpClient, AcpError, AgentCommand, DenyAll, EventSink, Root, Workspace};
+use forge_acp::{
+    AcpClient, AcpError, AgentCommand, AllowAll, DenyAll, EventSink, Gate, GateKind, GateRequest,
+    GateVerdict, Root, Workspace,
+};
 use forge_api::TurnId;
-use forge_api::events::{EventKind, EventPayload, Verdict};
+use forge_api::events::{EventKind, EventPayload};
 use forge_api::model::{Action, EditKind};
 use futures_util::future::BoxFuture;
 
@@ -65,6 +68,10 @@ impl Fixture {
     }
 
     async fn start(&self, script: &str) -> AcpClient {
+        self.start_with(script, Arc::new(AllowAll)).await
+    }
+
+    async fn start_with(&self, script: &str, gate: Arc<dyn Gate>) -> AcpClient {
         let path = self.dir.path().join("script.yaml");
         std::fs::write(&path, script).unwrap();
         let workspace = Workspace::new(vec![Root {
@@ -79,10 +86,7 @@ impl Fixture {
             ],
             env: vec![],
         };
-        let deny = Arc::new(DenyAll {
-            reason: "no policy".into(),
-        });
-        AcpClient::start(command, workspace, unsandboxed(), self.sink.clone(), deny)
+        AcpClient::start(command, workspace, unsandboxed(), self.sink.clone(), gate)
             .await
             .unwrap()
     }
@@ -198,33 +202,200 @@ async fn writes_outside_the_worktree_fail_and_leave_nothing() {
     );
 }
 
+/// Records what it is asked and answers with a fixed verdict.
+struct Recording {
+    verdict: GateVerdict,
+    asked: Mutex<Vec<GateRequest>>,
+}
+
+impl Gate for Recording {
+    fn decide(&self, request: GateRequest) -> BoxFuture<'_, GateVerdict> {
+        self.asked.lock().unwrap().push(request);
+        let verdict = self.verdict.clone();
+        Box::pin(async move { verdict })
+    }
+}
+
 #[tokio::test]
-async fn permission_requests_are_denied_and_logged() {
+async fn the_gate_decides_permission_requests_writes_and_terminals() {
     let fx = Fixture::new();
+    let gate = Arc::new(Recording {
+        verdict: GateVerdict::Deny("no".into()),
+        asked: Mutex::default(),
+    });
     let client = fx
-        .start(
+        .start_with(
             r#"
 steps:
   - request_permission: { action: exec, argv: ["pnpm", "add", "left-pad"] }
   - expect_permission: deny
+  - request_permission: { action: edit, path: "sub/../notes.txt" }
+  - write: { path: a.txt, content: "secret?", expect: deny }
+  - exec: { argv: ["touch", "ran"], expect: deny }
   - end_turn
 "#,
+            gate.clone(),
         )
         .await;
     assert_eq!(
         client.prompt(TurnId::new(), "x".into()).await.unwrap(),
         "end_turn"
     );
+    assert!(!fx.root().join("a.txt").exists());
+    assert!(!fx.root().join("ran").exists());
+
+    let asked = gate.asked.lock().unwrap().clone();
+    let seen: Vec<_> = asked
+        .iter()
+        .map(|r| (r.kind, r.action.clone(), r.content.clone()))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            (
+                GateKind::Permission,
+                Some(Action::Exec {
+                    argv: vec!["pnpm".into(), "add".into(), "left-pad".into()],
+                    cwd: ".".into()
+                }),
+                None
+            ),
+            (
+                GateKind::Permission,
+                Some(Action::Edit {
+                    path: "notes.txt".into(),
+                    kind: EditKind::Modify
+                }),
+                None
+            ),
+            (
+                GateKind::Write,
+                Some(Action::Edit {
+                    path: "a.txt".into(),
+                    kind: EditKind::Create
+                }),
+                Some("secret?".into())
+            ),
+            (
+                GateKind::Terminal,
+                Some(Action::Exec {
+                    argv: vec!["touch".into(), "ran".into()],
+                    cwd: ".".into()
+                }),
+                None
+            ),
+        ]
+    );
+    // Each refused write or command ends with a failed result naming the reason.
+    use EventKind::*;
+    assert_eq!(
+        fx.sink.kinds(),
+        [
+            ToolCall, ToolCall, ToolCall, ToolResult, ToolCall, ToolResult
+        ]
+    );
     let events = fx.sink.0.lock().unwrap().clone();
-    assert!(matches!(&events[0], EventPayload::ToolCall(b)
-        if b.action == Action::Exec { argv: vec!["pnpm".into(), "add".into(), "left-pad".into()], cwd: ".".into() }));
-    match &events[1] {
-        EventPayload::PolicyDecision(b) => {
-            assert_eq!(b.verdict, Verdict::Deny);
-            assert_eq!(b.reason, "no policy");
+    assert!(matches!(&events[3], EventPayload::ToolResult(b)
+        if b.status == "failed" && b.output.as_deref() == Some("refused by policy: no")));
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn permission_edits_through_a_symlink_or_out_of_the_worktree_map_to_no_action() {
+    let fx = Fixture::new();
+    std::fs::write(fx.root().join(".env"), "TOKEN=1\n").unwrap();
+    std::os::unix::fs::symlink(".env", fx.root().join("notes.txt")).unwrap();
+    let gate = Arc::new(Recording {
+        verdict: GateVerdict::Deny("no".into()),
+        asked: Mutex::default(),
+    });
+    let client = fx
+        .start_with(
+            r#"
+steps:
+  - request_permission: { action: edit, path: notes.txt }
+  - request_permission: { action: edit, path: ../outside.txt }
+  - end_turn
+"#,
+            gate.clone(),
+        )
+        .await;
+    client.prompt(TurnId::new(), "x".into()).await.unwrap();
+    let actions: Vec<_> = gate
+        .asked
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| r.action.clone())
+        .collect();
+    assert_eq!(actions, [None, None]);
+    client.shutdown().await;
+}
+
+/// Swaps `sub` for a symlink to `outside` while a write waits for its decision, as an agent's
+/// own process could, then allows it.
+struct SwapWhileWaiting {
+    root: PathBuf,
+    outside: PathBuf,
+}
+
+impl Gate for SwapWhileWaiting {
+    fn decide(&self, request: GateRequest) -> BoxFuture<'_, GateVerdict> {
+        if request.kind == GateKind::Write {
+            std::fs::rename(self.root.join("sub"), self.root.join("sub-old")).unwrap();
+            std::os::unix::fs::symlink(&self.outside, self.root.join("sub")).unwrap();
         }
-        other => panic!("{other:?}"),
+        Box::pin(async { GateVerdict::Allow })
     }
+}
+
+#[tokio::test]
+async fn a_path_swapped_for_a_symlink_while_waiting_is_not_written() {
+    let fx = Fixture::new();
+    let outside = fx.dir.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::create_dir(fx.root().join("sub")).unwrap();
+    let gate = Arc::new(SwapWhileWaiting {
+        root: fx.root(),
+        outside: outside.clone(),
+    });
+    let client = fx
+        .start_with(
+            "steps:\n  - write: { path: sub/b.txt, content: x, expect: deny }\n  - end_turn\n",
+            gate,
+        )
+        .await;
+    assert_eq!(
+        client.prompt(TurnId::new(), "x".into()).await.unwrap(),
+        "end_turn"
+    );
+    assert!(!outside.join("b.txt").exists());
+    assert!(!fx.root().join("sub-old/b.txt").exists());
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_cancelled_permission_request_answers_cancelled() {
+    let fx = Fixture::new();
+    let gate = Arc::new(Recording {
+        verdict: GateVerdict::Cancelled,
+        asked: Mutex::default(),
+    });
+    let client = fx
+        .start_with(
+            r#"
+steps:
+  - request_permission: { action: exec, argv: ["ls"] }
+  - expect_permission: deny
+  - end_turn
+"#,
+            gate,
+        )
+        .await;
+    assert_eq!(
+        client.prompt(TurnId::new(), "x".into()).await.unwrap(),
+        "end_turn"
+    );
     client.shutdown().await;
 }
 
