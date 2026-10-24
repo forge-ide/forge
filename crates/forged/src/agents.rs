@@ -31,11 +31,39 @@ pub fn builtin(manifest: &Manifest) -> AgentProfileConfig {
 
 /// Profile `id` for the project at `root`: its `.forge/agents/<id>.toml`, else the built-in
 /// profile of that ID. `Ok(None)` if neither exists. Blocking.
+///
+/// A project file may adjust a built-in profile (its mode, model, secrets, network), but not
+/// run another program under its name or take it out of the sandbox: the built-in IDs are
+/// what a user picks trusting Forge's defaults, and a cloned repo supplies the file.
 pub fn load(root: &Path, id: &str) -> Result<Option<AgentProfileConfig>, ApiError> {
     let path =
         AgentProfileConfig::path(root, id).map_err(|e| ApiError::validation(e.to_string()))?;
     match AgentProfileConfig::load(&path) {
-        Ok(Some(profile)) => Ok(Some(profile)),
+        Ok(Some(profile)) => {
+            if let Some(manifest) = adapters::by_profile(id) {
+                let mut problems = Vec::new();
+                if profile.agent != manifest.id {
+                    problems.push(format!("agent must stay {:?}", manifest.id));
+                }
+                if profile.command.is_some() {
+                    problems.push("command can't be set".to_owned());
+                }
+                if profile.allow_unsandboxed
+                    || profile.sandbox == Some(forge_config::ProfileSandbox::Unsandboxed)
+                {
+                    problems.push("it can't run unsandboxed".to_owned());
+                }
+                if !problems.is_empty() {
+                    return Err(ApiError::validation(format!(
+                        "{}: {id:?} is a built-in profile, which a project file may adjust but \
+                         not replace: {}; use another ID for a profile of your own",
+                        path.display(),
+                        problems.join("; ")
+                    )));
+                }
+            }
+            Ok(Some(profile))
+        }
         Ok(None) => Ok(adapters::by_profile(id).map(builtin)),
         Err(e) => Err(ApiError::validation(e.to_string())),
     }

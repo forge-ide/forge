@@ -1083,15 +1083,26 @@ mod tests {
     #[test]
     fn options_that_save_agent_rules_are_never_picked() {
         use acp::{PermissionOption as Opt, PermissionOptionKind as Kind};
-        // What Codex offers for a command.
+        // What Codex offers for a command: a plain approval first, then a session-wide one,
+        // then rules of its own.
         let codex = [
-            Opt::new("accept_execpolicy_amendment", "Always", Kind::AllowAlways),
+            Opt::new("allow_once", "Yes, proceed", Kind::AllowOnce),
             Opt::new("allow_for_session", "This session", Kind::AllowAlways),
+            Opt::new("accept_execpolicy_amendment", "Always", Kind::AllowAlways),
             Opt::new("decline", "No", Kind::RejectOnce),
         ];
         let allow = [Kind::AllowOnce, Kind::AllowAlways];
         assert_eq!(
             choose(&codex, &allow).map(|o| &*o.option_id.0),
+            Some("allow_once")
+        );
+        // Without a plain approval, the session-wide one; never a rule.
+        let no_once = [
+            Opt::new("accept_execpolicy_amendment", "Always", Kind::AllowAlways),
+            Opt::new("allow_for_session", "This session", Kind::AllowAlways),
+        ];
+        assert_eq!(
+            choose(&no_once, &allow).map(|o| &*o.option_id.0),
             Some("allow_for_session")
         );
         let only_rules = [

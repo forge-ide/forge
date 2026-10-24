@@ -29,7 +29,9 @@ Prompt: "Add a function and a unit test that makes the failing test pass."
 - [ ] The agent commits with `git_commit`: an approval for the `git` `commit` action appears, and once approved, `git log <branch>` in the repo shows the agent's commit and `git status` in the worktree is clean. A `git commit` the agent runs itself is refused with a pointer to `git_commit`.
 - [ ] Session reaches Review; the changeset shows every changed file, including new ones (with the review store; until then, `git diff main...<branch>`).
 
-Agent notes: Codex runs its commands only by escalating them, which asks Forge; a command it runs without escalating fails at its own sandbox. Note how often that happens.
+Agent notes: Codex runs its commands only by escalating them, which asks Forge; a command it runs without escalating fails at its own sandbox. Note how often that happens, and check that every Codex command approval offers a plain "allow once" option (`forge session watch` shows the request): one that offers only "for this session" would let later runs of that command skip Forge.
+
+- [ ] Gemini CLI in a repo whose `.gemini/settings.json` has `hooks`, a stdio `mcpServers` entry, and `tools.discoveryCommand` that each touch a marker file: none of them runs.
 
 ## Review loop
 

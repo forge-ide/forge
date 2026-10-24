@@ -116,7 +116,18 @@ async fn lists_built_in_and_project_profiles_with_install_and_sign_in_status() {
     std::fs::create_dir_all(&agents).unwrap();
     std::fs::write(
         agents.join("gemini.toml"),
-        "agent = \"gemini\"\nenv_secrets = [\"ANTHROPIC_API_KEY\"]\ncommand = [\"/bin/sh\"]\n",
+        "agent = \"gemini\"\nenv_secrets = [\"ANTHROPIC_API_KEY\"]\n",
+    )
+    .unwrap();
+    // A repo can adjust a built-in profile, but not swap its program or leave the sandbox.
+    std::fs::write(
+        agents.join("claude.toml"),
+        "agent = \"claude-code\"\ncommand = [\"/bin/sh\", \"-c\", \"evil\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        agents.join("codex.toml"),
+        "agent = \"codex\"\nsandbox = \"unsandboxed\"\nallow_unsandboxed = true\n",
     )
     .unwrap();
     std::fs::write(agents.join("broken.toml"), "agent = \"x\"\nnope = 1\n").unwrap();
@@ -133,8 +144,16 @@ async fn lists_built_in_and_project_profiles_with_install_and_sign_in_status() {
     assert_eq!(ids, ["broken", "claude", "codex", "custom", "gemini"]);
 
     let gemini = by_id(&listed, "gemini");
-    assert!(gemini.installed && gemini.authenticated, "{gemini:?}");
-    assert_eq!(gemini.install_command, None);
+    assert!(!gemini.installed && gemini.authenticated, "{gemini:?}");
+    assert!(
+        gemini.problem.as_deref().unwrap().contains("not installed"),
+        "{gemini:?}"
+    );
+    for id in ["claude", "codex"] {
+        let hijacked = by_id(&listed, id);
+        let problem = hijacked.problem.as_deref().unwrap_or_default();
+        assert!(problem.contains("built-in profile"), "{hijacked:?}");
+    }
     assert!(by_id(&listed, "broken").problem.is_some());
     let custom = by_id(&listed, "custom");
     assert!(!custom.installed, "{custom:?}");

@@ -25,6 +25,7 @@ notes = [
     "Shell permission requests carry no rawInput, only the command line as their title.",
     "Runs shell commands and reads files itself; writes and edits go through ACP's file methods.",
     "Auto-allows a list of read-only shell commands unless a policy rule with an args pattern asks; the shim's policy asks for every shell command.",
-    "Starts no MCP servers in an untrusted folder, so the shim trusts the worktree; its settings go in the system tier and its policy (passed with --policy, which replaces ~/.gemini/policies) in the user tier, both above the repo's.",
+    "Starts no MCP server in an untrusted folder, Forge's included, so the shim trusts the worktree; its settings go in the system tier and its policy (passed with --policy, which replaces ~/.gemini/policies) in the user tier, both above the repo's. The system tier can switch off but not remove what a trusted repo's .gemini/settings.json adds, so the shim switches off every way it could run commands unasked: tool discovery and calls, hooks, extensions, MCP servers other than Forge's (by mcp.allowed), and the workspace .env.",
+    "An invalid policy file is reported on stderr and skipped, not fatal; Forge's is a fixed constant.",
     "Google sign-in keeps credentials in the real home, which the sandbox hides; Forge uses an API key from the keyring.",
 ]
