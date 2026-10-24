@@ -772,3 +772,40 @@ steps:
     assert_eq!(count(&events, EventKind::ApprovalRequested), 0);
     daemon.stop();
 }
+
+#[tokio::test]
+async fn a_patch_is_allowed_only_if_every_path_it_changes_is() {
+    let home = temp_home();
+    let repo = git_repo_with_commit(home.path(), "demo");
+    fake_profile(
+        &repo,
+        "fake",
+        r#"
+steps:
+  - request_permission: { action: edit, paths: [src/a.rs, src/b.rs] }
+  - expect_permission: allow
+  - request_permission: { action: edit, paths: [src/a.rs, .env] }
+  - expect_permission: deny
+  - request_permission: { action: edit, paths: [src/a.rs, ../../../../outside.txt] }
+  - expect_permission: deny
+  - end_turn
+"#,
+    );
+    let daemon = Daemon::start(home.path());
+    let mut client = daemon.client().await;
+    let project = open(&mut client, &repo).await;
+    let session = start(&mut client, &project, Mode::AcceptEdits, "go").await;
+    wait_for_state(&mut client, &session.id, SessionState::Review).await;
+    let events = all_events(&mut client, &session.id).await;
+    assert_eq!(
+        decisions(&events),
+        [
+            (Verdict::Allow, "mode:accept-edits".into()),
+            (Verdict::Allow, "mode:accept-edits".into()),
+            (Verdict::Allow, "mode:accept-edits".into()),
+            (Verdict::Deny, "guard:protected-path".into()),
+            (Verdict::Deny, "guard:unknown-action".into()),
+        ]
+    );
+    daemon.stop();
+}

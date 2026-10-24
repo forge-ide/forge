@@ -103,6 +103,9 @@ pub struct PermissionStep {
     pub argv: Vec<String>,
     #[serde(default)]
     pub path: Option<String>,
+    /// For an edit: the paths it changes, as its locations (a patch touching several files).
+    #[serde(default)]
+    pub paths: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -207,6 +210,7 @@ steps:
                 action: PermissionAction::Exec,
                 argv: vec!["pnpm".into(), "add".into(), "left-pad".into()],
                 path: None,
+                paths: vec![],
             })
         );
         assert_eq!(script.steps[10], Step::EndTurn);

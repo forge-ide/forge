@@ -848,26 +848,39 @@ impl Handlers {
             let commands = lock(&self.commands);
             permission::target(&req, &self.workspace, self.command_source, &commands)
         };
-        let (action, unmapped) = match target {
-            Target::Action(action) => (Some(action), Unmapped::Nothing),
-            Target::Read { inside_worktree } => (None, Unmapped::Read { inside_worktree }),
-            Target::Fetch => (None, Unmapped::Fetch),
-            Target::Unknown => (None, Unmapped::Nothing),
+        let asks: Vec<(Option<Action>, Unmapped)> = match target {
+            Target::Action(action) => vec![(Some(action), Unmapped::Nothing)],
+            Target::Edits(edits) => edits
+                .into_iter()
+                .map(|e| (Some(e), Unmapped::Nothing))
+                .collect(),
+            Target::Read { inside_worktree } => vec![(None, Unmapped::Read { inside_worktree })],
+            Target::Fetch => vec![(None, Unmapped::Fetch)],
+            Target::Unknown => vec![(None, Unmapped::Nothing)],
         };
-        let request = GateRequest {
-            kind: GateKind::Permission,
-            tool_call_id: req.tool_call.tool_call_id.0.to_string(),
-            title: fields.title.clone().unwrap_or_default(),
-            action,
-            content: None,
-            unmapped,
-        };
-        if let Some(action) = &request.action {
-            self.call(&request.tool_call_id, action, &request.title)
-                .await;
+        // Each path a patch changes is decided on its own, and the first that isn't allowed
+        // decides the request.
+        let mut verdict = GateVerdict::Allow;
+        for (action, unmapped) in asks {
+            let request = GateRequest {
+                kind: GateKind::Permission,
+                tool_call_id: req.tool_call.tool_call_id.0.to_string(),
+                title: fields.title.clone().unwrap_or_default(),
+                action,
+                content: None,
+                unmapped,
+            };
+            if let Some(action) = &request.action {
+                self.call(&request.tool_call_id, action, &request.title)
+                    .await;
+            }
+            verdict = self.gate.decide(request).await;
+            if verdict != GateVerdict::Allow {
+                break;
+            }
         }
         use acp::PermissionOptionKind as Kind;
-        let wanted: &[Kind] = match self.gate.decide(request).await {
+        let wanted: &[Kind] = match verdict {
             GateVerdict::Allow => &[Kind::AllowOnce, Kind::AllowAlways],
             // The agent's own tool can't run a different command.
             GateVerdict::Deny(_) | GateVerdict::Rewrite(_) => {

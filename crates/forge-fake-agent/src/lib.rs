@@ -216,7 +216,10 @@ async fn run_turn(
             Step::RequestPermission(p) => {
                 let (kind, raw) = match p.action {
                     PermissionAction::Exec => (ToolKind::Execute, json!({ "argv": p.argv })),
-                    PermissionAction::Edit => (ToolKind::Edit, json!({ "path": p.path })),
+                    PermissionAction::Edit if p.path.is_some() => {
+                        (ToolKind::Edit, json!({ "path": p.path }))
+                    }
+                    PermissionAction::Edit => (ToolKind::Edit, json!({})),
                     PermissionAction::Read => (ToolKind::Read, json!({})),
                     PermissionAction::Fetch => {
                         (ToolKind::Fetch, json!({ "url": "https://example.com/" }))
@@ -230,6 +233,14 @@ async fn run_turn(
                     && let Some(path) = &p.path
                 {
                     fields = fields.locations(vec![ToolCallLocation::new(resolve(&cwd, path))]);
+                }
+                if !p.paths.is_empty() {
+                    fields = fields.locations(
+                        p.paths
+                            .iter()
+                            .map(|path| ToolCallLocation::new(resolve(&cwd, path)))
+                            .collect::<Vec<_>>(),
+                    );
                 }
                 let options = vec![
                     PermissionOption::new("allow", "Allow", PermissionOptionKind::AllowOnce),

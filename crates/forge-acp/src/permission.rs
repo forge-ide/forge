@@ -17,6 +17,9 @@ const REMEMBERED_COMMANDS: usize = 256;
 pub enum Target {
     /// An action the policy engine decides.
     Action(Action),
+    /// Edits to several paths in one request (a patch, a move), each decided on its own; the
+    /// request is allowed only if every one is.
+    Edits(Vec<Action>),
     /// Reading or searching files, which the policy engine has no action for: the sandbox
     /// bounds every read, so Forge only checks that each named path is inside a worktree.
     Read { inside_worktree: bool },
@@ -85,29 +88,44 @@ pub fn target(
             }
         }
         acp::ToolKind::Edit | acp::ToolKind::Delete | acp::ToolKind::Move => {
-            let Some(path) = fields
+            // Every path the request names: a patch or a move changes them all.
+            let mut paths: Vec<PathBuf> = fields
                 .locations
-                .as_ref()
-                .and_then(|l| l.first())
+                .iter()
+                .flatten()
                 .map(|l| l.path.clone())
-                .or_else(|| raw.and_then(|r| r.get("path")?.as_str().map(PathBuf::from)))
-            else {
+                .collect();
+            if let Some(path) = raw.and_then(|r| r.get("path")?.as_str()) {
+                paths.push(PathBuf::from(path));
+            }
+            if paths.is_empty() {
                 return Target::Unknown;
-            };
-            // Resolved as a write would be, so the path decided is the file that would really
-            // change: a symlink the agent planted can't carry an allowed edit elsewhere.
-            let Ok(resolved) = workspace.resolve_write(&workspace.cwd().join(path)) else {
-                return Target::Unknown;
-            };
+            }
             let kind = if kind == acp::ToolKind::Delete {
                 EditKind::Delete
             } else {
                 EditKind::Modify
             };
-            Target::Action(Action::Edit {
-                path: resolved.display,
-                kind,
-            })
+            let mut edits: Vec<Action> = Vec::new();
+            for path in paths {
+                // Resolved as a write would be, so the path decided is the file that would
+                // really change: a symlink the agent planted can't carry an allowed edit
+                // elsewhere. One path that can't be resolved leaves nothing to decide.
+                let Ok(resolved) = workspace.resolve_write(&workspace.cwd().join(path)) else {
+                    return Target::Unknown;
+                };
+                let edit = Action::Edit {
+                    path: resolved.display,
+                    kind,
+                };
+                if !edits.contains(&edit) {
+                    edits.push(edit);
+                }
+            }
+            match edits.len() {
+                1 => Target::Action(edits.remove(0)),
+                _ => Target::Edits(edits),
+            }
         }
         acp::ToolKind::Read | acp::ToolKind::Search => {
             let mut paths: Vec<PathBuf> = fields
@@ -425,6 +443,46 @@ mod tests {
                 inside_worktree: false
             }
         );
+    }
+
+    #[test]
+    fn a_patch_is_decided_on_every_path_it_names() {
+        let (dir, ws) = workspace();
+        let at = |p: &std::path::Path| acp::ToolCallLocation::new(p.to_path_buf());
+        let edit = |path: &str| Action::Edit {
+            path: path.into(),
+            kind: EditKind::Modify,
+        };
+        let req = request(acp::ToolKind::Edit, |f| {
+            f.locations(vec![
+                at(&ws.cwd().join("a.rs")),
+                at(&ws.cwd().join(".github/workflows/ci.yml")),
+                at(&ws.cwd().join("a.rs")),
+            ])
+        });
+        assert_eq!(
+            decide(&req, &ws, CommandSource::RawInput),
+            Target::Edits(vec![edit("a.rs"), edit(".github/workflows/ci.yml")])
+        );
+        // One path out of the worktree, wherever it comes, leaves nothing to allow.
+        let req = request(acp::ToolKind::Edit, |f| {
+            f.locations(vec![at(&ws.cwd().join("a.rs")), at(&dir.path().join("x"))])
+        });
+        assert_eq!(decide(&req, &ws, CommandSource::RawInput), Target::Unknown);
+        // A move names both ends; a delete deletes each.
+        let req = request(acp::ToolKind::Delete, |f| {
+            f.locations(vec![at(&ws.cwd().join("a.rs")), at(&ws.cwd().join("b.rs"))])
+        });
+        let delete = |path: &str| Action::Edit {
+            path: path.into(),
+            kind: EditKind::Delete,
+        };
+        assert_eq!(
+            decide(&req, &ws, CommandSource::RawInput),
+            Target::Edits(vec![delete("a.rs"), delete("b.rs")])
+        );
+        let req = request(acp::ToolKind::Edit, |f| f);
+        assert_eq!(decide(&req, &ws, CommandSource::RawInput), Target::Unknown);
     }
 
     #[test]
