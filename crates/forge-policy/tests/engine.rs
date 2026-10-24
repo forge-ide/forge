@@ -679,8 +679,18 @@ async fn files_that_run_code_on_the_users_machine_are_protected() {
         "lefthook.yml",
         "lefthook.yaml",
         ".pre-commit-config.yaml",
+        ".lefthook.yml",
+        "lefthook-local.yaml",
+        "mise.toml",
         ".mise.toml",
+        "mise.local.toml",
+        ".mise/tasks/build",
+        ".config/mise.toml",
         ".vscode/tasks.json",
+        ".vscode/launch.json",
+        ".vscode/settings.json",
+        "forge.code-workspace",
+        "tools/dev.code-workspace",
     ] {
         let d = e.decide(&edit(path), Mode::FullAccess).await.decision;
         assert_eq!(d.verdict, Verdict::Deny, "{path}");
@@ -688,8 +698,9 @@ async fn files_that_run_code_on_the_users_machine_are_protected() {
     }
     for path in [
         "docs/envrc.md",
-        ".vscode/settings.json",
+        ".vscode/extensions.json",
         "web/.vscode/tasks.json",
+        "docs/mise.md",
     ] {
         let d = e.decide(&edit(path), Mode::FullAccess).await.decision;
         assert_eq!(d.verdict, Verdict::Allow, "{path}");
