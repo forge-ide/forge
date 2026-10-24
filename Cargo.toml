@@ -17,12 +17,14 @@ forge-events = { path = "crates/forge-events" }
 forge-fake-agent = { path = "crates/forge-fake-agent" }
 forge-git = { path = "crates/forge-git" }
 forge-hooks = { path = "crates/forge-hooks" }
+forge-mcp = { path = "crates/forge-mcp" }
 forge-policy = { path = "crates/forge-policy" }
 forge-sandbox = { path = "crates/forge-sandbox" }
 forge-session = { path = "crates/forge-session" }
 
 agent-client-protocol = { version = "3.5.0", default-features = false }
 anyhow = "1.0.104"
+base64 = "0.23.1"
 clap = { version = "4.6.6", features = ["derive"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 globset = "0.4.20"

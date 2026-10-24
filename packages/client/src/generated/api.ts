@@ -1,6 +1,6 @@
 // Generated from crates/forge-api by `just gen`. Do not edit.
 
-export const API_VERSION = "0.3.0";
+export const API_VERSION = "0.4.0";
 
 export const EVENT_NOTIFICATION = "event";
 
@@ -130,8 +130,38 @@ export type AgentProfile = {
    */
   agent: string;
   installed: boolean;
+  /**
+   * Every secret the profile names is in the keyring, or for a registry agent with none
+   * of them there, its own subscription sign-in is present and unexpired.
+   */
   authenticated: boolean;
+  /**
+   * The installed version, when Forge can tell.
+   */
   version?: string;
+  /**
+   * The agent's display name, for a registry agent.
+   */
+  name?: string;
+  /**
+   * The version Forge is tested with, for a registry agent.
+   */
+  supportedVersion?: string;
+  /**
+   * The command that installs the supported version, when the agent isn't installed or
+   * is at another version.
+   */
+  installCommand?: string;
+  /**
+   * How to sign in, when the agent isn't signed in: the command that stores each missing
+   * secret in the keyring, or the agent's own command that signs in with a subscription.
+   */
+  signIn?: string;
+  /**
+   * Why a session with this profile can't start, when Forge can tell before starting one
+   * (an invalid profile file, an unknown agent).
+   */
+  problem?: string;
 };
 
 export type Usage = { inputTokens: number; outputTokens: number; costUsd?: number };
@@ -446,6 +476,14 @@ export type ProjectOpenParams = {
 
 export type ProjectGetParams = { projectId: ProjectId };
 
+export type AgentListParams = {
+  /**
+   * List this project's profiles: the built-in ones and its `.forge/agents/` files. Without
+   * it, only the built-in profiles.
+   */
+  projectId?: ProjectId;
+};
+
 export type SessionCreateParams = {
   projectId: ProjectId;
   agentProfile: string;
@@ -595,7 +633,7 @@ export type Methods = {
   "project.open": { params: ProjectOpenParams; result: Project };
   "project.list": { params: Empty; result: Array<Project> };
   "project.get": { params: ProjectGetParams; result: Project };
-  "agent.list": { params: Empty; result: Array<AgentProfile> };
+  "agent.list": { params: AgentListParams; result: Array<AgentProfile> };
   "session.create": { params: SessionCreateParams; result: Session };
   "session.prompt": { params: SessionPromptParams; result: TurnResult };
   "session.cancel": { params: SessionIdParams; result: Empty };

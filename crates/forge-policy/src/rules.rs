@@ -44,6 +44,12 @@ pub const BUILTIN_PROTECTED: &[&str] = &[
     ".vscode/launch.json",
     ".vscode/settings.json",
     "*.code-workspace",
+    // Coding agents' project config, which can name hooks, MCP servers, and tools they run:
+    // the user's own agents run them outside the sandbox, and in Forge a cloned repo's or an
+    // agent's own copy would run commands unasked.
+    ".claude/",
+    ".codex/",
+    ".gemini/",
 ];
 
 /// Every layer's rules, compiled once per session launch.

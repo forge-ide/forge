@@ -45,6 +45,11 @@ pub(crate) fn extra(
         .collect()
 }
 
+/// The value of `name` in `env`.
+pub(crate) fn lookup(env: &[(String, String)], name: &str) -> Option<String> {
+    env.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

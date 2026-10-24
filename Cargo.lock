@@ -1110,17 +1110,21 @@ name = "forge-acp"
 version = "0.0.0"
 dependencies = [
  "agent-client-protocol",
+ "base64 0.23.1",
  "forge-api",
  "forge-fake-agent",
  "forge-sandbox",
  "futures-util",
  "rustix",
+ "serde",
  "serde_json",
  "similar 3.2.0",
  "tempfile",
  "thiserror 2.0.21",
+ "time",
  "tokio",
  "tokio-util",
+ "toml 1.1.8+spec-1.1.0",
  "tracing",
  "ulid",
 ]
@@ -1226,6 +1230,13 @@ version = "0.0.0"
 [[package]]
 name = "forge-mcp"
 version = "0.0.0"
+dependencies = [
+ "forge-sandbox",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "forge-policy"
@@ -1280,6 +1291,7 @@ dependencies = [
  "forge-events",
  "forge-git",
  "forge-hooks",
+ "forge-mcp",
  "forge-policy",
  "forge-sandbox",
  "futures-util",
@@ -1287,6 +1299,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "ulid",
 ]
 
 [[package]]

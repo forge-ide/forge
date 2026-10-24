@@ -30,9 +30,13 @@ pub enum Step {
     Exec(ExecStep),
     /// Ask the client for permission.
     RequestPermission(PermissionStep),
+    /// Call a tool on the MCP server the client named `forge` at session start. The turn
+    /// fails unless the call succeeds, or with `expect: deny`, unless the tool refuses.
+    McpCall(McpCallStep),
     /// Fail the turn unless the last permission request got this answer.
     ExpectPermission(Expected),
-    /// Stream an agent message.
+    /// Stream an agent message; `{forge_mcp_url}` in it is replaced by the URL of the client's
+    /// `forge` MCP server.
     Message(String),
     /// Wait, unless the turn is cancelled first.
     SleepMs(u64),
@@ -84,12 +88,25 @@ impl From<ExecForm> for ExecStep {
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct McpCallStep {
+    pub tool: String,
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+    #[serde(default)]
+    pub expect: Option<Expected>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PermissionStep {
     pub action: PermissionAction,
     #[serde(default)]
     pub argv: Vec<String>,
     #[serde(default)]
     pub path: Option<String>,
+    /// For an edit: the paths it changes, as its locations (a patch touching several files).
+    #[serde(default)]
+    pub paths: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -97,6 +114,10 @@ pub struct PermissionStep {
 pub enum PermissionAction {
     Exec,
     Edit,
+    /// Read `path`, as a tool of kind `read` with it as the location.
+    Read,
+    /// Fetch a URL, as a tool of kind `fetch`.
+    Fetch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -169,11 +190,20 @@ steps:
   - expect_permission: deny
   - message: "Done."
   - sleep_ms: 10
+  - mcp_call: { tool: git_commit, arguments: { message: "add f" }, expect: allow }
   - end_turn
 "#,
         )
         .unwrap();
-        assert_eq!(script.steps.len(), 10);
+        assert_eq!(script.steps.len(), 11);
+        assert_eq!(
+            script.steps[9],
+            Step::McpCall(McpCallStep {
+                tool: "git_commit".into(),
+                arguments: serde_json::json!({ "message": "add f" }),
+                expect: Some(Expected::Allow),
+            })
+        );
         assert_eq!(script.steps[0], Step::ExpectPrompt("*retry*".into()));
         assert_eq!(
             script.steps[5],
@@ -181,9 +211,10 @@ steps:
                 action: PermissionAction::Exec,
                 argv: vec!["pnpm".into(), "add".into(), "left-pad".into()],
                 path: None,
+                paths: vec![],
             })
         );
-        assert_eq!(script.steps[9], Step::EndTurn);
+        assert_eq!(script.steps[10], Step::EndTurn);
     }
 
     #[test]

@@ -106,6 +106,7 @@ pub fn generate() -> String {
         .add::<HelloResult>()
         .add::<ProjectOpenParams>()
         .add::<ProjectGetParams>()
+        .add::<AgentListParams>()
         .add::<SessionCreateParams>()
         .add::<CollisionResolution>()
         .add::<BranchPreviewParams>()

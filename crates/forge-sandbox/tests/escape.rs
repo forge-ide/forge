@@ -132,11 +132,12 @@ impl Fixture {
             resolver: Arc::new(TestDns(upstream_addr)),
             log: Arc::new(move |c| log.lock().unwrap().push(c)),
             limits: Limits::default(),
-            routes: vec![SecretRoute {
-                secret: forge_sandbox::secrets::known("ANTHROPIC_API_KEY").unwrap(),
-                value: Secret::new(ROUTE_SECRET),
-            }],
+            routes: vec![SecretRoute::fixed(
+                forge_sandbox::secrets::known("ANTHROPIC_API_KEY").unwrap(),
+                Secret::new(ROUTE_SECRET),
+            )],
             upstream: Some(Arc::new(PlainUpstream)),
+            local: None,
         })
         .await
         .unwrap();

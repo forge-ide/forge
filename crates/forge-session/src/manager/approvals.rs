@@ -4,12 +4,12 @@
 
 use std::sync::{Arc, Weak};
 
-use forge_acp::{EventSink, Gate, GateKind, GateRequest, GateVerdict};
+use forge_acp::{EventSink, Gate, GateKind, GateRequest, GateVerdict, Unmapped};
 use forge_api::events::{
     ApprovalDecidedBody, ApprovalDecision, ApprovalRequestedBody, EventPayload, PolicyDecisionBody,
     Remember, Verdict,
 };
-use forge_api::model::{Action, Approval, EditKind, SessionState};
+use forge_api::model::{Action, Approval, EditKind, Mode, SessionState};
 use forge_api::{ApiError, ApprovalId, ErrorKind, SessionId, Timestamp};
 use forge_config::{PolicyRule, RuleListName};
 use forge_hooks::HookRunner;
@@ -84,16 +84,56 @@ impl Gate for SessionGate {
 }
 
 impl SessionGate {
+    /// The mode the session's next decision uses.
+    pub(super) async fn mode(&self) -> Mode {
+        match self.manager.upgrade() {
+            Some(manager) => manager
+                .get(&self.session)
+                .await
+                .map_or(Mode::Ask, |s| s.mode),
+            None => Mode::Ask,
+        }
+    }
+
     async fn evaluate(&self, request: GateRequest) -> Result<GateVerdict, SessionError> {
         let id = request.tool_call_id.clone();
         let Some(manager) = self.manager.upgrade() else {
             return Ok(GateVerdict::Deny("Forge is shutting down".into()));
         };
         let Some(action) = request.action else {
-            let reason = "the request describes nothing Forge can check, so it is refused";
-            self.record(&id, Verdict::Deny, reason, "guard:unknown-action")
-                .await;
-            return Ok(GateVerdict::Deny(reason.into()));
+            let (verdict, reason, source) = match request.unmapped {
+                // The sandbox bounds every read; Forge only keeps reads to the worktrees.
+                Unmapped::Read {
+                    inside_worktree: true,
+                } => (
+                    Verdict::Allow,
+                    "reading inside the session's worktrees",
+                    "read:worktree",
+                ),
+                Unmapped::Read {
+                    inside_worktree: false,
+                } => (
+                    Verdict::Deny,
+                    "the agent may only read inside the session's worktrees",
+                    "guard:outside-worktree",
+                ),
+                Unmapped::Fetch => (
+                    Verdict::Deny,
+                    "agents can't fetch with their own tools; the egress proxy's allowlist \
+                     decides the network, so fetch with a command, which goes through it",
+                    "network:allowlist",
+                ),
+                Unmapped::Nothing => (
+                    Verdict::Deny,
+                    "the request describes nothing Forge can check, so it is refused",
+                    "guard:unknown-action",
+                ),
+            };
+            self.record(&id, verdict, reason, source).await;
+            return Ok(match verdict {
+                Verdict::Allow => GateVerdict::Allow,
+                _ => GateVerdict::Deny(reason.into()),
+            });
         };
         let mode = manager.get(&self.session).await?.mode;
         let checked = Request {
@@ -137,6 +177,10 @@ impl SessionGate {
             }
             _ => decision.reason.clone(),
         };
+        let shown = match &request.detail {
+            Some(detail) => format!("{shown} ({detail})"),
+            None => shown,
+        };
         if outcome.action != checked.action && decision.verdict != Verdict::Deny {
             // A hook rewrote the action. Only a terminal can run the rewritten command; the
             // agent's own tools can't, so it is told what to run instead.
@@ -161,7 +205,7 @@ impl SessionGate {
         // or rule would flag in the write itself (its content, for one).
         let granted = decision.verdict == Verdict::Ask
             && matches!(decision.source, Source::Mode(_))
-            && request.kind != GateKind::Permission
+            && matches!(request.kind, GateKind::Write | GateKind::Terminal)
             && self.take_grant(&outcome.action);
         let verdict = if granted {
             let reason = "a human allowed this in the agent's permission request";

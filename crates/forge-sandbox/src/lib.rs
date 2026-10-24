@@ -155,6 +155,10 @@ pub trait Sandbox: Send + Sync + 'static {
 pub trait SessionSandbox: Send + Sync + 'static {
     fn tier(&self) -> SandboxTier;
 
+    /// The value the sandbox gives variable `name` (`HTTP_PROXY`, `HOME`, ...), as a process
+    /// inside it sees it.
+    fn var(&self, name: &str) -> Option<String>;
+
     /// A command that runs `program args` in `cwd` inside the sandbox, with the sandbox's
     /// environment plus `env`. `env` (which an agent chooses for its terminals) can't replace
     /// any variable the sandbox sets (`PATH`, `HOME`, `TMPDIR`, the proxy variables, ...), and

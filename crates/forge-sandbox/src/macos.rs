@@ -113,6 +113,10 @@ impl SessionSandbox for SeatbeltSession {
         self.tier
     }
 
+    fn var(&self, name: &str) -> Option<String> {
+        crate::env::lookup(&self.env, name)
+    }
+
     fn command(
         &self,
         program: &str,

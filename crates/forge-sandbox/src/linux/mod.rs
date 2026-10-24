@@ -144,6 +144,10 @@ impl SessionSandbox for Light {
         SandboxTier::Light
     }
 
+    fn var(&self, name: &str) -> Option<String> {
+        crate::env::lookup(&self.env, name)
+    }
+
     fn command(
         &self,
         program: &str,
@@ -223,6 +227,10 @@ impl Bwrap {
 impl SessionSandbox for Bwrap {
     fn tier(&self) -> SandboxTier {
         SandboxTier::Standard
+    }
+
+    fn var(&self, name: &str) -> Option<String> {
+        crate::env::lookup(&self.env, name)
     }
 
     fn command(

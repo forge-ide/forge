@@ -323,6 +323,37 @@ impl Engine {
     }
 
     /// Steps 1 and 2: hard denies and guards. `None` if neither decides.
+    /// The guards on a path an agent changes, by an edit or in a commit: denied when it is
+    /// outside the worktree, inside `.git`, or protected.
+    pub fn guard_path(&self, path: &str) -> Option<Decision> {
+        let Some(path) = paths::normalize(path) else {
+            return Some(Decision::new(
+                Verdict::Deny,
+                format!("{path:?} is outside the worktree"),
+                Source::OutsideWorktree,
+            ));
+        };
+        if path.split('/').any(is_git_dir_name) {
+            return Some(Decision::new(
+                Verdict::Deny,
+                format!("{path:?} is inside .git"),
+                Source::OutsideWorktree,
+            ));
+        }
+        if let Some(p) = self.rules.protected(&path) {
+            return Some(Decision::new(
+                Verdict::Deny,
+                format!(
+                    "{path:?} is a protected path ({} pattern {:?}); a human edits it outside \
+                     the agent",
+                    p.layer, p.pattern
+                ),
+                Source::ProtectedPath,
+            ));
+        }
+        None
+    }
+
     pub fn check(&self, request: &Request, mode: Mode) -> Option<Decision> {
         let action = &request.action;
         let cmd = match action {
@@ -370,32 +401,10 @@ impl Engine {
                 Source::OpaqueCommand,
             ));
         }
-        if let Action::Edit { path, .. } = action {
-            let Some(path) = paths::normalize(path) else {
-                return Some(Decision::new(
-                    Verdict::Deny,
-                    format!("{path:?} is outside the worktree"),
-                    Source::OutsideWorktree,
-                ));
-            };
-            if path.split('/').any(is_git_dir_name) {
-                return Some(Decision::new(
-                    Verdict::Deny,
-                    format!("{path:?} is inside .git"),
-                    Source::OutsideWorktree,
-                ));
-            }
-            if let Some(p) = self.rules.protected(&path) {
-                return Some(Decision::new(
-                    Verdict::Deny,
-                    format!(
-                        "{path:?} is a protected path ({} pattern {:?}); a human edits it outside \
-                         the agent",
-                        p.layer, p.pattern
-                    ),
-                    Source::ProtectedPath,
-                ));
-            }
+        if let Action::Edit { path, .. } = action
+            && let Some(decision) = self.guard_path(path)
+        {
+            return Some(decision);
         }
         let mut kinds = Vec::new();
         if let Some(content) = &request.content {

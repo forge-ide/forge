@@ -147,3 +147,45 @@ async fn status_prints_hello() {
     assert_eq!(hello["apiVersion"], forge_api::API_VERSION);
     env.stop_daemon().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lists_agents_and_approvals_and_checks_wire_names() {
+    let mut env = Env::new();
+    env.start_daemon().await;
+    let agents: Vec<forge_api::model::AgentProfile> =
+        stdout_json(&env.forge(env.home.path(), &["agent", "list"]).await);
+    let ids: Vec<_> = agents.iter().map(|a| a.id.as_str()).collect();
+    assert_eq!(ids, ["claude", "codex", "gemini"]);
+    assert!(agents.iter().all(|a| a.supported_version.is_some()));
+
+    let pending: Vec<serde_json::Value> =
+        stdout_json(&env.forge(env.home.path(), &["approval", "list"]).await);
+    assert!(pending.is_empty());
+
+    // Modes and decisions take their wire names, and anything else fails before connecting.
+    let project = forge_api::ProjectId::new().to_string();
+    let output = env
+        .forge(
+            env.home.path(),
+            &[
+                "session",
+                "create",
+                "--project",
+                &project,
+                "--agent",
+                "claude",
+                "--title",
+                "t",
+                "--mode",
+                "yolo",
+            ],
+        )
+        .await;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("yolo"));
+    let output = env
+        .forge(env.home.path(), &["approval", "decide", "apr_x", "maybe"])
+        .await;
+    assert!(!output.status.success());
+    env.stop_daemon().await;
+}

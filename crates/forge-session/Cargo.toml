@@ -14,6 +14,7 @@ forge-config.workspace = true
 forge-events.workspace = true
 forge-git.workspace = true
 forge-hooks.workspace = true
+forge-mcp.workspace = true
 forge-policy.workspace = true
 forge-sandbox.workspace = true
 futures-util.workspace = true
@@ -21,6 +22,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+ulid.workspace = true
 
 [lints]
 workspace = true

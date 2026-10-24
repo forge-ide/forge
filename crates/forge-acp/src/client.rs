@@ -1,7 +1,6 @@
 //! The ACP connection to one agent process.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -29,6 +28,8 @@ use tokio::process::Child;
 use tokio::sync::{oneshot, watch};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
+use crate::adapters::CommandSource;
+use crate::permission::{self, Target, ToolCommands};
 use crate::terminal::{DEFAULT_OUTPUT_LIMIT, ExitInfo, Pipe, Terminals};
 use crate::workspace::{PathError, Workspace};
 
@@ -58,10 +59,13 @@ pub enum GateKind {
     Write,
     /// A command in a client terminal.
     Terminal,
+    /// A call to one of Forge's own tools (`git_commit`), through its MCP endpoint.
+    Tool,
 }
 
 /// An action the agent wants to take, for the [`Gate`] to decide. `action` is `None` when a
-/// permission request describes nothing Forge can map to an action.
+/// permission request describes nothing Forge can map to an action; `unmapped` then says what
+/// it asked for, if Forge can tell.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GateRequest {
     pub kind: GateKind,
@@ -70,6 +74,42 @@ pub struct GateRequest {
     pub action: Option<Action>,
     /// The content of a write, for the secret scan.
     pub content: Option<String>,
+    pub unmapped: Unmapped,
+    /// What the human deciding should also see, such as the files a commit changes.
+    pub detail: Option<String>,
+}
+
+/// What a permission request without an action asked for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Unmapped {
+    /// Nothing Forge can check.
+    #[default]
+    Nothing,
+    /// Reading or searching files: inside the session's worktrees, or not.
+    Read { inside_worktree: bool },
+    /// Fetching a URL with the agent's own tool.
+    Fetch,
+}
+
+/// How to open the agent's ACP session.
+#[derive(Clone, Debug, Default)]
+pub struct SessionSetup {
+    /// Where the agent's execute permission requests carry their command.
+    pub command_source: CommandSource,
+    /// MCP servers offered to the agent, over HTTP.
+    pub mcp_servers: Vec<McpEndpoint>,
+    /// `_meta` for `session/new`.
+    pub meta: Option<serde_json::Map<String, serde_json::Value>>,
+    /// The ACP mode the agent must be in before the first prompt. The session fails to start
+    /// if the agent doesn't offer it.
+    pub mode: Option<String>,
+}
+
+/// An MCP server the agent reaches over Streamable HTTP.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpEndpoint {
+    pub name: String,
+    pub url: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -185,6 +225,7 @@ impl AcpClient {
     /// The agent's terminals run in the same sandbox.
     pub async fn start(
         command: AgentCommand,
+        setup: SessionSetup,
         workspace: Workspace,
         sandbox: Arc<dyn SessionSandbox>,
         sink: Arc<dyn EventSink>,
@@ -220,6 +261,8 @@ impl AcpClient {
             gate,
             terminals: terminals.clone(),
             turn: turn.clone(),
+            command_source: setup.command_source,
+            commands: Mutex::new(ToolCommands::default()),
         });
 
         let (exit_tx, exit_rx) = watch::channel(None);
@@ -265,11 +308,34 @@ impl AcpClient {
                 .write_text_file(true))
             .terminal(true);
         let init = InitializeRequest::new(ProtocolVersion::V1).client_capabilities(capabilities);
-        let setup = async {
-            client.request(init).await?;
-            client.request(NewSessionRequest::new(cwd)).await
+        let opened = async {
+            let agent = client.request(init).await?;
+            // Forge's tools are reached over HTTP; an agent that can't do that goes without.
+            let http = agent.agent_capabilities.mcp_capabilities.http;
+            if !http && !setup.mcp_servers.is_empty() {
+                tracing::warn!(
+                    "the agent can't reach MCP servers over HTTP; it gets none of Forge's tools"
+                );
+            }
+            let servers = setup
+                .mcp_servers
+                .iter()
+                .filter(|_| http)
+                .map(|s| acp::McpServer::Http(acp::McpServerHttp::new(&s.name, &s.url)))
+                .collect();
+            let session = client
+                .request(
+                    NewSessionRequest::new(cwd)
+                        .mcp_servers(servers)
+                        .meta(setup.meta.clone()),
+                )
+                .await?;
+            if let Some(mode) = &setup.mode {
+                client.enter_mode(&session, mode).await?;
+            }
+            Ok(session)
         };
-        match setup.await {
+        match opened.await {
             Ok(session) => {
                 client.session = session.session_id;
                 Ok(client)
@@ -279,6 +345,30 @@ impl AcpClient {
                 Err(e)
             }
         }
+    }
+
+    /// Put a new session in ACP mode `mode`, which the agent must offer. An agent may pick its
+    /// starting mode from settings a repo controls, so the mode is set whatever it reports.
+    async fn enter_mode(
+        &self,
+        session: &acp::NewSessionResponse,
+        mode: &str,
+    ) -> Result<(), AcpError> {
+        let offered = session
+            .modes
+            .as_ref()
+            .is_some_and(|m| m.available_modes.iter().any(|a| *a.id.0 == *mode));
+        if !offered {
+            return Err(AcpError::Protocol(format!(
+                "the agent doesn't offer the {mode:?} mode Forge runs it in"
+            )));
+        }
+        self.request(acp::SetSessionModeRequest::new(
+            session.session_id.clone(),
+            mode.to_owned(),
+        ))
+        .await?;
+        Ok(())
     }
 
     /// Run one prompt turn; returns the stop reason (`end_turn`, `cancelled`, ...).
@@ -403,6 +493,9 @@ struct Handlers {
     gate: Arc<dyn Gate>,
     terminals: Arc<Terminals>,
     turn: Arc<Mutex<Option<TurnId>>>,
+    command_source: CommandSource,
+    /// Commands the agent reported in its tool calls.
+    commands: Mutex<ToolCommands>,
 }
 
 type AcpResult<T> = Result<T, agent_client_protocol::Error>;
@@ -579,6 +672,8 @@ impl Handlers {
             title,
             action: Some(action),
             content: Some(content.clone()),
+            unmapped: Unmapped::Nothing,
+            detail: None,
         };
         if self.allowed(request).await?.is_some() {
             return Err(self.refuse(&id, "a write can't be rewritten".into()).await);
@@ -662,6 +757,8 @@ impl Handlers {
             title,
             action: Some(action),
             content: None,
+            unmapped: Unmapped::Nothing,
+            detail: None,
         };
         let (program, args, env) = match self.allowed(request).await? {
             Some(argv) => {
@@ -751,19 +848,44 @@ impl Handlers {
         req: RequestPermissionRequest,
     ) -> AcpResult<RequestPermissionResponse> {
         let fields = &req.tool_call.fields;
-        let request = GateRequest {
-            kind: GateKind::Permission,
-            tool_call_id: req.tool_call.tool_call_id.0.to_string(),
-            title: fields.title.clone().unwrap_or_default(),
-            action: permission_action(&req, &self.workspace),
-            content: None,
+        let target = {
+            let commands = lock(&self.commands);
+            permission::target(&req, &self.workspace, self.command_source, &commands)
         };
-        if let Some(action) = &request.action {
-            self.call(&request.tool_call_id, action, &request.title)
-                .await;
+        let asks: Vec<(Option<Action>, Unmapped)> = match target {
+            Target::Action(action) => vec![(Some(action), Unmapped::Nothing)],
+            Target::Edits(edits) => edits
+                .into_iter()
+                .map(|e| (Some(e), Unmapped::Nothing))
+                .collect(),
+            Target::Read { inside_worktree } => vec![(None, Unmapped::Read { inside_worktree })],
+            Target::Fetch => vec![(None, Unmapped::Fetch)],
+            Target::Unknown => vec![(None, Unmapped::Nothing)],
+        };
+        // Each path a patch changes is decided on its own, and the first that isn't allowed
+        // decides the request.
+        let mut verdict = GateVerdict::Allow;
+        for (action, unmapped) in asks {
+            let request = GateRequest {
+                kind: GateKind::Permission,
+                tool_call_id: req.tool_call.tool_call_id.0.to_string(),
+                title: fields.title.clone().unwrap_or_default(),
+                action,
+                content: None,
+                unmapped,
+                detail: None,
+            };
+            if let Some(action) = &request.action {
+                self.call(&request.tool_call_id, action, &request.title)
+                    .await;
+            }
+            verdict = self.gate.decide(request).await;
+            if verdict != GateVerdict::Allow {
+                break;
+            }
         }
         use acp::PermissionOptionKind as Kind;
-        let wanted: &[Kind] = match self.gate.decide(request).await {
+        let wanted: &[Kind] = match verdict {
             GateVerdict::Allow => &[Kind::AllowOnce, Kind::AllowAlways],
             // The agent's own tool can't run a different command.
             GateVerdict::Deny(_) | GateVerdict::Rewrite(_) => {
@@ -771,10 +893,7 @@ impl Handlers {
             }
             GateVerdict::Cancelled => &[],
         };
-        let choice = wanted
-            .iter()
-            .find_map(|k| req.options.iter().find(|o| o.kind == *k));
-        let outcome = match choice {
+        let outcome = match choose(&req.options, wanted) {
             Some(option) => RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
                 option.option_id.clone(),
             )),
@@ -816,6 +935,20 @@ impl Handlers {
 
     async fn update(&self, notification: SessionNotification) {
         let payload = match notification.update {
+            SessionUpdate::ToolCall(call) => {
+                let mut commands = lock(&self.commands);
+                commands.record(&call.tool_call_id.0, call.raw_input.as_ref());
+                commands.record_changes(&call.tool_call_id.0, &call.content);
+                return;
+            }
+            SessionUpdate::ToolCallUpdate(update) => {
+                let mut commands = lock(&self.commands);
+                commands.record(&update.tool_call_id.0, update.fields.raw_input.as_ref());
+                if let Some(content) = &update.fields.content {
+                    commands.record_changes(&update.tool_call_id.0, content);
+                }
+                return;
+            }
             SessionUpdate::AgentMessageChunk(chunk) => {
                 let ContentBlock::Text(text) = chunk.content else {
                     return;
@@ -879,51 +1012,24 @@ fn terminal_argv(command: &str, args: &[String], env: &[(String, String)]) -> Ve
     argv
 }
 
-/// The [`Action`] a permission request describes, when it maps to one.
-fn permission_action(req: &RequestPermissionRequest, workspace: &Workspace) -> Option<Action> {
-    let fields = &req.tool_call.fields;
-    let raw = fields.raw_input.as_ref();
-    match fields.kind? {
-        acp::ToolKind::Execute => {
-            let argv = match raw.and_then(|r| r.get("argv").or_else(|| r.get("command"))) {
-                Some(serde_json::Value::Array(items)) => items
-                    .iter()
-                    .filter_map(|v| v.as_str().map(str::to_owned))
-                    .collect(),
-                // A command string is a shell line, which is what the agent's shell runs;
-                // splitting it here would keep its quotes inside the words.
-                Some(serde_json::Value::String(cmd)) => {
-                    vec!["sh".to_owned(), "-c".to_owned(), cmd.clone()]
-                }
-                _ => return None,
-            };
-            Some(Action::Exec {
-                argv,
-                cwd: ".".into(),
-            })
-        }
-        acp::ToolKind::Edit | acp::ToolKind::Delete | acp::ToolKind::Move => {
-            let path = fields
-                .locations
-                .as_ref()
-                .and_then(|l| l.first())
-                .map(|l| l.path.clone())
-                .or_else(|| raw.and_then(|r| r.get("path")?.as_str().map(PathBuf::from)))?;
-            // Resolved as a write would be, so the path decided is the file that would really
-            // change: a symlink the agent planted can't carry an allowed edit elsewhere.
-            let path = workspace
-                .resolve_write(&workspace.cwd().join(path))
-                .ok()?
-                .display;
-            let kind = if fields.kind == Some(acp::ToolKind::Delete) {
-                EditKind::Delete
-            } else {
-                EditKind::Modify
-            };
-            Some(Action::Edit { path, kind })
-        }
-        _ => None,
-    }
+/// The first option of the `wanted` kinds, in order, that doesn't save a rule of the agent's.
+fn choose<'a>(
+    options: &'a [acp::PermissionOption],
+    wanted: &[acp::PermissionOptionKind],
+) -> Option<&'a acp::PermissionOption> {
+    wanted.iter().find_map(|k| {
+        options
+            .iter()
+            .find(|o| o.kind == *k && !saves_a_rule(&o.option_id.0))
+    })
+}
+
+/// Whether picking permission option `id` makes the agent save a rule of its own that would
+/// let later commands run without asking Forge: Codex offers to amend its exec and network
+/// policies alongside a plain approval.
+fn saves_a_rule(id: &str) -> bool {
+    id.starts_with("accept_execpolicy_amendment")
+        || id.starts_with("apply_network_policy_amendment")
 }
 
 fn exit_status(info: ExitInfo) -> TerminalExitStatus {
@@ -979,53 +1085,52 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 mod tests {
     use super::*;
 
-    fn permission(raw: serde_json::Value) -> RequestPermissionRequest {
-        let fields = acp::ToolCallUpdateFields::new()
-            .kind(acp::ToolKind::Execute)
-            .raw_input(raw);
-        RequestPermissionRequest::new(
-            acp::SessionId::new("s"),
-            acp::ToolCallUpdate::new("t", fields),
-            vec![],
-        )
-    }
-
-    fn workspace() -> (tempfile::TempDir, Workspace) {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        let ws = Workspace::new(vec![crate::Root {
-            name: "repo".into(),
-            path: root,
-        }])
-        .unwrap();
-        (dir, ws)
-    }
-
-    fn argv(action: Option<Action>) -> Vec<String> {
-        match action {
-            Some(Action::Exec { argv, .. }) => argv,
-            other => panic!("not an exec: {other:?}"),
-        }
-    }
-
     #[test]
-    fn command_strings_become_shell_lines() {
-        let (_dir, ws) = workspace();
-        let line = r#"git -C "a b" commit -m 'x y'"#;
-        let req = permission(serde_json::json!({ "command": line }));
-        assert_eq!(argv(permission_action(&req, &ws)), ["sh", "-c", line]);
-    }
-
-    #[test]
-    fn argv_arrays_are_kept_as_given() {
-        let (_dir, ws) = workspace();
-        let req = permission(serde_json::json!({ "argv": ["git", "-C", "a b", "status"] }));
+    fn options_that_save_agent_rules_are_never_picked() {
+        use acp::{PermissionOption as Opt, PermissionOptionKind as Kind};
+        // What Codex offers for a command: a plain approval first, then a session-wide one,
+        // then rules of its own.
+        let codex = [
+            Opt::new("allow_once", "Yes, proceed", Kind::AllowOnce),
+            Opt::new("allow_for_session", "This session", Kind::AllowAlways),
+            Opt::new("accept_execpolicy_amendment", "Always", Kind::AllowAlways),
+            Opt::new("decline", "No", Kind::RejectOnce),
+        ];
+        let allow = [Kind::AllowOnce, Kind::AllowAlways];
         assert_eq!(
-            argv(permission_action(&req, &ws)),
-            ["git", "-C", "a b", "status"]
+            choose(&codex, &allow).map(|o| &*o.option_id.0),
+            Some("allow_once")
         );
-        let req = permission(serde_json::json!({ "command": ["ls", "-la"] }));
-        assert_eq!(argv(permission_action(&req, &ws)), ["ls", "-la"]);
+        // Without a plain approval, the session-wide one; never a rule.
+        let no_once = [
+            Opt::new("accept_execpolicy_amendment", "Always", Kind::AllowAlways),
+            Opt::new("allow_for_session", "This session", Kind::AllowAlways),
+        ];
+        assert_eq!(
+            choose(&no_once, &allow).map(|o| &*o.option_id.0),
+            Some("allow_for_session")
+        );
+        let only_rules = [
+            Opt::new("accept_execpolicy_amendment", "Always", Kind::AllowAlways),
+            Opt::new(
+                "apply_network_policy_amendment:0",
+                "Host",
+                Kind::AllowAlways,
+            ),
+        ];
+        assert_eq!(choose(&only_rules, &allow), None);
+        let plain = [
+            Opt::new("always", "Always", Kind::AllowAlways),
+            Opt::new("once", "Once", Kind::AllowOnce),
+        ];
+        assert_eq!(
+            choose(&plain, &allow).map(|o| &*o.option_id.0),
+            Some("once")
+        );
+        assert_eq!(
+            choose(&codex, &[Kind::RejectOnce, Kind::RejectAlways]).map(|o| &*o.option_id.0),
+            Some("decline")
+        );
     }
 
     #[test]

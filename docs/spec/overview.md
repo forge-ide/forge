@@ -39,7 +39,7 @@ A project holds workspaces; a workspace holds repos; agents work in sessions, an
 
 ACP is the primary integration. It is an open JSON-RPC standard for how coding agents talk to editors, and more than 25 agents supported it as of March 2026 ([source](https://www.morphllm.com/agent-client-protocol)).
 
-- **Adapters for the big two.** Claude Code and Codex predate ACP and connect through adapters such as `claude-code-acp` and `codex-acp` ([source](https://ai-sdk.dev/providers/community-providers/acp)).
+- **Adapters for the big two.** Claude Code and Codex predate ACP and connect through adapters such as `claude-agent-acp` and `codex-acp` ([source](https://ai-sdk.dev/providers/community-providers/acp)).
 - **Full client capabilities.** File read/write, terminal, plan rendering, agent-advertised slash commands, session load and resume, and permission requests.
 - **MCP hand-off.** ACP clients pass MCP endpoints to the agent at session start, so Forge-managed MCP servers, including Forge's own, reach every agent.
 - **Agent registry.** Install, update, and pin agent versions; show auth status per agent.
@@ -275,7 +275,7 @@ v0.1 proves the review loop with one agent at a time; v0.2 adds parallel agents 
 - [ ] **UI stack.** Decided: Forge owns its UI, built on Tauri 2 with SolidJS and CodeMirror 6 (see Tech stack). Remaining risk is WebKitGTK performance on Linux; the fallback is Tauri's CEF runtime or Electron.
 - [ ] **ACP adoption.** VS Code runs Claude, Codex, and Copilot side by side, but through its own per-vendor harnesses (Claude Agent SDK, the Codex extension) tied to a Copilot subscription, not ACP ([source](https://code.visualstudio.com/docs/copilot/agents/third-party-agents)). ACP reaches VS Code only through community extensions. If ACP stalls, Forge needs native adapters for the top agents.
 - [ ] **Adapter lag.** Claude Code and Codex reach ACP through adapters, so their newest native features (subagents, their own auto modes, hooks) may arrive late.
-- [ ] **Two policy systems.** An agent with its own permission system plus Forge's policy can double-prompt or leave gaps. Proposal: run the agent in its most permissive mode inside the sandbox and let Forge own policy.
+- [x] **Two policy systems.** An agent with its own permission system plus Forge's policy can double-prompt or leave gaps. Decided: each agent's native shim puts it in the mode where it asks the client about everything that needs permission, never one that skips asking, and Forge owns policy (component-architecture.md, ACP client and agent adapters). Codex is the gap: no adapter mode sends every command to the client, and its own sandbox can't run inside Forge's, so its commands run only once it escalates them, which asks Forge.
 - [ ] **LSP per worktree.** Five parallel sessions could mean five rust-analyzer instances. Need a memory budget, or one server with per-worktree overlays.
 - [ ] **Classifier cost and latency** on every tool call; decide which model and where it runs.
 - [ ] **Licensing.** Open source, open core, or closed.

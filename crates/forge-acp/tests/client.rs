@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use forge_acp::{
     AcpClient, AcpError, AgentCommand, AllowAll, DenyAll, EventSink, Gate, GateKind, GateRequest,
-    GateVerdict, Root, Workspace,
+    GateVerdict, Root, SessionSetup, Workspace,
 };
 use forge_api::TurnId;
 use forge_api::events::{EventKind, EventPayload};
@@ -86,9 +86,16 @@ impl Fixture {
             ],
             env: vec![],
         };
-        AcpClient::start(command, workspace, unsandboxed(), self.sink.clone(), gate)
-            .await
-            .unwrap()
+        AcpClient::start(
+            command,
+            SessionSetup::default(),
+            workspace,
+            unsandboxed(),
+            self.sink.clone(),
+            gate,
+        )
+        .await
+        .unwrap()
     }
 }
 
@@ -442,10 +449,17 @@ async fn an_agent_that_dies_reports_its_exit() {
     let deny = Arc::new(DenyAll {
         reason: String::new(),
     });
-    let err = AcpClient::start(command, workspace, unsandboxed(), fx.sink.clone(), deny)
-        .await
-        .err()
-        .expect("start fails");
+    let err = AcpClient::start(
+        command,
+        SessionSetup::default(),
+        workspace,
+        unsandboxed(),
+        fx.sink.clone(),
+        deny,
+    )
+    .await
+    .err()
+    .expect("start fails");
     match err {
         AcpError::Exited(exit) => {
             assert_eq!(exit.code, Some(7));

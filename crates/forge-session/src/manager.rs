@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use forge_acp::{AcpClient, AcpError, AgentCommand, EventSink, Pipe, Root, Workspace};
+use forge_acp::logins::LoginKind;
+use forge_acp::shim::{self, HomeConfig, ShimContext};
+use forge_acp::{AcpClient, AcpError, AgentCommand, EventSink, Pipe, Root, Workspace, adapters};
 use forge_api::events::{
     EventPayload, PromptBody, SessionStateBody, TurnEndedBody, TurnSource, TurnStartedBody,
 };
@@ -37,8 +39,10 @@ use crate::state::{accepts_prompt, can_close, can_transition, is_live};
 use crate::store::{SessionStore, StoreError, WorktreeRecord};
 
 mod approvals;
+mod commit;
 
 use approvals::{Pending, SessionGate};
+use commit::CommitTool;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -66,13 +70,20 @@ impl From<forge_events::LogError> for SessionError {
 #[derive(Clone, Debug)]
 pub struct AgentLaunch {
     pub command: AgentCommand,
+    /// The registry agent it runs, whose shim prepares it; `None` for any other agent.
+    pub agent: Option<String>,
     /// Paths the sandbox shows read-only besides its defaults: the agent program and the
     /// user config's extra read-only paths.
     pub read_only: Vec<PathBuf>,
     /// Hosts the session's egress proxy lets through.
     pub network: Allowlist,
-    /// Secrets the proxy injects, with their values from the keyring.
+    /// Secrets the proxy injects, with their values from the keyring or the agent's login.
     pub secrets: Vec<SecretRoute>,
+    /// The agent's own sign-in the proxy carries, when it isn't an API key.
+    pub login: Option<LoginKind>,
+    /// What the agent reads from the user's own config; its links' targets are among
+    /// `read_only`.
+    pub home: HomeConfig,
     /// The managed, user, and project policy layers, compiled.
     pub rules: Arc<Rules>,
     /// The project's hooks, compiled.
@@ -155,6 +166,9 @@ struct Live {
     /// Wakes a turn waiting on `task.done` hooks when `session.cancel` arrives, which stops
     /// them.
     cancel_hooks: tokio::sync::Notify,
+    /// Instructions for the running agent's first prompt, for agents that take them no other
+    /// way.
+    preamble: Mutex<Option<&'static str>>,
 }
 
 /// `task.done` blocks in a row before the session goes to Review anyway.
@@ -411,6 +425,19 @@ impl SessionManager {
         }
         self.transition(&session, SessionState::Done, Some(reason.to_owned()))
             .await?;
+        // The copies of the user's agent settings don't outlive the session.
+        let scratch = self.dirs.sessions.join(id.to_string());
+        let cleared = tokio::task::spawn_blocking(move || {
+            shim::clear_home(&scratch.join("home"))?;
+            match std::fs::remove_dir_all(scratch.join("shim")) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            }
+        })
+        .await;
+        if let Ok(Err(e)) = cleared {
+            tracing::warn!(session_id = %id, error = %e, "clearing the agent's home config");
+        }
         // The session's secret values go only once nothing more can be recorded.
         self.log.unregister(id);
         self.redactor.remove(id);
@@ -506,6 +533,9 @@ impl SessionManager {
             self.dirs.clone(),
             session.clone(),
         );
+        // The index commits are staged in sits in the session's scratch dir, which only the
+        // daemon writes (the sandbox gets only its home and temp dirs).
+        let index = forge_git::commit::index_path(&self.dirs.sessions.join(session.id.to_string()));
         let found = tokio::task::spawn_blocking(move || {
             let launch = agents.launch(&record).map_err(|e| e.detail().to_owned())?;
             let records = store.worktrees(&record.id).map_err(|e| e.to_string())?;
@@ -530,6 +560,16 @@ impl SessionManager {
                 })
                 .collect();
             let workspace = Workspace::new(roots).map_err(|e| e.to_string())?;
+            // Commits go on the branch from the working directory's worktree.
+            let first = workspace.cwd().to_path_buf();
+            let repo = repo_of(&first, &record.branch)
+                .ok_or_else(|| format!("{} is not a session worktree", first.display()))?;
+            let target = commit::Target {
+                dirs: git.git_dirs(&repo, &first).map_err(|e| e.to_string())?,
+                worktree: first,
+                branch: record.branch.clone(),
+                index,
+            };
             // Only sessions with secrets need TLS to the secrets' hosts.
             let upstream = if launch.secrets.is_empty() {
                 None
@@ -538,43 +578,122 @@ impl SessionManager {
                     .map_err(|e| format!("loading TLS roots for secret injection: {e}"))?;
                 Some(tls as Arc<dyn Upstream>)
             };
-            Ok::<_, String>((launch, worktrees, workspace, upstream))
+            Ok::<_, String>((launch, worktrees, workspace, upstream, target))
         })
         .await
         .map_err(|e| e.to_string())??;
-        let (mut launch, worktrees, workspace, upstream) = found;
+        let (mut launch, worktrees, workspace, upstream, target) = found;
         let secrets = std::mem::take(&mut launch.secrets);
         let (rules, hook_set) = (launch.rules.clone(), launch.hooks.clone());
         let project_root = launch.project_root.clone();
-        // Commands and edits holding an injected secret's value ask, and the value never
-        // reaches the log.
-        let scanner = Arc::new(SecretScanner::new(
-            secrets
+        // A login's value as it is now; one its CLI refreshes later never enters the sandbox.
+        let sources: Vec<_> = secrets.iter().map(|s| s.value.clone()).collect();
+        let mut values: Vec<String> = tokio::task::spawn_blocking(move || {
+            sources
                 .iter()
-                .map(|s| s.value.expose().to_owned())
-                .collect(),
-        ));
+                .filter_map(|source| source.current().ok())
+                .map(|value| value.expose().to_owned())
+                .collect()
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        // Forge's MCP endpoint is served on the proxy; its tool is filled in once the gate
+        // exists, below.
+        let tools = Arc::new(CommitTool::default());
         let proxy = self
-            .start_proxy(session, launch.network.clone(), secrets, upstream)
+            .start_proxy(
+                session,
+                launch.network.clone(),
+                secrets,
+                upstream,
+                tools.clone(),
+            )
             .await?;
+        // Commands and edits holding an injected secret's value ask, and the value never
+        // reaches the log; nor does the proxy's token, which agents log in their config.
+        values.push(proxy.token().to_owned());
+        values.extend(launch.home.secrets.iter().cloned());
+        let scanner = Arc::new(SecretScanner::new(values));
         let record = session.clone();
+        let manifest = launch.agent.as_deref().and_then(adapters::manifest);
+        let repo_git = (
+            target.dirs.clone(),
+            target.worktree.clone(),
+            target.index.clone(),
+            target.branch.clone(),
+        );
         let setup = tokio::task::spawn_blocking(move || {
+            // The agent's repo config as the branch committed it, read before anything runs.
+            let (git_dirs, worktree, index, branch) = repo_git;
+            let committed = manifest
+                .map(|m| shim::repo_config(&m.id))
+                .unwrap_or_default()
+                .iter()
+                .map(|path| {
+                    forge_git::commit::committed_file(&git_dirs, &worktree, &index, &branch, path)
+                        .map(|c| ((*path).to_owned(), c))
+                        .map_err(|e| format!("reading {path} from the branch: {e}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let scratch = dirs.sessions.join(record.id.to_string());
+            // A fresh dir for the shim's files each launch, shown read-only: the agent can't
+            // change what its own settings say, or plant anything the daemon would follow.
+            let shim_dir = scratch.join("shim");
+            match std::fs::remove_dir_all(&shim_dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("clearing the agent's shim dir: {e}")),
+            }
+            std::fs::create_dir_all(&scratch)
+                .and_then(|()| std::fs::create_dir(&shim_dir))
+                .map_err(|e| format!("creating the agent's shim dir: {e}"))?;
+            // Agents' own config in the sandbox home starts afresh each launch, from the user's.
+            // Nothing runs in the session now; removing a directory never follows a symlink
+            // inside it.
+            let home = scratch.join("home");
+            shim::clear_home(&home).map_err(|e| e.to_string())?;
+            let mut read_only = launch.read_only;
+            read_only.push(shim_dir.clone());
             let spec = Spec {
                 tier: record.sandbox,
                 worktrees,
-                scratch: dirs.sessions.join(record.id.to_string()),
+                scratch,
                 home: dirs.home,
-                read_only: launch.read_only,
-                proxy: Some(proxy),
+                read_only,
+                proxy: Some(proxy.clone()),
             };
             let sandbox = sandbox
                 .prepare(spec)
                 .map_err(|e| format!("starting the sandbox: {e}"))?;
-            Ok::<_, String>((launch.command, workspace, sandbox))
+            // The sandbox has made its home by now.
+            let seen_as = sandbox
+                .var("HOME")
+                .map_or_else(|| home.clone(), PathBuf::from);
+            shim::install_home(&launch.home, &home, &seen_as)
+                .map_err(|e| format!("setting up the agent's config: {e}"))?;
+            let var = |name: &str| sandbox.var(name);
+            let mcp_url = sandbox.var("HTTP_PROXY").map(|url| proxy.local_url(&url));
+            let prepared = shim::prepare(
+                manifest,
+                &ShimContext {
+                    dir: &shim_dir,
+                    mcp_url,
+                    var: &var,
+                    home: &launch.home,
+                    login: launch.login,
+                    worktree: &worktree,
+                    committed: &committed,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            let mut command = launch.command;
+            command.argv.extend(prepared.args);
+            command.env.extend(prepared.env);
+            Ok::<_, String>((command, prepared.setup, workspace, sandbox))
         })
         .await
         .map_err(|e| e.to_string())??;
-        let (command, workspace, sandbox) = setup;
+        let (command, setup, workspace, sandbox) = setup;
         // A relaunch: what the old agent's streams held is recorded under the scanner it was
         // held with, before the new one takes over.
         let live = self.live(&session.id);
@@ -619,7 +738,9 @@ impl SessionManager {
             scanner,
             sink: sink.clone(),
         });
-        AcpClient::start(command, workspace, sandbox, sink, gate)
+        tools.set(gate.clone(), target);
+        *lock(&live.preamble) = shim::first_prompt_preamble(manifest);
+        AcpClient::start(command, setup, workspace, sandbox, sink, gate)
             .await
             .map(Arc::new)
             .map_err(|e| format!("starting the agent: {e}"))
@@ -633,6 +754,7 @@ impl SessionManager {
         allow: Allowlist,
         routes: Vec<SecretRoute>,
         upstream: Option<Arc<dyn Upstream>>,
+        tools: Arc<CommitTool>,
     ) -> Result<Arc<Proxy>, String> {
         let (log, id) = (self.log.clone(), session.id.clone());
         let runtime = tokio::runtime::Handle::current();
@@ -661,6 +783,7 @@ impl SessionManager {
             limits: Limits::default(),
             routes,
             upstream,
+            local: Some(Arc::new(forge_mcp::ForgeServer::new(tools))),
         })
         .await
         .map(Arc::new)
@@ -728,13 +851,19 @@ impl SessionManager {
     ) -> Result<(), SessionError> {
         let live = self.live(id);
         let outcome = match self.agent(id, &live).await {
-            Ok(agent) => agent.prompt(turn.clone(), text).await.map_err(|e| {
-                if matches!(e, AcpError::Exited(_)) {
-                    // The process is gone; the next prompt starts a new one.
-                    lock(&live.agent).take();
-                }
-                e.to_string()
-            }),
+            Ok(agent) => {
+                let text = match lock(&live.preamble).take() {
+                    Some(preamble) => format!("{preamble}\n\n{text}"),
+                    None => text,
+                };
+                agent.prompt(turn.clone(), text).await.map_err(|e| {
+                    if matches!(e, AcpError::Exited(_)) {
+                        // The process is gone; the next prompt starts a new one.
+                        lock(&live.agent).take();
+                    }
+                    e.to_string()
+                })
+            }
             Err(reason) => Err(reason),
         };
         // task.done hooks may take minutes, so they run before the lock is taken.
