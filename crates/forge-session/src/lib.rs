@@ -6,10 +6,12 @@
 
 pub mod manager;
 pub mod naming;
+pub mod redact;
 pub mod state;
 pub mod store;
 
 pub use manager::{
     AgentLaunch, AgentResolver, CreateRequest, SandboxDirs, SessionError, SessionManager,
 };
+pub use redact::SecretRedactor;
 pub use store::{ApprovalOutcome, ApprovalRecord, SessionStore, StoreError, WorktreeRecord};

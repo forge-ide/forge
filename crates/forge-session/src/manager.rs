@@ -10,11 +10,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use forge_acp::{AcpClient, AcpError, AgentCommand, EventSink, Root, Workspace};
+use forge_acp::{AcpClient, AcpError, AgentCommand, EventSink, Pipe, Root, Workspace};
 use forge_api::events::{
     EventPayload, PromptBody, SessionStateBody, TurnEndedBody, TurnSource, TurnStartedBody,
 };
-use forge_api::events::{HookRunBody, NetworkBody, Verdict};
+use forge_api::events::{HookRunBody, NetworkBody, TerminalOutputBody, Verdict};
 use forge_api::methods::{BranchCollision, CollisionResolution};
 use forge_api::model::{Action, Mode, Project, SandboxTier, Session, SessionState, Usage};
 use forge_api::{
@@ -32,12 +32,13 @@ use forge_sandbox::{Sandbox, Spec, WorktreeMount};
 use futures_util::future::BoxFuture;
 
 use crate::naming::{RepoName, decide};
+use crate::redact::{Holdback, SecretRedactor};
 use crate::state::{accepts_prompt, can_close, can_transition, is_live};
 use crate::store::{SessionStore, StoreError, WorktreeRecord};
 
 mod approvals;
 
-use approvals::{Pending, SessionGate, redact_payload};
+use approvals::{Pending, SessionGate};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -85,6 +86,9 @@ pub struct AgentLaunch {
 pub trait AgentResolver: Send + Sync + 'static {
     /// Blocking; may read config files.
     fn launch(&self, session: &Session) -> Result<AgentLaunch, ApiError>;
+    /// The values of the secrets the session's proxy injects, so the event log can redact
+    /// them before the agent is launched (after a daemon restart). Blocking.
+    fn secret_values(&self, session: &Session) -> Result<Vec<String>, ApiError>;
     /// Append `rule` to the session's project policy file. Blocking.
     fn remember_in_project(
         &self,
@@ -137,6 +141,9 @@ struct Live {
     resume_note: Mutex<Option<String>>,
     /// The running agent's hooks.
     hooks: Mutex<Option<Arc<dyn HookRunner>>>,
+    /// The running agent's event sink, whose held-back stream text is flushed when a turn
+    /// ends.
+    sink: Mutex<Option<Arc<SessionSink>>>,
     /// Hook notes for the agent's next prompt, from writes and allowed actions, whose
     /// responses have no room for them.
     notes: Mutex<Vec<String>>,
@@ -161,6 +168,8 @@ pub struct SessionManager {
     agents: Arc<dyn AgentResolver>,
     sandbox: Arc<dyn Sandbox>,
     dirs: SandboxDirs,
+    /// The event log's redactor, told each session's secrets at launch.
+    redactor: Arc<SecretRedactor>,
     live: Mutex<HashMap<SessionId, Arc<Live>>>,
     /// Serializes creates, so two sessions never claim the same branch name.
     create_lock: tokio::sync::Mutex<()>,
@@ -174,6 +183,7 @@ impl SessionManager {
         agents: Arc<dyn AgentResolver>,
         sandbox: Arc<dyn Sandbox>,
         dirs: SandboxDirs,
+        redactor: Arc<SecretRedactor>,
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
@@ -182,6 +192,7 @@ impl SessionManager {
             agents,
             sandbox,
             dirs,
+            redactor,
             live: Mutex::default(),
             create_lock: tokio::sync::Mutex::new(()),
         })
@@ -329,6 +340,7 @@ impl SessionManager {
             return Err(invalid_state(&session, "take a prompt"));
         }
         self.register_log(id).await?;
+        self.know_secrets(&session).await?;
         *lock(&live.hook_rounds) = 0;
         live.cancel_requested.store(false, Ordering::SeqCst);
         let text = agent_text(&live, text);
@@ -337,6 +349,22 @@ impl SessionManager {
         let (session_id, turn_id) = (id.clone(), turn.clone());
         tokio::spawn(async move { manager.run_turn(session_id, turn_id, text).await });
         Ok(turn)
+    }
+
+    /// Make sure the log redacts the session's injected secrets before anything the human
+    /// types is recorded: after a daemon restart, the agent and its scanner aren't there yet.
+    /// If they can't be resolved the prompt fails, as the launch after it would.
+    async fn know_secrets(&self, session: &Session) -> Result<(), SessionError> {
+        if self.redactor.has(&session.id) {
+            return Ok(());
+        }
+        let (agents, record) = (self.agents.clone(), session.clone());
+        let values = tokio::task::spawn_blocking(move || agents.secret_values(&record))
+            .await
+            .map_err(|e| SessionError::Internal(e.to_string()))??;
+        self.redactor
+            .set(&session.id, Arc::new(SecretScanner::new(values)));
+        Ok(())
     }
 
     /// Ask the agent to stop the current turn; anything waiting for approval is cancelled.
@@ -377,21 +405,32 @@ impl SessionManager {
             agent.shutdown().await;
         }
         self.register_log(id).await?;
+        let sink = lock(&live.sink).take();
+        if let Some(sink) = sink {
+            sink.release_all().await;
+        }
         self.transition(&session, SessionState::Done, Some(reason.to_owned()))
             .await?;
+        // The session's secret values go only once nothing more can be recorded.
         self.log.unregister(id);
+        self.redactor.remove(id);
         lock(&self.live).remove(id);
         Ok(())
     }
 
-    /// Stop every agent, e.g. on daemon shutdown. Sessions keep their state.
+    /// Stop every agent, e.g. on daemon shutdown, recording what their streams held back.
+    /// Sessions keep their state.
     pub async fn shutdown(&self) {
-        let agents: Vec<Arc<AcpClient>> = lock(&self.live)
-            .values()
-            .filter_map(|l| lock(&l.agent).take())
-            .collect();
-        for agent in agents {
-            agent.shutdown().await;
+        let lives: Vec<Arc<Live>> = lock(&self.live).values().cloned().collect();
+        for live in lives {
+            let agent = lock(&live.agent).take();
+            if let Some(agent) = agent {
+                agent.shutdown().await;
+            }
+            let sink = lock(&live.sink).take();
+            if let Some(sink) = sink {
+                sink.release_all().await;
+            }
         }
     }
 
@@ -536,10 +575,18 @@ impl SessionManager {
         .await
         .map_err(|e| e.to_string())??;
         let (command, workspace, sandbox) = setup;
+        // A relaunch: what the old agent's streams held is recorded under the scanner it was
+        // held with, before the new one takes over.
+        let live = self.live(&session.id);
+        let old = lock(&live.sink).take();
+        if let Some(old) = old {
+            old.release_all().await;
+        }
+        self.redactor.set(&session.id, scanner.clone());
         let sink = Arc::new(SessionSink {
             log: self.log.clone(),
             session: session.id.clone(),
-            scanner: scanner.clone(),
+            holdback: Holdback::new(scanner.clone()),
         });
         let hooks: Arc<dyn HookRunner> = Arc::new(ShellHooks::new(
             hook_set,
@@ -557,8 +604,8 @@ impl SessionManager {
             hooks.clone(),
             Arc::new(NoClassifier),
         ));
-        let live = self.live(&session.id);
         *lock(&live.hooks) = Some(hooks.clone());
+        *lock(&live.sink) = Some(sink.clone());
         for (action, verdict) in lock(&live.remembered).iter() {
             engine.remember(action, *verdict);
         }
@@ -720,6 +767,10 @@ impl SessionManager {
         self.cancel_pending(&live, id).await?;
         lock(&live.grants).clear();
         let session = self.get(id).await?;
+        let sink = lock(&live.sink).clone();
+        if let Some(sink) = sink {
+            sink.end_turn().await;
+        }
         let stop_reason = outcome.as_deref().unwrap_or("error").to_owned();
         self.emit(
             id,
@@ -921,11 +972,34 @@ fn agent_text(live: &Live, text: String) -> String {
     parts.join("\n\n")
 }
 
-/// Appends a session's ACP events to the event log, with secrets redacted.
+/// Appends a session's ACP events to the event log, which redacts them, holding back the end
+/// of streamed chunks that might continue a secret in the next one.
 struct SessionSink {
     log: Arc<EventLog>,
     session: SessionId,
-    scanner: Arc<SecretScanner>,
+    holdback: Holdback,
+}
+
+impl SessionSink {
+    /// Record what messages held back; the turn is over. Terminals keep theirs until they end.
+    async fn end_turn(&self) {
+        for payload in self.holdback.end_turn() {
+            self.append(payload).await;
+        }
+    }
+
+    /// Record everything held back; the agent stopped.
+    async fn release_all(&self) {
+        for payload in self.holdback.release_all() {
+            self.append(payload).await;
+        }
+    }
+
+    async fn append(&self, payload: EventPayload) {
+        if let Err(e) = self.log.emit(&self.session, None, payload).await {
+            tracing::error!(session_id = %self.session, error = %e, "appending an agent event");
+        }
+    }
 }
 
 impl HookLog for SessionSink {
@@ -936,10 +1010,19 @@ impl HookLog for SessionSink {
 
 impl EventSink for SessionSink {
     fn emit(&self, payload: EventPayload) -> BoxFuture<'_, ()> {
-        let payload = redact_payload(&self.scanner, payload);
+        let ready = self.holdback.take(payload);
         Box::pin(async move {
-            if let Err(e) = self.log.emit(&self.session, None, payload).await {
-                tracing::error!(session_id = %self.session, error = %e, "appending an agent event");
+            for payload in ready {
+                self.append(payload).await;
+            }
+        })
+    }
+
+    fn terminal_output(&self, pipe: Pipe, body: TerminalOutputBody) -> BoxFuture<'_, ()> {
+        let ready = self.holdback.take_output(pipe, body);
+        Box::pin(async move {
+            for payload in ready {
+                self.append(payload).await;
             }
         })
     }

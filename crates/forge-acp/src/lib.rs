@@ -13,4 +13,5 @@ pub use client::{
     AcpClient, AcpError, AgentCommand, AgentExit, AllowAll, DenyAll, EventSink, Gate, GateKind,
     GateRequest, GateVerdict,
 };
+pub use terminal::Pipe;
 pub use workspace::{PathError, Resolved, Root, Workspace};

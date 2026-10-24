@@ -30,24 +30,86 @@ impl ExitInfo {
     }
 }
 
-/// Captured output, trimmed from the front to stay under a byte limit.
+/// Longest unfinished line kept apart for one pipe before it joins the rest as it is.
+const PENDING_LIMIT: usize = 64 * 1024;
+
+/// Which of a command's output pipes a chunk came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pipe {
+    Stdout,
+    Stderr,
+}
+
+/// Captured output, trimmed from the front to stay under a byte limit. Each pipe's unfinished
+/// last line is kept apart until it ends, so the other pipe's lines never land inside it: a
+/// token on stdout stays whole whatever stderr prints meanwhile. Nothing is held from
+/// readers, who see the unfinished lines after the finished ones.
 #[derive(Debug, Default)]
 struct Output {
-    text: String,
+    merged: String,
+    pending: [String; 2],
     truncated: bool,
     limit: usize,
 }
 
 impl Output {
-    fn push(&mut self, chunk: &str) {
-        self.text.push_str(chunk);
-        if self.text.len() > self.limit {
-            let mut cut = self.text.len() - self.limit;
-            while !self.text.is_char_boundary(cut) {
-                cut += 1;
+    fn push(&mut self, pipe: Pipe, chunk: &str) {
+        let pending = &mut self.pending[pipe as usize];
+        pending.push_str(chunk);
+        if let Some(end) = pending.rfind(['\n', '\r']) {
+            self.merged.push_str(&pending[..=end]);
+            pending.drain(..=end);
+        }
+        if pending.len() > PENDING_LIMIT {
+            self.merged.push_str(&std::mem::take(pending));
+        }
+        self.trim();
+    }
+
+    /// The pipes' unfinished lines join the rest: the command is done.
+    fn finish(&mut self) {
+        let unfinished = self.unfinished();
+        self.merged.push_str(&unfinished);
+        self.pending = Default::default();
+    }
+
+    fn text(&self) -> String {
+        self.merged.clone() + &self.unfinished()
+    }
+
+    /// Both pipes' unfinished lines, on lines of their own: one pipe's text glued to the
+    /// other's could hide the end of a secret (`AKIA…` then `warn`).
+    fn unfinished(&self) -> String {
+        let parts: Vec<&str> = self
+            .pending
+            .iter()
+            .map(String::as_str)
+            .filter(|p| !p.is_empty())
+            .collect();
+        parts.join("\n")
+    }
+
+    fn trim(&mut self) {
+        let pending: usize = self.pending.iter().map(String::len).sum();
+        let total = self.merged.len() + pending;
+        if total <= self.limit {
+            return;
+        }
+        let mut cut = (total - self.limit).min(self.merged.len());
+        while !self.merged.is_char_boundary(cut) {
+            cut += 1;
+        }
+        self.merged.drain(..cut);
+        self.truncated = true;
+        // A limit smaller than the unfinished lines themselves.
+        for pending in &mut self.pending {
+            if pending.len() > self.limit {
+                let mut cut = pending.len() - self.limit;
+                while !pending.is_char_boundary(cut) {
+                    cut += 1;
+                }
+                pending.drain(..cut);
             }
-            self.text.drain(..cut);
-            self.truncated = true;
         }
     }
 }
@@ -58,8 +120,8 @@ struct Terminal {
     exit: watch::Receiver<Option<ExitInfo>>,
 }
 
-/// Called with each chunk of output as it arrives.
-pub type OnOutput = Arc<dyn Fn(String) -> BoxFuture<'static, ()> + Send + Sync>;
+/// Called with each chunk of output as it arrives, and the pipe it came from.
+pub type OnOutput = Arc<dyn Fn(Pipe, String) -> BoxFuture<'static, ()> + Send + Sync>;
 /// Called once the command has exited and all its output was delivered, before waiters wake.
 /// What it returns is added to the end of the output.
 pub type OnExit = Box<dyn FnOnce(ExitInfo, String) -> BoxFuture<'static, Option<String>> + Send>;
@@ -122,18 +184,24 @@ impl Terminals {
             exit: exit_rx,
         });
         let readers = [
-            child
-                .stdout
-                .take()
-                .map(|s| Box::new(s) as Box<dyn AsyncRead + Send + Unpin>),
-            child
-                .stderr
-                .take()
-                .map(|s| Box::new(s) as Box<dyn AsyncRead + Send + Unpin>),
+            child.stdout.take().map(|s| {
+                (
+                    Pipe::Stdout,
+                    Box::new(s) as Box<dyn AsyncRead + Send + Unpin>,
+                )
+            }),
+            child.stderr.take().map(|s| {
+                (
+                    Pipe::Stderr,
+                    Box::new(s) as Box<dyn AsyncRead + Send + Unpin>,
+                )
+            }),
         ]
         .into_iter()
         .flatten()
-        .map(|stream| tokio::spawn(read_into(stream, terminal.clone(), on_output.clone())))
+        .map(|(pipe, stream)| {
+            tokio::spawn(read_into(pipe, stream, terminal.clone(), on_output.clone()))
+        })
         .collect::<Vec<_>>();
 
         let watcher = terminal.clone();
@@ -158,9 +226,15 @@ impl Terminals {
                     }
                 }
             };
-            let tail = lock(&watcher.output).text.clone();
+            let tail = {
+                let mut output = lock(&watcher.output);
+                output.finish();
+                output.text()
+            };
             if let Some(extra) = on_exit(info.clone(), tail).await {
-                lock(&watcher.output).push(&extra);
+                let mut output = lock(&watcher.output);
+                output.push(Pipe::Stdout, &extra);
+                output.finish();
             }
             let _ = exit_tx.send(Some(info));
         });
@@ -173,7 +247,7 @@ impl Terminals {
         let terminal = self.get(id)?;
         let output = lock(&terminal.output);
         let exit = terminal.exit.borrow().clone();
-        Ok((output.text.clone(), output.truncated, exit))
+        Ok((output.text(), output.truncated, exit))
     }
 
     /// Wait for the command to exit.
@@ -226,6 +300,7 @@ impl Terminals {
 }
 
 async fn read_into(
+    pipe: Pipe,
     mut stream: Box<dyn AsyncRead + Send + Unpin>,
     terminal: Arc<Terminal>,
     on_output: OnOutput,
@@ -241,13 +316,13 @@ async fn read_into(
         if chunk.is_empty() {
             continue;
         }
-        lock(&terminal.output).push(&chunk);
-        on_output(chunk).await;
+        lock(&terminal.output).push(pipe, &chunk);
+        on_output(pipe, chunk).await;
     }
     if !carry.is_empty() {
         let rest = String::from_utf8_lossy(&carry).into_owned();
-        lock(&terminal.output).push(&rest);
-        on_output(rest).await;
+        lock(&terminal.output).push(pipe, &rest);
+        on_output(pipe, rest).await;
     }
 }
 
@@ -313,8 +388,42 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn one_pipes_unfinished_line_is_never_split_by_the_other() {
+        let mut out = Output {
+            limit: 1024,
+            ..Output::default()
+        };
+        out.push(Pipe::Stdout, "token: ghp_a1B2");
+        out.push(Pipe::Stderr, "   Compiling foo\n");
+        // Readers see everything at once, the unfinished line last.
+        assert_eq!(out.text(), "   Compiling foo\ntoken: ghp_a1B2");
+        out.push(Pipe::Stdout, "c3D4\ndone\n");
+        out.push(Pipe::Stderr, "warn");
+        assert_eq!(
+            out.text(),
+            "   Compiling foo\ntoken: ghp_a1B2c3D4\ndone\nwarn"
+        );
+        out.push(Pipe::Stdout, "AKIA0123456789ABCDEF");
+        // Two unfinished lines are kept apart, so neither runs into the other.
+        let both = "   Compiling foo\ntoken: ghp_a1B2c3D4\ndone\nAKIA0123456789ABCDEF\nwarn";
+        assert_eq!(out.text(), both);
+        out.finish();
+        assert_eq!(out.text(), both);
+        let mut small = Output {
+            limit: 8,
+            ..Output::default()
+        };
+        small.push(Pipe::Stdout, "0123456789\nabcdefghijkl");
+        assert!(
+            small.text().len() <= 8 && small.truncated,
+            "{:?}",
+            small.text()
+        );
+    }
+
     fn noop_output() -> OnOutput {
-        Arc::new(|_| Box::pin(async {}))
+        Arc::new(|_, _| Box::pin(async {}))
     }
 
     #[tokio::test]
@@ -333,7 +442,7 @@ mod tests {
                 dir.path(),
                 &[],
                 DEFAULT_OUTPUT_LIMIT,
-                Arc::new(move |c| {
+                Arc::new(move |_, c| {
                     sink.lock().unwrap().push_str(&c);
                     Box::pin(async {})
                 }),
@@ -346,8 +455,12 @@ mod tests {
         let info = terminals.wait(&id).await.unwrap();
         assert_eq!(info.code, Some(3));
         let (output, truncated, exit) = terminals.output(&id).unwrap();
-        // What the exit callback returns is in the output before waiters wake.
-        assert_eq!(output.len(), 11);
+        // The pipes' unfinished lines on lines of their own, then what the exit callback
+        // returns, before waiters wake.
+        assert!(
+            output == "out\nerr+note" || output == "err\nout+note",
+            "{output:?}"
+        );
         assert!(output.contains("out") && output.contains("err"));
         assert!(output.ends_with("+note"));
         assert!(!truncated);
@@ -408,11 +521,11 @@ mod tests {
             limit: 5,
             ..Output::default()
         };
-        out.push("abc");
-        out.push("déf");
+        out.push(Pipe::Stdout, "abc");
+        out.push(Pipe::Stdout, "déf");
         assert!(out.truncated);
-        assert!(out.text.len() <= 5);
-        assert!(out.text.ends_with("éf"));
+        assert!(out.text().len() <= 5);
+        assert!(out.text().ends_with("éf"));
     }
 
     #[test]
