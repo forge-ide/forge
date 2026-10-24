@@ -1903,7 +1903,7 @@ mod tests {
             ),
             // Two Hosts: which one a server believes is anyone's guess.
             format!(
-                "POST {base}/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nHost: evil.example\r\n\r\n"
+                "POST {base}/v1/messages HTTP/1.1\r\nHost: evil.example\r\nHost: 127.0.0.1\r\n\r\n"
             ),
         ];
         for request in &cases {
