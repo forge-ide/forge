@@ -103,7 +103,8 @@ pub struct AgentProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub supported_version: Option<String>,
-    /// The command that installs the supported version, when the agent isn't installed.
+    /// The command that installs the supported version, when the agent isn't installed or
+    /// is at another version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub install_command: Option<String>,
