@@ -341,6 +341,52 @@ fn run(
     Ok(String::from_utf8_lossy(&stdout).into_owned())
 }
 
+/// The largest committed file [`committed_file`] reads.
+const MAX_COMMITTED_FILE: u64 = 1024 * 1024;
+
+/// What the tip of `branch` holds at `path`: a regular file's contents, `None` when the tree
+/// has nothing there, and an error for anything else there (a symlink, a directory, a file
+/// over 1 MiB). Read from the repo's objects, never from the worktree, which the agent can
+/// write.
+pub fn committed_file(
+    dirs: &GitDirs,
+    worktree: &Path,
+    index: &Path,
+    branch: &str,
+    path: &str,
+) -> Result<Option<String>, GitError> {
+    let rev = format!("refs/heads/{branch}");
+    let listed = run(
+        dirs,
+        worktree,
+        index,
+        &["ls-tree", "-z", &rev, "--", path],
+        None,
+    )?;
+    let Some(entry) = listed.split('\0').find(|e| !e.is_empty()) else {
+        return Ok(None);
+    };
+    let odd = |why: &str| GitError::Command {
+        args: format!("ls-tree {rev} -- {path}"),
+        stderr: format!("{path} on {branch} {why}"),
+    };
+    let (meta, _) = entry.split_once('\t').ok_or_else(|| odd("is unreadable"))?;
+    let mut fields = meta.split(' ');
+    let (mode, kind, object) = (fields.next(), fields.next(), fields.next());
+    let object = match (mode, kind, object) {
+        (Some("100644" | "100755"), Some("blob"), Some(object)) => object,
+        _ => return Err(odd("is not a regular file")),
+    };
+    let size: u64 = run(dirs, worktree, index, &["cat-file", "-s", object], None)?
+        .trim()
+        .parse()
+        .map_err(|_| odd("has no size"))?;
+    if size > MAX_COMMITTED_FILE {
+        return Err(odd("is over 1 MiB"));
+    }
+    run(dirs, worktree, index, &["cat-file", "blob", object], None).map(Some)
+}
+
 /// Where a session keeps the index its commits are staged in: a daemon-owned dir no sandbox
 /// can write.
 pub fn index_path(private_dir: &Path) -> PathBuf {
@@ -386,6 +432,31 @@ mod tests {
         let private = root.join("private");
         std::fs::create_dir(&private).unwrap();
         (dir, repo, wt, dirs, private)
+    }
+
+    #[test]
+    fn committed_files_come_from_the_branch_not_the_worktree() {
+        let (_dir, _repo, wt, dirs, private) = setup();
+        let index = index_path(&private);
+        let read = |path: &str| committed_file(&dirs, &wt, &index, "feat/x", path);
+        assert_eq!(read("a.txt").unwrap().as_deref(), Some("a\n"));
+        assert_eq!(read(".claude/settings.json").unwrap(), None);
+        // What the agent writes in the worktree doesn't count until it is committed.
+        std::fs::write(wt.join("a.txt"), "changed\n").unwrap();
+        std::fs::create_dir_all(wt.join(".claude")).unwrap();
+        std::fs::write(wt.join(".claude/settings.json"), "{}").unwrap();
+        assert_eq!(read("a.txt").unwrap().as_deref(), Some("a\n"));
+        assert_eq!(read(".claude/settings.json").unwrap(), None);
+        // A committed symlink or directory is refused, not followed.
+        std::os::unix::fs::symlink("/etc/passwd", wt.join("link")).unwrap();
+        git(&wt, &["add", "link", ".claude"]);
+        git(&wt, &["commit", "--quiet", "-m", "link"]);
+        assert!(read("link").is_err());
+        assert!(read(".claude").is_err());
+        assert_eq!(
+            read(".claude/settings.json").unwrap().as_deref(),
+            Some("{}")
+        );
     }
 
     #[test]

@@ -269,6 +269,7 @@ impl AgentResolver for ProfileResolver {
         let user = UserConfig::load(&self.paths.user_config())
             .map_err(|e| ApiError::validation(e.to_string()))?;
         let mut read_only = checked_read_only(
+            "sandbox.read_only in the user config",
             &user.sandbox.read_only,
             &[&self.home, &self.paths.data_dir, &self.paths.runtime_dir],
         )?;
@@ -297,9 +298,19 @@ impl AgentResolver for ProfileResolver {
         // Forge; the links' targets are shown read-only, never the home or Forge's own dirs.
         let home = shim::home_config(manifest, &self.home, credentials.login.as_ref())
             .map_err(|e| ApiError::new(ErrorKind::AgentUnavailable, e.to_string()))?;
+        // A link target that holds an agent's config dir or sign-in (through a symlink the
+        // user made, say) is refused too: those hold credentials and transcripts.
+        let agent_dirs: Vec<PathBuf> = shim::AGENT_HOME_ENTRIES
+            .iter()
+            .map(|entry| self.home.join(entry))
+            .collect();
+        let mut protected: Vec<&Path> =
+            vec![&self.home, &self.paths.data_dir, &self.paths.runtime_dir];
+        protected.extend(agent_dirs.iter().map(PathBuf::as_path));
         read_only.extend(checked_read_only(
+            "the agent's user config",
             &home.read_only(),
-            &[&self.home, &self.paths.data_dir, &self.paths.runtime_dir],
+            &protected,
         )?);
         Ok(AgentLaunch {
             command: AgentCommand { argv, env: vec![] },
@@ -399,14 +410,18 @@ fn known_secrets(
 
 /// The user config's extra read-only paths, refusing any that would expose a protected dir:
 /// the home dir itself, or anything containing Forge's data or runtime dir.
-fn checked_read_only(paths: &[PathBuf], protected: &[&Path]) -> Result<Vec<PathBuf>, ApiError> {
+fn checked_read_only(
+    what: &str,
+    paths: &[PathBuf],
+    protected: &[&Path],
+) -> Result<Vec<PathBuf>, ApiError> {
     for path in paths {
         let resolved = resolve(path);
         // Compare as written and as resolved, so neither a symlink nor a missing path slips by.
         let covers = |p: &&Path| p.starts_with(path) || resolve(p).starts_with(&resolved);
         if protected.iter().any(covers) {
             return Err(ApiError::validation(format!(
-                "sandbox.read_only in the user config: {} would expose the home dir or Forge's own data",
+                "{what}: {} would expose the home dir, an agent's sign-in, or Forge's own data",
                 path.display()
             )));
         }
@@ -446,7 +461,7 @@ mod tests {
             PathBuf::from("/home/u/.local/share/agents"),
             PathBuf::from("/opt/x"),
         ];
-        assert_eq!(checked_read_only(&ok, &[home, data]).unwrap(), ok);
+        assert_eq!(checked_read_only("t", &ok, &[home, data]).unwrap(), ok);
         for bad in [
             "/home/u",
             "/home",
@@ -454,10 +469,28 @@ mod tests {
             "/home/u/.local/share/forge",
         ] {
             assert!(
-                checked_read_only(&[PathBuf::from(bad)], &[home, data]).is_err(),
+                checked_read_only("t", &[PathBuf::from(bad)], &[home, data]).is_err(),
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn an_agent_link_target_holding_its_config_dir_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(home.join(".claude/skills")).unwrap();
+        // The user's own link, back to the dir with the sign-in in it.
+        std::os::unix::fs::symlink(home.join(".claude"), home.join(".claude/agents")).unwrap();
+        let agent_dirs: Vec<PathBuf> = shim::AGENT_HOME_ENTRIES
+            .iter()
+            .map(|e| home.join(e))
+            .collect();
+        let protected: Vec<&Path> = agent_dirs.iter().map(PathBuf::as_path).collect();
+        let target = std::fs::canonicalize(home.join(".claude/agents")).unwrap();
+        assert!(checked_read_only("t", &[target], &protected).is_err());
+        let skills = home.join(".claude/skills");
+        assert!(checked_read_only("t", &[skills], &protected).is_ok());
     }
 
     #[test]
@@ -470,6 +503,6 @@ mod tests {
         assert_eq!(resolve(Path::new("/")), PathBuf::from("/"));
         // Protecting a missing dir behind a symlink still refuses its resolved parent.
         let protected = link.join("data/forge");
-        assert!(checked_read_only(&[real.join("data")], &[&protected]).is_err());
+        assert!(checked_read_only("t", &[real.join("data")], &[&protected]).is_err());
     }
 }

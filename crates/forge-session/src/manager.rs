@@ -425,6 +425,19 @@ impl SessionManager {
         }
         self.transition(&session, SessionState::Done, Some(reason.to_owned()))
             .await?;
+        // The copies of the user's agent settings don't outlive the session.
+        let scratch = self.dirs.sessions.join(id.to_string());
+        let cleared = tokio::task::spawn_blocking(move || {
+            shim::clear_home(&scratch.join("home"))?;
+            match std::fs::remove_dir_all(scratch.join("shim")) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            }
+        })
+        .await;
+        if let Ok(Err(e)) = cleared {
+            tracing::warn!(session_id = %id, error = %e, "clearing the agent's home config");
+        }
         // The session's secret values go only once nothing more can be recorded.
         self.log.unregister(id);
         self.redactor.remove(id);
@@ -599,10 +612,29 @@ impl SessionManager {
         // Commands and edits holding an injected secret's value ask, and the value never
         // reaches the log; nor does the proxy's token, which agents log in their config.
         values.push(proxy.token().to_owned());
+        values.extend(launch.home.secrets.iter().cloned());
         let scanner = Arc::new(SecretScanner::new(values));
         let record = session.clone();
         let manifest = launch.agent.as_deref().and_then(adapters::manifest);
+        let repo_git = (
+            target.dirs.clone(),
+            target.worktree.clone(),
+            target.index.clone(),
+            target.branch.clone(),
+        );
         let setup = tokio::task::spawn_blocking(move || {
+            // The agent's repo config as the branch committed it, read before anything runs.
+            let (git_dirs, worktree, index, branch) = repo_git;
+            let committed = manifest
+                .map(|m| shim::repo_config(&m.id))
+                .unwrap_or_default()
+                .iter()
+                .map(|path| {
+                    forge_git::commit::committed_file(&git_dirs, &worktree, &index, &branch, path)
+                        .map(|c| ((*path).to_owned(), c))
+                        .map_err(|e| format!("reading {path} from the branch: {e}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let scratch = dirs.sessions.join(record.id.to_string());
             // A fresh dir for the shim's files each launch, shown read-only: the agent can't
             // change what its own settings say, or plant anything the daemon would follow.
@@ -619,16 +651,7 @@ impl SessionManager {
             // Nothing runs in the session now; removing a directory never follows a symlink
             // inside it.
             let home = scratch.join("home");
-            for entry in shim::AGENT_HOME_ENTRIES {
-                let path = home.join(entry);
-                let removed = match std::fs::symlink_metadata(&path) {
-                    Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&path),
-                    Ok(_) => std::fs::remove_file(&path),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                    Err(e) => Err(e),
-                };
-                removed.map_err(|e| format!("clearing {}: {e}", path.display()))?;
-            }
+            shim::clear_home(&home).map_err(|e| e.to_string())?;
             let mut read_only = launch.read_only;
             read_only.push(shim_dir.clone());
             let spec = Spec {
@@ -658,6 +681,8 @@ impl SessionManager {
                     var: &var,
                     home: &launch.home,
                     login: launch.login,
+                    worktree: &worktree,
+                    committed: &committed,
                 },
             )
             .map_err(|e| e.to_string())?;

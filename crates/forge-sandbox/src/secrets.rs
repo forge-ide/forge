@@ -61,9 +61,10 @@ pub struct KnownSecret {
     pub base_url_var: &'static str,
     /// Appended to the route in the base URL, matching the client's default base URL.
     pub base_url_suffix: &'static str,
-    /// The only paths a request carrying the secret may use: these, or anything below them.
-    /// Inference and model listing only, so a key with wider scope can't be used to manage
-    /// the account (minting new keys, for one).
+    /// The only paths a request carrying the secret may use: each exactly, or, for one
+    /// ending in `/*`, anything below it. Inference and model listing only, so a key with
+    /// wider scope can't be used to manage the account (minting new keys, or reading another
+    /// session's batches).
     pub paths: &'static [&'static str],
 }
 
@@ -76,12 +77,18 @@ impl KnownSecret {
         let suspicious =
             path.contains("..") || path.contains('%') || path.contains('\\') || path.contains("//");
         !suspicious
-            && self.paths.iter().any(|allowed| {
-                path == *allowed
-                    || path
-                        .strip_prefix(allowed)
-                        .is_some_and(|rest| rest.starts_with('/'))
-            })
+            && self
+                .paths
+                .iter()
+                .any(|allowed| match allowed.strip_suffix("/*") {
+                    Some(base) => {
+                        path == base
+                            || path
+                                .strip_prefix(base)
+                                .is_some_and(|rest| rest.starts_with('/'))
+                    }
+                    None => path == *allowed,
+                })
     }
 }
 
@@ -94,7 +101,12 @@ pub const KNOWN: &[KnownSecret] = &[
         header: Header::Named("x-api-key"),
         base_url_var: "ANTHROPIC_BASE_URL",
         base_url_suffix: "",
-        paths: &["/v1/messages", "/v1/complete", "/v1/models"],
+        paths: &[
+            "/v1/messages",
+            "/v1/messages/count_tokens",
+            "/v1/complete",
+            "/v1/models/*",
+        ],
     },
     KnownSecret {
         name: "OPENAI_API_KEY",
@@ -104,11 +116,11 @@ pub const KNOWN: &[KnownSecret] = &[
         base_url_var: "OPENAI_BASE_URL",
         base_url_suffix: "/v1",
         paths: &[
-            "/v1/responses",
+            "/v1/responses/*",
             "/v1/chat/completions",
             "/v1/completions",
             "/v1/embeddings",
-            "/v1/models",
+            "/v1/models/*",
         ],
     },
     KnownSecret {
@@ -118,7 +130,7 @@ pub const KNOWN: &[KnownSecret] = &[
         header: Header::Named("x-goog-api-key"),
         base_url_var: "GOOGLE_GEMINI_BASE_URL",
         base_url_suffix: "",
-        paths: &["/v1beta/models", "/v1/models"],
+        paths: &["/v1beta/models/*", "/v1/models/*"],
     },
     // Logins: an agent's own subscription sign-in, which Forge reads where the agent's CLI
     // keeps it when the keyring has no API key. Claude Code takes the token as
@@ -131,7 +143,7 @@ pub const KNOWN: &[KnownSecret] = &[
         header: Header::Bearer,
         base_url_var: "ANTHROPIC_BASE_URL",
         base_url_suffix: "",
-        paths: &["/v1/messages", "/v1/models"],
+        paths: &["/v1/messages", "/v1/messages/count_tokens", "/v1/models/*"],
     },
     // Codex reads its ChatGPT sign-in from auth.json, which the shim writes with this
     // placeholder; the variables only carry the placeholder and the route to the shim.
@@ -142,7 +154,11 @@ pub const KNOWN: &[KnownSecret] = &[
         header: Header::Bearer,
         base_url_var: "CODEX_CHATGPT_BASE_URL",
         base_url_suffix: "/backend-api",
-        paths: &["/backend-api/codex"],
+        // Responses (compaction below it) and the model list.
+        paths: &[
+            "/backend-api/codex/responses/*",
+            "/backend-api/codex/models",
+        ],
     },
 ];
 
@@ -355,8 +371,12 @@ mod tests {
         let chatgpt = known("CODEX_CHATGPT_TOKEN").unwrap();
         assert_eq!(chatgpt.host, "chatgpt.com");
         assert!(chatgpt.allows_path("/backend-api/codex/responses"));
+        assert!(chatgpt.allows_path("/backend-api/codex/responses/compact"));
         assert!(chatgpt.allows_path("/backend-api/codex/models?client_version=1"));
         for bad in [
+            "/backend-api/codex",
+            "/backend-api/codex/tasks",
+            "/backend-api/codex/models/x",
             "/backend-api/accounts",
             "/backend-api/codexx",
             "/backend-api/me",
@@ -369,6 +389,7 @@ mod tests {
         let claude = known("CLAUDE_CODE_OAUTH_TOKEN").unwrap();
         assert_eq!(claude.header, Header::Bearer);
         assert!(claude.allows_path("/v1/messages"));
+        assert!(!claude.allows_path("/v1/messages/batches"));
         assert!(!claude.allows_path("/api/oauth/claude_cli/create_api_key"));
     }
 
@@ -384,6 +405,8 @@ mod tests {
         }
         for bad in [
             "/v1/organizations/api_keys",
+            "/v1/messages/batches",
+            "/v1/messages/batches/b1/results",
             "/v1/messagesX",
             "/v1/messages/../organizations",
             "/v1/messages/%2e%2e/organizations",

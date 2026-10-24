@@ -283,6 +283,14 @@ pub fn unsigned_jwt(claims: &Value) -> String {
 /// file is in the user's own home, outside any sandbox.
 fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>, String> {
     use std::io::Read;
+    // Checked before opening too, so a FIFO there can't block the open.
+    match std::fs::metadata(path) {
+        Ok(meta) if !meta.is_file() => {
+            return Err(format!("{} is not a regular file", path.display()));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        _ => {}
+    }
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),

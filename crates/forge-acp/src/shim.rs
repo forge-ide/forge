@@ -54,6 +54,11 @@ pub struct ShimContext<'a> {
     pub home: &'a HomeConfig,
     /// The sign-in the proxy carries for the agent, when it isn't an API key.
     pub login: Option<LoginKind>,
+    /// The agent's working directory, a worktree.
+    pub worktree: &'a Path,
+    /// Each of the agent's [`repo_config`] paths as the session branch's last commit holds
+    /// it: what the user accepted, as opposed to what the agent may since have written.
+    pub committed: &'a [(String, Option<String>)],
 }
 
 /// What to start the agent with.
@@ -74,6 +79,41 @@ pub enum ShimError {
     },
     #[error("reading the user's {agent} config: {why}")]
     Read { agent: String, why: String },
+    /// The worktree's copy of config the agent acts on without asking differs from the
+    /// branch's last commit: something in the session wrote it.
+    #[error(
+        "{path} in the worktree differs from the branch's last commit, and {agent} would act on \
+         it without asking Forge; restore it (git checkout -- {path}) or commit it yourself, \
+         then start {agent} again"
+    )]
+    RepoConfigChanged { agent: String, path: String },
+}
+
+/// The repo files each agent reads its project config from, which a shim takes from the
+/// branch's last commit (Claude) or checks against it (Codex and Gemini, whose CLIs read them
+/// from the worktree at startup, and can't be pointed elsewhere).
+pub fn repo_config(agent: &str) -> &'static [&'static str] {
+    match agent {
+        "claude-code" => &[".claude/settings.json"],
+        "codex" => &[".codex/config.toml", ".codex/hooks.json"],
+        // A trusted worktree's .env is loaded into Gemini's environment, which every shell
+        // command inherits.
+        "gemini" => &[".gemini/settings.json", ".gemini/.env", ".env"],
+        _ => &[],
+    }
+}
+
+/// Whether the worktree's copy of `path` is what the branch committed: both missing, or a
+/// regular file with the same contents.
+fn unchanged(worktree: &Path, path: &str, committed: Option<&str>) -> bool {
+    let full = worktree.join(path);
+    match (std::fs::symlink_metadata(&full), committed) {
+        (Err(e), None) => e.kind() == std::io::ErrorKind::NotFound,
+        (Ok(meta), Some(committed)) if meta.is_file() => {
+            std::fs::read(&full).is_ok_and(|bytes| bytes == committed.as_bytes())
+        }
+        _ => false,
+    }
 }
 
 /// Variables Gemini reads that a repo's `.env` could otherwise set (dotenv never replaces one
@@ -120,12 +160,22 @@ pub fn prepare(manifest: Option<&Manifest>, cx: &ShimContext<'_>) -> Result<Shim
             .iter()
             .map(|(k, v)| (k.clone(), v.clone())),
     );
+    if manifest.id != "claude-code" {
+        for (path, committed) in cx.committed {
+            if !unchanged(cx.worktree, path, committed.as_deref()) {
+                return Err(ShimError::RepoConfigChanged {
+                    agent: manifest.name.clone(),
+                    path: path.clone(),
+                });
+            }
+        }
+    }
     let failed = |source| ShimError::Write {
         agent: manifest.id.clone(),
         source,
     };
     match manifest.id.as_str() {
-        "claude-code" => claude(&mut shim, cx).map_err(failed)?,
+        "claude-code" => claude(&mut shim, cx, manifest)?,
         "codex" => codex(&mut shim, cx),
         "gemini" => gemini(&mut shim, cx).map_err(failed)?,
         _ => {}
@@ -133,22 +183,51 @@ pub fn prepare(manifest: Option<&Manifest>, cx: &ShimContext<'_>) -> Result<Shim
     Ok(shim)
 }
 
-/// Claude Code: the repo's settings files and the user's (from a read-only copy in the shim
-/// dir, so neither the agent nor a command can add rules to it mid-session; the agent-writable
-/// user settings in the sandbox home are not read), its bypass mode refused, its web tools off,
-/// only `git_commit` pre-allowed, and the `default` mode, in which every tool the settings don't
-/// allow asks the client.
-fn claude(shim: &mut Shim, cx: &ShimContext<'_>) -> std::io::Result<()> {
+/// Claude Code: one settings file, the user's settings merged with the repo's committed
+/// `.claude/settings.json`, in the read-only shim dir, and no settings files of its own (it
+/// watches them, so one an approved command wrote in the worktree or the sandbox home would
+/// take effect at once); its bypass mode refused, its web tools off, only `git_commit`
+/// pre-allowed, and the `default` mode, in which every tool the settings don't allow asks the
+/// client.
+fn claude(shim: &mut Shim, cx: &ShimContext<'_>, manifest: &Manifest) -> Result<(), ShimError> {
+    let unreadable = |why: String| ShimError::Read {
+        agent: manifest.name.clone(),
+        why,
+    };
+    let user = match &cx.home.claude_settings {
+        Some(raw) => Some(
+            serde_json::from_slice::<serde_json::Value>(raw)
+                .map_err(|e| unreadable(format!("~/.claude/settings.json: {e}")))?,
+        ),
+        None => None,
+    };
+    let project = match cx.committed.iter().find_map(|(_, c)| c.as_deref()) {
+        Some(raw) => Some(
+            serde_json::from_str::<serde_json::Value>(raw)
+                .map_err(|e| unreadable(format!("the repo's .claude/settings.json: {e}")))?,
+        ),
+        None => None,
+    };
     let mut options = json!({
-        "settingSources": ["project", "local"],
+        "settingSources": [],
         "allowDangerouslySkipPermissions": false,
         "allowedTools": [format!("mcp__{MCP_SERVER}__git_commit")],
         "disallowedTools": ["WebFetch", "WebSearch"],
         "promptSuggestions": false,
     });
-    if let Some(settings) = &cx.home.claude_settings {
+    let merged = match (user, project) {
+        (Some(mut user), Some(project)) => {
+            merge_settings(&mut user, project);
+            Some(user)
+        }
+        (one, other) => one.or(other),
+    };
+    if let Some(settings) = merged {
         let path = cx.dir.join("claude-settings.json");
-        write_new(&path, settings)?;
+        write_new(&path, settings.to_string().as_bytes()).map_err(|source| ShimError::Write {
+            agent: manifest.id.clone(),
+            source,
+        })?;
         options["settings"] = path.display().to_string().into();
     }
     let meta = json!({
@@ -158,6 +237,32 @@ fn claude(shim: &mut Shim, cx: &ShimContext<'_>) -> std::io::Result<()> {
     shim.setup.meta = meta.as_object().cloned();
     shim.setup.mode = Some("default".into());
     Ok(())
+}
+
+/// Merge `over` into `base` as Claude Code layers its settings: objects key by key, arrays
+/// concatenated without repeats, and anything else replaced by `over`'s.
+fn merge_settings(base: &mut serde_json::Value, over: serde_json::Value) {
+    use serde_json::Value;
+    match (base, over) {
+        (Value::Object(base), Value::Object(over)) => {
+            for (key, value) in over {
+                match base.get_mut(&key) {
+                    Some(existing) => merge_settings(existing, value),
+                    None => {
+                        base.insert(key, value);
+                    }
+                }
+            }
+        }
+        (Value::Array(base), Value::Array(over)) => {
+            for value in over {
+                if !base.contains(&value) {
+                    base.push(value);
+                }
+            }
+        }
+        (base, over) => *base = over,
+    }
 }
 
 /// Codex: the read-only mode (see the manifest's quirks), plain `-c` shells, escalations
@@ -279,6 +384,10 @@ pub struct HomeConfig {
     pub links: Vec<(PathBuf, PathBuf)>,
     /// Claude Code's user settings, which its shim passes from the read-only shim dir.
     pub claude_settings: Option<Vec<u8>>,
+    /// Values in the copies that look like credentials (an MCP server's token in its `env`, a
+    /// key in Claude's `env`): the agent reads them as it would outside Forge, but the log
+    /// redactor hides them, and a command carrying one asks.
+    pub secrets: Vec<String>,
 }
 
 impl HomeConfig {
@@ -382,7 +491,74 @@ pub fn home_config(
         }
         _ => {}
     }
+    let mut found = Vec::new();
+    if let Some(raw) = &out.claude_settings {
+        found.extend(serde_json::from_slice::<serde_json::Value>(raw).ok());
+    }
+    for (path, raw) in &out.files {
+        // A login's placeholders hold nothing secret.
+        if path.ends_with("auth.json") {
+            continue;
+        }
+        let parsed = if path.extension().is_some_and(|e| e == "toml") {
+            std::str::from_utf8(raw)
+                .ok()
+                .and_then(|text| toml::from_str::<toml::Value>(text).ok())
+                .and_then(|v| serde_json::to_value(v).ok())
+        } else {
+            serde_json::from_slice(raw).ok()
+        };
+        found.extend(parsed);
+    }
+    for value in &found {
+        credential_values(value, false, &mut out.secrets);
+    }
+    out.secrets.sort();
+    out.secrets.dedup();
     Ok(out)
+}
+
+/// Keys whose values are credentials, or hold them.
+fn holds_credentials(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    matches!(
+        key.as_str(),
+        "env" | "headers" | "http_headers" | "env_http_headers"
+    ) || [
+        "token",
+        "key",
+        "secret",
+        "password",
+        "authorization",
+        "bearer",
+    ]
+    .iter()
+    .any(|word| key.contains(word))
+}
+
+/// The strings in `value` under a key that [`holds_credentials`], except ones that are plainly
+/// paths, URLs, or variable references.
+fn credential_values(value: &serde_json::Value, inside: bool, out: &mut Vec<String>) {
+    use serde_json::Value;
+    match value {
+        Value::Object(map) => {
+            for (key, value) in map {
+                credential_values(value, inside || holds_credentials(key), out);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                credential_values(item, inside, out);
+            }
+        }
+        Value::String(s) if inside => {
+            let plain = ["http", "/", "~", "$"].iter().any(|p| s.starts_with(p));
+            if !plain && !s.trim().is_empty() {
+                out.push(s.clone());
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Codex's `auth.json` for a ChatGPT sign-in, holding placeholders for its tokens: unsigned
@@ -418,6 +594,14 @@ fn codex_auth(account: &crate::logins::ChatgptAccount) -> String {
 /// A settings file's contents, if it exists; refused if it isn't a regular file under 1 MiB.
 fn read_settings(path: &Path) -> Result<Option<Vec<u8>>, String> {
     use std::io::Read;
+    // Checked before opening too, so a FIFO there can't block the open.
+    match std::fs::metadata(path) {
+        Ok(meta) if !meta.is_file() => {
+            return Err(format!("{} is not a regular file", path.display()));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        _ => {}
+    }
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -437,6 +621,25 @@ fn read_settings(path: &Path) -> Result<Option<Vec<u8>>, String> {
         .read_to_end(&mut out)
         .map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(Some(out))
+}
+
+/// Remove the agents' entries ([`AGENT_HOME_ENTRIES`]) from the sandbox home `home`, at each
+/// launch and when the session ends. Nothing may run in the session meanwhile; removing a
+/// directory never follows a symlink inside it.
+pub fn clear_home(home: &Path) -> std::io::Result<()> {
+    for entry in AGENT_HOME_ENTRIES {
+        let path = home.join(entry);
+        let removed = match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&path),
+            Ok(_) => std::fs::remove_file(&path),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        };
+        removed.map_err(|e| {
+            std::io::Error::new(e.kind(), format!("clearing {}: {e}", path.display()))
+        })?;
+    }
+    Ok(())
 }
 
 /// Put `config` into the sandbox home `home`, whose agent entries ([`AGENT_HOME_ENTRIES`]) the
@@ -475,11 +678,14 @@ fn set_env(shim: &mut Shim, name: &str, value: &str) {
 }
 
 /// Write a file that must not exist yet, so nothing already there is followed or replaced.
+/// Only its owner can read it: it may hold the user's own settings.
 fn write_new(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
+        .mode(0o600)
         .open(path)?;
     file.write_all(contents)
 }
@@ -511,6 +717,7 @@ mod tests {
         files: Vec::new(),
         links: Vec::new(),
         claude_settings: None,
+        secrets: Vec::new(),
     };
 
     fn context<'a>(dir: &'a Path, var: &'a dyn Fn(&str) -> Option<String>) -> ShimContext<'a> {
@@ -520,6 +727,10 @@ mod tests {
             var,
             home: &NO_HOME,
             login: None,
+            // An empty worktree, matching a branch with no agent config: tests that need
+            // files pass their own.
+            worktree: Path::new("/nonexistent-forge-worktree"),
+            committed: &[],
         }
     }
 
@@ -549,8 +760,9 @@ mod tests {
         let shim = prepare(manifest("claude-code"), &context(dir.path(), &no_vars)).unwrap();
         let meta = Value::Object(shim.setup.meta.clone().unwrap());
         let options = &meta["claudeCode"]["options"];
-        // Not "user": the sandbox home's settings file is the agent's to write.
-        assert_eq!(options["settingSources"], json!(["project", "local"]));
+        // None at all: Claude watches its settings files, and the agent can write the sandbox
+        // home's and the worktree's.
+        assert_eq!(options["settingSources"], json!([]));
         assert_eq!(options["allowDangerouslySkipPermissions"], false);
         assert_eq!(allowed_tools(&meta), ["mcp__forge__git_commit"]);
         assert_eq!(options["disallowedTools"], json!(["WebFetch", "WebSearch"]));
@@ -571,24 +783,55 @@ mod tests {
         assert_eq!(shim.setup.mcp_servers[0].name, "forge");
         assert!(shim.args.is_empty());
         assert!(files(dir.path()).is_empty());
-        // The user's settings go in from the read-only shim dir.
+        // The user's settings and the repo's committed ones go in from the read-only shim
+        // dir, merged as Claude layers them; what the worktree holds now doesn't count.
         let home = HomeConfig {
-            claude_settings: Some(br#"{"model":"opus"}"#.to_vec()),
+            claude_settings: Some(
+                br#"{"model":"opus","permissions":{"allow":["Bash(ls)"]},"env":{"A":"1"}}"#
+                    .to_vec(),
+            ),
             ..HomeConfig::default()
         };
+        let committed = [(
+            ".claude/settings.json".to_owned(),
+            Some(
+                r#"{"model":"sonnet","permissions":{"allow":["Bash(ls)","Bash(make)"]}}"#
+                    .to_owned(),
+            ),
+        )];
         let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("wt");
+        std::fs::create_dir_all(worktree.join(".claude")).unwrap();
+        std::fs::write(
+            worktree.join(".claude/settings.json"),
+            r#"{"permissions":{"allow":["Bash"]}}"#,
+        )
+        .unwrap();
+        let shim_dir = dir.path().join("shim");
+        std::fs::create_dir(&shim_dir).unwrap();
         let cx = ShimContext {
             home: &home,
-            ..context(dir.path(), &no_vars)
+            worktree: &worktree,
+            committed: &committed,
+            ..context(&shim_dir, &no_vars)
         };
         let shim = prepare(manifest("claude-code"), &cx).unwrap();
         let meta = Value::Object(shim.setup.meta.unwrap());
-        let path = dir.path().join("claude-settings.json");
+        let path = shim_dir.join("claude-settings.json");
         assert_eq!(
             meta["claudeCode"]["options"]["settings"],
             path.display().to_string()
         );
-        assert_eq!(std::fs::read(&path).unwrap(), br#"{"model":"opus"}"#);
+        let merged: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            merged,
+            json!({"model":"sonnet","permissions":{"allow":["Bash(ls)","Bash(make)"]},"env":{"A":"1"}})
+        );
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
@@ -848,6 +1091,84 @@ mod tests {
             home_config(None, home.path(), None).unwrap(),
             HomeConfig::default()
         );
+    }
+
+    #[test]
+    fn codex_and_gemini_wont_start_on_repo_config_changed_since_the_last_commit() {
+        for (agent, path) in [
+            ("codex", ".codex/config.toml"),
+            ("codex", ".codex/hooks.json"),
+            ("gemini", ".gemini/settings.json"),
+            ("gemini", ".gemini/.env"),
+            ("gemini", ".env"),
+        ] {
+            assert!(repo_config(agent).contains(&path), "{agent} {path}");
+            let dir = tempfile::tempdir().unwrap();
+            let worktree = dir.path().join("wt");
+            std::fs::create_dir_all(worktree.join(path).parent().unwrap()).unwrap();
+            let shim_dir = dir.path().join("shim");
+            let attempt = |committed: Option<&str>| {
+                let _ = std::fs::remove_dir_all(&shim_dir);
+                std::fs::create_dir(&shim_dir).unwrap();
+                let committed = [(path.to_owned(), committed.map(str::to_owned))];
+                let cx = ShimContext {
+                    worktree: &worktree,
+                    committed: &committed,
+                    ..context(&shim_dir, &no_vars)
+                };
+                match prepare(manifest(agent), &cx) {
+                    Err(ShimError::RepoConfigChanged { path: found, .. }) => Some(found),
+                    Ok(_) => None,
+                    Err(e) => panic!("{agent} {path}: {e}"),
+                }
+            };
+            // As committed, or absent from both: fine.
+            assert_eq!(attempt(None), None, "{agent} {path}");
+            std::fs::write(worktree.join(path), "committed").unwrap();
+            assert_eq!(attempt(Some("committed")), None, "{agent} {path}");
+            // Written in the session, added, or removed: refused.
+            std::fs::write(worktree.join(path), "rewritten").unwrap();
+            assert_eq!(attempt(Some("committed")).as_deref(), Some(path));
+            assert_eq!(attempt(None).as_deref(), Some(path));
+            std::fs::remove_file(worktree.join(path)).unwrap();
+            assert_eq!(attempt(Some("committed")).as_deref(), Some(path));
+            // A symlink is never the committed file.
+            std::os::unix::fs::symlink("/nonexistent", worktree.join(path)).unwrap();
+            assert_eq!(attempt(None).as_deref(), Some(path));
+        }
+    }
+
+    #[test]
+    fn credentials_in_the_users_settings_are_found_for_redaction() {
+        let home = tempfile::tempdir().unwrap();
+        let put = |rel: &str, contents: &str| {
+            let path = home.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        };
+        put(
+            ".claude/settings.json",
+            r#"{"env":{"GITHUB_TOKEN":"ghp_settingsvalue1","EDITOR_PATH":"/usr/bin/vim"},"model":"opus-long-name"}"#,
+        );
+        put(
+            ".claude.json",
+            r#"{"mcpServers":{"gh":{"command":"gh-mcp","env":{"PAT":"ghp_mcpvalue12345"},"headers":{"Authorization":"Bearer abcdefgh123"}}}}"#,
+        );
+        let claude = home_config(manifest("claude-code"), home.path(), None).unwrap();
+        assert_eq!(
+            claude.secrets,
+            [
+                "Bearer abcdefgh123",
+                "ghp_mcpvalue12345",
+                "ghp_settingsvalue1"
+            ]
+        );
+        put(
+            ".codex/config.toml",
+            "model = \"gpt-5-codex-long\"\n[mcp_servers.x]\ncommand = \"x\"\nbearer_token = \"tok_codexvalue99\"\n[mcp_servers.x.env]\nAPI_KEY = \"sk-codexenv-1234\"\nHOME_URL = \"https://example.com\"\n",
+        );
+        let codex = home_config(manifest("codex"), home.path(), None).unwrap();
+        assert_eq!(codex.secrets, ["sk-codexenv-1234", "tok_codexvalue99"]);
     }
 
     #[test]

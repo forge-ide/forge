@@ -797,5 +797,18 @@ async fn each_launch_starts_the_agents_own_config_empty() {
         std::fs::read_to_string(scratch_home.join("notes.txt")).unwrap(),
         "kept"
     );
+    // Closing the session removes the agent's config, so copies of the user's settings
+    // don't outlive it.
+    std::fs::create_dir_all(scratch_home.join(".claude")).unwrap();
+    std::fs::write(scratch_home.join(".claude/settings.json"), "{}").unwrap();
+    client
+        .call::<SessionClose>(&SessionCloseParams {
+            session_id: session.id.clone(),
+            outcome: SessionOutcome::Abandoned,
+        })
+        .await
+        .unwrap();
+    assert!(!scratch_home.join(".claude").exists());
+    assert!(!scratch_home.parent().unwrap().join("shim").exists());
     daemon.stop();
 }
