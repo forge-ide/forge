@@ -664,3 +664,23 @@ fn exact_patterns_match_only_the_action_they_came_from() {
         .is_err()
     );
 }
+
+#[tokio::test]
+async fn files_that_run_code_on_the_users_machine_are_protected() {
+    let e = plain("[[allow]]\nedit = [\"**\"]\n");
+    for path in [
+        ".envrc",
+        "services/api/.envrc",
+        ".husky/pre-commit",
+        "web/.husky/_/h",
+    ] {
+        let d = e.decide(&edit(path), Mode::FullAccess).await.decision;
+        assert_eq!(d.verdict, Verdict::Deny, "{path}");
+        assert_eq!(d.source, Source::ProtectedPath, "{path}");
+    }
+    let d = e
+        .decide(&edit("docs/envrc.md"), Mode::FullAccess)
+        .await
+        .decision;
+    assert_eq!(d.verdict, Verdict::Allow);
+}

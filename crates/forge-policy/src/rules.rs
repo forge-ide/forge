@@ -9,7 +9,12 @@ use crate::paths::{PathPatterns, normalize};
 use crate::{Layer, PolicyError, RuleList};
 
 /// Paths agents may never edit through Forge, whatever the files say.
-pub const BUILTIN_PROTECTED: &[&str] = &[".env", ".env.*", "*.pem", "*.key", ".forge/"];
+pub const BUILTIN_PROTECTED: &[&str] = &[
+    ".env", ".env.*", "*.pem", "*.key", ".forge/",
+    // Both run code on the user's machine outside the sandbox: direnv loads `.envrc` on
+    // entering the directory, and husky's git hooks run on the user's own commits.
+    ".envrc", ".husky/",
+];
 
 /// Every layer's rules, compiled once per session launch.
 #[derive(Clone, Debug)]
