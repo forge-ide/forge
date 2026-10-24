@@ -36,7 +36,7 @@ justification; a command run without them fails before it starts.";
 /// What agents keep in their home: recreated empty at every launch, since the sandbox home is
 /// writable and an earlier command could have left settings there that run programs unasked
 /// (Codex's `notify`, Gemini's hooks, Claude's MCP servers).
-pub const AGENT_HOME_ENTRIES: &[&str] = &[".claude", ".claude.json", ".codex", ".gemini"];
+pub const AGENT_HOME_ENTRIES: &[&str] = &[".claude", ".claude.json", ".codex", ".gemini", ".env"];
 
 /// What a shim needs to know about the session.
 pub struct ShimContext<'a> {
@@ -70,9 +70,9 @@ pub enum ShimError {
     /// The worktree has config the agent would read and act on without asking, which Forge
     /// can't outrank.
     #[error(
-        "{agent} would run commands that {path} names without asking Forge, and Forge can't \
-         switch them off; remove {path} from the branch (or commit it elsewhere) to run {agent} \
-         in Forge"
+        "{agent} would act on {path} without asking Forge (it can name commands to run, or \
+         variables that change what every command runs), and Forge can't switch that off; \
+         remove {path} from the branch to run {agent} in Forge"
     )]
     RepoConfig { agent: String, path: String },
 }
@@ -82,7 +82,9 @@ pub enum ShimError {
 /// server otherwise); codex-acp trusts every project itself.
 fn untrusted_config(agent: &str) -> &'static [&'static str] {
     match agent {
-        "gemini" => &[".gemini/settings.json", ".gemini/.env"],
+        // A trusted worktree's .env is loaded into Gemini's environment, which every shell
+        // command it runs inherits (BASH_ENV, LD_PRELOAD, ...); there is no flag to skip it.
+        "gemini" => &[".gemini/settings.json", ".gemini/.env", ".env"],
         "codex" => &[".codex/config.toml", ".codex/hooks.json"],
         _ => &[],
     }
@@ -452,6 +454,7 @@ mod tests {
         for (agent, path) in [
             ("gemini", ".gemini/settings.json"),
             ("gemini", ".gemini/.env"),
+            ("gemini", ".env"),
             ("codex", ".codex/config.toml"),
             ("codex", ".codex/hooks.json"),
         ] {

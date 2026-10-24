@@ -31,7 +31,7 @@ Prompt: "Add a function and a unit test that makes the failing test pass."
 
 Agent notes: Codex runs its commands only by escalating them, which asks Forge; a command it runs without escalating fails at its own sandbox. Note how often that happens, and check that every Codex command approval offers a plain "allow once" option (`forge session watch` shows the request): one that offers only "for this session" would let later runs of that command skip Forge.
 
-- [ ] Gemini CLI or Codex in a repo with `.gemini/settings.json` or `.codex/config.toml`: the session fails to start, saying which file and why.
+- [ ] Gemini CLI or Codex in a repo with `.gemini/settings.json`, a committed `.env` (Gemini), or `.codex/config.toml`: the session fails to start, saying which file and why.
 - [ ] Gemini CLI with a repo `.gemini/policies/` rule allowing `run_shell_command`: commands still ask.
 
 ## Review loop

@@ -106,6 +106,7 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 - [x] Each agent's shim allows Forge's `git_commit` tool and tells the agent to commit with it; the smoke task checks a real agent commits through it.
 - [x] Moved from M6, since `git_commit` needs it: the minimal per-session Forge MCP endpoint with `git_commit`, passed to the agent at ACP session start; the daemon commits on the session branch after policy and the `commit.pre` hook.
 - [x] Permission requests for reads and fetches (which name no `Action`): a read or search inside the worktrees is allowed, one outside is denied, and a fetch is denied with the network policy's reason.
+- [x] Gemini CLI and Codex refuse to start in a worktree with repo config they would act on unasked (`.gemini/settings.json`, `.gemini/.env`, `.env`, `.codex/config.toml`, `.codex/hooks.json`); a follow-up can parse these and allow benign ones.
 - [x] CLI commands for sessions and approvals, so the smoke checklist runs before the session UI exists; sample repos in `tests/fixtures/repos/`.
 
 **Done when:** each of the three agents completes the scripted smoke task ("add a function and a unit test") in each sample repo under Accept-edits mode, following the manual checklist in `docs/smoke.md`. Automated tests cover the registry, install and sign-in detection, shims, permission mapping, and `git_commit` with the fake agent; the real agents are checked by hand.

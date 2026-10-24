@@ -759,6 +759,7 @@ async fn each_launch_starts_the_agents_own_config_empty() {
     let outside = home.path().join("outside.json");
     std::fs::write(&outside, "{}").unwrap();
     std::os::unix::fs::symlink(&outside, scratch_home.join(".claude.json")).unwrap();
+    std::fs::write(scratch_home.join(".env"), "BASH_ENV=/x\n").unwrap();
     std::fs::write(scratch_home.join("notes.txt"), "kept").unwrap();
 
     let daemon = Daemon::start(home.path());
@@ -785,6 +786,7 @@ async fn each_launch_starts_the_agents_own_config_empty() {
     })
     .await;
     assert!(!scratch_home.join(".codex").exists());
+    assert!(!scratch_home.join(".env").exists());
     assert!(std::fs::symlink_metadata(scratch_home.join(".claude.json")).is_err());
     assert_eq!(
         std::fs::read_to_string(&outside).unwrap(),
