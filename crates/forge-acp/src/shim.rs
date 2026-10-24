@@ -214,9 +214,7 @@ fn write_new(path: &Path, contents: &[u8]) -> std::io::Result<()> {
 /// The text the first prompt starts with, for agents whose instructions can't be added to
 /// any other way.
 pub fn first_prompt_preamble(manifest: Option<&Manifest>) -> Option<&'static str> {
-    manifest
-        .filter(|m| m.id == "gemini")
-        .map(|_| INSTRUCTIONS)
+    manifest.filter(|m| m.id == "gemini").map(|_| INSTRUCTIONS)
 }
 
 /// The tools a Claude shim pre-allows.
@@ -275,12 +273,20 @@ mod tests {
         assert_eq!(allowed_tools(&meta), ["mcp__forge__git_commit"]);
         assert_eq!(options["disallowedTools"], json!(["WebFetch", "WebSearch"]));
         assert!(options.get("permissionMode").is_none());
-        assert!(meta["systemPrompt"]["append"].as_str().unwrap().contains("git_commit"));
+        assert!(
+            meta["systemPrompt"]["append"]
+                .as_str()
+                .unwrap()
+                .contains("git_commit")
+        );
         assert_eq!(shim.setup.mode.as_deref(), Some("default"));
         assert_eq!(shim.setup.command_source, CommandSource::RawInput);
         assert_eq!(shim.setup.mcp_servers[0].name, "forge");
         assert!(shim.args.is_empty());
-        assert!(files(dir.path()).is_empty(), "Claude's shim writes no files");
+        assert!(
+            files(dir.path()).is_empty(),
+            "Claude's shim writes no files"
+        );
     }
 
     #[test]
@@ -296,16 +302,31 @@ mod tests {
         assert_eq!(config["allow_login_shell"], false);
         assert_eq!(config["features"]["shell_snapshot"], false);
         assert_eq!(config["web_search"], "disabled");
-        assert_eq!(config["openai_base_url"], "http://127.0.0.1:9/_forge/tok/openai/v1");
+        assert_eq!(
+            config["openai_base_url"],
+            "http://127.0.0.1:9/_forge/tok/openai/v1"
+        );
         let forge = &config["mcp_servers"]["forge"];
         assert_eq!(forge["url"], "http://127.0.0.1:9/_forge/tok/mcp");
-        assert_eq!(forge["tools"], json!({ "git_commit": { "approval_mode": "approve" } }));
+        assert_eq!(
+            forge["tools"],
+            json!({ "git_commit": { "approval_mode": "approve" } })
+        );
         assert_eq!(config["mcp_servers"].as_object().unwrap().len(), 1);
         // Nothing that would let Codex skip asking.
-        for key in ["approval_policy", "sandbox_mode", "default_tools_approval_mode"] {
+        for key in [
+            "approval_policy",
+            "sandbox_mode",
+            "default_tools_approval_mode",
+        ] {
             assert!(config.get(key).is_none(), "{key}");
         }
-        assert!(config["developer_instructions"].as_str().unwrap().contains("git_commit"));
+        assert!(
+            config["developer_instructions"]
+                .as_str()
+                .unwrap()
+                .contains("git_commit")
+        );
         assert_eq!(shim.setup.mode.as_deref(), Some("read-only"));
         assert_eq!(shim.setup.command_source, CommandSource::ToolCallArgv);
         assert!(files(dir.path()).is_empty(), "Codex's shim writes no files");
@@ -328,24 +349,37 @@ mod tests {
         assert_eq!(env["GEMINI_CLI_TRUST_WORKSPACE"], "true");
         assert_eq!(
             shim.args,
-            ["--policy", &dir.path().join("gemini-policies").display().to_string()]
+            [
+                "--policy",
+                &dir.path().join("gemini-policies").display().to_string()
+            ]
         );
         let settings: Value =
             serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
         assert_eq!(settings["security"]["disableAlwaysAllow"], true);
-        assert_eq!(settings["security"]["auth"]["selectedType"], "gemini-api-key");
+        assert_eq!(
+            settings["security"]["auth"]["selectedType"],
+            "gemini-api-key"
+        );
         assert!(settings.get("mcpServers").is_none());
         assert!(settings["tools"].get("allowed").is_none());
         // The policy parses, allows only git_commit, and asks for every shell command.
         let policy: toml::Value = toml::from_str(GEMINI_POLICY).unwrap();
         let rules = policy["rule"].as_array().unwrap();
-        let allows: Vec<_> = rules.iter().filter(|r| r["decision"].as_str() == Some("allow")).collect();
+        let allows: Vec<_> = rules
+            .iter()
+            .filter(|r| r["decision"].as_str() == Some("allow"))
+            .collect();
         assert_eq!(allows.len(), 1);
         assert_eq!(allows[0]["toolName"].as_str(), Some("git_commit"));
         assert_eq!(allows[0]["mcpName"].as_str(), Some("forge"));
-        assert!(rules.iter().any(|r| r["toolName"].as_str() == Some("run_shell_command")
-            && r["argsPattern"].as_str() == Some(".*")
-            && r["decision"].as_str() == Some("ask_user")));
+        assert!(
+            rules
+                .iter()
+                .any(|r| r["toolName"].as_str() == Some("run_shell_command")
+                    && r["argsPattern"].as_str() == Some(".*")
+                    && r["decision"].as_str() == Some("ask_user"))
+        );
         assert_eq!(shim.setup.command_source, CommandSource::Title);
         assert_eq!(shim.setup.mode.as_deref(), Some("default"));
         assert!(first_prompt_preamble(manifest("gemini")).is_some());

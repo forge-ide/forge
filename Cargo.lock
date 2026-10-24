@@ -1289,6 +1289,7 @@ dependencies = [
  "forge-events",
  "forge-git",
  "forge-hooks",
+ "forge-mcp",
  "forge-policy",
  "forge-sandbox",
  "futures-util",
@@ -1296,6 +1297,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "ulid",
 ]
 
 [[package]]

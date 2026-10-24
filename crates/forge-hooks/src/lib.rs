@@ -237,7 +237,10 @@ pub struct CommitInput {
 pub enum CommitCheck {
     Passed,
     /// A hook blocked it; `reason` (with the hook's note for the agent) goes back to the agent.
-    Blocked { hook: String, reason: String },
+    Blocked {
+        hook: String,
+        reason: String,
+    },
 }
 
 /// Runs a session's hooks.
@@ -257,8 +260,7 @@ pub trait HookRunner: PreToolHooks {
     /// Before `git_commit` records a commit. A hook that denies, asks, fails, or times out
     /// blocks it: these hooks run in the agent's sandbox, so only a pass lets it through, and
     /// nothing they say can loosen what the policy decided.
-    fn commit_pre<'a>(&'a self, mode: Mode, commit: &'a CommitInput)
-    -> BoxFuture<'a, CommitCheck>;
+    fn commit_pre<'a>(&'a self, mode: Mode, commit: &'a CommitInput) -> BoxFuture<'a, CommitCheck>;
 }
 
 /// What a session's hooks need to run.
@@ -558,11 +560,7 @@ impl HookRunner for ShellHooks {
         })
     }
 
-    fn commit_pre<'a>(
-        &'a self,
-        mode: Mode,
-        commit: &'a CommitInput,
-    ) -> BoxFuture<'a, CommitCheck> {
+    fn commit_pre<'a>(&'a self, mode: Mode, commit: &'a CommitInput) -> BoxFuture<'a, CommitCheck> {
         Box::pin(async move {
             for hook in self.matching(HookEvent::CommitPre, None) {
                 let blocked = |reason: String| CommitCheck::Blocked {
@@ -572,7 +570,10 @@ impl HookRunner for ShellHooks {
                 let input = serde_json::json!({ "message": commit.message, "paths": commit.paths });
                 match self.run(hook, input, mode).await {
                     Ran::Failed(why) => {
-                        return blocked(format!("The commit.pre hook {} failed: {why}.", hook.name));
+                        return blocked(format!(
+                            "The commit.pre hook {} failed: {why}.",
+                            hook.name
+                        ));
                     }
                     Ran::Answered(Some(answer))
                         if matches!(answer.verdict, Some(Verdict::Deny) | Some(Verdict::Ask)) =>

@@ -9,7 +9,7 @@ use forge_api::events::{
     ApprovalDecidedBody, ApprovalDecision, ApprovalRequestedBody, EventPayload, PolicyDecisionBody,
     Remember, Verdict,
 };
-use forge_api::model::{Action, Approval, EditKind, SessionState};
+use forge_api::model::{Action, Approval, EditKind, Mode, SessionState};
 use forge_api::{ApiError, ApprovalId, ErrorKind, SessionId, Timestamp};
 use forge_config::{PolicyRule, RuleListName};
 use forge_hooks::HookRunner;
@@ -84,6 +84,17 @@ impl Gate for SessionGate {
 }
 
 impl SessionGate {
+    /// The mode the session's next decision uses.
+    pub(super) async fn mode(&self) -> Mode {
+        match self.manager.upgrade() {
+            Some(manager) => manager
+                .get(&self.session)
+                .await
+                .map_or(Mode::Ask, |s| s.mode),
+            None => Mode::Ask,
+        }
+    }
+
     async fn evaluate(&self, request: GateRequest) -> Result<GateVerdict, SessionError> {
         let id = request.tool_call_id.clone();
         let Some(manager) = self.manager.upgrade() else {
@@ -190,7 +201,7 @@ impl SessionGate {
         // or rule would flag in the write itself (its content, for one).
         let granted = decision.verdict == Verdict::Ask
             && matches!(decision.source, Source::Mode(_))
-            && request.kind != GateKind::Permission
+            && matches!(request.kind, GateKind::Write | GateKind::Terminal)
             && self.take_grant(&outcome.action);
         let verdict = if granted {
             let reason = "a human allowed this in the agent's permission request";

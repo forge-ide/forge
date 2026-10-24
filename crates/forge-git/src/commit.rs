@@ -249,8 +249,8 @@ fn run(
 
 /// Where a session keeps the index its commits are staged in: a daemon-owned dir no sandbox
 /// can write.
-pub fn index_path(private_dir: &Path, repo: &str) -> PathBuf {
-    private_dir.join(format!("commit-{repo}.index"))
+pub fn index_path(private_dir: &Path) -> PathBuf {
+    private_dir.join("git_commit.index")
 }
 
 #[cfg(test)]
@@ -297,7 +297,7 @@ mod tests {
     #[test]
     fn commits_every_change_on_the_branch_and_leaves_the_worktree_clean() {
         let (_dir, repo, wt, dirs, private) = setup();
-        let index = index_path(&private, "repo");
+        let index = index_path(&private);
         std::fs::write(wt.join("a.txt"), "changed\n").unwrap();
         std::fs::write(wt.join("new.rs"), "fn f() {}\n").unwrap();
         // The agent's own staging is ignored: the daemon stages from the files.
@@ -326,7 +326,7 @@ mod tests {
     #[test]
     fn commits_only_named_paths_and_refuses_paths_that_leave_the_worktree() {
         let (_dir, repo, wt, dirs, private) = setup();
-        let index = index_path(&private, "repo");
+        let index = index_path(&private);
         std::fs::write(wt.join("a.txt"), "changed\n").unwrap();
         std::fs::write(wt.join("b.txt"), "b\n").unwrap();
         let paths = vec!["b.txt".to_owned()];
@@ -354,7 +354,7 @@ mod tests {
     #[test]
     fn a_branch_that_moved_after_staging_is_not_overwritten() {
         let (_dir, repo, wt, dirs, private) = setup();
-        let index = index_path(&private, "repo");
+        let index = index_path(&private);
         std::fs::write(wt.join("a.txt"), "changed\n").unwrap();
         let staged = stage(&dirs, &wt, "feat/x", None, &index).unwrap();
         let main = git(&repo, &["rev-parse", "main"]);
@@ -380,7 +380,7 @@ mod tests {
     #[test]
     fn the_worktrees_git_link_and_hooks_are_never_used() {
         let (_dir, repo, wt, dirs, private) = setup();
-        let index = index_path(&private, "repo");
+        let index = index_path(&private);
         // A hook that would leave a mark if anything ran it.
         let hooks = repo.join(".git/hooks");
         std::fs::create_dir_all(&hooks).unwrap();

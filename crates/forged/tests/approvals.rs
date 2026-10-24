@@ -731,3 +731,44 @@ async fn a_daemon_restart_cancels_pending_approvals_and_tells_the_agent() {
     assert!(resumed.contains("pnpm add left-pad"), "{resumed}");
     assert!(resumed.contains("cancelled"), "{resumed}");
 }
+
+#[tokio::test]
+async fn reads_inside_the_worktree_are_allowed_and_other_unmapped_requests_refused() {
+    let home = temp_home();
+    let repo = git_repo_with_commit(home.path(), "demo");
+    fake_profile(
+        &repo,
+        "fake",
+        r#"
+steps:
+  - request_permission: { action: read, path: README.md }
+  - expect_permission: allow
+  - request_permission: { action: read, path: ../../../../outside.txt }
+  - expect_permission: deny
+  - request_permission: { action: read }
+  - expect_permission: deny
+  - request_permission: { action: fetch }
+  - expect_permission: deny
+  - end_turn
+"#,
+    );
+    std::fs::write(home.path().join("outside.txt"), "x").unwrap();
+    let daemon = Daemon::start(home.path());
+    let mut client = daemon.client().await;
+    let project = open(&mut client, &repo).await;
+    // Even in Ask mode, nothing here waits on a human.
+    let session = start(&mut client, &project, Mode::Ask, "go").await;
+    wait_for_state(&mut client, &session.id, SessionState::Review).await;
+    let events = all_events(&mut client, &session.id).await;
+    assert_eq!(
+        decisions(&events),
+        [
+            (Verdict::Allow, "read:worktree".into()),
+            (Verdict::Deny, "guard:outside-worktree".into()),
+            (Verdict::Deny, "guard:outside-worktree".into()),
+            (Verdict::Deny, "network:allowlist".into()),
+        ]
+    );
+    assert_eq!(count(&events, EventKind::ApprovalRequested), 0);
+    daemon.stop();
+}

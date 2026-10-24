@@ -17,7 +17,8 @@ use tokio::sync::Notify;
 pub mod script;
 
 pub use script::{
-    ExecStep, Expected, PermissionAction, Script, ScriptError, Step, WriteStep, glob_match,
+    ExecStep, Expected, McpCallStep, PermissionAction, Script, ScriptError, Step, WriteStep,
+    glob_match,
 };
 
 /// Script position and per-connection state.
@@ -27,6 +28,8 @@ struct State {
     cwd: PathBuf,
     last_permission: Option<Expected>,
     turns: u64,
+    /// The URL of the MCP server the client named `forge`.
+    mcp: Option<String>,
 }
 
 struct Shared {
@@ -71,6 +74,7 @@ pub async fn serve(
             cwd: PathBuf::from("/"),
             last_permission: None,
             turns: 0,
+            mcp: None,
         }),
         cancelled: AtomicBool::new(false),
         cancel: Notify::new(),
@@ -82,15 +86,23 @@ pub async fn serve(
         .on_receive_request(
             async move |init: InitializeRequest, responder, _cx| {
                 responder.respond(
-                    InitializeResponse::new(init.protocol_version)
-                        .agent_capabilities(AgentCapabilities::new()),
+                    InitializeResponse::new(init.protocol_version).agent_capabilities(
+                        AgentCapabilities::new()
+                            .mcp_capabilities(McpCapabilities::new().http(true)),
+                    ),
                 )
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
             async move |req: NewSessionRequest, responder, _cx| {
-                on_session.state().cwd = req.cwd;
+                let mut state = on_session.state();
+                state.cwd = req.cwd;
+                state.mcp = req.mcp_servers.iter().find_map(|s| match s {
+                    McpServer::Http(http) if http.name == "forge" => Some(http.url.clone()),
+                    _ => None,
+                });
+                drop(state);
                 responder.respond(NewSessionResponse::new("fake-session"))
             },
             agent_client_protocol::on_receive_request!(),
@@ -205,11 +217,20 @@ async fn run_turn(
                 let (kind, raw) = match p.action {
                     PermissionAction::Exec => (ToolKind::Execute, json!({ "argv": p.argv })),
                     PermissionAction::Edit => (ToolKind::Edit, json!({ "path": p.path })),
+                    PermissionAction::Read => (ToolKind::Read, json!({})),
+                    PermissionAction::Fetch => {
+                        (ToolKind::Fetch, json!({ "url": "https://example.com/" }))
+                    }
                 };
-                let fields = ToolCallUpdateFields::new()
+                let mut fields = ToolCallUpdateFields::new()
                     .kind(kind)
                     .title(format!("{:?}", p.action))
                     .raw_input(raw);
+                if p.action == PermissionAction::Read
+                    && let Some(path) = &p.path
+                {
+                    fields = fields.locations(vec![ToolCallLocation::new(resolve(&cwd, path))]);
+                }
                 let options = vec![
                     PermissionOption::new("allow", "Allow", PermissionOptionKind::AllowOnce),
                     PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
@@ -235,11 +256,100 @@ async fn run_turn(
                     return Err(format!("expected permission {want:?}, got {got:?}"));
                 }
             }
+            Step::McpCall(call) => {
+                let url = shared
+                    .state()
+                    .mcp
+                    .clone()
+                    .ok_or("the client offered no forge MCP server")?;
+                let refused = mcp_call(&url, &call.tool, call.arguments).await?;
+                match (refused, call.expect) {
+                    (Some(why), Some(Expected::Deny)) => {
+                        eprintln!("forge-fake-agent: refused as expected: {why}")
+                    }
+                    (Some(why), _) => return Err(format!("{} refused: {why}", call.tool)),
+                    (None, Some(Expected::Deny)) => {
+                        return Err(format!("{}: expected a refusal", call.tool));
+                    }
+                    (None, _) => {}
+                }
+            }
             Step::SleepMs(ms) => {
                 shared.sleep(Duration::from_millis(ms)).await;
             }
         }
     }
+}
+
+/// Initialize the MCP server at `url` and call `tool`: `Some(reason)` if the tool refused.
+async fn mcp_call(
+    url: &str,
+    tool: &str,
+    arguments: serde_json::Value,
+) -> Result<Option<String>, String> {
+    mcp_post(
+        url,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                           "clientInfo": {"name": "forge-fake-agent", "version": "0"}}}),
+    )
+    .await?;
+    let reply = mcp_post(
+        url,
+        &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": tool, "arguments": arguments}}),
+    )
+    .await?;
+    let result = reply
+        .get("result")
+        .ok_or_else(|| format!("{tool}: {reply}"))?;
+    if result["isError"] == true {
+        Ok(Some(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned(),
+        ))
+    } else {
+        Ok(None)
+    }
+}
+
+/// POST one JSON-RPC message to a plain-HTTP URL and read the JSON answer.
+async fn mcp_post(url: &str, message: &serde_json::Value) -> Result<serde_json::Value, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or("the MCP URL isn't http://")?;
+    let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let body = message.to_string();
+    let mut stream = tokio::net::TcpStream::connect(authority)
+        .await
+        .map_err(|e| format!("connecting to {authority}: {e}"))?;
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {authority}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .map_err(|e| e.to_string())?;
+    let response = String::from_utf8_lossy(&response);
+    let (head, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or("malformed MCP response")?;
+    if !head.starts_with("HTTP/1.1 200") {
+        return Err(format!(
+            "MCP server answered {}",
+            head.lines().next().unwrap_or("")
+        ));
+    }
+    serde_json::from_str(body).map_err(|e| format!("MCP response: {e}"))
 }
 
 /// After a cancel, continue the script from the step after the interrupted turn's `end_turn`.

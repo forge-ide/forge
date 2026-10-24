@@ -378,7 +378,10 @@ async fn commit_pre_hooks_see_the_commit_and_block_unless_they_pass() {
         "check.sh",
         r#"input=$(cat); case "$input" in *'"message":"add f"'*'"paths":["src/f.rs"]'*) ;; *) echo '{"verdict":"deny","reason":"wrong input"}';; esac"#,
     );
-    fx.script("tests.sh", r#"echo '{"verdict":"deny","reason":"tests fail","noteForAgent":"fix them"}'"#);
+    fx.script(
+        "tests.sh",
+        r#"echo '{"verdict":"deny","reason":"tests fail","noteForAgent":"fix them"}'"#,
+    );
     fx.script("asks.sh", r#"echo '{"verdict":"ask","reason":"maybe"}'"#);
     fx.script("broken.sh", "exit 3");
     fx.script("slow.sh", "sleep 5");
@@ -391,7 +394,10 @@ async fn commit_pre_hooks_see_the_commit_and_block_unless_they_pass() {
             "[[hook]]\nevent = \"commit.pre\"\nname = \"{name}\"\nrun = [\".forge/hooks/{name}.sh\"]\ntimeout_ms = 300\n"
         ))
     };
-    assert_eq!(hooks("check").commit_pre(Mode::Auto, &commit).await, CommitCheck::Passed);
+    assert_eq!(
+        hooks("check").commit_pre(Mode::Auto, &commit).await,
+        CommitCheck::Passed
+    );
     let blocked = |name: &str, reason: &str| CommitCheck::Blocked {
         hook: name.into(),
         reason: reason.into(),
@@ -411,7 +417,10 @@ async fn commit_pre_hooks_see_the_commit_and_block_unless_they_pass() {
     }
     // No commit.pre hooks: nothing to block.
     let none = fx.hooks("");
-    assert_eq!(none.commit_pre(Mode::Auto, &commit).await, CommitCheck::Passed);
+    assert_eq!(
+        none.commit_pre(Mode::Auto, &commit).await,
+        CommitCheck::Passed
+    );
 }
 
 #[tokio::test]

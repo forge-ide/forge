@@ -287,6 +287,7 @@ impl AgentResolver for ProfileResolver {
         read_only.extend(hooks.dir().map(Path::to_path_buf));
         Ok(AgentLaunch {
             command: AgentCommand { argv, env: vec![] },
+            agent: manifest.map(|m| m.id.clone()),
             read_only,
             network,
             secrets,

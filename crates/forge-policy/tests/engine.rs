@@ -734,21 +734,39 @@ async fn an_agents_shell_wrapper_is_decided_by_its_script_unless_it_reads_startu
 #[tokio::test]
 async fn commits_are_guarded_by_path_and_scanned_for_secrets() {
     let e = plain("[protected]\npaths = [\"Cargo.lock\"]\n");
-    for path in [".envrc", "Cargo.lock", "a/.git/config", "../x", ".forge/policy.toml"] {
-        let d = e.guard_path(path).unwrap_or_else(|| panic!("{path} not guarded"));
+    for path in [
+        ".envrc",
+        "Cargo.lock",
+        "a/.git/config",
+        "../x",
+        ".forge/policy.toml",
+    ] {
+        let d = e
+            .guard_path(path)
+            .unwrap_or_else(|| panic!("{path} not guarded"));
         assert_eq!(d.verdict, Verdict::Deny, "{path}");
     }
     assert_eq!(e.guard_path("src/lib.rs"), None);
 
-    let commit = || Request::new(Action::Git { op: "commit".into() });
+    let commit = || {
+        Request::new(Action::Git {
+            op: "commit".into(),
+        })
+    };
     let d = e.decide(&commit(), Mode::AcceptEdits).await.decision;
-    assert_eq!((d.verdict, d.source), (Verdict::Ask, Source::Mode(Mode::AcceptEdits)));
+    assert_eq!(
+        (d.verdict, d.source),
+        (Verdict::Ask, Source::Mode(Mode::AcceptEdits))
+    );
     let d = e.decide(&commit(), Mode::Auto).await.decision;
     assert_eq!(d.verdict, Verdict::Allow);
     // A secret in the lines a commit adds asks, even where the mode would allow it.
     let key = format!("AKIA{}", "Q".repeat(16));
     let d = e
-        .decide(&commit().with_content(format!("let k = \"{key}\";\n")), Mode::FullAccess)
+        .decide(
+            &commit().with_content(format!("let k = \"{key}\";\n")),
+            Mode::FullAccess,
+        )
         .await
         .decision;
     assert_eq!((d.verdict, d.source), (Verdict::Ask, Source::SecretScan));

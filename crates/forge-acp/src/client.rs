@@ -59,6 +59,8 @@ pub enum GateKind {
     Write,
     /// A command in a client terminal.
     Terminal,
+    /// A call to one of Forge's own tools (`git_commit`), through its MCP endpoint.
+    Tool,
 }
 
 /// An action the agent wants to take, for the [`Gate`] to decide. `action` is `None` when a
@@ -309,7 +311,9 @@ impl AcpClient {
             // Forge's tools are reached over HTTP; an agent that can't do that goes without.
             let http = agent.agent_capabilities.mcp_capabilities.http;
             if !http && !setup.mcp_servers.is_empty() {
-                tracing::warn!("the agent can't reach MCP servers over HTTP; it gets none of Forge's tools");
+                tracing::warn!(
+                    "the agent can't reach MCP servers over HTTP; it gets none of Forge's tools"
+                );
             }
             let servers = setup
                 .mcp_servers
