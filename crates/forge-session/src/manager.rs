@@ -567,14 +567,10 @@ impl SessionManager {
         let secrets = std::mem::take(&mut launch.secrets);
         let (rules, hook_set) = (launch.rules.clone(), launch.hooks.clone());
         let project_root = launch.project_root.clone();
-        // Commands and edits holding an injected secret's value ask, and the value never
-        // reaches the log.
-        let scanner = Arc::new(SecretScanner::new(
-            secrets
-                .iter()
-                .map(|s| s.value.expose().to_owned())
-                .collect(),
-        ));
+        let mut values: Vec<String> = secrets
+            .iter()
+            .map(|s| s.value.expose().to_owned())
+            .collect();
         // Forge's MCP endpoint is served on the proxy; its tool is filled in once the gate
         // exists, below.
         let tools = Arc::new(CommitTool::default());
@@ -587,6 +583,10 @@ impl SessionManager {
                 tools.clone(),
             )
             .await?;
+        // Commands and edits holding an injected secret's value ask, and the value never
+        // reaches the log; nor does the proxy's token, which agents log in their config.
+        values.push(proxy.token().to_owned());
+        let scanner = Arc::new(SecretScanner::new(values));
         let record = session.clone();
         let manifest = launch.agent.as_deref().and_then(adapters::manifest);
         let setup = tokio::task::spawn_blocking(move || {

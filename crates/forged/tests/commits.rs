@@ -297,3 +297,40 @@ async fn a_worktree_that_changes_while_the_commit_is_checked_is_not_committed() 
     assert!(refused, "{events:?}");
     daemon.stop();
 }
+
+#[tokio::test]
+async fn the_endpoints_token_never_reaches_the_event_log() {
+    let home = temp_home();
+    let repo = git_repo_with_commit(home.path(), "demo");
+    fake_profile(
+        &repo,
+        "fake",
+        "steps:\n  - message: \"config: {forge_mcp_url}\"\n  - end_turn\n",
+    );
+    let daemon = daemon(home.path());
+    let mut client = daemon.client().await;
+    let project = open(&mut client, &repo).await;
+    let session = start(&mut client, &project, Mode::FullAccess).await;
+    wait_for_state(&mut client, &session.id, SessionState::Review).await;
+    let events = all_events(&mut client, &session.id).await;
+    let said: String = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::AgentMessage(m) => Some(m.delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(said.contains("/_forge/"), "{said}");
+    let token = said
+        .split("/_forge/")
+        .nth(1)
+        .unwrap()
+        .split('/')
+        .next()
+        .unwrap();
+    assert!(
+        !token.chars().all(|c| c.is_ascii_hexdigit()) || token.len() < 32,
+        "token logged: {said}"
+    );
+    daemon.stop();
+}

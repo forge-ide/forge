@@ -1095,6 +1095,11 @@ async fn respond<S: AsyncWrite + Unpin>(
 }
 
 impl Proxy {
+    /// The secret path segment of every route, for the log redactor.
+    pub fn token(&self) -> &str {
+        &self.state.token
+    }
+
     /// The local route's URL, for a sandboxed process that reaches the proxy at `url`.
     pub fn local_url(&self, url: &str) -> String {
         format!("{url}/_forge/{}/{LOCAL_ROUTE}", self.state.token)

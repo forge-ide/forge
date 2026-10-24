@@ -35,7 +35,8 @@ pub enum Step {
     McpCall(McpCallStep),
     /// Fail the turn unless the last permission request got this answer.
     ExpectPermission(Expected),
-    /// Stream an agent message.
+    /// Stream an agent message; `{forge_mcp_url}` in it is replaced by the URL of the client's
+    /// `forge` MCP server.
     Message(String),
     /// Wait, unless the turn is cancelled first.
     SleepMs(u64),

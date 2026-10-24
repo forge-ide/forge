@@ -188,6 +188,10 @@ async fn run_turn(
                 update(cx, &session, SessionUpdate::Plan(Plan::new(entries)))?;
             }
             Step::Message(text) => {
+                // `{forge_mcp_url}` stands for the MCP URL the client gave, as an agent that
+                // logs its config would print it.
+                let url = shared.state().mcp.clone().unwrap_or_default();
+                let text = text.replace("{forge_mcp_url}", &url);
                 let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)))
                     .message_id(MessageId::new(message_id.as_str()));
                 update(cx, &session, SessionUpdate::AgentMessageChunk(chunk))?;
