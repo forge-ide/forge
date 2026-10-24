@@ -249,11 +249,17 @@ async fn a_client_killed_mid_stream_resumes_with_after_seq_and_loses_nothing() {
     let received: Vec<Event> = all.into_iter().map(|n| n.event).collect();
     let logged = all_events(&mut client, &session.id).await;
     assert_eq!(received, logged, "no events lost across the reconnect");
-    let messages = logged
+    // Every chunk arrived, in order. Streamed text is held back by up to the longest value the
+    // redactor knows (the proxy's token, at least), so chunks may arrive joined.
+    let text: String = logged
         .iter()
-        .filter(|e| e.payload.kind() == EventKind::AgentMessage)
-        .count();
-    assert_eq!(messages, 20);
+        .filter_map(|e| match &e.payload {
+            EventPayload::AgentMessage(m) => Some(m.delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    let expected: String = (0..20).map(|i| format!("chunk {i} ")).collect();
+    assert_eq!(text, expected);
 }
 
 #[tokio::test]
