@@ -16,11 +16,13 @@
 //! `/<path>`, with the secret's header set to the real value. The agent only ever holds a
 //! placeholder. `<token>` is random per proxy and reaches the sandbox only in the base-URL
 //! variables, so other local programs (or a web page rebinding a name to loopback) can't use
-//! the route; requests must also name a loopback `Host`, carry no browser `Origin` or
-//! `Sec-Fetch-*` headers, use `GET` or `POST`, and stay on the secret's allowed paths.
+//! the route; requests must also name one loopback `Host`, carry no browser `Origin` or Fetch
+//! Metadata headers (but `Sec-Fetch-Mode` alone, which Node's `fetch` always sends), use `GET`
+//! or `POST`, and stay on the secret's allowed paths.
 //!
 //! And it serves the daemon's own endpoint for the session, when it has one: a `POST` to
-//! `/_forge/<token>/mcp`, with the same caller checks, is answered by a [`LocalService`]
+//! `/_forge/<token>/mcp`, with the same caller checks and a JSON body, is answered by a
+//! [`LocalService`]
 //! (Forge's MCP server) instead of going anywhere.
 
 use std::collections::HashSet;
@@ -874,11 +876,20 @@ fn local_request(method: &str, headers: &[httparse::Header<'_>]) -> Request {
         );
     }
     let mut length = None;
+    let mut json = false;
     let mut kept = Vec::new();
     for h in headers {
         let name = h.name.to_ascii_lowercase();
         let value = String::from_utf8_lossy(h.value).into_owned();
         match name.as_str() {
+            // JSON-RPC is always JSON, and a page can't send JSON without a preflight the
+            // proxy refuses; a form's text/plain POST can't pass for it.
+            "content-type" => {
+                json = value
+                    .split(';')
+                    .next()
+                    .is_some_and(|t| t.trim().eq_ignore_ascii_case("application/json"));
+            }
             "transfer-encoding" => {
                 return refuse(411, "a request body must have a Content-Length".into());
             }
@@ -889,6 +900,12 @@ fn local_request(method: &str, headers: &[httparse::Header<'_>]) -> Request {
             _ => {}
         }
         kept.push((name, value));
+    }
+    if !json {
+        return refuse(
+            415,
+            "requests to Forge's endpoint must be application/json".into(),
+        );
     }
     match length {
         None => refuse(411, "a request body must have a Content-Length".into()),
@@ -942,24 +959,41 @@ async fn serve_local<S>(
     }
 }
 
-/// Why a route request's headers show it isn't from a sandboxed client, if they do: its `Host`
-/// must be loopback (a page rebinding its own name to 127.0.0.1 still sends that name), and a
-/// browser's `Origin` and `Sec-Fetch-*` headers are refused.
+/// Why a route request's headers show it isn't from a sandboxed client, if they do: its one
+/// `Host` must be loopback (a page rebinding its own name to 127.0.0.1 still sends that name),
+/// and a browser's `Origin` and Fetch Metadata headers are refused. `Sec-Fetch-Mode` alone is
+/// accepted: browsers only send it with `Sec-Fetch-Site` (and page script can drop neither,
+/// nor an `Origin`), while Node's `fetch` sends it alone on every request. Its modes that only
+/// a browser uses (navigations and WebSockets) are refused even alone.
 fn route_caller_ok(headers: &[httparse::Header<'_>]) -> Result<(), String> {
     let mut host = None;
     for h in headers {
         let name = h.name.to_ascii_lowercase();
-        if name == "origin" || name.starts_with("sec-fetch-") {
+        let browser_mode = name == "sec-fetch-mode"
+            && matches!(
+                String::from_utf8_lossy(h.value)
+                    .trim()
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "navigate" | "nested-navigate" | "websocket"
+            );
+        if name == "origin"
+            || (name.starts_with("sec-fetch-") && name != "sec-fetch-mode")
+            || browser_mode
+        {
             return Err(format!(
-                "{} requests are refused on a secret's route",
+                "requests with {} are refused on Forge's routes",
                 h.name
             ));
         }
         if name == "host" {
+            if host.is_some() {
+                return Err("a request may have only one Host header".into());
+            }
             host = Some(String::from_utf8_lossy(h.value).to_ascii_lowercase());
         }
     }
-    let host = host.ok_or("a Host header is required on a secret's route")?;
+    let host = host.ok_or("a Host header is required on Forge's routes")?;
     let name = match host.rsplit_once(':') {
         Some((name, port)) if port.chars().all(|c| c.is_ascii_digit()) => name,
         _ => host.as_str(),
@@ -1048,6 +1082,7 @@ async fn respond<S: AsyncWrite + Unpin>(
         405 => "Method Not Allowed",
         411 => "Length Required",
         413 => "Content Too Large",
+        415 => "Unsupported Media Type",
         _ => "Bad Gateway",
     };
     let body = format!("forge egress proxy: {why}\n");
@@ -1210,30 +1245,62 @@ mod tests {
         );
         let post = |path: &str, extra: &str, body: &str| {
             format!(
-                "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra}Content-Length: {}\r\n\r\n{body}",
+                "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n{extra}Content-Length: {}\r\n\r\n{body}",
                 body.len()
             )
         };
         let reply = exchange(proxy.port(), post(path, "", "{}").as_bytes()).await;
         assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
-        assert!(reply.ends_with("{} 2"), "{reply}");
+        assert!(reply.ends_with("{} 3"), "{reply}");
+        // Node's fetch, as Gemini CLI's MCP client sends it.
+        let reply = exchange(
+            proxy.port(),
+            post(
+                path,
+                "accept: application/json, text/event-stream\r\nsec-fetch-mode: cors\r\n",
+                "{}",
+            )
+            .as_bytes(),
+        )
+        .await;
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
         // A body sent in pieces is read whole.
         let mut s = TcpStream::connect(("127.0.0.1", proxy.port()))
             .await
             .unwrap();
-        let head =
-            format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 6\r\n\r\nabc");
+        let head = format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: 6\r\n\r\nabc"
+        );
         s.write_all(head.as_bytes()).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         s.write_all(b"def").await.unwrap();
         let mut out = Vec::new();
         s.read_to_end(&mut out).await.unwrap();
-        assert!(String::from_utf8_lossy(&out).ends_with("abcdef 2"));
+        assert!(String::from_utf8_lossy(&out).ends_with("abcdef 3"));
 
         let wrong_token = "/_forge/nottoken/mcp";
         for (request, code) in [
             (post(wrong_token, "", "{}"), "404"),
             (post(path, "Origin: https://evil.example\r\n", "{}"), "403"),
+            (
+                post(
+                    path,
+                    "Sec-Fetch-Mode: cors\r\nSec-Fetch-Site: cross-site\r\n",
+                    "{}",
+                ),
+                "403",
+            ),
+            // A form can post text/plain without a preflight; JSON-RPC is always JSON.
+            (
+                format!(
+                    "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\n{{}}"
+                ),
+                "415",
+            ),
+            (
+                format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r\n{{}}"),
+                "415",
+            ),
             (
                 format!(
                     "POST {path} HTTP/1.1\r\nHost: evil.example\r\nContent-Length: 2\r\n\r\n{{}}"
@@ -1246,13 +1313,13 @@ mod tests {
             ),
             (
                 format!(
-                    "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+                    "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n"
                 ),
                 "411",
             ),
             (
                 format!(
-                    "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 99999999\r\n\r\n"
+                    "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 99999999\r\n\r\n"
                 ),
                 "413",
             ),
@@ -1760,6 +1827,25 @@ mod tests {
     /// Requests that know the token but don't look like a sandboxed client, or that would use
     /// the secret for something other than inference, are refused and logged.
     #[tokio::test]
+    async fn node_fetch_reaches_a_secrets_route() {
+        // What Node's fetch (undici) sends on every request: Sec-Fetch-Mode, alone.
+        let (addr, seen) = upstream().await;
+        let resolver = Arc::new(Mapped(HashMap::from([("api.anthropic.com".into(), addr)])));
+        let h = routed(resolver, vec![route("ANTHROPIC_API_KEY", "sk-real")]).await;
+        let base = format!("/_forge/{}/anthropic", h.proxy.state.token);
+        for mode in ["cors", "no-cors", "same-origin"] {
+            lock(&seen).clear();
+            let request = format!(
+                "POST {base}/v1/messages HTTP/1.1\r\nHost: 127.0.0.1:3128\r\nx-api-key: {PLACEHOLDER}\r\naccept-language: *\r\nsec-fetch-mode: {mode}\r\nuser-agent: node\r\nContent-Length: 2\r\n\r\n{{}}"
+            );
+            let reply = exchange(h.proxy.port(), request.as_bytes()).await;
+            assert!(reply.ends_with("pong"), "{mode}: {reply}");
+            let sent = String::from_utf8_lossy(&lock(&seen)).into_owned();
+            assert!(sent.contains("x-api-key: sk-real"), "{sent}");
+        }
+    }
+
+    #[tokio::test]
     async fn route_requests_from_browsers_or_for_other_uses_are_refused() {
         let (addr, seen) = upstream().await;
         let resolver = Arc::new(Mapped(HashMap::from([("api.anthropic.com".into(), addr)])));
@@ -1782,14 +1868,56 @@ mod tests {
             format!(
                 "POST {base}/v1/messages/%2E%2E/organizations HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
             ),
+            // Browsers send Sec-Fetch-Mode only with Sec-Fetch-Site, or with an Origin.
+            format!(
+                "POST {base}/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nSec-Fetch-Mode: cors\r\nSec-Fetch-Site: cross-site\r\n\r\n"
+            ),
+            format!(
+                "POST {base}/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nSec-Fetch-Mode: cors\r\nOrigin: http://localhost:5173\r\n\r\n"
+            ),
+            format!("POST {base}/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: null\r\n\r\n"),
+            format!(
+                "POST {base}/v1/messages HTTP/1.1\r\nHost: evil.example\r\nSec-Fetch-Mode: cors\r\nSec-Fetch-Site: same-origin\r\n\r\n"
+            ),
+            format!(
+                "GET {base}/v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\n\r\n"
+            ),
+            // Modes only a browser uses are refused even alone.
+            format!(
+                "GET {base}/v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nSec-Fetch-Mode: navigate\r\n\r\n"
+            ),
+            format!(
+                "GET {base}/v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nsec-fetch-mode: WebSocket\r\n\r\n"
+            ),
+            format!(
+                "POST {base}/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nSec-Fetch-Dest: empty\r\n\r\n"
+            ),
+            format!(
+                "POST {base}/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nSec-Fetch-User: ?1\r\n\r\n"
+            ),
+            format!(
+                "POST {base}/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nsec-fetch-mode: cors\r\nSEC-FETCH-SITE: none\r\n\r\n"
+            ),
+            format!(
+                "OPTIONS {base}/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://evil.example\r\nAccess-Control-Request-Private-Network: true\r\n\r\n"
+            ),
+            // Two Hosts: which one a server believes is anyone's guess.
+            format!(
+                "POST {base}/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nHost: evil.example\r\n\r\n"
+            ),
         ];
         for request in &cases {
             let reply = exchange(h.proxy.port(), request.as_bytes()).await;
             assert!(reply.starts_with("HTTP/1.1 403"), "{request}: {reply}");
+            assert!(!reply.contains("Access-Control-Allow"), "{reply}");
         }
         assert!(lock(&seen).is_empty(), "nothing reached the secret's host");
-        let log = logged(&h, cases.len()).await;
-        assert_eq!(log.len(), cases.len());
+        // Denials are logged at most so many a second.
+        let expected = cases
+            .len()
+            .min(Limits::default().denials_per_second as usize);
+        let log = logged(&h, expected).await;
+        assert_eq!(log.len(), expected);
         assert!(
             log.iter()
                 .all(|c| !c.allowed && c.host == "api.anthropic.com"),

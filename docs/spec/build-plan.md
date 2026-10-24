@@ -17,7 +17,8 @@ Items marked **assumed** are defaults chosen so work can start; change them befo
 | Sandbox, Linux | Light: Landlock + seccomp. Standard: bubblewrap | Decided |
 | Sandbox, macOS | Light and Standard: one Seatbelt profile. Container: Podman machine | Decided (Seatbelt); Assumed (Container) |
 | Agent commits | Through Forge's `git_commit` MCP tool, run by the daemon; the shared git dir is read-only inside the sandbox | Decided |
-| Agents in v0.1 | Claude Code, Codex, Gemini CLI, all through ACP | Decided |
+| Agents in v0.1 | Claude Code, Codex, Gemini CLI, all through ACP (`claude-agent-acp`, `codex-acp`, `gemini --acp`), at versions pinned in the adapter registry | Decided |
+| Agent sign-in in v0.1 | API keys from the OS keyring, injected by the egress proxy; subscription sign-ins (claude.ai, ChatGPT, Google) keep credentials in the real home, which the sandbox hides, so they aren't supported yet | Decided |
 | Languages in v0.1 | Rust, TypeScript, Python, Go | Decided |
 | Git hosting in v0.1 | Push the branch with the user's git credentials; PR creation is v0.2 | Assumed |
 | GitHub auth (v0.2) | Reuse `gh auth token` if present, else OAuth device flow | Assumed |
@@ -90,7 +91,7 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 - [x] Shell hook runtime for `tool.pre`, `tool.post`, `edit.pre`, `edit.post`, `task.done`.
 - [x] Modes: Ask, Accept edits, rules-only Auto, Full access.
 - [x] `approval.list`, `approval.decide`; ACP permission requests wait on them.
-- [ ] `commit.pre` shell hook; default deny rules for manual git commands that write shared state (`git commit`, `git push`, and `git stash` and `git branch` except their read-only forms), with a reason pointing agents at `git_commit`.
+- [x] `commit.pre` shell hook (it runs from M5, with `git_commit`); default deny rules for manual git commands that write shared state (`git commit`, `git push`, and `git stash` and `git branch` except their read-only forms), with a reason pointing agents at `git_commit`.
 
 **Done when:** the policy golden tests pass, and an API test shows an Ask decision blocking the fake agent until `approval.decide` arrives.
 
@@ -98,13 +99,16 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 
 ### M5: Real agents
 
-- [ ] Adapter registry: one manifest per agent with install command, version pin, auth check, and known quirks.
-- [ ] Agent profiles for Claude Code, Codex, and Gemini CLI.
-- [ ] Native shim that sets each agent's own permission mode so it defers to Forge's policy.
-- [ ] `agent.list` with install and auth status; UI prompts to install or sign in.
-- [ ] Each agent's shim allows Forge's `git_commit` tool and tells the agent to commit with it; the smoke task checks a real agent commits through it.
+- [x] Adapter registry: one manifest per agent with install command, version pin, auth check, and known quirks.
+- [x] Agent profiles for Claude Code, Codex, and Gemini CLI: built in as `claude`, `codex`, and `gemini`; a project's `.forge/agents/<id>.toml` overrides one by ID.
+- [x] Native shim that sets each agent's own permission mode so it defers to Forge's policy.
+- [x] `agent.list` with install and auth status, and `forge agent list`. The UI prompt to install or sign in moved to M8, which brings the New session dialog it belongs in.
+- [x] Each agent's shim allows Forge's `git_commit` tool and tells the agent to commit with it; the smoke task checks a real agent commits through it.
+- [x] Moved from M6, since `git_commit` needs it: the minimal per-session Forge MCP endpoint with `git_commit`, passed to the agent at ACP session start; the daemon commits on the session branch after policy and the `commit.pre` hook.
+- [x] Permission requests for reads and fetches (which name no `Action`): a read or search inside the worktrees is allowed, one outside is denied, and a fetch is denied with the network policy's reason.
+- [x] CLI commands for sessions and approvals, so the smoke checklist runs before the session UI exists; sample repos in `tests/fixtures/repos/`.
 
-**Done when:** each of the three agents completes the scripted smoke task ("add a function and a unit test") in each sample repo under Accept-edits mode, following the manual checklist in `docs/smoke.md`.
+**Done when:** each of the three agents completes the scripted smoke task ("add a function and a unit test") in each sample repo under Accept-edits mode, following the manual checklist in `docs/smoke.md`. Automated tests cover the registry, install and sign-in detection, shims, permission mapping, and `git_commit` with the fake agent; the real agents are checked by hand.
 
 ### M6: Review store and review pane
 
@@ -115,7 +119,7 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 - [ ] Changes since last review; per-hunk revert.
 - [ ] Review pane UI (ui-screens.md).
 - [ ] `review.ship` with `push-branch` and `merge-local`.
-- [ ] Minimal per-session Forge MCP endpoint with `git_commit`, passed to the agent at ACP session start; the daemon commits on the session branch after policy and the `commit.pre` hook, sharing commit code with checkpoints and ship.
+- [ ] Checkpoints and ship share their commit code with `git_commit` (the endpoint itself landed in M5).
 
 **Done when:** an end-to-end test drives the fake agent through change → comment → request changes → agent reply → thread resolved; the review pane meets the large-diff performance target on WebKitGTK and macOS.
 
@@ -131,6 +135,7 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 ### M8: Session UI, timeline, and packaging
 
 - [ ] Board (single session in v0.1), approvals inbox, session view with transcript and timeline.
+- [ ] New session dialog lists `agent.list` with install and sign-in status, and shows the install command or the keyring command for an agent that needs one (from M5).
 - [ ] Rewind from the timeline; mode and sandbox tier switches with confirmations.
 - [ ] Linux packages: AppImage, `.deb`, `.rpm`, and an Arch `.pkg.tar.zst` with AUR `-bin` and `-git` packages; `forged` systemd user unit.
 - [ ] macOS: signed and notarized `.dmg`; `forged` launchd agent.

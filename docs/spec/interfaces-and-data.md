@@ -40,7 +40,8 @@ type SessionState = 'provisioning' | 'ready' | 'working' | 'waiting'
 type Project = { id: string; name: string; root: string; repos: Repo[] };
 type Repo = { name: string; path: string; baseBranch: string };
 type AgentProfile = { id: string; agent: 'claude-code' | 'codex' | 'gemini' | string;
-  installed: boolean; authenticated: boolean; version?: string };
+  installed: boolean; authenticated: boolean; version?: string; name?: string;
+  supportedVersion?: string; installCommand?: string; signIn?: string; problem?: string };
 type Session = { id: string; projectId: string; title: string; agentProfile: string;
   state: SessionState; mode: Mode; sandbox: SandboxTier; branch: string;
   createdAt: string; updatedAt: string; usage: { inputTokens: number;
@@ -73,7 +74,7 @@ type BranchCollision = { repo: string;
 | `project.open` | `{ path }` | `Project` |
 | `project.list` | `{}` | `Project[]` |
 | `project.get` | `{ projectId }` | `Project` |
-| `agent.list` | `{}` | `AgentProfile[]` |
+| `agent.list` | `{ projectId? }` | `AgentProfile[]` |
 | `session.create` | `{ projectId, agentProfile, title, prompt, mode, sandbox?, branch?, onCollision? }` | `Session` |
 | `session.branchPreview` | `{ projectId, title, branch? }` | `{ branch, collisions: BranchCollision[] }` |
 | `session.prompt` | `{ sessionId, text }` | `{ turnId }` |
@@ -107,7 +108,8 @@ Method notes:
 
 - **`server.hello`**: `sandboxTiers` lists the tiers this machine can run, as probed when the daemon started, plus `unsandboxed`, which always runs but still needs each profile's opt-in. Clients compare the major `apiVersion` and refuse to continue on a mismatch.
 - **`project.open`**: `path` must be absolute (clients resolve relative paths). If the directory has no `forge.toml`, it must be a git repository root on a branch; the daemon writes a single-repo `forge.toml` (name from the directory, `path = "."`, `base_branch` from the current branch) and never overwrites an existing one. Reopening the same root returns the same project ID and picks up edits to `forge.toml`. Invalid config is `ValidationFailed` with every problem listed.
-- **`session.create`**: returns at once in `provisioning`; progress arrives as events, starting with `session.state` to `ready` (or `failed`, with the reason). The agent profile is `.forge/agents/<agentProfile>.toml` (`NotFound` if missing). The sandbox tier is `sandbox`, else the profile's, else `standard`; a tier this machine can't run is `SandboxUnavailable`, never a silent fallback, and `unsandboxed` also needs `allow_unsandboxed = true` in the profile. The branch is `branch`, or one derived from `title` (see `session.branchPreview`). If the branch or its worktree already exists in any repo, the call fails with `Conflict` unless `onCollision` says what the user chose: `reuse-branch` (only if no worktree has the branch checked out) or `adopt-worktree` (only if git lists it as a worktree of that branch). A worktree owned by a live session is always `Conflict`. A repo path that resolves outside the project root is `ValidationFailed`. More live sessions than `sessions.max_concurrent` is `InvalidState`. A non-empty `prompt` starts the first turn once the session is ready.
+- **`agent.list`**: the built-in profiles (`claude`, `codex`, `gemini`, one per registry agent) and, with `projectId`, the project's `.forge/agents/*.toml` files, which override a built-in one of the same ID; sorted by ID. Found without running any agent: `installed` when its command resolves to something it can run (see Launch in component-architecture.md), with `version` read from its npm package; `authenticated` when every secret in its `env_secrets` is in the keyring (a registry agent's profile must name one). `name` and `supportedVersion` come from the registry; `installCommand` is the pinned install command when the agent isn't installed or is at another version; `signIn` is the keyring command for each missing secret; `problem` says why a session can't start (an invalid profile file, an agent outside the registry with no `command`). `NotFound` for an unknown `projectId`.
+- **`session.create`**: returns at once in `provisioning`; progress arrives as events, starting with `session.state` to `ready` (or `failed`, with the reason). The agent profile is `.forge/agents/<agentProfile>.toml`, else the built-in profile of that ID (`NotFound` if neither exists). The sandbox tier is `sandbox`, else the profile's, else `standard`; a tier this machine can't run is `SandboxUnavailable`, never a silent fallback, and `unsandboxed` also needs `allow_unsandboxed = true` in the profile. The branch is `branch`, or one derived from `title` (see `session.branchPreview`). If the branch or its worktree already exists in any repo, the call fails with `Conflict` unless `onCollision` says what the user chose: `reuse-branch` (only if no worktree has the branch checked out) or `adopt-worktree` (only if git lists it as a worktree of that branch). A worktree owned by a live session is always `Conflict`. A repo path that resolves outside the project root is `ValidationFailed`. More live sessions than `sessions.max_concurrent` is `InvalidState`. A non-empty `prompt` starts the first turn once the session is ready.
 - **`session.branchPreview`**: the branch name `session.create` would use and what already holds it in each repo, so a client can show the name and ask about collisions first. A derived name uses the `[branches]` format and types from `forge.toml`, falling back to the user config, then `{type}/{slug}` with `feat`, `fix`, `bug`. An invalid branch name, or a title with nothing to make a slug from, is `ValidationFailed`.
 - **`session.prompt`**: accepted in `ready`, `review`, and `paused` (`InvalidState` otherwise); returns once the turn has started. After a daemon restart it first loads the session's injected secrets, so the prompt is redacted with them, and fails (`AgentUnavailable`) without recording the prompt when they can't be loaded. **`session.cancel`**: in `working` or `waiting`; approvals still pending end as cancelled, the turn ends with stop reason `cancelled`, and the session returns to `ready`. **`session.close`**: in `ready`, `review`, `paused`, or `failed`; stops the agent, keeps the worktrees, and moves to `done`.
 - **`events.subscribe`**: `topics` must be non-empty, and `project/<id>` and `session/<id>` must exist (`NotFound` otherwise). A connection can only unsubscribe its own subscriptions, and they end when it disconnects. Notification `seq` is the daemon-wide stream cursor, not the event's own `seq`: it increases across all sessions and topics and survives restarts. With `afterSeq`, every matching event after that cursor is replayed first, then live events follow with none missed or repeated; replayed events arrive after the subscribe response. An `afterSeq` ahead of the stream (for example, from before the data directory was replaced) is `ValidationFailed`; the client resubscribes without it and reloads. Each event reaches a subscription once, naming the first of its topics that the subscription includes.
@@ -199,7 +201,7 @@ read_only = ["/home/me/.local/share/agents"]  # extra paths visible read-only in
 
 ```toml
 agent = "claude-code"             # registry key
-command = ["claude-code-acp"]     # overrides the registry default
+command = ["claude-agent-acp"]    # overrides the registry default
 model = "claude-opus-5"           # optional; passed if the agent supports it
 mode = "accept-edits"
 sandbox = "standard"
@@ -210,7 +212,7 @@ env_secrets = ["ANTHROPIC_API_KEY"]  # keyring names, injected via proxy
 allow = ["api.anthropic.com", "crates.io", "static.crates.io", "registry.npmjs.org"]
 ```
 
-`sandbox` defaults to `standard`; `allow_unsandboxed` defaults to `false`. `[network] allow` lists the hosts the session's egress proxy lets through, on ports 80 and 443: plain host names, matched exactly (ignoring case and a trailing dot), with no scheme, port, path, wildcard, or IP address; anything else fails `session.create` with `ValidationFailed`. An empty or missing list means no network. `env_secrets` may name only secrets Forge knows how to inject (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`; anything else is `ValidationFailed`). Each is read at launch from the OS keyring, service `forge`, account the secret's name; one that is missing fails the session with the command that stores it (`secret-tool store --label='Forge NAME' service forge account NAME` on Linux, `security add-generic-password -s forge -a NAME -w` on macOS). The profile ID is the file name and may use only letters, digits, `-`, and `_`.
+`agent` is a registry key (`claude-code`, `codex`, `gemini`) or any other name, which must then set `command`; a registry agent gets its shim (component-architecture.md, ACP client and agent adapters). Each registry agent has a built-in profile, used when the project has no file of that ID: `claude`, `codex`, and `gemini`, each with `mode = "accept-edits"`, the Standard tier, no `[network] allow`, and `env_secrets` naming its API key. `sandbox` defaults to `standard`; `allow_unsandboxed` defaults to `false`. `[network] allow` lists the hosts the session's egress proxy lets through, on ports 80 and 443: plain host names, matched exactly (ignoring case and a trailing dot), with no scheme, port, path, wildcard, or IP address; anything else fails `session.create` with `ValidationFailed`. An empty or missing list means no network. `env_secrets` may name only secrets Forge knows how to inject (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`; anything else is `ValidationFailed`). Each is read at launch from the OS keyring, service `forge`, account the secret's name; one that is missing fails the session with the command that stores it (`secret-tool store --label='Forge NAME' service forge account NAME` on Linux, `security add-generic-password -s forge -a NAME -w` on macOS). The profile ID is the file name and may use only letters, digits, `-`, and `_`.
 
 **`policy.toml`** (managed: `/etc/forge/managed.toml` on Linux, `/Library/Application Support/Forge/managed.toml` on macOS; user: `~/.config/forge/policy.toml`; project: `<root>/.forge/policy.toml`)
 
@@ -275,7 +277,7 @@ The file is `<root>/.forge/hooks.toml`, read from the project root when the agen
 }
 ```
 
-`tool.post` and `edit.post` input also has `"status": "completed" | "failed"`; `task.done` input has no `action`. `rewrite` is a replacement argv, for `tool.pre` on commands only; `verdict` counts at `tool.pre` and `edit.pre`, and a `deny` at `task.done` sends the session back to work. Exit code 0 with empty output means no opinion. A non-zero exit, a timeout, output over 1 MiB, or invalid JSON is logged; it asks at `tool.pre` and `edit.pre`, blocks at `commit.pre` and `task.done`, and is no opinion at `tool.post` and `edit.post`. Hooks run in the agent's sandbox, so `verdict: "allow"` is logged but counts as no opinion; `deny`, `ask`, and `rewrite` count. `reason` and `noteForAgent` are cut at 4 KiB.
+`tool.post` and `edit.post` input also has `"status": "completed" | "failed"`; `task.done` input has no `action`; `commit.pre` input has no `action` but the commit's `message` and the `paths` it changes, and a `deny` or `ask` from it blocks the commit. `rewrite` is a replacement argv, for `tool.pre` on commands only; `verdict` counts at `tool.pre` and `edit.pre`, and a `deny` at `task.done` sends the session back to work. Exit code 0 with empty output means no opinion. A non-zero exit, a timeout, output over 1 MiB, or invalid JSON is logged; it asks at `tool.pre` and `edit.pre`, blocks at `commit.pre` and `task.done`, and is no opinion at `tool.post` and `edit.post`. Hooks run in the agent's sandbox, so `verdict: "allow"` is logged but counts as no opinion; `deny`, `ask`, and `rewrite` count. `reason` and `noteForAgent` are cut at 4 KiB.
 
 **Plugin manifest** `forge-plugin.toml` (v0.2, defined now so v0.1 hooks fit it):
 
@@ -315,7 +317,7 @@ Forge's MCP server ships in v0.2, but its tool names and schemas are fixed now s
 | `review_reply` | `{ threadId, body }` | `{}` |
 | `checks_run` | `{ names? }` | `{ results: { name, passed, output }[] }` |
 | `ask_human` | `{ question, options? }` | `{ answer }` (blocks until answered) |
-| `git_commit` | `{ message, paths? }` | `{ commit, branch }` (all changes, including untracked files, when `paths` is omitted; policy-checked, runs the `commit.pre` hook) |
+| `git_commit` | `{ message, paths? }` | `{ commit, branch }` (all changes, including untracked files, when `paths` is omitted; `paths` are literal and must stay inside the working directory; policy-checked, runs the `commit.pre` hook; nothing to commit, a guard, a denial, or a blocking hook is a tool error with the reason) |
 
 Lines and columns are 1-based. Paths are relative to the session's working directory. Tool names use underscores because some agents reject dots in MCP tool names.
 

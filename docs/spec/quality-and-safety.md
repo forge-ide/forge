@@ -26,7 +26,7 @@ steps:
   - end_turn
 ```
 
-Each step is a one-key map or a bare name; unknown steps or keys are errors. Paths are relative to the session's working directory. Implemented so far: `expect_prompt` (a glob where `*` matches anything), `plan`, `read`, `write` with `content` (the whole new file), `exec`, `request_permission` (`action: exec` with `argv`, or `action: edit` with `path`), `expect_permission`, `message`, `end_turn`, and `sleep_ms` (waits, unless the turn is cancelled first; for tests that act mid-turn). `write` with `patch`, `expect_review_comments`, and `reply_thread` arrive with the review store. A cancelled turn resumes the script after that turn's `end_turn`. A failed expectation fails the turn with an error.
+Each step is a one-key map or a bare name; unknown steps or keys are errors. Paths are relative to the session's working directory. Implemented so far: `expect_prompt` (a glob where `*` matches anything), `plan`, `read`, `write` with `content` (the whole new file), `exec`, `request_permission` (`action: exec` with `argv`, `action: edit` with `path`, `action: read` with an optional `path`, or `action: fetch`), `mcp_call` (a tool on the client's `forge` MCP server, with `arguments` and an optional `expect: deny`), `expect_permission`, `message`, `end_turn`, and `sleep_ms` (waits, unless the turn is cancelled first; for tests that act mid-turn). `write` with `patch`, `expect_review_comments`, and `reply_thread` arrive with the review store. A cancelled turn resumes the script after that turn's `end_turn`. A failed expectation fails the turn with an error.
 
 | Layer | Tooling | Required coverage |
 | --- | --- | --- |
@@ -70,6 +70,7 @@ Forge assumes the agent is well-meaning but fallible and steerable by anything i
 | Prompt injection | A README or web page tells the agent to send `~/.aws` somewhere | Sandbox hides `$HOME`; egress allowlist | Injection flags; classifier (v0.2) |
 | Secret leakage | Agent prints an API key into a log or commit | Secrets injected by the proxy, never in the environment | Secret scan on edits, output, and commits; log redaction |
 | Malicious repo | Build script or git hook runs code on checkout | All agent commands run sandboxed; git hooks disabled in worktrees | Container tier for untrusted repos |
+| Agent config in the repo | A cloned repo's `.claude/settings.json`, `.gemini/`, or `.codex/config.toml` pre-allows tools or picks a mode that skips asking | Native shims rank Forge's settings above the repo's and the agent's own, and Forge sets and checks the agent's mode | The sandbox bounds whatever runs |
 | Malicious dependency | Typosquatted package added by the agent | New-dependency guard (v0.2); Ask for package installs by default | Review shows lockfile changes |
 | Plugin or hook abuse | A project plugin exfiltrates data | Project plugins pinned by hash and approved on first use; WASM hooks have no ambient access | Hooks run in the sandbox by default |
 | Another local user | Connects to the daemon socket | Socket mode 0600 in a per-user directory | Remote clients need paired tokens |
