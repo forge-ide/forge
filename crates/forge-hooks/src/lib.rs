@@ -27,7 +27,7 @@ use forge_policy::paths::{PathPatterns, normalize};
 use forge_policy::{HookAdvice, PreToolHooks, Request, mode_name};
 use forge_sandbox::SessionSandbox;
 use futures_util::future::BoxFuture;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Default timeout for tool and edit hooks.
@@ -224,6 +224,22 @@ pub enum TaskCheck {
     },
 }
 
+/// A commit `git_commit` is about to make, as `commit.pre` hooks see it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CommitInput {
+    pub message: String,
+    /// The paths it changes, relative to the repo.
+    pub paths: Vec<String>,
+}
+
+/// Whether the `commit.pre` hooks let a commit go ahead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommitCheck {
+    Passed,
+    /// A hook blocked it; `reason` (with the hook's note for the agent) goes back to the agent.
+    Blocked { hook: String, reason: String },
+}
+
 /// Runs a session's hooks.
 pub trait HookRunner: PreToolHooks {
     /// After a command or write finished with `status` (`completed` or `failed`): the notes
@@ -237,6 +253,12 @@ pub trait HookRunner: PreToolHooks {
 
     /// When a turn ended with the agent reporting it done.
     fn task_done(&self, mode: Mode) -> BoxFuture<'_, TaskCheck>;
+
+    /// Before `git_commit` records a commit. A hook that denies, asks, fails, or times out
+    /// blocks it: these hooks run in the agent's sandbox, so only a pass lets it through, and
+    /// nothing they say can loosen what the policy decided.
+    fn commit_pre<'a>(&'a self, mode: Mode, commit: &'a CommitInput)
+    -> BoxFuture<'a, CommitCheck>;
 }
 
 /// What a session's hooks need to run.
@@ -533,6 +555,47 @@ impl HookRunner for ShellHooks {
                 }
             }
             TaskCheck::Done
+        })
+    }
+
+    fn commit_pre<'a>(
+        &'a self,
+        mode: Mode,
+        commit: &'a CommitInput,
+    ) -> BoxFuture<'a, CommitCheck> {
+        Box::pin(async move {
+            for hook in self.matching(HookEvent::CommitPre, None) {
+                let blocked = |reason: String| CommitCheck::Blocked {
+                    hook: hook.name.clone(),
+                    reason,
+                };
+                let input = serde_json::json!({ "message": commit.message, "paths": commit.paths });
+                match self.run(hook, input, mode).await {
+                    Ran::Failed(why) => {
+                        return blocked(format!("The commit.pre hook {} failed: {why}.", hook.name));
+                    }
+                    Ran::Answered(Some(answer))
+                        if matches!(answer.verdict, Some(Verdict::Deny) | Some(Verdict::Ask)) =>
+                    {
+                        let mut reason = answer.reason.unwrap_or_else(|| {
+                            format!("The commit.pre hook {} blocked the commit.", hook.name)
+                        });
+                        if answer.verdict == Some(Verdict::Ask) {
+                            reason = format!(
+                                "The commit.pre hook {} asked ({reason}), and commit.pre hooks can only pass or block.",
+                                hook.name
+                            );
+                        }
+                        if let Some(note) = answer.note_for_agent {
+                            reason.push_str("\n\n");
+                            reason.push_str(&note);
+                        }
+                        return blocked(reason);
+                    }
+                    Ran::Answered(_) => {}
+                }
+            }
+            CommitCheck::Passed
         })
     }
 }

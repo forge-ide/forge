@@ -306,14 +306,15 @@ impl AcpClient {
         let init = InitializeRequest::new(ProtocolVersion::V1).client_capabilities(capabilities);
         let opened = async {
             let agent = client.request(init).await?;
-            if !setup.mcp_servers.is_empty() && !agent.agent_capabilities.mcp_capabilities.http {
-                return Err(AcpError::Protocol(
-                    "the agent can't reach MCP servers over HTTP, which Forge's tools need".into(),
-                ));
+            // Forge's tools are reached over HTTP; an agent that can't do that goes without.
+            let http = agent.agent_capabilities.mcp_capabilities.http;
+            if !http && !setup.mcp_servers.is_empty() {
+                tracing::warn!("the agent can't reach MCP servers over HTTP; it gets none of Forge's tools");
             }
             let servers = setup
                 .mcp_servers
                 .iter()
+                .filter(|_| http)
                 .map(|s| acp::McpServer::Http(acp::McpServerHttp::new(&s.name, &s.url)))
                 .collect();
             let session = client

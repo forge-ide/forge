@@ -8,6 +8,7 @@
 pub mod adapters;
 pub mod client;
 pub mod permission;
+pub mod shim;
 pub mod terminal;
 pub mod workspace;
 
