@@ -7,13 +7,14 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use forge_acp::{AcpClient, AcpError, AgentCommand, EventSink, Root, Workspace};
 use forge_api::events::{
     EventPayload, PromptBody, SessionStateBody, TurnEndedBody, TurnSource, TurnStartedBody,
 };
-use forge_api::events::{NetworkBody, Verdict};
+use forge_api::events::{HookRunBody, NetworkBody, Verdict};
 use forge_api::methods::{BranchCollision, CollisionResolution};
 use forge_api::model::{Action, Mode, Project, SandboxTier, Session, SessionState, Usage};
 use forge_api::{
@@ -22,7 +23,8 @@ use forge_api::{
 use forge_config::{PolicyRule, RuleListName};
 use forge_events::EventLog;
 use forge_git::{CreateMode, GitError, Worktrees, worktree_path};
-use forge_policy::{Engine, NoClassifier, NoHooks, Policy, Rules, SecretScanner};
+use forge_hooks::{HookContext, HookLog, HookRunner, HookSet, ShellHooks, TaskCheck};
+use forge_policy::{Engine, NoClassifier, Policy, Rules, SecretScanner};
 use forge_sandbox::proxy::{
     Allowlist, Connection, Limits, Proxy, ProxyConfig, PublicDns, SecretRoute, Tls, Upstream,
 };
@@ -72,6 +74,10 @@ pub struct AgentLaunch {
     pub secrets: Vec<SecretRoute>,
     /// The managed, user, and project policy layers, compiled.
     pub rules: Arc<Rules>,
+    /// The project's hooks, compiled.
+    pub hooks: Arc<HookSet>,
+    /// The project root, for hooks' input.
+    pub project_root: PathBuf,
 }
 
 /// Finds how to start a session's agent from its profile and the policy files, and records
@@ -129,7 +135,23 @@ struct Live {
     grants: Mutex<Vec<Action>>,
     /// For the agent with the next prompt: approvals a daemon restart cancelled.
     resume_note: Mutex<Option<String>>,
+    /// The running agent's hooks.
+    hooks: Mutex<Option<Arc<dyn HookRunner>>>,
+    /// Hook notes for the agent's next prompt, from writes and allowed actions, whose
+    /// responses have no room for them.
+    notes: Mutex<Vec<String>>,
+    /// `task.done` blocks in a row since the human last prompted.
+    hook_rounds: Mutex<u32>,
+    /// Set by `session.cancel`, so a turn that ends while `task.done` hooks run doesn't start
+    /// another.
+    cancel_requested: std::sync::atomic::AtomicBool,
+    /// Wakes a turn waiting on `task.done` hooks when `session.cancel` arrives, which stops
+    /// them.
+    cancel_hooks: tokio::sync::Notify,
 }
+
+/// `task.done` blocks in a row before the session goes to Review anyway.
+const MAX_HOOK_ROUNDS: u32 = 3;
 
 /// Owns every session's lifecycle.
 pub struct SessionManager {
@@ -307,10 +329,9 @@ impl SessionManager {
             return Err(invalid_state(&session, "take a prompt"));
         }
         self.register_log(id).await?;
-        let text = match lock(&live.resume_note).take() {
-            Some(note) => format!("{note}\n\n{text}"),
-            None => text,
-        };
+        *lock(&live.hook_rounds) = 0;
+        live.cancel_requested.store(false, Ordering::SeqCst);
+        let text = agent_text(&live, text);
         let turn = self.begin_turn(&session, text.clone(), source).await?;
         let manager = self.clone();
         let (session_id, turn_id) = (id.clone(), turn.clone());
@@ -335,6 +356,8 @@ impl SessionManager {
             .retryable()
             .into());
         };
+        live.cancel_requested.store(true, Ordering::SeqCst);
+        live.cancel_hooks.notify_waiters();
         agent
             .cancel()
             .map_err(|e| ApiError::new(ErrorKind::AgentUnavailable, e.to_string()))?;
@@ -482,7 +505,8 @@ impl SessionManager {
         .map_err(|e| e.to_string())??;
         let (mut launch, worktrees, workspace, upstream) = found;
         let secrets = std::mem::take(&mut launch.secrets);
-        let rules = launch.rules.clone();
+        let (rules, hook_set) = (launch.rules.clone(), launch.hooks.clone());
+        let project_root = launch.project_root.clone();
         // Commands and edits holding an injected secret's value ask, and the value never
         // reaches the log.
         let scanner = Arc::new(SecretScanner::new(
@@ -517,13 +541,24 @@ impl SessionManager {
             session: session.id.clone(),
             scanner: scanner.clone(),
         });
+        let hooks: Arc<dyn HookRunner> = Arc::new(ShellHooks::new(
+            hook_set,
+            HookContext {
+                session: session.id.clone(),
+                project_root,
+                worktree: workspace.cwd().to_path_buf(),
+                sandbox: sandbox.clone(),
+                log: sink.clone(),
+            },
+        ));
         let engine = Arc::new(Engine::new(
             rules,
             scanner.clone(),
-            Arc::new(NoHooks),
+            hooks.clone(),
             Arc::new(NoClassifier),
         ));
         let live = self.live(&session.id);
+        *lock(&live.hooks) = Some(hooks.clone());
         for (action, verdict) in lock(&live.remembered).iter() {
             engine.remember(action, *verdict);
         }
@@ -533,6 +568,7 @@ impl SessionManager {
             session: session.id.clone(),
             live: live.clone(),
             engine,
+            hooks,
             scanner,
             sink: sink.clone(),
         });
@@ -591,11 +627,21 @@ impl SessionManager {
         text: String,
         source: TurnSource,
     ) -> Result<TurnId, SessionError> {
-        let turn = TurnId::new();
         self.transition(session, SessionState::Working, None)
             .await?;
+        self.record_turn(&session.id, text, source).await
+    }
+
+    /// Record a turn's start and prompt. The caller holds the lock.
+    async fn record_turn(
+        &self,
+        id: &SessionId,
+        text: String,
+        source: TurnSource,
+    ) -> Result<TurnId, SessionError> {
+        let turn = TurnId::new();
         self.emit(
-            &session.id,
+            id,
             EventPayload::TurnStarted(TurnStartedBody {
                 turn_id: turn.clone(),
                 source,
@@ -603,7 +649,7 @@ impl SessionManager {
         )
         .await?;
         self.emit(
-            &session.id,
+            id,
             EventPayload::Prompt(PromptBody {
                 turn_id: turn.clone(),
                 text,
@@ -613,10 +659,18 @@ impl SessionManager {
         Ok(turn)
     }
 
-    async fn run_turn(self: Arc<Self>, id: SessionId, turn: TurnId, text: String) {
-        if let Err(e) = self.turn(&id, &turn, text).await {
-            tracing::error!(session_id = %id, error = %e, "running a turn");
-        }
+    /// Boxed, since a turn a `task.done` hook blocked starts the next one.
+    fn run_turn(
+        self: Arc<Self>,
+        id: SessionId,
+        turn: TurnId,
+        text: String,
+    ) -> BoxFuture<'static, ()> {
+        Box::pin(async move {
+            if let Err(e) = self.turn(&id, &turn, text).await {
+                tracing::error!(session_id = %id, error = %e, "running a turn");
+            }
+        })
     }
 
     async fn turn(
@@ -636,6 +690,31 @@ impl SessionManager {
             }),
             Err(reason) => Err(reason),
         };
+        // task.done hooks may take minutes, so they run before the lock is taken.
+        // session.cancel stops them; dropping the run kills the hook.
+        let hooks = lock(&live.hooks).clone();
+        let mut interrupted = false;
+        let check = match (&outcome, hooks) {
+            (Ok(stop), Some(hooks)) if stop == "end_turn" => {
+                let mode = self.get(id).await?.mode;
+                let cancelled = live.cancel_hooks.notified();
+                tokio::pin!(cancelled);
+                cancelled.as_mut().enable();
+                if live.cancel_requested.load(Ordering::SeqCst) {
+                    interrupted = true;
+                    None
+                } else {
+                    tokio::select! {
+                        check = hooks.task_done(mode) => Some(check),
+                        () = cancelled => {
+                            interrupted = true;
+                            None
+                        }
+                    }
+                }
+            }
+            _ => None,
+        };
         let _guard = live.lock.lock().await;
         // Whatever still waits can't be answered once the turn is over.
         self.cancel_pending(&live, id).await?;
@@ -651,7 +730,47 @@ impl SessionManager {
         )
         .await?;
         let (to, reason) = match outcome {
-            Ok(stop) if stop == "end_turn" => (SessionState::Review, None),
+            Ok(stop) if stop == "end_turn" && interrupted => {
+                live.cancel_requested.store(false, Ordering::SeqCst);
+                (
+                    SessionState::Ready,
+                    Some("turn ended: cancelled".to_owned()),
+                )
+            }
+            Ok(stop) if stop == "end_turn" => match check {
+                Some(TaskCheck::Blocked { hook, reason })
+                    if session.state == SessionState::Working =>
+                {
+                    if live.cancel_requested.swap(false, Ordering::SeqCst) {
+                        (
+                            SessionState::Ready,
+                            Some("turn ended: cancelled".to_owned()),
+                        )
+                    } else {
+                        let rounds = {
+                            let mut rounds = lock(&live.hook_rounds);
+                            *rounds += 1;
+                            *rounds
+                        };
+                        if rounds < MAX_HOOK_ROUNDS {
+                            // Back to work, staying in Working, with what the hook said.
+                            let text = agent_text(&live, reason);
+                            let next = self.record_turn(id, text.clone(), TurnSource::Hook).await?;
+                            let (manager, id) = (self.clone(), id.clone());
+                            tokio::spawn(manager.run_turn(id, next, text));
+                            return Ok(());
+                        }
+                        *lock(&live.hook_rounds) = 0;
+                        (
+                            SessionState::Review,
+                            Some(format!(
+                                "the task.done hook {hook} still blocked after {rounds} rounds: {reason}"
+                            )),
+                        )
+                    }
+                }
+                _ => (SessionState::Review, None),
+            },
             Ok(stop) => (SessionState::Ready, Some(format!("turn ended: {stop}"))),
             Err(reason) => {
                 self.emit(
@@ -786,11 +905,33 @@ struct RepoPlan {
     mode: CreateMode,
 }
 
+/// `text` for the agent, after the notes it should hear first: approvals a restart cancelled,
+/// and hook notes from writes and allowed actions.
+fn agent_text(live: &Live, text: String) -> String {
+    let mut parts = Vec::new();
+    parts.extend(lock(&live.resume_note).take());
+    let notes = std::mem::take(&mut *lock(&live.notes));
+    if !notes.is_empty() {
+        parts.push(format!(
+            "Notes from the project's hooks:\n{}",
+            notes.join("\n")
+        ));
+    }
+    parts.push(text);
+    parts.join("\n\n")
+}
+
 /// Appends a session's ACP events to the event log, with secrets redacted.
 struct SessionSink {
     log: Arc<EventLog>,
     session: SessionId,
     scanner: Arc<SecretScanner>,
+}
+
+impl HookLog for SessionSink {
+    fn ran(&self, run: HookRunBody) -> BoxFuture<'_, ()> {
+        EventSink::emit(self, EventPayload::HookRun(run))
+    }
 }
 
 impl EventSink for SessionSink {

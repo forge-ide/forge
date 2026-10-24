@@ -12,7 +12,8 @@ use forge_api::events::{
 use forge_api::model::{Action, Approval, EditKind, SessionState};
 use forge_api::{ApiError, ApprovalId, ErrorKind, SessionId, Timestamp};
 use forge_config::{PolicyRule, RuleListName};
-use forge_policy::{Engine, Policy, Request, SecretScanner, Source, exact_pattern};
+use forge_hooks::HookRunner;
+use forge_policy::{Engine, Outcome, Policy, Request, SecretScanner, Source, exact_pattern};
 use futures_util::future::BoxFuture;
 use tokio::sync::oneshot;
 
@@ -41,11 +42,32 @@ pub(super) struct SessionGate {
     pub(super) session: SessionId,
     pub(super) live: Arc<Live>,
     pub(super) engine: Arc<Engine>,
+    pub(super) hooks: Arc<dyn HookRunner>,
     pub(super) scanner: Arc<SecretScanner>,
     pub(super) sink: Arc<SessionSink>,
 }
 
 impl Gate for SessionGate {
+    fn finished<'a>(
+        &'a self,
+        kind: GateKind,
+        action: &'a Action,
+        success: bool,
+    ) -> BoxFuture<'a, Option<String>> {
+        Box::pin(async move {
+            let manager = self.manager.upgrade()?;
+            let mode = manager.get(&self.session).await.ok()?.mode;
+            let status = if success { "completed" } else { "failed" };
+            let note = self.hooks.post(action, mode, status).await?;
+            if kind == GateKind::Terminal {
+                return Some(note);
+            }
+            // A write's response has no room for text, so the note comes with the next prompt.
+            queue_note(&self.live, note);
+            None
+        })
+    }
+
     fn decide(&self, request: GateRequest) -> BoxFuture<'_, GateVerdict> {
         Box::pin(async move {
             let id = request.tool_call_id.clone();
@@ -82,60 +104,111 @@ impl SessionGate {
             .as_ref()
             .is_some_and(|c| c.len() > LARGE_CONTENT);
         let outcome = if large {
-            let (engine, checked) = (self.engine.clone(), checked.clone());
-            let runtime = tokio::runtime::Handle::current();
-            tokio::task::spawn_blocking(move || runtime.block_on(engine.decide(&checked, mode)))
+            // Only the scan of the content runs on the blocking pool; hooks may take minutes
+            // and must not hold a blocking thread meanwhile.
+            let (engine, request) = (self.engine.clone(), checked.clone());
+            let early = tokio::task::spawn_blocking(move || engine.check(&request, mode))
                 .await
-                .map_err(|e| SessionError::Internal(e.to_string()))?
+                .map_err(|e| SessionError::Internal(e.to_string()))?;
+            match early {
+                Some(decision) => Outcome {
+                    decision,
+                    action: checked.action.clone(),
+                    note: None,
+                    rewritten_by: None,
+                },
+                None => self.engine.decide_checked(&checked, mode).await,
+            }
         } else {
             self.engine.decide(&checked, mode).await
         };
-        let decision = outcome.decision;
-        // The client runs the action it asked about, so a rewrite can't take effect yet.
+        let mut decision = outcome.decision;
+        let note = outcome.note;
+        // A rewrite always shows in the decision, whoever decided.
+        let shown = match (&outcome.rewritten_by, &checked.action, &outcome.action) {
+            (Some(hook), Action::Exec { argv: from, .. }, Action::Exec { argv: to, .. }) => {
+                format!(
+                    "hook {hook} rewrote `{}` to `{}`; {}",
+                    from.join(" "),
+                    to.join(" "),
+                    decision.reason
+                )
+            }
+            _ => decision.reason.clone(),
+        };
         if outcome.action != checked.action && decision.verdict != Verdict::Deny {
-            let reason = "a hook rewrote the action, and Forge can't run a rewritten action yet";
-            self.record(&id, Verdict::Deny, reason, &decision.source.to_string())
-                .await;
-            return Ok(GateVerdict::Deny(reason.into()));
+            // A hook rewrote the action. Only a terminal can run the rewritten command; the
+            // agent's own tools can't, so it is told what to run instead.
+            let refusal = match (&outcome.action, request.kind) {
+                (Action::Exec { .. }, GateKind::Terminal) => None,
+                (Action::Exec { argv, .. }, GateKind::Permission) => Some(format!(
+                    "a hook changed the command to `{}`; run that instead",
+                    argv.join(" ")
+                )),
+                _ => Some("a hook rewrote an action that can't be rewritten".to_owned()),
+            };
+            if let Some(reason) = refusal {
+                let source = decision.source.to_string();
+                self.record(&id, Verdict::Deny, &format!("{shown}; {reason}"), &source)
+                    .await;
+                return Ok(GateVerdict::Deny(with_note(reason, note)));
+            }
         }
         // A human who allowed exactly this in the agent's permission request has answered
         // the ask already; the grant is good once.
         // Only an ask from the mode: the permission request didn't show the human what a guard
         // or rule would flag in the write itself (its content, for one).
-        if decision.verdict == Verdict::Ask
+        let granted = decision.verdict == Verdict::Ask
             && matches!(decision.source, Source::Mode(_))
             && request.kind != GateKind::Permission
-            && self.take_grant(&outcome.action)
-        {
+            && self.take_grant(&outcome.action);
+        let verdict = if granted {
             let reason = "a human allowed this in the agent's permission request";
             self.record(&id, Verdict::Allow, reason, "approval").await;
-            return Ok(GateVerdict::Allow);
-        }
-        let source = decision.source.to_string();
-        self.record(&id, decision.verdict, &decision.reason, &source)
-            .await;
-        Ok(match decision.verdict {
-            Verdict::Allow => GateVerdict::Allow,
-            Verdict::Deny => GateVerdict::Deny(decision.reason),
-            Verdict::Ask => {
-                let secret = !self.scanner.kinds(&describe(&outcome.action)).is_empty();
-                let pending = |reply| Pending {
-                    action: outcome.action.clone(),
-                    rememberable: decision.source.rememberable(),
-                    secret,
-                    kind: request.kind,
-                    reply,
-                };
-                manager
-                    .ask(
-                        &self.live,
-                        &self.session,
-                        &self.scanner,
-                        &decision.reason,
-                        pending,
-                    )
-                    .await?
+            GateVerdict::Allow
+        } else {
+            let source = decision.source.to_string();
+            self.record(&id, decision.verdict, &shown, &source).await;
+            decision.reason = shown;
+            match decision.verdict {
+                Verdict::Allow => GateVerdict::Allow,
+                Verdict::Deny => GateVerdict::Deny(decision.reason),
+                Verdict::Ask => {
+                    let secret = !self.scanner.kinds(&describe(&outcome.action)).is_empty();
+                    let pending = |reply| Pending {
+                        action: outcome.action.clone(),
+                        rememberable: decision.source.rememberable(),
+                        secret,
+                        kind: request.kind,
+                        reply,
+                    };
+                    manager
+                        .ask(
+                            &self.live,
+                            &self.session,
+                            &self.scanner,
+                            &decision.reason,
+                            pending,
+                        )
+                        .await?
+                }
             }
+        };
+        Ok(match verdict {
+            GateVerdict::Deny(reason) => GateVerdict::Deny(with_note(reason, note)),
+            GateVerdict::Allow => {
+                // The agent hears an allowed action's hook notes with its next prompt.
+                if let Some(note) = note {
+                    queue_note(&self.live, note);
+                }
+                match outcome.action {
+                    Action::Exec { argv, .. } if outcome.action != checked.action => {
+                        GateVerdict::Rewrite(argv)
+                    }
+                    _ => GateVerdict::Allow,
+                }
+            }
+            other => other,
         })
     }
 
@@ -154,6 +227,35 @@ impl SessionGate {
         let mut grants = lock(&self.live.grants);
         let found = grants.iter().position(|g| granted(g, action));
         found.map(|i| grants.remove(i)).is_some()
+    }
+}
+
+/// Most text queued in hook notes for the next prompt; older notes are dropped first.
+const NOTES_LIMIT: usize = 16 * 1024;
+
+/// Queue a hook note for the agent's next prompt, keeping the queue under [`NOTES_LIMIT`].
+fn queue_note(live: &Live, note: String) {
+    const DROPPED: &str = "(earlier notes dropped)";
+    let mut notes = lock(&live.notes);
+    let mut dropped = notes.first().is_some_and(|n| n == DROPPED);
+    if dropped {
+        notes.remove(0);
+    }
+    notes.push(note);
+    while notes.len() > 1 && notes.iter().map(String::len).sum::<usize>() > NOTES_LIMIT {
+        notes.remove(0);
+        dropped = true;
+    }
+    if dropped {
+        notes.insert(0, DROPPED.to_owned());
+    }
+}
+
+/// `reason`, followed by a hook's note for the agent.
+fn with_note(reason: String, note: Option<String>) -> String {
+    match note {
+        Some(note) => format!("{reason}\n{note}"),
+        None => reason,
     }
 }
 

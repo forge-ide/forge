@@ -15,6 +15,7 @@ forge-api.workspace = true
 forge-config.workspace = true
 forge-events.workspace = true
 forge-git.workspace = true
+forge-hooks.workspace = true
 forge-policy.workspace = true
 forge-sandbox.workspace = true
 forge-session.workspace = true

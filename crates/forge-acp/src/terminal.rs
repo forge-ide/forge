@@ -61,7 +61,8 @@ struct Terminal {
 /// Called with each chunk of output as it arrives.
 pub type OnOutput = Arc<dyn Fn(String) -> BoxFuture<'static, ()> + Send + Sync>;
 /// Called once the command has exited and all its output was delivered, before waiters wake.
-pub type OnExit = Box<dyn FnOnce(ExitInfo, String) -> BoxFuture<'static, ()> + Send>;
+/// What it returns is added to the end of the output.
+pub type OnExit = Box<dyn FnOnce(ExitInfo, String) -> BoxFuture<'static, Option<String>> + Send>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TerminalError {
@@ -158,7 +159,9 @@ impl Terminals {
                 }
             };
             let tail = lock(&watcher.output).text.clone();
-            on_exit(info.clone(), tail).await;
+            if let Some(extra) = on_exit(info.clone(), tail).await {
+                lock(&watcher.output).push(&extra);
+            }
             let _ = exit_tx.send(Some(info));
         });
         lock(&self.map).insert(id.clone(), terminal);
@@ -336,15 +339,17 @@ mod tests {
                 }),
                 Box::new(move |info, tail| {
                     *record.lock().unwrap() = Some((info, tail));
-                    Box::pin(async {})
+                    Box::pin(async { Some("+note".to_owned()) })
                 }),
             )
             .unwrap();
         let info = terminals.wait(&id).await.unwrap();
         assert_eq!(info.code, Some(3));
         let (output, truncated, exit) = terminals.output(&id).unwrap();
-        assert_eq!(output.len(), 6);
+        // What the exit callback returns is in the output before waiters wake.
+        assert_eq!(output.len(), 11);
         assert!(output.contains("out") && output.contains("err"));
+        assert!(output.ends_with("+note"));
         assert!(!truncated);
         assert_eq!(exit, Some(info.clone()));
         assert_eq!(chunks.lock().unwrap().len(), 6);
@@ -369,7 +374,7 @@ mod tests {
                 &[],
                 DEFAULT_OUTPUT_LIMIT,
                 noop_output(),
-                Box::new(|_, _| Box::pin(async {})),
+                Box::new(|_, _| Box::pin(async { None })),
             )
             .unwrap();
         terminals.kill(&id).unwrap();
@@ -392,7 +397,7 @@ mod tests {
             &[],
             10,
             noop_output(),
-            Box::new(|_, _| Box::pin(async {})),
+            Box::new(|_, _| Box::pin(async { None })),
         );
         assert!(matches!(result, Err(TerminalError::Spawn { .. })));
     }

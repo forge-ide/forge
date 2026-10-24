@@ -10,9 +10,11 @@ use forge_api::methods::{
 use forge_api::model::{Project, SandboxTier, Session};
 use forge_api::{ApiError, ErrorKind, ProjectId};
 use forge_config::{
-    AgentProfileConfig, BranchRules, ConfigError, PROJECT_POLICY_FILE, Paths, PolicyConfig,
-    PolicyRule, ProfileSandbox, ProjectConfig, RuleListName, UserConfig,
+    AgentProfileConfig, BranchRules, ConfigError, HooksConfig, PROJECT_HOOKS_FILE,
+    PROJECT_POLICY_FILE, Paths, PolicyConfig, PolicyRule, ProfileSandbox, ProjectConfig,
+    RuleListName, UserConfig,
 };
+use forge_hooks::HookSet;
 use forge_policy::{Layer, Rules};
 use forge_sandbox::proxy::{Allowlist, SecretRoute};
 use forge_sandbox::secrets::{self, SecretStore};
@@ -252,12 +254,18 @@ impl AgentResolver for ProfileResolver {
         argv[0] = program.display().to_string();
         read_only.push(program);
         let rules = Arc::new(policy_rules(&self.paths, &root)?);
+        let hooks = project_hooks(&root, &self.home)?;
+        // Hook scripts come from the project root, shown read-only, so the agent can't change
+        // them from its worktree.
+        read_only.extend(hooks.dir().map(Path::to_path_buf));
         Ok(AgentLaunch {
             command: AgentCommand { argv, env: vec![] },
             read_only,
             network,
             secrets,
             rules,
+            hooks: Arc::new(hooks),
+            project_root: root,
         })
     }
 
@@ -275,6 +283,14 @@ impl AgentResolver for ProfileResolver {
         forge_config::append_rule(&root.join(PROJECT_POLICY_FILE), list, &rule)
             .map_err(|e| ApiError::validation(e.to_string()))
     }
+}
+
+/// The project's hooks file, compiled; read from its root, never a session's worktree.
+fn project_hooks(root: &Path, home: &Path) -> Result<HookSet, ApiError> {
+    let config = HooksConfig::load(&root.join(PROJECT_HOOKS_FILE))
+        .map_err(|e| ApiError::validation(e.to_string()))?;
+    HookSet::compile(&config, root, home)
+        .map_err(|e| ApiError::validation(format!("{PROJECT_HOOKS_FILE}: {e}")))
 }
 
 /// The managed, user, and project policy files, compiled. The project's is read from its root,

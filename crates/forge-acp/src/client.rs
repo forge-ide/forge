@@ -70,6 +70,9 @@ pub struct GateRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GateVerdict {
     Allow,
+    /// Allow a terminal, running this argv instead of the one requested (a hook rewrote it).
+    /// The extra environment, if kept, is part of the argv as an `env` prefix.
+    Rewrite(Vec<String>),
     Deny(String),
     /// The turn was cancelled while the request waited.
     Cancelled,
@@ -79,6 +82,17 @@ pub enum GateVerdict {
 /// decision. A decision may wait on a human.
 pub trait Gate: Send + Sync + 'static {
     fn decide(&self, request: GateRequest) -> BoxFuture<'_, GateVerdict>;
+
+    /// After an allowed write or terminal finished, successfully or not: text for the end of
+    /// a terminal's output, such as notes from post hooks.
+    fn finished<'a>(
+        &'a self,
+        _kind: GateKind,
+        _action: &'a Action,
+        _success: bool,
+    ) -> BoxFuture<'a, Option<String>> {
+        Box::pin(async { None })
+    }
 }
 
 /// Allows everything; for tests.
@@ -554,15 +568,16 @@ impl Handlers {
             action: Some(action),
             content: Some(content.clone()),
         };
-        self.allowed(request).await?;
+        if self.allowed(request).await?.is_some() {
+            return Err(self.refuse(&id, "a write can't be rewritten".into()).await);
+        }
         // The decision may have waited on a human while the agent's processes kept running,
         // so resolve again: a parent directory swapped for a symlink in the meantime must not
         // carry the write somewhere else.
         let again = self.workspace.resolve_write(&req.path);
         if again.as_ref().map(|r| &r.path) != Ok(&path) {
             let reason = "the path changed while the write waited for a decision".to_owned();
-            self.result(&id, "failed", Some(reason.clone())).await;
-            return Err(agent_client_protocol::Error::new(REFUSED, reason));
+            return Err(self.refuse(&id, reason).await);
         }
         let old = tokio::fs::read_to_string(&path).await.ok().or(old);
         let new = content.clone();
@@ -570,6 +585,13 @@ impl Handlers {
             .await
             .map_err(io_error)
             .and_then(|r| r.map_err(io_error));
+        let action = Action::Edit {
+            path: resolved.display.clone(),
+            kind,
+        };
+        self.gate
+            .finished(GateKind::Write, &action, written.is_ok())
+            .await;
         match written {
             Ok(()) => {
                 let (additions, deletions) = line_changes(old.as_deref().unwrap_or(""), &new);
@@ -629,7 +651,20 @@ impl Handlers {
             action: Some(action),
             content: None,
         };
-        self.allowed(request).await?;
+        let (program, args, env) = match self.allowed(request).await? {
+            Some(argv) => {
+                let (program, args) = argv
+                    .split_first()
+                    .map(|(p, a)| (p.clone(), a.to_vec()))
+                    .unwrap_or_default();
+                (program, args, Vec::new())
+            }
+            None => (req.command.clone(), req.args.clone(), env),
+        };
+        let action = Action::Exec {
+            argv: terminal_argv(&program, &args, &env),
+            cwd: cwd.display.clone(),
+        };
         let limit = req
             .output_byte_limit
             .and_then(|n| usize::try_from(n).ok())
@@ -639,8 +674,8 @@ impl Handlers {
         let result_id = id.clone();
         let spawned = self.terminals.spawn(
             id.clone(),
-            &req.command,
-            &req.args,
+            &program,
+            &args,
             &cwd.path,
             &env,
             limit,
@@ -662,7 +697,14 @@ impl Handlers {
                     } else {
                         "failed"
                     };
+                    let extra = done
+                        .gate
+                        .finished(GateKind::Terminal, &action, info.success())
+                        .await
+                        .map(|note| format!("\n[forge] {note}\n"));
+                    let output = output + extra.as_deref().unwrap_or("");
                     done.result(&result_id, status, Some(tail(&output))).await;
+                    extra
                 })
             }),
         );
@@ -714,7 +756,10 @@ impl Handlers {
         use acp::PermissionOptionKind as Kind;
         let wanted: &[Kind] = match self.gate.decide(request).await {
             GateVerdict::Allow => &[Kind::AllowOnce, Kind::AllowAlways],
-            GateVerdict::Deny(_) => &[Kind::RejectOnce, Kind::RejectAlways],
+            // The agent's own tool can't run a different command.
+            GateVerdict::Deny(_) | GateVerdict::Rewrite(_) => {
+                &[Kind::RejectOnce, Kind::RejectAlways]
+            }
             GateVerdict::Cancelled => &[],
         };
         let choice = wanted
@@ -740,17 +785,24 @@ impl Handlers {
             .await;
     }
 
-    /// Ask the gate about a write or terminal; on a refusal, record the failed result and
-    /// return the error for the agent.
-    async fn allowed(&self, request: GateRequest) -> AcpResult<()> {
+    /// Ask the gate about a write or terminal: the argv to run instead, if a hook rewrote it.
+    /// On a refusal, record the failed result and return the error for the agent.
+    async fn allowed(&self, request: GateRequest) -> AcpResult<Option<Vec<String>>> {
         let id = request.tool_call_id.clone();
         let reason = match self.gate.decide(request).await {
-            GateVerdict::Allow => return Ok(()),
+            GateVerdict::Allow => return Ok(None),
+            GateVerdict::Rewrite(argv) if !argv.is_empty() => return Ok(Some(argv)),
+            GateVerdict::Rewrite(_) => "refused: a hook rewrote it to nothing".to_owned(),
             GateVerdict::Deny(reason) => format!("refused by policy: {reason}"),
             GateVerdict::Cancelled => "cancelled".to_owned(),
         };
-        self.result(&id, "failed", Some(reason.clone())).await;
-        Err(agent_client_protocol::Error::new(REFUSED, reason))
+        Err(self.refuse(&id, reason).await)
+    }
+
+    /// Record a refused write or terminal as failed, and the error for the agent.
+    async fn refuse(&self, id: &str, reason: String) -> agent_client_protocol::Error {
+        self.result(id, "failed", Some(reason.clone())).await;
+        agent_client_protocol::Error::new(REFUSED, reason)
     }
 
     async fn update(&self, notification: SessionNotification) {

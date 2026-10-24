@@ -20,8 +20,9 @@ use forge_api::methods::*;
 use forge_api::model::{SandboxTier, SessionState};
 
 /// Edits two files and runs one command, as in the session tests, then tries to read an SSH
-/// key from the real home and to reach a host off the allowlist, through terminals.
-fn script(key: &Path, probe: &Path) -> String {
+/// key from the real home and to reach a host off the allowlist, through terminals, runs a
+/// command a hook denies, and tries to change a hook script.
+fn script(key: &Path, probe: &Path, hooks: &Path) -> String {
     format!(
         r#"
 steps:
@@ -34,11 +35,14 @@ steps:
   - exec: ["sh", "-c", "cat {} || echo key-hidden"]
   - exec: ["{}", "proxy-connect", "blocked.example:443"]
   - exec: ["sh", "-c", "echo key=$ANTHROPIC_API_KEY url=$ANTHROPIC_BASE_URL"]
+  - exec: {{ argv: ["rm", "hello.txt"], expect: deny }}
+  - exec: ["sh", "-c", "echo x >> {}/no-rm.sh || echo hooks-read-only"]
   - message: "Done."
   - end_turn
 "#,
         key.display(),
-        probe.display()
+        probe.display(),
+        hooks.display()
     )
 }
 
@@ -60,7 +64,9 @@ fn setup(tier: &str) -> Setup {
     std::fs::create_dir_all(&scripts).unwrap();
     let script_path = scripts.join("fake.yaml");
     let probe = &sandbox_bins()[1];
-    std::fs::write(&script_path, script(&key, probe)).unwrap();
+    let hooks = repo.join(".forge/hooks");
+    std::fs::write(&script_path, script(&key, probe, &hooks)).unwrap();
+    write_hooks(&repo);
     std::fs::create_dir_all(repo.join(".forge/agents")).unwrap();
     let opt_in = if tier == "unsandboxed" {
         "allow_unsandboxed = true\n"
@@ -87,6 +93,36 @@ fn setup(tier: &str) -> Setup {
     )
     .unwrap();
     Setup { home, repo, key }
+}
+
+/// A `tool.pre` hook that denies `rm`, and a `tool.post` hook that tries to write to its own
+/// directory and leaves a note saying whether it could.
+fn write_hooks(repo: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = repo.join(".forge/hooks");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        repo.join(".forge/hooks.toml"),
+        "[[hook]]\nevent = \"tool.pre\"\nmatch = { argv = \"rm *\" }\nrun = [\".forge/hooks/no-rm.sh\"]\n\n\
+         [[hook]]\nevent = \"tool.post\"\nrun = [\".forge/hooks/post.sh\"]\n",
+    )
+    .unwrap();
+    let scripts = [
+        (
+            "no-rm.sh",
+            r#"echo '{"verdict":"deny","reason":"no rm in this repo"}'"#,
+        ),
+        (
+            "post.sh",
+            r#"if touch "$(dirname "$0")/tampered" 2>/dev/null; then w=writable; else w=read-only; fi
+echo "{\"noteForAgent\":\"post hook ran; its dir is $w\"}""#,
+        ),
+    ];
+    for (name, body) in scripts {
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 }
 
 /// The value the fake keyring holds for `ANTHROPIC_API_KEY`; it must never reach a sandbox
@@ -186,6 +222,36 @@ async fn fake_agent_in(tier: SandboxTier) {
     let denied = denied.expect("the refused connection is in the event log");
     assert_eq!((denied.port, denied.verdict), (443, Verdict::Deny));
     assert!(denied.reason.unwrap_or_default().contains("allowlist"));
+    // Hooks run inside the sandbox from the project root, which neither they nor the agent
+    // can change.
+    let decisions: Vec<String> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::PolicyDecision(b) if b.verdict == Verdict::Deny => Some(b.source.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(decisions, ["hook:no-rm.sh"]);
+    let results: String = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::ToolResult(b) => b.output.clone(),
+            _ => None,
+        })
+        .collect();
+    assert!(results.contains("post hook ran"), "{results}");
+    let hooks = s.repo.join(".forge/hooks");
+    if tier != SandboxTier::Unsandboxed {
+        assert!(results.contains("its dir is read-only"), "{results}");
+        assert!(!results.contains("writable"), "{results}");
+        assert!(output.contains("hooks-read-only"), "{output:?}");
+        assert!(!hooks.join("tampered").exists());
+        assert!(
+            !std::fs::read_to_string(hooks.join("no-rm.sh"))
+                .unwrap()
+                .contains("\nx\n")
+        );
+    }
     let worktree = s.repo.join(".worktrees/feat/add-greeting");
     assert_eq!(
         std::fs::read_to_string(worktree.join("hello.txt")).unwrap(),
@@ -210,6 +276,56 @@ async fn fake_agent_edits_and_runs_a_command_in_light() {
 #[ignore = "needs a sandbox-capable host; run `just test-sandbox`"]
 async fn fake_agent_edits_and_runs_a_command_in_standard() {
     fake_agent_in(SandboxTier::Standard).await;
+}
+
+/// A hook that times out inside Standard leaves nothing running: killing it reaches what it
+/// started inside bubblewrap's namespace too.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "needs a sandbox-capable host; run `just test-sandbox`"]
+async fn a_hook_that_times_out_in_standard_leaves_nothing_running() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = setup("standard");
+    let marker = format!("sleep 8{}", std::process::id());
+    std::fs::write(
+        s.repo.join(".forge/hooks.toml"),
+        "[[hook]]\nevent = \"tool.pre\"\nrun = [\".forge/hooks/slow.sh\"]\ntimeout_ms = 1000\n",
+    )
+    .unwrap();
+    let slow = s.repo.join(".forge/hooks/slow.sh");
+    std::fs::write(&slow, format!("#!/bin/sh\n{marker} &\n{marker}\n")).unwrap();
+    std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        s.home.path().join("scripts/fake.yaml"),
+        "steps:\n  - exec: { argv: [\"true\"], expect: deny }\n  - end_turn\n",
+    )
+    .unwrap();
+    let daemon = start_daemon(&s);
+    let mut client = daemon.client().await;
+    require_tier(&mut client, SandboxTier::Standard).await;
+    let project = open(&mut client, &s.repo).await;
+    let mut params = create_params(&project, "x", "go");
+    params.sandbox = None;
+    let session = client.call::<SessionCreate>(&params).await.unwrap();
+    wait_for_state(&mut client, &session.id, SessionState::Waiting).await;
+    // The timed-out hook made the command ask; by now it and its children are gone.
+    let running = std::fs::read_dir("/proc").unwrap().flatten().any(|p| {
+        std::fs::read(p.path().join("cmdline")).is_ok_and(|c| {
+            String::from_utf8_lossy(&c)
+                .replace('\0', " ")
+                .contains(&marker)
+        })
+    });
+    assert!(!running, "the timed-out hook left {marker:?} running");
+    let pending = client
+        .call::<ApprovalList>(&ApprovalListParams { project_id: None })
+        .await
+        .unwrap();
+    assert!(
+        pending[0].reason.contains("timed out"),
+        "{}",
+        pending[0].reason
+    );
 }
 
 /// A sandbox that can't start fails the session with the reason, and never runs the agent

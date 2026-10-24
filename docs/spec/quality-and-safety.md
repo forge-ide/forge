@@ -95,7 +95,7 @@ The rule throughout: never lose work, never resume silently, and always tell the
 | Ship conflicts with the base branch | Show the conflicting files; offer "Ask agent to rebase" (a new turn) or manual resolution in the editor |
 | Disk below 1 GB free | Pause all Working sessions and refuse new ones until space is freed |
 | Language server crashes | Restart with backoff; after 3 crashes in 5 minutes mark the language degraded; never block sessions |
-| Hook times out or errors | Log it; treat as no opinion, except `commit.pre` and `task.done`, which block |
+| Hook times out or errors | Log it; a `tool.pre` or `edit.pre` hook asks, `commit.pre` and `task.done` block, and post hooks have no opinion |
 | Network down | Agent turns fail with the agent's error; session goes Paused; Resume works when back online |
 | SQLite corruption | Refuse to start, keep the file, point to `forge doctor --rebuild-index`, which rebuilds from JSONL logs and git refs |
 

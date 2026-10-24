@@ -242,11 +242,14 @@ Rule matching: `exec` patterns are globs over the space-joined argv, with the pr
 ```toml
 [[hook]]
 event = "tool.pre"
-match = { action = "exec", argv = "npm install*" }   # optional filter
+name = "block-npm"           # optional; defaults to the program's file name
+match = { action = "exec", argv = "npm install*" }   # optional filter; edits match `path`
 run = [".forge/hooks/block-npm.sh"]
-timeout_ms = 5000
-where = "sandbox"            # or "daemon"
+timeout_ms = 5000            # default 5000, or 300000 for task.done; at most 600000
+where = "sandbox"            # "daemon" is reserved for hooks that need credentials
 ```
+
+The file is `<root>/.forge/hooks.toml`, read from the project root when the agent launches; an invalid file fails the launch. A program or argument given as a relative path under `.forge/hooks/` is taken from the project root (any other relative program is refused), and the hook's environment has `FORGE_HOOKS_DIR` set to that directory; a bare program name is found through the daemon's `PATH` when the agent launches, must already be inside what the sandbox shows read-only (system or toolchain directories), and runs by the path found; nothing is mounted for it. `name` is 1 to 64 letters, digits, `.`, `_`, or `-`. A decision a hook makes has the source `hook:<name>`, and each run is a `hook.run` event, with exit code -1 when the hook couldn't start or timed out.
 
 **Input** (JSON on stdin):
 
@@ -272,7 +275,7 @@ where = "sandbox"            # or "daemon"
 }
 ```
 
-Exit code 0 with empty output means no opinion. A non-zero exit or invalid JSON is logged and treated as no opinion, except `commit.pre` and `task.done`, where it blocks.
+`tool.post` and `edit.post` input also has `"status": "completed" | "failed"`; `task.done` input has no `action`. `rewrite` is a replacement argv, for `tool.pre` on commands only; `verdict` counts at `tool.pre` and `edit.pre`, and a `deny` at `task.done` sends the session back to work. Exit code 0 with empty output means no opinion. A non-zero exit, a timeout, output over 1 MiB, or invalid JSON is logged; it asks at `tool.pre` and `edit.pre`, blocks at `commit.pre` and `task.done`, and is no opinion at `tool.post` and `edit.post`. Hooks run in the agent's sandbox, so `verdict: "allow"` is logged but counts as no opinion; `deny`, `ask`, and `rewrite` count. `reason` and `noteForAgent` are cut at 4 KiB.
 
 **Plugin manifest** `forge-plugin.toml` (v0.2, defined now so v0.1 hooks fit it):
 

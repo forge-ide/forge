@@ -87,7 +87,7 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 - [x] `Action`, `Decision`, and the evaluation order from the component architecture.
 - [x] Layered TOML rules: managed, user, project, session.
 - [ ] Guards: secret scan on edits and output, protected paths.
-- [ ] Shell hook runtime for `tool.pre`, `tool.post`, `edit.pre`, `edit.post`, `task.done`.
+- [x] Shell hook runtime for `tool.pre`, `tool.post`, `edit.pre`, `edit.post`, `task.done`.
 - [x] Modes: Ask, Accept edits, rules-only Auto, Full access.
 - [x] `approval.list`, `approval.decide`; ACP permission requests wait on them.
 - [ ] `commit.pre` shell hook; default deny rules for manual git commands that write shared state (`git commit`, `git push`, and `git stash` and `git branch` except their read-only forms), with a reason pointing agents at `git_commit`.

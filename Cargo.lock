@@ -1204,6 +1204,20 @@ dependencies = [
 [[package]]
 name = "forge-hooks"
 version = "0.0.0"
+dependencies = [
+ "forge-api",
+ "forge-config",
+ "forge-policy",
+ "forge-sandbox",
+ "futures-util",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml 1.1.8+spec-1.1.0",
+ "tracing",
+]
 
 [[package]]
 name = "forge-lsp"
@@ -1265,6 +1279,7 @@ dependencies = [
  "forge-config",
  "forge-events",
  "forge-git",
+ "forge-hooks",
  "forge-policy",
  "forge-sandbox",
  "futures-util",
@@ -1284,6 +1299,7 @@ dependencies = [
  "forge-config",
  "forge-events",
  "forge-git",
+ "forge-hooks",
  "forge-policy",
  "forge-sandbox",
  "forge-session",
