@@ -5,10 +5,12 @@ use std::ffi::OsString;
 use std::path::Path;
 
 use forge_acp::adapters::{self, Manifest};
+use forge_acp::logins::{self, Login};
 use forge_api::model::AgentProfile;
 use forge_api::{ApiError, ProjectId};
 use forge_config::agent::NetworkConfig;
 use forge_config::{AGENTS_DIR, AgentProfileConfig, ProfileMode};
+use forge_sandbox::proxy::SecretRoute;
 use forge_sandbox::secrets::{self, SecretError, SecretStore};
 
 use crate::rpc::{HandlerError, State};
@@ -114,6 +116,7 @@ pub async fn list(
         None => None,
     };
     let store = state.secrets.clone();
+    let home = state.home.clone();
     let path = std::env::var_os("PATH");
     let listed = tokio::task::spawn_blocking(move || {
         let mut ids: Vec<String> = adapters::manifests()
@@ -132,7 +135,7 @@ pub async fn list(
                     None => Ok(adapters::by_profile(&id).map(builtin)),
                 };
                 match loaded {
-                    Ok(Some(profile)) => status(&id, &profile, store.as_ref(), path.clone()),
+                    Ok(Some(profile)) => status(&id, &profile, store.as_ref(), &home, path.clone()),
                     Ok(None) => unreachable!("listed profiles exist"),
                     Err(e) => AgentProfile {
                         id,
@@ -177,6 +180,7 @@ fn status(
     id: &str,
     profile: &AgentProfileConfig,
     store: &dyn SecretStore,
+    home: &Path,
     path: Option<OsString>,
 ) -> AgentProfile {
     let manifest = adapters::manifest(&profile.agent);
@@ -218,22 +222,91 @@ fn status(
             }
         },
     }
-    let (authenticated, sign_in) = sign_in(profile, manifest, store);
+    let (authenticated, sign_in) = sign_in(profile, manifest, store, home);
     listed.authenticated = authenticated;
     listed.sign_in = sign_in;
     listed
 }
 
-/// Whether every secret the profile signs in with is in the keyring, and if not, how to put
-/// it there. A registry agent's profile must name at least one, since the sandbox hides the
-/// agent's own sign-in.
-fn sign_in(
+/// How a session signs in: the secrets the proxy injects, and the agent's own login when it
+/// stands in for keyring secrets.
+pub struct Credentials {
+    pub routes: Vec<SecretRoute>,
+    pub login: Option<Login>,
+}
+
+/// How a session with `profile` signs in: each secret it names from the keyring, or, for a
+/// registry agent whose keyring secrets are all missing, its user's own sign-in under `home`
+/// (the real home dir). An error lists what to do. Blocking.
+pub fn credentials(
     profile: &AgentProfileConfig,
     manifest: Option<&Manifest>,
     store: &dyn SecretStore,
-) -> (bool, Option<String>) {
+    home: &Path,
+) -> Result<Credentials, Vec<String>> {
     let mut fixes = Vec::new();
-    if profile.env_secrets.is_empty()
+    let mut routes = Vec::new();
+    let mut missing = Vec::new();
+    for name in &profile.env_secrets {
+        let Some(secret) = secrets::known(name) else {
+            fixes.push(format!(
+                "Forge can't inject {name:?}; it knows {}",
+                secrets::known_names()
+            ));
+            continue;
+        };
+        match store.get(name) {
+            Ok(value) => routes.push(SecretRoute::fixed(secret, value)),
+            Err(SecretError::Missing { fix, .. }) => missing.push((name.as_str(), fix)),
+            Err(e) => fixes.push(e.to_string()),
+        }
+    }
+    let login_kind = manifest.and_then(|m| m.auth.login);
+    // The login stands in only for the registry's own secrets, and only when none is stored.
+    let login_fits = routes.is_empty()
+        && fixes.is_empty()
+        && manifest.is_some_and(|m| {
+            missing
+                .iter()
+                .all(|(name, _)| m.auth.secrets.iter().any(|s| s == name))
+        });
+    let mut login = None;
+    match login_kind {
+        Some(kind) if login_fits && (!missing.is_empty() || profile.env_secrets.is_empty()) => {
+            match logins::find(kind, home) {
+                Ok(Some(found)) => {
+                    routes.push(found.route());
+                    login = Some(found);
+                    missing.clear();
+                }
+                Ok(None) => {
+                    let keys = missing
+                        .drain(..)
+                        .map(|(_, fix)| fix)
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    let sign_in = format!(
+                        "sign in with `{}` ({})",
+                        kind.sign_in_command(),
+                        kind.label()
+                    );
+                    fixes.push(if keys.is_empty() {
+                        sign_in
+                    } else {
+                        format!("{keys}; or {sign_in}")
+                    });
+                }
+                Err(why) => {
+                    missing.clear();
+                    fixes.push(why);
+                }
+            }
+        }
+        _ => {}
+    }
+    fixes.extend(missing.into_iter().map(|(_, fix)| fix));
+    if routes.is_empty()
+        && fixes.is_empty()
         && let Some(m) = manifest
     {
         fixes.push(format!(
@@ -241,24 +314,23 @@ fn sign_in(
             m.auth.secrets, m.name
         ));
     }
-    for name in &profile.env_secrets {
-        if secrets::known(name).is_none() {
-            fixes.push(format!(
-                "Forge can't inject {name:?}; it knows {}",
-                secrets::known_names()
-            ));
-            continue;
-        }
-        match store.get(name) {
-            Ok(_) => {}
-            Err(SecretError::Missing { fix, .. }) => fixes.push(fix),
-            Err(e) => fixes.push(e.to_string()),
-        }
-    }
     if fixes.is_empty() {
-        (true, None)
+        Ok(Credentials { routes, login })
     } else {
-        (false, Some(fixes.join("; ")))
+        Err(fixes)
+    }
+}
+
+/// Whether the profile can sign in, and if not, how to.
+fn sign_in(
+    profile: &AgentProfileConfig,
+    manifest: Option<&Manifest>,
+    store: &dyn SecretStore,
+    home: &Path,
+) -> (bool, Option<String>) {
+    match credentials(profile, manifest, store, home) {
+        Ok(_) => (true, None),
+        Err(fixes) => (false, Some(fixes.join("; "))),
     }
 }
 
@@ -279,6 +351,89 @@ mod tests {
         std::fs::write(&path, text).unwrap();
         let loaded = load(dir.path(), id);
         (dir, loaded)
+    }
+
+    /// A keyring holding only `stored`.
+    struct Store(&'static [&'static str]);
+
+    impl SecretStore for Store {
+        fn get(&self, name: &str) -> Result<secrets::Secret, SecretError> {
+            if self.0.contains(&name) {
+                Ok(secrets::Secret::new(format!("key-{name}")))
+            } else {
+                Err(SecretError::Missing {
+                    name: name.to_owned(),
+                    fix: format!("store {name}"),
+                })
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn claude_login(home: &Path) {
+        let later = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            + 3_600_000;
+        let path = home.join(".claude/.credentials.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            format!(r#"{{"claudeAiOauth":{{"accessToken":"oauth","expiresAt":{later}}}}}"#),
+        )
+        .unwrap();
+    }
+
+    // On macOS the login keychain is read first, and tests never read the real one.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_stored_key_wins_and_the_login_stands_in_only_for_a_missing_one() {
+        let m = adapters::manifest("claude-code").unwrap();
+        let profile = builtin(m);
+        let home = tempfile::tempdir().unwrap();
+        // Neither: both ways to sign in are offered.
+        let fixes = credentials(&profile, Some(m), &Store(&[]), home.path())
+            .err()
+            .unwrap()
+            .join("; ");
+        assert!(
+            fixes.contains("store ANTHROPIC_API_KEY") && fixes.contains("`claude`"),
+            "{fixes}"
+        );
+        claude_login(home.path());
+        let with_login = credentials(&profile, Some(m), &Store(&[]), home.path())
+            .ok()
+            .unwrap();
+        assert_eq!(with_login.routes.len(), 1);
+        assert_eq!(with_login.routes[0].secret.name, "CLAUDE_CODE_OAUTH_TOKEN");
+        assert_eq!(
+            with_login.routes[0].value.current().unwrap().expose(),
+            "oauth"
+        );
+        assert!(with_login.login.is_some());
+        let with_key = credentials(
+            &profile,
+            Some(m),
+            &Store(&["ANTHROPIC_API_KEY"]),
+            home.path(),
+        )
+        .ok()
+        .unwrap();
+        assert_eq!(with_key.routes.len(), 1);
+        assert_eq!(with_key.routes[0].secret.name, "ANTHROPIC_API_KEY");
+        assert!(with_key.login.is_none());
+        // A profile naming a secret outside the registry's gets no login in its place.
+        let other = AgentProfileConfig {
+            env_secrets: vec!["OPENAI_API_KEY".into()],
+            ..profile.clone()
+        };
+        let fixes = credentials(&other, Some(m), &Store(&[]), home.path())
+            .err()
+            .unwrap();
+        assert_eq!(fixes, ["store OPENAI_API_KEY"]);
+        // Nor an agent outside the registry.
+        assert!(credentials(&profile, None, &Store(&[]), home.path()).is_err());
     }
 
     #[test]

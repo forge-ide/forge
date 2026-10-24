@@ -68,6 +68,10 @@ pub struct Launch {
 pub struct Auth {
     /// The keyring secrets the agent signs in with, injected through the egress proxy.
     pub secrets: Vec<String>,
+    /// The agent's own subscription sign-in, which Forge carries when the keyring has none
+    /// of `secrets`.
+    #[serde(default)]
+    pub login: Option<crate::logins::LoginKind>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]

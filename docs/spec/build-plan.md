@@ -18,7 +18,8 @@ Items marked **assumed** are defaults chosen so work can start; change them befo
 | Sandbox, macOS | Light and Standard: one Seatbelt profile. Container: Podman machine | Decided (Seatbelt); Assumed (Container) |
 | Agent commits | Through Forge's `git_commit` MCP tool, run by the daemon; the shared git dir is read-only inside the sandbox | Decided |
 | Agents in v0.1 | Claude Code, Codex, Gemini CLI, all through ACP (`claude-agent-acp`, `codex-acp`, `gemini --acp`), at versions pinned in the adapter registry | Decided |
-| Agent sign-in in v0.1 | API keys from the OS keyring, injected by the egress proxy; subscription sign-ins (claude.ai, ChatGPT, Google) keep credentials in the real home, which the sandbox hides, so they aren't supported yet | Decided |
+| Agent sign-in in v0.1 | API keys from the OS keyring, injected by the egress proxy; without one, the agent's own claude.ai or ChatGPT sign-in, read by `forged` from the real home and injected the same way, so its tokens never enter the sandbox. Google sign-ins aren't carried yet | Decided |
+| Agents' own settings | Each agent reads its user's settings (copies made at launch, plus read-only links to their instructions, skills, and plugins) and the repo's, as outside Forge; Forge pins only what keeps its gate in front (modes, Gemini's policy, Codex's reviewer, bypass refused) | Decided |
 | Languages in v0.1 | Rust, TypeScript, Python, Go | Decided |
 | Git hosting in v0.1 | Push the branch with the user's git credentials; PR creation is v0.2 | Assumed |
 | GitHub auth (v0.2) | Reuse `gh auth token` if present, else OAuth device flow | Assumed |
@@ -106,7 +107,7 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 - [x] Each agent's shim allows Forge's `git_commit` tool and tells the agent to commit with it; the smoke task checks a real agent commits through it.
 - [x] Moved from M6, since `git_commit` needs it: the minimal per-session Forge MCP endpoint with `git_commit`, passed to the agent at ACP session start; the daemon commits on the session branch after policy and the `commit.pre` hook.
 - [x] Permission requests for reads and fetches (which name no `Action`): a read or search inside the worktrees is allowed, one outside is denied, and a fetch is denied with the network policy's reason.
-- [x] Gemini CLI and Codex refuse to start in a worktree with repo config they would act on unasked (`.gemini/settings.json`, `.gemini/.env`, `.env`, `.codex/config.toml`, `.codex/hooks.json`); a follow-up can parse these and allow benign ones.
+- [x] Agents read their user's settings and the repo's, and sign in with the user's own claude.ai or ChatGPT login when the keyring has no key for them.
 - [x] CLI commands for sessions and approvals, so the smoke checklist runs before the session UI exists; sample repos in `tests/fixtures/repos/`.
 
 **Done when:** each of the three agents completes the scripted smoke task ("add a function and a unit test") in each sample repo under Accept-edits mode, following the manual checklist in `docs/smoke.md`. Automated tests cover the registry, install and sign-in detection, shims, permission mapping, and `git_commit` with the fake agent; the real agents are checked by hand.

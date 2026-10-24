@@ -6,7 +6,9 @@
 //! the placeholder header with the real value. A placeholder sent anywhere else is worthless.
 //!
 //! Values come from the OS keyring: service `forge`, account the secret's name. Linux reads
-//! them with `secret-tool` (libsecret), macOS with `security` (the login keychain).
+//! them with `secret-tool` (libsecret), macOS with `security` (the login keychain). A login
+//! secret (an agent's own subscription sign-in) is read instead from where the agent's CLI
+//! keeps it, fresh for each request, through a [`SecretSource`].
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -118,6 +120,30 @@ pub const KNOWN: &[KnownSecret] = &[
         base_url_suffix: "",
         paths: &["/v1beta/models", "/v1/models"],
     },
+    // Logins: an agent's own subscription sign-in, which Forge reads where the agent's CLI
+    // keeps it when the keyring has no API key. Claude Code takes the token as
+    // CLAUDE_CODE_OAUTH_TOKEN (a `claude setup-token` token can be stored in the keyring under
+    // that name too).
+    KnownSecret {
+        name: "CLAUDE_CODE_OAUTH_TOKEN",
+        route: "anthropic-login",
+        host: "api.anthropic.com",
+        header: Header::Bearer,
+        base_url_var: "ANTHROPIC_BASE_URL",
+        base_url_suffix: "",
+        paths: &["/v1/messages", "/v1/models"],
+    },
+    // Codex reads its ChatGPT sign-in from auth.json, which the shim writes with this
+    // placeholder; the variables only carry the placeholder and the route to the shim.
+    KnownSecret {
+        name: "CODEX_CHATGPT_TOKEN",
+        route: "chatgpt",
+        host: "chatgpt.com",
+        header: Header::Bearer,
+        base_url_var: "CODEX_CHATGPT_BASE_URL",
+        base_url_suffix: "/backend-api",
+        paths: &["/backend-api/codex"],
+    },
 ];
 
 /// The known secret called `name`.
@@ -166,6 +192,19 @@ pub enum SecretError {
 /// Where secret values come from. Blocking.
 pub trait SecretStore: Send + Sync + 'static {
     fn get(&self, name: &str) -> Result<Secret, SecretError>;
+}
+
+/// Where a route's value comes from: read once per request sent on the route, so a value that
+/// changes (a login the agent's own CLI refreshes) is current. Blocking; the proxy calls it
+/// off the runtime. An error is the reason the request is refused, shown to the agent.
+pub trait SecretSource: Send + Sync + 'static {
+    fn current(&self) -> Result<Secret, String>;
+}
+
+impl SecretSource for Secret {
+    fn current(&self) -> Result<Secret, String> {
+        Ok(self.clone())
+    }
 }
 
 /// The OS keyring, through its command-line tool.
@@ -309,6 +348,28 @@ mod tests {
         }
         assert_eq!(known("OPENAI_API_KEY").unwrap().host, "api.openai.com");
         assert!(known("AWS_SECRET_ACCESS_KEY").is_none());
+    }
+
+    #[test]
+    fn logins_go_only_to_inference_paths() {
+        let chatgpt = known("CODEX_CHATGPT_TOKEN").unwrap();
+        assert_eq!(chatgpt.host, "chatgpt.com");
+        assert!(chatgpt.allows_path("/backend-api/codex/responses"));
+        assert!(chatgpt.allows_path("/backend-api/codex/models?client_version=1"));
+        for bad in [
+            "/backend-api/accounts",
+            "/backend-api/codexx",
+            "/backend-api/me",
+            "/backend-api/wham/tasks",
+            "/backend-api/wham/accounts/check",
+            "/backend-api/ps/mcp",
+        ] {
+            assert!(!chatgpt.allows_path(bad), "{bad}");
+        }
+        let claude = known("CLAUDE_CODE_OAUTH_TOKEN").unwrap();
+        assert_eq!(claude.header, Header::Bearer);
+        assert!(claude.allows_path("/v1/messages"));
+        assert!(!claude.allows_path("/api/oauth/claude_cli/create_api_key"));
     }
 
     #[test]

@@ -7,7 +7,7 @@ For each agent (Claude Code, Codex, Gemini CLI) × each sample repo in `tests/fi
 ## Before you start
 
 - [ ] Each agent's adapter is installed at the version `forge agent list` names as `supportedVersion`; for one that isn't, `installCommand` is the command to run (`npm install -g ...`).
-- [ ] Each agent's API key is in the keyring: `forge agent list` shows it `authenticated`, or names the command that stores it under `signIn` (`secret-tool store --label='Forge NAME' service forge account NAME` on Linux, `security add-generic-password -s forge -a NAME -w` on macOS). Subscription sign-ins (claude.ai, ChatGPT, Google) don't carry into the sandbox.
+- [ ] Each agent is signed in: `forge agent list` shows it `authenticated`, or under `signIn` names the command that stores its API key (`secret-tool store --label='Forge NAME' service forge account NAME` on Linux, `security add-generic-password -s forge -a NAME -w` on macOS) or, for Claude Code and Codex, the command that signs in with a subscription (`claude`, `codex login`). Run the checklist once with keys and once with subscription sign-ins; Google sign-ins aren't carried, so Gemini needs a key.
 - [ ] Toolchains are visible in the sandbox. It shows the system directories, `~/.cargo`, `~/.rustup`, and `~/.npm`; one installed elsewhere under the home dir (Go from a version manager, a Python virtualenv) needs its directory in `[sandbox] read_only` in `~/.config/forge/config.toml`.
 - [ ] A sample repo outside Forge's own checkout: `just smoke-repo rust /tmp/smoke-rust` (or `typescript`, `python`, `go`), then `forge project open /tmp/smoke-rust`. The repo's README names its test command.
 
@@ -31,8 +31,9 @@ Prompt: "Add a function and a unit test that makes the failing test pass."
 
 Agent notes: Codex runs its commands only by escalating them, which asks Forge; a command it runs without escalating fails at its own sandbox. Note how often that happens, and check that every Codex command approval offers a plain "allow once" option (`forge session watch` shows the request): one that offers only "for this session" would let later runs of that command skip Forge.
 
-- [ ] Gemini CLI or Codex in a repo with `.gemini/settings.json`, a committed `.env` (Gemini), or `.codex/config.toml`: the session fails to start, saying which file and why.
-- [ ] Gemini CLI with a repo `.gemini/policies/` rule allowing `run_shell_command`: commands still ask.
+- [ ] Gemini CLI with a repo `.gemini/policies/` rule allowing `run_shell_command`, or a `.gemini/settings.json` allowing it: commands still ask.
+- [ ] Each agent picks up the user's settings (its model, say) and instructions (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`).
+- [ ] With a subscription sign-in, `~/.claude/.credentials.json` and `~/.codex/auth.json` are unchanged after the session, and the agent's own CLI still works outside Forge.
 
 ## Review loop
 

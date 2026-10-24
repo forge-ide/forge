@@ -24,6 +24,7 @@ forge-session = { path = "crates/forge-session" }
 
 agent-client-protocol = { version = "3.5.0", default-features = false }
 anyhow = "1.0.104"
+base64 = "0.23.1"
 clap = { version = "4.6.6", features = ["derive"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 globset = "0.4.20"

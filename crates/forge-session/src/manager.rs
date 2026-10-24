@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use forge_acp::shim::{self, ShimContext};
+use forge_acp::logins::LoginKind;
+use forge_acp::shim::{self, HomeConfig, ShimContext};
 use forge_acp::{AcpClient, AcpError, AgentCommand, EventSink, Pipe, Root, Workspace, adapters};
 use forge_api::events::{
     EventPayload, PromptBody, SessionStateBody, TurnEndedBody, TurnSource, TurnStartedBody,
@@ -76,8 +77,13 @@ pub struct AgentLaunch {
     pub read_only: Vec<PathBuf>,
     /// Hosts the session's egress proxy lets through.
     pub network: Allowlist,
-    /// Secrets the proxy injects, with their values from the keyring.
+    /// Secrets the proxy injects, with their values from the keyring or the agent's login.
     pub secrets: Vec<SecretRoute>,
+    /// The agent's own sign-in the proxy carries, when it isn't an API key.
+    pub login: Option<LoginKind>,
+    /// What the agent reads from the user's own config; its links' targets are among
+    /// `read_only`.
+    pub home: HomeConfig,
     /// The managed, user, and project policy layers, compiled.
     pub rules: Arc<Rules>,
     /// The project's hooks, compiled.
@@ -567,10 +573,17 @@ impl SessionManager {
         let secrets = std::mem::take(&mut launch.secrets);
         let (rules, hook_set) = (launch.rules.clone(), launch.hooks.clone());
         let project_root = launch.project_root.clone();
-        let mut values: Vec<String> = secrets
-            .iter()
-            .map(|s| s.value.expose().to_owned())
-            .collect();
+        // A login's value as it is now; one its CLI refreshes later never enters the sandbox.
+        let sources: Vec<_> = secrets.iter().map(|s| s.value.clone()).collect();
+        let mut values: Vec<String> = tokio::task::spawn_blocking(move || {
+            sources
+                .iter()
+                .filter_map(|source| source.current().ok())
+                .map(|value| value.expose().to_owned())
+                .collect()
+        })
+        .await
+        .map_err(|e| e.to_string())?;
         // Forge's MCP endpoint is served on the proxy; its tool is filled in once the gate
         // exists, below.
         let tools = Arc::new(CommitTool::default());
@@ -602,10 +615,12 @@ impl SessionManager {
             std::fs::create_dir_all(&scratch)
                 .and_then(|()| std::fs::create_dir(&shim_dir))
                 .map_err(|e| format!("creating the agent's shim dir: {e}"))?;
-            // Agents' own config in the sandbox home starts empty each launch. Nothing runs in
-            // the session now; removing a directory never follows a symlink inside it.
+            // Agents' own config in the sandbox home starts afresh each launch, from the user's.
+            // Nothing runs in the session now; removing a directory never follows a symlink
+            // inside it.
+            let home = scratch.join("home");
             for entry in shim::AGENT_HOME_ENTRIES {
-                let path = scratch.join("home").join(entry);
+                let path = home.join(entry);
                 let removed = match std::fs::symlink_metadata(&path) {
                     Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&path),
                     Ok(_) => std::fs::remove_file(&path),
@@ -627,6 +642,12 @@ impl SessionManager {
             let sandbox = sandbox
                 .prepare(spec)
                 .map_err(|e| format!("starting the sandbox: {e}"))?;
+            // The sandbox has made its home by now.
+            let seen_as = sandbox
+                .var("HOME")
+                .map_or_else(|| home.clone(), PathBuf::from);
+            shim::install_home(&launch.home, &home, &seen_as)
+                .map_err(|e| format!("setting up the agent's config: {e}"))?;
             let var = |name: &str| sandbox.var(name);
             let mcp_url = sandbox.var("HTTP_PROXY").map(|url| proxy.local_url(&url));
             let prepared = shim::prepare(
@@ -635,7 +656,8 @@ impl SessionManager {
                     dir: &shim_dir,
                     mcp_url,
                     var: &var,
-                    worktree: workspace.cwd(),
+                    home: &launch.home,
+                    login: launch.login,
                 },
             )
             .map_err(|e| e.to_string())?;

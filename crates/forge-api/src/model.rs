@@ -90,6 +90,8 @@ pub struct AgentProfile {
     /// Registry key: `claude-code`, `codex`, `gemini`, or another adapter.
     pub agent: String,
     pub installed: bool,
+    /// Every secret the profile names is in the keyring, or for a registry agent with none
+    /// of them there, its own subscription sign-in is present and unexpired.
     pub authenticated: bool,
     /// The installed version, when Forge can tell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,7 +111,7 @@ pub struct AgentProfile {
     #[ts(optional)]
     pub install_command: Option<String>,
     /// How to sign in, when the agent isn't signed in: the command that stores each missing
-    /// secret in the keyring.
+    /// secret in the keyring, or the agent's own command that signs in with a subscription.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub sign_in: Option<String>,

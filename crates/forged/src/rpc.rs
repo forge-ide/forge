@@ -33,6 +33,8 @@ pub struct State {
     pub paths: Paths,
     /// Where agents' secrets come from.
     pub secrets: Arc<dyn forge_sandbox::secrets::SecretStore>,
+    /// The user's real home, where agents' own sign-ins and settings are read from.
+    pub home: std::path::PathBuf,
 }
 
 /// Work to run once a request's response is queued, such as replaying events to a new

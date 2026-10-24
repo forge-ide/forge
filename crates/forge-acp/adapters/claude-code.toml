@@ -15,6 +15,8 @@ env = { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", DISABLE_AUTOUPDATER = "1
 
 [auth]
 secrets = ["ANTHROPIC_API_KEY"]
+# Without them, the sign-in the agent\'s own CLI keeps in the real home, sent by the proxy.
+login = "claude-ai"
 
 [permissions]
 # Bash requests carry `rawInput.command` as one shell string.
@@ -23,7 +25,8 @@ command = "raw-input"
 [quirks]
 notes = [
     "Runs its Read, Write, Edit, and Bash tools itself, never through ACP's file or terminal methods; the sandbox bounds them and Forge decides them from their permission requests.",
-    "Reads its settings files from the worktree (.claude/settings*.json) unless told not to; the shim turns every settings source off so a repo can't pre-allow tools.",
-    "Takes its starting mode from settings, so Forge sets the ACP mode to `default` after session/new and checks that it took.",
-    "Subscription sign-in (claude.ai) keeps credentials in the real home, which the sandbox hides; Forge uses an API key from the keyring.",
+    "Reads the repo's .claude/settings.json and settings.local.json, whose permission rules can allow tools without asking Forge. The user's ~/.claude/settings.json goes in as a read-only copy passed with the `settings` option (the flag tier, above the repo's), not as user settings, since the sandbox home is the agent's to write and Claude watches its settings files.",
+    "Its user-scope MCP servers come from ~/.claude.json, of which Forge copies only mcpServers; CLAUDE.md, agents, commands, hooks, output styles, plugins, rules, and skills are linked read-only from the real ~/.claude.",
+    "Takes its starting mode from settings, so Forge sets the ACP mode to `default` after session/new and checks that it took; bypassPermissions stays refused.",
+    "Without ANTHROPIC_API_KEY in the keyring, the claude.ai sign-in from ~/.claude/.credentials.json (on macOS the `Claude Code-credentials` keychain item): the agent gets CLAUDE_CODE_OAUTH_TOKEN as a placeholder and the proxy sends the access token, read fresh, to api.anthropic.com. The refresh token stays put, so an expired sign-in is refreshed by running `claude` outside Forge.",
 ]

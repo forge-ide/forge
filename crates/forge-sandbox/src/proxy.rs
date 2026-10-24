@@ -38,7 +38,7 @@ use tokio::net::{TcpListener, TcpStream, UnixListener};
 use tokio::sync::Semaphore;
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::secrets::{KnownSecret, PLACEHOLDER, Secret};
+use crate::secrets::{KnownSecret, PLACEHOLDER, Secret, SecretSource};
 
 /// Longest request head the proxy reads before giving up.
 const MAX_HEAD: usize = 16 * 1024;
@@ -260,11 +260,29 @@ pub trait LocalService: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = LocalResponse> + Send + '_>>;
 }
 
-/// A secret and its value, served on the secret's route.
-#[derive(Clone, Debug)]
+/// A secret and where its value comes from, served on the secret's route.
+#[derive(Clone)]
 pub struct SecretRoute {
     pub secret: &'static KnownSecret,
-    pub value: Secret,
+    pub value: Arc<dyn SecretSource>,
+}
+
+impl SecretRoute {
+    /// A route whose value never changes, such as an API key from the keyring.
+    pub fn fixed(secret: &'static KnownSecret, value: Secret) -> Self {
+        Self {
+            secret,
+            value: Arc::new(value),
+        }
+    }
+}
+
+impl std::fmt::Debug for SecretRoute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretRoute")
+            .field("secret", &self.secret.name)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A connection to a route's host, ready for the rewritten request.
@@ -587,9 +605,13 @@ enum Request {
         port: u16,
         head: Vec<u8>,
     },
-    /// A secret's route; `head` is the request rewritten for the secret's host, with the
-    /// secret in it.
-    Route { host: String, head: Vec<u8> },
+    /// A secret's route; `head` is the request rewritten for the secret's host, still
+    /// without the secret's header, which [`finish_route_head`] adds.
+    Route {
+        host: String,
+        route: SecretRoute,
+        head: Vec<u8>,
+    },
     /// `/_forge/...` without this proxy's token, or for a route this session doesn't have.
     UnknownRoute,
     /// A request on a secret's route that may not carry it.
@@ -654,6 +676,24 @@ where
         log_denial(state, deny(reason.clone()));
         return;
     }
+    // The secret's value, read now: a login's changes as its CLI refreshes it.
+    let request = match request {
+        Request::Route { host, route, head } => {
+            let source = route.value.clone();
+            let value = tokio::task::spawn_blocking(move || source.current())
+                .await
+                .unwrap_or_else(|e| Err(format!("reading the secret: {e}")));
+            match value.and_then(|value| finish_route_head(head, &route, &value)) {
+                Ok(head) => Request::Route { host, route, head },
+                Err(why) => {
+                    let _ = respond(&mut client, 401, &why).await;
+                    log_denial(state, deny(why));
+                    return;
+                }
+            }
+        }
+        other => other,
+    };
     // A route's host is fixed by the secret, not by the allowlist.
     let routed = matches!(request, Request::Route { .. });
     if !routed && let Err(why) = config.allow.check(&host, port) {
@@ -821,14 +861,18 @@ fn parse(head: &[u8], routes: &[SecretRoute], token: &str, local: bool) -> Resul
             return refuse(format!("{method} is not allowed on a secret's route"));
         }
         if !route.secret.allows_path(path) {
+            // The path without its query, which may carry anything.
+            let asked = path.split(['?', '#']).next().unwrap_or_default();
             return refuse(format!(
-                "{} may only be sent to {}",
+                "{} may only be sent to {}, not {}",
                 route.secret.name,
-                route.secret.paths.join(", ")
+                route.secret.paths.join(", "),
+                clip(asked.to_owned(), 120)
             ));
         }
         return Ok(Request::Route {
             host: route.secret.host.to_owned(),
+            route: route.clone(),
             head: route_head(method, path, req.headers, route),
         });
     }
@@ -1005,8 +1049,8 @@ fn route_caller_ok(headers: &[httparse::Header<'_>]) -> Result<(), String> {
     }
 }
 
-/// The request for a route's host: the path without the route, its own `Host`, and the
-/// secret's header carrying the real value in place of whatever the client sent.
+/// The request for a route's host: the path without the route, its own `Host`, and none of
+/// the secret's header the client sent; [`finish_route_head`] adds the real one.
 fn route_head(
     method: &str,
     path: &str,
@@ -1029,9 +1073,25 @@ fn route_head(
         out.extend_from_slice(h.value);
         out.extend_from_slice(b"\r\n");
     }
-    out.extend_from_slice(secret.header.line(route.value.expose()).as_bytes());
-    out.extend_from_slice(b"Connection: close\r\n\r\n");
     out
+}
+
+/// End a route's request head with the secret's header carrying `value`, refusing a value
+/// that would inject headers of its own.
+fn finish_route_head(
+    mut head: Vec<u8>,
+    route: &SecretRoute,
+    value: &Secret,
+) -> Result<Vec<u8>, String> {
+    if value.expose().is_empty() || value.expose().chars().any(char::is_control) {
+        return Err(format!(
+            "the value of {} is empty or contains control characters",
+            route.secret.name
+        ));
+    }
+    head.extend_from_slice(route.secret.header.line(value.expose()).as_bytes());
+    head.extend_from_slice(b"Connection: close\r\n\r\n");
+    Ok(head)
 }
 
 /// `host:port`, with `default` when the port is missing.
@@ -1077,6 +1137,7 @@ async fn respond<S: AsyncWrite + Unpin>(
 ) -> std::io::Result<()> {
     let status = match code {
         400 => "Bad Request",
+        401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
@@ -1179,10 +1240,7 @@ mod tests {
     }
 
     fn route(name: &str, value: &str) -> SecretRoute {
-        SecretRoute {
-            secret: crate::secrets::known(name).unwrap(),
-            value: Secret::new(value),
-        }
+        SecretRoute::fixed(crate::secrets::known(name).unwrap(), Secret::new(value))
     }
 
     async fn harness_full(
@@ -1770,6 +1828,53 @@ mod tests {
             "{got}"
         );
         assert!(got.contains("Authorization: Bearer sk-open\r\n"), "{got}");
+    }
+
+    /// A value that changes between requests, or can't be read: a login.
+    struct Changing(Mutex<Vec<Result<Secret, String>>>);
+
+    impl SecretSource for Changing {
+        fn current(&self) -> Result<Secret, String> {
+            lock(&self.0).remove(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn routes_read_their_value_for_each_request() {
+        let (addr, seen) = upstream().await;
+        let resolver = Arc::new(Mapped(HashMap::from([("chatgpt.com".into(), addr)])));
+        let values = Changing(Mutex::new(vec![
+            Ok(Secret::new("tok-1")),
+            Ok(Secret::new("tok-2")),
+            Err("the ChatGPT login has expired; run codex".into()),
+            Ok(Secret::new("tok\r\nX-Injected: 1")),
+        ]));
+        let login = SecretRoute {
+            secret: crate::secrets::known("CODEX_CHATGPT_TOKEN").unwrap(),
+            value: Arc::new(values),
+        };
+        let h = routed(resolver, vec![login]).await;
+        let request = format!(
+            "POST /_forge/{}/chatgpt/backend-api/codex/responses HTTP/1.1\r\nHost: localhost:3128\r\nAuthorization: Bearer {PLACEHOLDER}\r\nContent-Length: 0\r\n\r\n",
+            h.proxy.state.token
+        );
+        for _ in 0..2 {
+            assert_eq!(exchange(h.proxy.port(), request.as_bytes()).await, "pong");
+        }
+        let got = String::from_utf8(lock(&seen).clone()).unwrap();
+        assert!(got.contains("Authorization: Bearer tok-1\r\n"), "{got}");
+        assert!(got.contains("Authorization: Bearer tok-2\r\n"), "{got}");
+        // An unreadable value, or one that would add headers, sends nothing.
+        let expired = exchange(h.proxy.port(), request.as_bytes()).await;
+        assert!(expired.starts_with("HTTP/1.1 401"), "{expired}");
+        assert!(expired.contains("run codex"), "{expired}");
+        let injected = exchange(h.proxy.port(), request.as_bytes()).await;
+        assert!(injected.starts_with("HTTP/1.1 401"), "{injected}");
+        let got = String::from_utf8(lock(&seen).clone()).unwrap();
+        assert!(!got.contains("X-Injected"), "{got}");
+        assert_eq!(got.matches("POST ").count(), 2, "{got}");
+        let log = logged(&h, 4).await;
+        assert_eq!(log.iter().filter(|c| !c.allowed).count(), 2);
     }
 
     #[tokio::test]

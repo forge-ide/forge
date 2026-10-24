@@ -130,6 +130,10 @@ export type AgentProfile = {
    */
   agent: string;
   installed: boolean;
+  /**
+   * Every secret the profile names is in the keyring, or for a registry agent with none
+   * of them there, its own subscription sign-in is present and unexpired.
+   */
   authenticated: boolean;
   /**
    * The installed version, when Forge can tell.
@@ -150,7 +154,7 @@ export type AgentProfile = {
   installCommand?: string;
   /**
    * How to sign in, when the agent isn't signed in: the command that stores each missing
-   * secret in the keyring.
+   * secret in the keyring, or the agent's own command that signs in with a subscription.
    */
   signIn?: string;
   /**

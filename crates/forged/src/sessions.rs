@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use forge_acp::{AgentCommand, adapters};
+use forge_acp::{AgentCommand, adapters, shim};
 use forge_api::methods::{
     BranchPreview, BranchPreviewParams, SessionCreateParams, SessionOutcome, SessionSetModeParams,
 };
@@ -16,7 +16,7 @@ use forge_config::{
 };
 use forge_hooks::HookSet;
 use forge_policy::{Layer, Rules};
-use forge_sandbox::proxy::{Allowlist, SecretRoute};
+use forge_sandbox::proxy::Allowlist;
 use forge_sandbox::secrets::{self, SecretStore};
 use forge_sandbox::{Sandbox, TierStatus};
 use forge_session::{AgentLaunch, AgentResolver, CreateRequest, SessionError};
@@ -219,28 +219,36 @@ impl ProfileResolver {
         Ok((root, profile))
     }
 
-    /// The secrets the profile injects, with their values from the keyring.
-    fn routes(&self, profile: &AgentProfileConfig, id: &str) -> Result<Vec<SecretRoute>, ApiError> {
-        known_secrets(profile, id)?
-            .into_iter()
-            .map(|secret| {
-                let value = self.secrets.get(secret.name).map_err(|e| {
-                    ApiError::new(
-                        ErrorKind::AgentUnavailable,
-                        format!("agent profile {id:?}: {e}"),
-                    )
-                })?;
-                Ok(SecretRoute { secret, value })
-            })
-            .collect()
+    /// How the profile signs in: the secrets the proxy injects, from the keyring or the
+    /// agent's own login.
+    fn credentials(
+        &self,
+        profile: &AgentProfileConfig,
+        id: &str,
+    ) -> Result<crate::agents::Credentials, ApiError> {
+        known_secrets(profile, id)?;
+        let manifest = adapters::manifest(&profile.agent);
+        crate::agents::credentials(profile, manifest, self.secrets.as_ref(), &self.home).map_err(
+            |fixes| {
+                ApiError::new(
+                    ErrorKind::AgentUnavailable,
+                    format!("agent profile {id:?}: {}", fixes.join("; ")),
+                )
+            },
+        )
     }
 }
 
 impl AgentResolver for ProfileResolver {
     fn secret_values(&self, session: &Session) -> Result<Vec<String>, ApiError> {
         let (_, profile) = self.profile(session)?;
-        let routes = self.routes(&profile, &session.agent_profile)?;
-        Ok(routes.iter().map(|r| r.value.expose().to_owned()).collect())
+        let credentials = self.credentials(&profile, &session.agent_profile)?;
+        Ok(credentials
+            .routes
+            .iter()
+            .filter_map(|r| r.value.current().ok())
+            .map(|v| v.expose().to_owned())
+            .collect())
     }
 
     fn launch(&self, session: &Session) -> Result<AgentLaunch, ApiError> {
@@ -248,7 +256,7 @@ impl AgentResolver for ProfileResolver {
         let id = &session.agent_profile;
         sandbox_tier(Some(session.sandbox), &profile, id, &self.sandbox.tiers())?;
         let network = allowlist(&profile, id)?;
-        let secrets = self.routes(&profile, id)?;
+        let credentials = self.credentials(&profile, id)?;
         let command = crate::agents::command(&profile).ok_or_else(|| {
             ApiError::new(
                 ErrorKind::AgentUnavailable,
@@ -285,12 +293,22 @@ impl AgentResolver for ProfileResolver {
         // Hook scripts come from the project root, shown read-only, so the agent can't change
         // them from its worktree.
         read_only.extend(hooks.dir().map(Path::to_path_buf));
+        // The user's own settings and extensions, which the agent reads as it would outside
+        // Forge; the links' targets are shown read-only, never the home or Forge's own dirs.
+        let home = shim::home_config(manifest, &self.home, credentials.login.as_ref())
+            .map_err(|e| ApiError::new(ErrorKind::AgentUnavailable, e.to_string()))?;
+        read_only.extend(checked_read_only(
+            &home.read_only(),
+            &[&self.home, &self.paths.data_dir, &self.paths.runtime_dir],
+        )?);
         Ok(AgentLaunch {
             command: AgentCommand { argv, env: vec![] },
             agent: manifest.map(|m| m.id.clone()),
             read_only,
             network,
-            secrets,
+            secrets: credentials.routes,
+            login: credentials.login.map(|l| l.kind),
+            home,
             rules,
             hooks: Arc::new(hooks),
             project_root: root,
@@ -351,7 +369,7 @@ fn known_secrets(
     id: &str,
 ) -> Result<Vec<&'static secrets::KnownSecret>, ApiError> {
     let mut seen = std::collections::HashSet::new();
-    profile
+    let known: Vec<&'static secrets::KnownSecret> = profile
         .env_secrets
         .iter()
         .filter(|name| seen.insert(name.as_str()))
@@ -363,7 +381,20 @@ fn known_secrets(
                 ))
             })
         })
-        .collect()
+        .collect::<Result<_, _>>()?;
+    // Two secrets pointing the same variable at their routes: only one could be used.
+    for (i, a) in known.iter().enumerate() {
+        if let Some(b) = known[i + 1..]
+            .iter()
+            .find(|b| b.base_url_var == a.base_url_var)
+        {
+            return Err(ApiError::validation(format!(
+                "agent profile {id:?}: env_secrets: {} and {} can't both be used; keep one",
+                a.name, b.name
+            )));
+        }
+    }
+    Ok(known)
 }
 
 /// The user config's extra read-only paths, refusing any that would expose a protected dir:

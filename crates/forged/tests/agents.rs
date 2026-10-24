@@ -175,3 +175,64 @@ async fn lists_built_in_and_project_profiles_with_install_and_sign_in_status() {
     );
     daemon.stop();
 }
+
+#[tokio::test]
+async fn an_agents_own_sign_in_counts_when_the_keyring_has_no_key() {
+    let home = temp_home();
+    let tool = home.path().join("fake-keyring");
+    let missing = if cfg!(target_os = "macos") { 44 } else { 1 };
+    executable(&tool, &format!("#!/bin/sh\nexit {missing}\n"));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    // A current claude.ai sign-in, and a ChatGPT one whose token has expired.
+    let claude = home.path().join(".claude/.credentials.json");
+    std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+    std::fs::write(
+        &claude,
+        format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"at","refreshToken":"rt","expiresAt":{}}}}}"#,
+            (now + 3600) * 1000
+        ),
+    )
+    .unwrap();
+    // `{"exp": 1}`, unsigned.
+    let expired = "eyJhbGciOiJub25lIn0.eyJleHAiOjF9.x";
+    let codex = home.path().join(".codex/auth.json");
+    std::fs::create_dir_all(codex.parent().unwrap()).unwrap();
+    std::fs::write(
+        &codex,
+        format!(
+            r#"{{"auth_mode":"chatgpt","tokens":{{"access_token":"{expired}","id_token":"{expired}","refresh_token":"rt","account_id":"a"}}}}"#
+        ),
+    )
+    .unwrap();
+    let daemon = Daemon::start_with(home.path(), |cmd| {
+        cmd.env("FORGE_KEYRING_TOOL", &tool);
+    });
+    let mut client = daemon.client().await;
+    let listed = client
+        .call::<AgentList>(&AgentListParams::default())
+        .await
+        .unwrap();
+    // On macOS the fake keyring has no keychain item either, so the file counts.
+    let claude = by_id(&listed, "claude");
+    assert!(claude.authenticated, "{claude:?}");
+    assert_eq!(claude.sign_in, None);
+    let codex = by_id(&listed, "codex");
+    assert!(!codex.authenticated, "{codex:?}");
+    let fix = codex.sign_in.as_deref().unwrap();
+    assert!(
+        fix.contains("expired") && fix.contains("`codex login`"),
+        "{fix}"
+    );
+    // Gemini has no sign-in Forge carries: an API key, and nothing about a login.
+    let gemini = by_id(&listed, "gemini");
+    let fix = gemini.sign_in.as_deref().unwrap();
+    assert!(
+        fix.contains("GEMINI_API_KEY") && !fix.contains("sign in with"),
+        "{fix}"
+    );
+    daemon.stop();
+}

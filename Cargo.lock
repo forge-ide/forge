@@ -1110,6 +1110,7 @@ name = "forge-acp"
 version = "0.0.0"
 dependencies = [
  "agent-client-protocol",
+ "base64 0.23.1",
  "forge-api",
  "forge-fake-agent",
  "forge-sandbox",
@@ -1120,6 +1121,7 @@ dependencies = [
  "similar 3.2.0",
  "tempfile",
  "thiserror 2.0.21",
+ "time",
  "tokio",
  "tokio-util",
  "toml 1.1.8+spec-1.1.0",

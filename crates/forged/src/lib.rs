@@ -98,7 +98,7 @@ async fn open_state(db: db::Db, paths: Paths) -> anyhow::Result<Arc<rpc::State>>
         sandbox.clone(),
         forge_session::SandboxDirs {
             sessions: paths.data_dir.join("sessions"),
-            home,
+            home: home.clone(),
         },
         redactor,
     );
@@ -113,5 +113,6 @@ async fn open_state(db: db::Db, paths: Paths) -> anyhow::Result<Arc<rpc::State>>
         sandbox,
         paths,
         secrets,
+        home,
     }))
 }
