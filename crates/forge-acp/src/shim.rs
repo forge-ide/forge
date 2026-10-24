@@ -453,11 +453,21 @@ pub fn home_config(
         why,
     };
     let (dir, entries) = shared_entries(&manifest.id);
+    // An entry the user linked elsewhere inside an agent's config dir (to its sign-in, say) is
+    // left out: only the entry itself, or something outside those dirs, is shown.
+    let agent_dirs: Vec<PathBuf> = AGENT_HOME_ENTRIES
+        .iter()
+        .filter_map(|e| std::fs::canonicalize(home.join(e)).ok())
+        .collect();
+    let canonical_home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
     for entry in entries {
         let rel = Path::new(dir).join(entry);
         // By the resolved path, which is where the sandbox shows it.
         if let Ok(real) = std::fs::canonicalize(home.join(&rel)) {
-            out.links.push((rel, real));
+            let itself = real == canonical_home.join(&rel);
+            if itself || !agent_dirs.iter().any(|d| real.starts_with(d)) {
+                out.links.push((rel, real));
+            }
         }
     }
     match manifest.id.as_str() {
@@ -537,13 +547,23 @@ fn holds_credentials(key: &str) -> bool {
 }
 
 /// The strings in `value` under a key that [`holds_credentials`], except ones that are plainly
-/// paths, URLs, or variable references.
+/// paths, variable references, or URLs carrying nothing secret; and anywhere, a URL with
+/// credentials or a query in it (an MCP server's `url` with `?api_key=`, a webhook).
 fn credential_values(value: &serde_json::Value, inside: bool, out: &mut Vec<String>) {
     use serde_json::Value;
     match value {
         Value::Object(map) => {
             for (key, value) in map {
                 credential_values(value, inside || holds_credentials(key), out);
+            }
+        }
+        Value::String(s) if s.starts_with("http") => {
+            // Userinfo or a query can carry a key, and so can a long path in a credential's
+            // place (a webhook's).
+            let rest = s.split_once("://").map_or("", |(_, rest)| rest);
+            let authority = rest.split('/').next().unwrap_or_default();
+            if authority.contains('@') || rest.contains('?') || (inside && rest.contains('/')) {
+                out.push(s.clone());
             }
         }
         Value::Array(items) => {
@@ -1169,6 +1189,44 @@ mod tests {
         );
         let codex = home_config(manifest("codex"), home.path(), None).unwrap();
         assert_eq!(codex.secrets, ["sk-codexenv-1234", "tok_codexvalue99"]);
+        // URLs that carry a key; a plain one doesn't count.
+        put(
+            ".gemini/settings.json",
+            r#"{"mcpServers":{"a":{"httpUrl":"https://mcp.example/x?api_key=k1234567"},"b":{"url":"https://mcp.example/plain"}},"env":{"HOOK":"https://hooks.example/services/T/B/s3cr3t"},"x":"https://u:p4ssword@host.example"}"#,
+        );
+        let gemini = home_config(manifest("gemini"), home.path(), None).unwrap();
+        assert_eq!(
+            gemini.secrets,
+            [
+                "https://hooks.example/services/T/B/s3cr3t",
+                "https://mcp.example/x?api_key=k1234567",
+                "https://u:p4ssword@host.example",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_entry_linked_to_an_agents_sign_in_is_left_out() {
+        let home = user_home();
+        std::fs::remove_dir_all(home.path().join(".claude/skills")).unwrap();
+        std::os::unix::fs::symlink(
+            home.path().join(".claude/.credentials.json"),
+            home.path().join(".claude/skills"),
+        )
+        .unwrap();
+        let elsewhere = home.path().join("dotfiles/agents");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, home.path().join(".claude/agents")).unwrap();
+        let config = home_config(manifest("claude-code"), home.path(), None).unwrap();
+        let rels: Vec<_> = config.links.iter().map(|(rel, _)| rel.clone()).collect();
+        assert_eq!(
+            rels,
+            [
+                PathBuf::from(".claude/CLAUDE.md"),
+                PathBuf::from(".claude/agents"),
+            ]
+        );
+        assert!(!format!("{config:?}").contains("credentials"));
     }
 
     #[test]
