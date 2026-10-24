@@ -44,8 +44,8 @@ pub struct Change {
 }
 
 impl ToolCommands {
-    /// Remember the files `call`'s diffs change, if it reports any and none were remembered
-    /// for it yet.
+    /// Remember the files `call`'s diffs change, adding to what earlier reports of it named:
+    /// every file any report names is decided.
     pub fn record_changes(&mut self, id: &str, content: &[acp::ToolCallContent]) {
         let changes: Vec<Change> = content
             .iter()
@@ -61,7 +61,15 @@ impl ToolCommands {
                 _ => None,
             })
             .collect();
-        if changes.is_empty() || self.1.iter().any(|(known, _)| known == id) {
+        if changes.is_empty() {
+            return;
+        }
+        if let Some((_, known)) = self.1.iter_mut().find(|(known, _)| known == id) {
+            for change in changes {
+                if !known.contains(&change) {
+                    known.push(change);
+                }
+            }
             return;
         }
         if self.1.len() == REMEMBERED_COMMANDS {
@@ -548,13 +556,12 @@ mod tests {
             meta.insert("kind".into(), kind.into());
             acp::ToolCallContent::Diff(acp::Diff::new(path.to_path_buf(), "x").meta(meta))
         };
+        // Diffs reported over two updates both count.
         commands.record_changes(
             "t1",
-            &[
-                diff(&ws.cwd().join(".github/workflows/ci.yml"), "update"),
-                diff(&ws.cwd().join("old.rs"), "delete"),
-            ],
+            &[diff(&ws.cwd().join(".github/workflows/ci.yml"), "update")],
         );
+        commands.record_changes("t1", &[diff(&ws.cwd().join("old.rs"), "delete")]);
         // The request itself names only the patch's source.
         let req = request(acp::ToolKind::Edit, |f| {
             f.locations(vec![acp::ToolCallLocation::new(ws.cwd().join("a.rs"))])

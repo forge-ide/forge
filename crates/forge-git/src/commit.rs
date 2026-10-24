@@ -326,7 +326,10 @@ fn run(
     if over.load(Ordering::SeqCst) {
         return Err(GitError::Command {
             args: args.join(" "),
-            stderr: format!("output over {} MiB", MAX_GIT_OUTPUT / 1024 / 1024),
+            stderr: format!(
+                "output over {} MiB, too large to check; commit fewer paths at a time",
+                MAX_GIT_OUTPUT / 1024 / 1024
+            ),
         });
     }
     if !status.success() {
