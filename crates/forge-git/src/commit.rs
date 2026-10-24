@@ -6,14 +6,22 @@
 //! explicit refs, never the worktree's `.git` link, git dir, or index, which whatever runs in
 //! the worktree can rewrite; and the repo's hooks never run.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::worktree::{GitDirs, GitError};
 
 /// Most diff text kept for the secret scan; a larger change is reported as cut.
 const MAX_DIFF: usize = 4 * 1024 * 1024;
+
+/// Most bytes of changed files one commit may hold. Checked before anything is staged, so
+/// an agent can't fill the daemon's memory, or the repo's object store, through `git_commit`.
+pub const MAX_COMMIT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Longest any one git command may run.
+const GIT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// What a commit would record.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,6 +45,11 @@ pub enum CommitError {
     BadPath(String),
     #[error("the branch {0} moved while committing; try again")]
     Moved(String),
+    #[error(
+        "the changes are larger than the {} MiB one commit may hold; commit fewer paths at a time, or leave large files out",
+        MAX_COMMIT_BYTES / 1024 / 1024
+    )]
+    TooLarge,
     #[error(transparent)]
     Git(#[from] GitError),
 }
@@ -69,6 +82,27 @@ pub fn stage(
     .trim()
     .to_owned();
     run(&["read-tree", &parent])?;
+    // What would be staged, by size on disk, before any of it is copied into the repo.
+    let mut status = vec![
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--no-renames",
+        "--",
+    ];
+    status.extend(pathspecs.iter().map(String::as_str));
+    let mut total: u64 = 0;
+    for entry in run(&status)?.split('\0').filter(|e| e.len() > 3) {
+        if let Ok(meta) = std::fs::symlink_metadata(worktree.join(&entry[3..]))
+            && meta.is_file()
+        {
+            total = total.saturating_add(meta.len());
+            if total > MAX_COMMIT_BYTES {
+                return Err(CommitError::TooLarge);
+            }
+        }
+    }
     let mut add = vec!["add", "--all", "--"];
     add.extend(pathspecs.iter().map(String::as_str));
     run(&add)?;
@@ -96,7 +130,6 @@ pub fn stage(
         "--no-renames",
         "--no-ext-diff",
         "--no-textconv",
-        "--binary",
         &parent,
         &tree,
     ])?;
@@ -234,17 +267,59 @@ fn run(
             source,
         })?;
     }
-    let output = child.wait_with_output().map_err(|source| GitError::Io {
-        context: "running git".into(),
-        source,
-    })?;
-    if !output.status.success() {
+    // Read both pipes off this thread, so a full pipe can't stall the wait, and kill git if
+    // it runs too long.
+    let reader = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut out);
+            }
+            out
+        })
+    };
+    let stdout = reader(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let stderr = reader(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let deadline = Instant::now() + GIT_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(GitError::Command {
+                    args: args.join(" "),
+                    stderr: format!("timed out after {} s", GIT_TIMEOUT.as_secs()),
+                });
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(5)),
+            Err(source) => {
+                return Err(GitError::Io {
+                    context: "running git".into(),
+                    source,
+                });
+            }
+        }
+    };
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = stderr.join().unwrap_or_default();
+    if !status.success() {
         return Err(GitError::Command {
             args: args.join(" "),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            stderr: String::from_utf8_lossy(&stderr).trim().to_owned(),
         });
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(String::from_utf8_lossy(&stdout).into_owned())
 }
 
 /// Where a session keeps the index its commits are staged in: a daemon-owned dir no sandbox
@@ -349,6 +424,38 @@ mod tests {
         }
         // A pathspec is literal: a glob names a file called `*`, not everything.
         assert!(stage(&dirs, &wt, "feat/x", Some(&["*".to_owned()]), &index).is_err());
+    }
+
+    #[test]
+    fn changes_too_large_for_one_commit_are_refused_before_staging() {
+        let (_dir, repo, wt, dirs, private) = setup();
+        let index = index_path(&private);
+        let big = std::fs::File::create(wt.join("big.bin")).unwrap();
+        big.set_len(MAX_COMMIT_BYTES + 1).unwrap();
+        assert!(matches!(
+            stage(&dirs, &wt, "feat/x", None, &index),
+            Err(CommitError::TooLarge)
+        ));
+        // Nothing of it reached the repo's object store.
+        let objects = git(&repo, &["count-objects", "-v"]);
+        let size: u64 = objects
+            .lines()
+            .find_map(|l| l.strip_prefix("size: "))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(size < 1024, "{objects}");
+        // A file at a path the commit leaves out doesn't count.
+        std::fs::write(wt.join("small.txt"), "s\n").unwrap();
+        let staged = stage(
+            &dirs,
+            &wt,
+            "feat/x",
+            Some(&["small.txt".to_owned()]),
+            &index,
+        )
+        .unwrap();
+        assert_eq!(staged.changed, ["small.txt"]);
     }
 
     #[test]
