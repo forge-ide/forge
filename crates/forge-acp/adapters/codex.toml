@@ -25,9 +25,11 @@ command = "tool-call-argv"
 
 [quirks]
 notes = [
-    "No adapter mode sends every command to the client: Forge runs it in `read-only`, where edits and anything that writes or needs the network ask, while read-only commands run in Codex's own sandbox without a permission request.",
+    "No adapter mode sends every command to the client, and Codex's own sandbox (bubblewrap, or Landlock with bubblewrap) can't start inside any Forge tier. Forge runs it in `read-only`, where patches always ask; a command fails before it starts unless Codex escalates it, and an escalated command reaches Forge's gate with its whole argv. The shim tells Codex to escalate every command; a command it doesn't escalate never runs.",
     "Codex wraps commands in the user's login shell (`bash -lc`); the shim turns login shells and the shell snapshot off, so commands arrive as `<shell> -c <script>`. A user whose passwd shell is zsh or fish gets an ask for every command.",
     "Runs commands and applies patches itself, never through ACP's file or terminal methods.",
     "Offers to save an exec-policy rule with an approval; Forge never picks it.",
-    "ChatGPT sign-in keeps credentials in the real home, which the sandbox hides; Forge uses an API key from the keyring.",
+    "At start it reaches github.com and chatgpt.com, which the egress proxy refuses; it works without them.",
+    "Tries the Responses API over WebSocket first and falls back to HTTPS by itself.",
+    "ChatGPT sign-in keeps credentials in the real home, which the sandbox hides; Forge uses an API key from the keyring, signing in with the proxy's placeholder (DEFAULT_AUTH_REQUEST).",
 ]

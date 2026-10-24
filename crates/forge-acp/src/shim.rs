@@ -26,6 +26,13 @@ refused. Forge decides each command and edit by its policy and may ask a human o
 it refuses, it says why, so adjust instead of retrying the same thing. The repository's own \
 instructions, if any, are in AGENTS.md or CLAUDE.md at its root; read them before you start.";
 
+/// What Codex is told besides: its own sandbox can't start inside Forge's, so a command it
+/// runs without escalating fails, and an escalated one is what reaches Forge's gate.
+const CODEX_INSTRUCTIONS: &str = "Codex's own sandbox can't run here: Forge runs you inside its \
+sandbox instead and decides every command. Request escalated permissions \
+(sandbox_permissions = \"require_escalated\") for every command you run, with a one-line \
+justification; a command run without them fails before it starts.";
+
 /// What a shim needs to know about the session.
 pub struct ShimContext<'a> {
     /// The session's shim dir: empty, owned by the daemon, shown read-only in the sandbox at
@@ -120,7 +127,7 @@ fn codex(shim: &mut Shim, cx: &ShimContext<'_>) {
         "analytics": { "enabled": false },
         "feedback": { "enabled": false },
         "history": { "persistence": "none" },
-        "developer_instructions": INSTRUCTIONS,
+        "developer_instructions": format!("{INSTRUCTIONS}\n\n{CODEX_INSTRUCTIONS}"),
     });
     if let Some(url) = (cx.var)("OPENAI_BASE_URL") {
         config["openai_base_url"] = url.into();
@@ -321,11 +328,10 @@ mod tests {
         ] {
             assert!(config.get(key).is_none(), "{key}");
         }
+        let told = config["developer_instructions"].as_str().unwrap();
         assert!(
-            config["developer_instructions"]
-                .as_str()
-                .unwrap()
-                .contains("git_commit")
+            told.contains("git_commit") && told.contains("require_escalated"),
+            "{told}"
         );
         assert_eq!(shim.setup.mode.as_deref(), Some("read-only"));
         assert_eq!(shim.setup.command_source, CommandSource::ToolCallArgv);
