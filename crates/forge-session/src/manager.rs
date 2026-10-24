@@ -661,6 +661,7 @@ impl SessionManager {
             limits: Limits::default(),
             routes,
             upstream,
+            local: None,
         })
         .await
         .map(Arc::new)

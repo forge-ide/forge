@@ -4,7 +4,7 @@
 
 use std::sync::{Arc, Weak};
 
-use forge_acp::{EventSink, Gate, GateKind, GateRequest, GateVerdict};
+use forge_acp::{EventSink, Gate, GateKind, GateRequest, GateVerdict, Unmapped};
 use forge_api::events::{
     ApprovalDecidedBody, ApprovalDecision, ApprovalRequestedBody, EventPayload, PolicyDecisionBody,
     Remember, Verdict,
@@ -90,10 +90,39 @@ impl SessionGate {
             return Ok(GateVerdict::Deny("Forge is shutting down".into()));
         };
         let Some(action) = request.action else {
-            let reason = "the request describes nothing Forge can check, so it is refused";
-            self.record(&id, Verdict::Deny, reason, "guard:unknown-action")
-                .await;
-            return Ok(GateVerdict::Deny(reason.into()));
+            let (verdict, reason, source) = match request.unmapped {
+                // The sandbox bounds every read; Forge only keeps reads to the worktrees.
+                Unmapped::Read {
+                    inside_worktree: true,
+                } => (
+                    Verdict::Allow,
+                    "reading inside the session's worktrees",
+                    "read:worktree",
+                ),
+                Unmapped::Read {
+                    inside_worktree: false,
+                } => (
+                    Verdict::Deny,
+                    "the agent may only read inside the session's worktrees",
+                    "guard:outside-worktree",
+                ),
+                Unmapped::Fetch => (
+                    Verdict::Deny,
+                    "agents can't fetch with their own tools; the egress proxy's allowlist \
+                     decides the network, so fetch with a command, which goes through it",
+                    "network:allowlist",
+                ),
+                Unmapped::Nothing => (
+                    Verdict::Deny,
+                    "the request describes nothing Forge can check, so it is refused",
+                    "guard:unknown-action",
+                ),
+            };
+            self.record(&id, verdict, reason, source).await;
+            return Ok(match verdict {
+                Verdict::Allow => GateVerdict::Allow,
+                _ => GateVerdict::Deny(reason.into()),
+            });
         };
         let mode = manager.get(&self.session).await?.mode;
         let checked = Request {

@@ -137,6 +137,7 @@ impl Fixture {
                 value: Secret::new(ROUTE_SECRET),
             }],
             upstream: Some(Arc::new(PlainUpstream)),
+            local: None,
         })
         .await
         .unwrap();

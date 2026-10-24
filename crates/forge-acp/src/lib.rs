@@ -7,12 +7,13 @@
 
 pub mod adapters;
 pub mod client;
+pub mod permission;
 pub mod terminal;
 pub mod workspace;
 
 pub use client::{
     AcpClient, AcpError, AgentCommand, AgentExit, AllowAll, DenyAll, EventSink, Gate, GateKind,
-    GateRequest, GateVerdict,
+    GateRequest, GateVerdict, McpEndpoint, SessionSetup, Unmapped,
 };
 pub use terminal::Pipe;
 pub use workspace::{PathError, Resolved, Root, Workspace};

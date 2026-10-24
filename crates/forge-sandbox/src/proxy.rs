@@ -18,6 +18,10 @@
 //! variables, so other local programs (or a web page rebinding a name to loopback) can't use
 //! the route; requests must also name a loopback `Host`, carry no browser `Origin` or
 //! `Sec-Fetch-*` headers, use `GET` or `POST`, and stay on the secret's allowed paths.
+//!
+//! And it serves the daemon's own endpoint for the session, when it has one: a `POST` to
+//! `/_forge/<token>/mcp`, with the same caller checks, is answered by a [`LocalService`]
+//! (Forge's MCP server) instead of going anywhere.
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -220,6 +224,38 @@ pub struct ProxyConfig {
     pub routes: Vec<SecretRoute>,
     /// Secures the connection to a route's host; required when there are routes.
     pub upstream: Option<Arc<dyn Upstream>>,
+    /// Answers requests on the local route.
+    pub local: Option<Arc<dyn LocalService>>,
+}
+
+/// The local route's name: `/_forge/<token>/mcp`.
+pub const LOCAL_ROUTE: &str = "mcp";
+
+/// Largest request body the local route accepts.
+const MAX_LOCAL_BODY: usize = 1024 * 1024;
+
+/// A request on the local route.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalRequest {
+    /// Request headers, names lowercased.
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+/// The answer to a [`LocalRequest`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalResponse {
+    pub status: u16,
+    pub content_type: &'static str,
+    pub body: Vec<u8>,
+}
+
+/// Serves the local route. A call may wait on a human (an approval), so it isn't timed out.
+pub trait LocalService: Send + Sync + 'static {
+    fn call(
+        &self,
+        request: LocalRequest,
+    ) -> Pin<Box<dyn Future<Output = LocalResponse> + Send + '_>>;
 }
 
 /// A secret and its value, served on the secret's route.
@@ -556,6 +592,13 @@ enum Request {
     UnknownRoute,
     /// A request on a secret's route that may not carry it.
     RouteRefused { host: String, reason: String },
+    /// A `POST` on the local route with a body of `length` bytes.
+    Local {
+        headers: Vec<(String, String)>,
+        length: usize,
+    },
+    /// A request on the local route that may not be served.
+    LocalRefused { code: u16, reason: String },
 }
 
 async fn serve<S>(mut client: S, state: &Shared)
@@ -565,14 +608,16 @@ where
     let config = &state.config;
     let started = Instant::now();
     let (request, rest) = match tokio::time::timeout(HEAD_TIMEOUT, read_head(&mut client)).await {
-        Ok(Ok((head, rest))) => match parse(&head, &config.routes, &state.token) {
-            Ok(request) => (request, rest),
-            Err(why) => {
-                // Nothing to log against a host: the client didn't name one.
-                let _ = respond(&mut client, 400, &why).await;
-                return;
+        Ok(Ok((head, rest))) => {
+            match parse(&head, &config.routes, &state.token, config.local.is_some()) {
+                Ok(request) => (request, rest),
+                Err(why) => {
+                    // Nothing to log against a host: the client didn't name one.
+                    let _ = respond(&mut client, 400, &why).await;
+                    return;
+                }
             }
-        },
+        }
         _ => return,
     };
     let (host, port) = match &request {
@@ -580,6 +625,16 @@ where
         Request::Route { host, .. } | Request::RouteRefused { host, .. } => (host.clone(), 443),
         Request::UnknownRoute => {
             let _ = respond(&mut client, 404, "no such route").await;
+            return;
+        }
+        Request::LocalRefused { code, reason } => {
+            let _ = respond(&mut client, *code, reason).await;
+            return;
+        }
+        Request::Local { headers, length } => {
+            if let Some(service) = &config.local {
+                serve_local(client, service.as_ref(), headers.clone(), *length, rest).await;
+            }
             return;
         }
     };
@@ -640,7 +695,10 @@ where
                 return;
             }
         }
-        Request::UnknownRoute | Request::RouteRefused { .. } => unreachable!("answered above"),
+        Request::UnknownRoute
+        | Request::RouteRefused { .. }
+        | Request::Local { .. }
+        | Request::LocalRefused { .. } => unreachable!("answered above"),
     }
     if !rest.is_empty() && upstream.write_all(&rest).await.is_err() {
         return;
@@ -721,7 +779,7 @@ async fn read_head<S: AsyncRead + Unpin>(client: &mut S) -> std::io::Result<(Vec
     }
 }
 
-fn parse(head: &[u8], routes: &[SecretRoute], token: &str) -> Result<Request, String> {
+fn parse(head: &[u8], routes: &[SecretRoute], token: &str, local: bool) -> Result<Request, String> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
     match req.parse(head) {
@@ -742,6 +800,9 @@ fn parse(head: &[u8], routes: &[SecretRoute], token: &str) -> Result<Request, St
             Some(i) => (&routed[..i], &routed[i..]),
             None => (routed, "/"),
         };
+        if local && name == LOCAL_ROUTE && path == "/" {
+            return Ok(local_request(method, req.headers));
+        }
         let Some(route) = routes.iter().find(|r| r.secret.route == name) else {
             return Ok(Request::UnknownRoute);
         };
@@ -797,6 +858,88 @@ fn parse(head: &[u8], routes: &[SecretRoute], token: &str) -> Result<Request, St
         port,
         head: out,
     })
+}
+
+/// A request on the local route: only a `POST` from a sandboxed client, with a body of known
+/// length that fits.
+fn local_request(method: &str, headers: &[httparse::Header<'_>]) -> Request {
+    let refuse = |code, reason: String| Request::LocalRefused { code, reason };
+    if let Err(why) = route_caller_ok(headers) {
+        return refuse(403, why);
+    }
+    if method != "POST" {
+        return refuse(
+            405,
+            format!("{method} is not served on Forge's endpoint; POST a request"),
+        );
+    }
+    let mut length = None;
+    let mut kept = Vec::new();
+    for h in headers {
+        let name = h.name.to_ascii_lowercase();
+        let value = String::from_utf8_lossy(h.value).into_owned();
+        match name.as_str() {
+            "transfer-encoding" => {
+                return refuse(411, "a request body must have a Content-Length".into());
+            }
+            "content-length" => match value.trim().parse::<usize>() {
+                Ok(n) if length.is_none() => length = Some(n),
+                _ => return refuse(400, "bad Content-Length".into()),
+            },
+            _ => {}
+        }
+        kept.push((name, value));
+    }
+    match length {
+        None => refuse(411, "a request body must have a Content-Length".into()),
+        Some(n) if n > MAX_LOCAL_BODY => refuse(413, "request body too large".into()),
+        Some(length) => Request::Local {
+            headers: kept,
+            length,
+        },
+    }
+}
+
+/// Read the local request's body, have `service` answer it, and send the answer.
+async fn serve_local<S>(
+    mut client: S,
+    service: &dyn LocalService,
+    headers: Vec<(String, String)>,
+    length: usize,
+    mut body: Vec<u8>,
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if body.len() > length {
+        let _ = respond(&mut client, 400, "more data than the Content-Length").await;
+        return;
+    }
+    let missing = length - body.len();
+    let mut more = vec![0; missing];
+    match tokio::time::timeout(HEAD_TIMEOUT, client.read_exact(&mut more)).await {
+        Ok(Ok(_)) => body.extend_from_slice(&more),
+        _ => return,
+    }
+    let answer = service.call(LocalRequest { headers, body }).await;
+    let status = match answer.status {
+        200 => "OK",
+        202 => "Accepted",
+        400 => "Bad Request",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        _ => "Error",
+    };
+    let mut response = format!(
+        "HTTP/1.1 {} {status}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        answer.status,
+        answer.content_type,
+        answer.body.len()
+    )
+    .into_bytes();
+    response.extend_from_slice(&answer.body);
+    if client.write_all(&response).await.is_ok() {
+        let _ = client.shutdown().await;
+    }
 }
 
 /// Why a route request's headers show it isn't from a sandboxed client, if they do: its `Host`
@@ -902,6 +1045,9 @@ async fn respond<S: AsyncWrite + Unpin>(
         400 => "Bad Request",
         403 => "Forbidden",
         404 => "Not Found",
+        405 => "Method Not Allowed",
+        411 => "Length Required",
+        413 => "Content Too Large",
         _ => "Bad Gateway",
     };
     let body = format!("forge egress proxy: {why}\n");
@@ -914,6 +1060,11 @@ async fn respond<S: AsyncWrite + Unpin>(
 }
 
 impl Proxy {
+    /// The local route's URL, for a sandboxed process that reaches the proxy at `url`.
+    pub fn local_url(&self, url: &str) -> String {
+        format!("{url}/_forge/{}/{LOCAL_ROUTE}", self.state.token)
+    }
+
     /// The variables that point a sandboxed process at this proxy, reached at `url`: the proxy
     /// variables, and for each secret a placeholder value and the base URL of its route.
     pub fn env(&self, url: &str) -> Vec<(String, String)> {
@@ -1009,10 +1160,118 @@ mod tests {
             limits,
             routes,
             upstream: Some(Arc::new(PlainUpstream)),
+            local: None,
         })
         .await
         .unwrap();
         Harness { proxy, log }
+    }
+
+    /// Echoes the body back with the headers it saw, as JSON.
+    struct Echo;
+
+    impl LocalService for Echo {
+        fn call(
+            &self,
+            request: LocalRequest,
+        ) -> Pin<Box<dyn Future<Output = LocalResponse> + Send + '_>> {
+            Box::pin(async move {
+                let mut body = request.body;
+                body.extend_from_slice(format!(" {}", request.headers.len()).as_bytes());
+                LocalResponse {
+                    status: 200,
+                    content_type: "application/json",
+                    body,
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn the_local_route_is_served_only_to_sandboxed_posts_with_the_token() {
+        let log: Arc<Mutex<Vec<Connection>>> = Arc::default();
+        let sink = log.clone();
+        let proxy = Proxy::start(ProxyConfig {
+            allow: Allowlist::new(&[] as &[&str]).unwrap(),
+            resolver: Arc::new(PublicDns),
+            log: Arc::new(move |c| lock(&sink).push(c)),
+            limits: Limits::default(),
+            routes: vec![],
+            upstream: None,
+            local: Some(Arc::new(Echo)),
+        })
+        .await
+        .unwrap();
+        let url = proxy.local_url("http://127.0.0.1:1");
+        let path = url.strip_prefix("http://127.0.0.1:1").unwrap();
+        assert!(
+            path.ends_with("/mcp") && path.starts_with("/_forge/"),
+            "{path}"
+        );
+        let post = |path: &str, extra: &str, body: &str| {
+            format!(
+                "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra}Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+        };
+        let reply = exchange(proxy.port(), post(path, "", "{}").as_bytes()).await;
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        assert!(reply.ends_with("{} 2"), "{reply}");
+        // A body sent in pieces is read whole.
+        let mut s = TcpStream::connect(("127.0.0.1", proxy.port()))
+            .await
+            .unwrap();
+        let head =
+            format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 6\r\n\r\nabc");
+        s.write_all(head.as_bytes()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        s.write_all(b"def").await.unwrap();
+        let mut out = Vec::new();
+        s.read_to_end(&mut out).await.unwrap();
+        assert!(String::from_utf8_lossy(&out).ends_with("abcdef 2"));
+
+        let wrong_token = "/_forge/nottoken/mcp";
+        for (request, code) in [
+            (post(wrong_token, "", "{}"), "404"),
+            (post(path, "Origin: https://evil.example\r\n", "{}"), "403"),
+            (
+                format!(
+                    "POST {path} HTTP/1.1\r\nHost: evil.example\r\nContent-Length: 2\r\n\r\n{{}}"
+                ),
+                "403",
+            ),
+            (
+                format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"),
+                "405",
+            ),
+            (
+                format!(
+                    "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+                ),
+                "411",
+            ),
+            (
+                format!(
+                    "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 99999999\r\n\r\n"
+                ),
+                "413",
+            ),
+        ] {
+            let reply = exchange(proxy.port(), request.as_bytes()).await;
+            assert!(
+                reply.starts_with(&format!("HTTP/1.1 {code}")),
+                "{request}: {reply}"
+            );
+        }
+        // Nothing on the local route leaves the machine, so nothing is logged as a connection.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(lock(&log).is_empty(), "{:?}", lock(&log));
+
+        // A proxy without a local service has no such route.
+        let h = harness(&[], Arc::new(PublicDns)).await;
+        let path = h.proxy.local_url("");
+        let reply = exchange(h.proxy.port(), post(&path, "", "{}").as_bytes()).await;
+        assert!(reply.starts_with("HTTP/1.1 404"), "{reply}");
     }
 
     /// A server that answers `pong` to anything and records what it got.

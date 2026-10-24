@@ -1,5 +1,6 @@
 //! Worktrees, branches, and shadow refs.
 
+pub mod commit;
 pub mod naming;
 pub mod worktree;
 
