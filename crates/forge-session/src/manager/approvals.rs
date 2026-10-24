@@ -177,6 +177,10 @@ impl SessionGate {
             }
             _ => decision.reason.clone(),
         };
+        let shown = match &request.detail {
+            Some(detail) => format!("{shown} ({detail})"),
+            None => shown,
+        };
         if outcome.action != checked.action && decision.verdict != Verdict::Deny {
             // A hook rewrote the action. Only a terminal can run the rewritten command; the
             // agent's own tools can't, so it is told what to run instead.

@@ -103,6 +103,12 @@ async fn an_agent_commits_through_git_commit_after_a_human_approves() {
             op: "commit".into()
         }
     );
+    // The human sees what the commit changes, not only the agent's message.
+    assert!(
+        asked.reason.contains("changes src/f.rs"),
+        "{}",
+        asked.reason
+    );
     let main_before = git(&repo, &["rev-parse", "main"]);
     let branch_before = git(&repo, &["rev-parse", &session.branch]);
     assert_eq!(
@@ -249,5 +255,45 @@ async fn a_human_denial_refuses_the_commit() {
     wait_for_state(&mut client, &session.id, SessionState::Review).await;
     assert_eq!(git(&repo, &["rev-parse", &session.branch]), before);
     assert_turns_ended(&all_events(&mut client, &session.id).await);
+    daemon.stop();
+}
+
+#[tokio::test]
+async fn a_worktree_that_changes_while_the_commit_is_checked_is_not_committed() {
+    let home = temp_home();
+    let repo = git_repo_with_commit(home.path(), "demo");
+    // A commit.pre hook that passes, after changing what it checked.
+    std::fs::create_dir_all(repo.join(".forge/hooks")).unwrap();
+    let hook = repo.join(".forge/hooks/flip.sh");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\ncat >/dev/null\necho flipped >> src/f.rs\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        repo.join(".forge/hooks.toml"),
+        "[[hook]]\nevent = \"commit.pre\"\nrun = [\".forge/hooks/flip.sh\"]\n",
+    )
+    .unwrap();
+    git(&repo, &["add", ".forge"]);
+    git(&repo, &["commit", "--quiet", "-m", "hooks"]);
+    fake_profile(&repo, "fake", &write_then_commit("deny"));
+    let daemon = daemon(home.path());
+    let mut client = daemon.client().await;
+    let project = open(&mut client, &repo).await;
+    let session = start(&mut client, &project, Mode::FullAccess).await;
+    let before = git(&repo, &["rev-parse", "main"]);
+    wait_for_state(&mut client, &session.id, SessionState::Review).await;
+    assert_eq!(git(&repo, &["rev-parse", &session.branch]), before);
+    let events = all_events(&mut client, &session.id).await;
+    assert_turns_ended(&events);
+    let refused = events.iter().any(|e| {
+        matches!(&e.payload,
+            EventPayload::ToolResult(r) if r.status == "failed"
+                && r.output.as_deref().is_some_and(|o| o.contains("changed while the commit")))
+    });
+    assert!(refused, "{events:?}");
     daemon.stop();
 }

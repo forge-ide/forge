@@ -33,6 +33,11 @@ sandbox instead and decides every command. Request escalated permissions \
 (sandbox_permissions = \"require_escalated\") for every command you run, with a one-line \
 justification; a command run without them fails before it starts.";
 
+/// What agents keep in their home: recreated empty at every launch, since the sandbox home is
+/// writable and an earlier command could have left settings there that run programs unasked
+/// (Codex's `notify`, Gemini's hooks, Claude's MCP servers).
+pub const AGENT_HOME_ENTRIES: &[&str] = &[".claude", ".claude.json", ".codex", ".gemini"];
+
 /// What a shim needs to know about the session.
 pub struct ShimContext<'a> {
     /// The session's shim dir: empty, owned by the daemon, shown read-only in the sandbox at
@@ -106,6 +111,8 @@ fn claude(shim: &mut Shim) {
                 "allowDangerouslySkipPermissions": false,
                 "allowedTools": [format!("mcp__{MCP_SERVER}__git_commit")],
                 "disallowedTools": ["WebFetch", "WebSearch"],
+                // Only the MCP servers Forge passes; none from ~/.claude.json or the repo.
+                "strictMcpConfig": true,
                 "promptSuggestions": false,
             }
         },
@@ -127,6 +134,8 @@ fn codex(shim: &mut Shim, cx: &ShimContext<'_>) {
         "analytics": { "enabled": false },
         "feedback": { "enabled": false },
         "history": { "persistence": "none" },
+        // A program Codex would run after every turn, outside Forge's gate.
+        "notify": [],
         "developer_instructions": format!("{INSTRUCTIONS}\n\n{CODEX_INSTRUCTIONS}"),
     });
     if let Some(url) = (cx.var)("OPENAI_BASE_URL") {
@@ -157,7 +166,19 @@ fn gemini(shim: &mut Shim, cx: &ShimContext<'_>) -> std::io::Result<()> {
         },
         "general": { "enableAutoUpdate": false, "defaultApprovalMode": "default" },
         "privacy": { "usageStatisticsEnabled": false },
-        "tools": { "exclude": ["web_fetch", "google_web_search"] },
+        // The workspace is trusted (Gemini starts no MCP server in an untrusted folder, Forge's
+        // included), so the repo's .gemini/settings.json is merged in. Everything there that
+        // runs a command without asking is switched off here, in the tier merged last: tool
+        // discovery and calls, hooks, extensions, and MCP servers other than Forge's.
+        "tools": {
+            "exclude": ["web_fetch", "google_web_search"],
+            "discoveryCommand": "",
+            "callCommand": "",
+        },
+        "hooksConfig": { "enabled": false },
+        "admin": { "extensions": { "enabled": false } },
+        "mcp": { "allowed": [MCP_SERVER] },
+        "advanced": { "ignoreLocalEnv": true },
         "context": { "fileName": ["GEMINI.md", "AGENTS.md"] },
     });
     let settings_path = cx.dir.join("gemini-settings.json");
@@ -279,6 +300,7 @@ mod tests {
         assert_eq!(options["allowDangerouslySkipPermissions"], false);
         assert_eq!(allowed_tools(&meta), ["mcp__forge__git_commit"]);
         assert_eq!(options["disallowedTools"], json!(["WebFetch", "WebSearch"]));
+        assert_eq!(options["strictMcpConfig"], true);
         assert!(options.get("permissionMode").is_none());
         assert!(
             meta["systemPrompt"]["append"]
@@ -309,6 +331,7 @@ mod tests {
         assert_eq!(config["allow_login_shell"], false);
         assert_eq!(config["features"]["shell_snapshot"], false);
         assert_eq!(config["web_search"], "disabled");
+        assert_eq!(config["notify"], json!([]));
         assert_eq!(
             config["openai_base_url"],
             "http://127.0.0.1:9/_forge/tok/openai/v1"
@@ -369,6 +392,13 @@ mod tests {
         );
         assert!(settings.get("mcpServers").is_none());
         assert!(settings["tools"].get("allowed").is_none());
+        // What a trusted repo's settings could otherwise use to run commands unasked.
+        assert_eq!(settings["tools"]["discoveryCommand"], "");
+        assert_eq!(settings["tools"]["callCommand"], "");
+        assert_eq!(settings["hooksConfig"]["enabled"], false);
+        assert_eq!(settings["admin"]["extensions"]["enabled"], false);
+        assert_eq!(settings["mcp"]["allowed"], json!(["forge"]));
+        assert_eq!(settings["advanced"]["ignoreLocalEnv"], true);
         // The policy parses, allows only git_commit, and asks for every shell command.
         let policy: toml::Value = toml::from_str(GEMINI_POLICY).unwrap();
         let rules = policy["rule"].as_array().unwrap();

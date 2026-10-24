@@ -75,6 +75,8 @@ pub struct GateRequest {
     /// The content of a write, for the secret scan.
     pub content: Option<String>,
     pub unmapped: Unmapped,
+    /// What the human deciding should also see, such as the files a commit changes.
+    pub detail: Option<String>,
 }
 
 /// What a permission request without an action asked for.
@@ -671,6 +673,7 @@ impl Handlers {
             action: Some(action),
             content: Some(content.clone()),
             unmapped: Unmapped::Nothing,
+            detail: None,
         };
         if self.allowed(request).await?.is_some() {
             return Err(self.refuse(&id, "a write can't be rewritten".into()).await);
@@ -755,6 +758,7 @@ impl Handlers {
             action: Some(action),
             content: None,
             unmapped: Unmapped::Nothing,
+            detail: None,
         };
         let (program, args, env) = match self.allowed(request).await? {
             Some(argv) => {
@@ -869,6 +873,7 @@ impl Handlers {
                 action,
                 content: None,
                 unmapped,
+                detail: None,
             };
             if let Some(action) = &request.action {
                 self.call(&request.tool_call_id, action, &request.title)

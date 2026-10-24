@@ -110,6 +110,7 @@ async fn run(
         action: Some(action.clone()),
         content: Some(staged.added.clone()),
         unmapped: Unmapped::Nothing,
+        detail: Some(changed_paths(&staged.changed)),
     };
     match gate.decide(request).await {
         GateVerdict::Allow => {}
@@ -128,6 +129,26 @@ async fn run(
         record(gate, &id, Verdict::Deny, &reason, &format!("hook:{hook}")).await;
         let _ = gate.finished(GateKind::Tool, &action, false).await;
         return fail(reason).await;
+    }
+    // The hooks checked the worktree as it is now; commit only if that is still what was
+    // approved.
+    let again = {
+        let (t, paths) = (target.clone(), args.paths.clone());
+        tokio::task::spawn_blocking(move || {
+            commit::stage(&t.dirs, &t.worktree, &t.branch, paths.as_deref(), &t.index)
+        })
+        .await
+    };
+    match again {
+        Ok(Ok(now)) if now.tree == staged.tree && now.parent == staged.parent => {}
+        Ok(_) | Err(_) => {
+            let _ = gate.finished(GateKind::Tool, &action, false).await;
+            return fail(
+                "the worktree changed while the commit was being checked; call git_commit again"
+                    .into(),
+            )
+            .await;
+        }
     }
     let made = {
         let (t, message) = (target.clone(), args.message);
@@ -155,6 +176,24 @@ async fn run(
         commit,
         branch: target.branch.clone(),
     })
+}
+
+/// The paths a commit changes, as the human deciding sees them.
+fn changed_paths(changed: &[String]) -> String {
+    const SHOWN: usize = 20;
+    let mut text = format!(
+        "changes {}",
+        changed
+            .iter()
+            .take(SHOWN)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    if changed.len() > SHOWN {
+        text.push_str(&format!(" and {} more", changed.len() - SHOWN));
+    }
+    text
 }
 
 fn commit_error(e: CommitError) -> String {

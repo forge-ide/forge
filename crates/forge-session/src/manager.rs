@@ -602,6 +602,18 @@ impl SessionManager {
             std::fs::create_dir_all(&scratch)
                 .and_then(|()| std::fs::create_dir(&shim_dir))
                 .map_err(|e| format!("creating the agent's shim dir: {e}"))?;
+            // Agents' own config in the sandbox home starts empty each launch. Nothing runs in
+            // the session now; removing a directory never follows a symlink inside it.
+            for entry in shim::AGENT_HOME_ENTRIES {
+                let path = scratch.join("home").join(entry);
+                let removed = match std::fs::symlink_metadata(&path) {
+                    Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&path),
+                    Ok(_) => std::fs::remove_file(&path),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(e) => Err(e),
+                };
+                removed.map_err(|e| format!("clearing {}: {e}", path.display()))?;
+            }
             let mut read_only = launch.read_only;
             read_only.push(shim_dir.clone());
             let spec = Spec {
