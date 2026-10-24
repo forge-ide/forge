@@ -37,7 +37,7 @@ pub mod helper;
 
 pub use env::{PASSTHROUGH_VARS, is_passed_through, is_valid_name};
 pub use unsandboxed::Unsandboxed;
-pub use view::{SYSTEM_READ_ONLY, View, toolchains};
+pub use view::{SYSTEM_READ_ONLY, View, shows_read_only, toolchains};
 
 /// File name of the helper binary, installed next to `forged`.
 pub const HELPER: &str = "forge-sandbox-exec";

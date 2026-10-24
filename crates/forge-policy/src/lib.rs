@@ -11,7 +11,7 @@
 //!    program Forge can't tell, then secrets in the content or command line. A deny rule or
 //!    the git rule that an expansion could complete asks here too.
 //! 3. Pre-tool hooks, which may also rewrite a command; a rewritten command goes through steps
-//!    1 and 2 again.
+//!    1 and 2 again. A hook's allow counts only from a hook the agent can't influence.
 //! 4. `[[ask]]` rules from any layer, then allows remembered for the session and `[[allow]]`
 //!    rules. Ask beats allow whichever layers they come from, so a lower layer never loosens a
 //!    higher one, and a hook's allow doesn't override an ask rule either.
@@ -192,6 +192,19 @@ pub struct Outcome {
     pub decision: Decision,
     pub action: Action,
     pub note: Option<String>,
+    /// The hook that rewrote the action, if one did.
+    pub rewritten_by: Option<String>,
+}
+
+impl Outcome {
+    fn of(decision: Decision, action: Action) -> Self {
+        Self {
+            decision,
+            action,
+            note: None,
+            rewritten_by: None,
+        }
+    }
 }
 
 /// A policy file that can't be used.
@@ -211,7 +224,13 @@ pub struct HookAdvice {
     pub reason: Option<String>,
     /// A replacement argv; only for `exec` actions.
     pub rewrite: Option<Vec<String>>,
+    /// The hook that rewrote the action, when another one decided.
+    pub rewritten_by: Option<String>,
     pub note: Option<String>,
+    /// Whether the hooks ran where the agent can't influence them. Only then does an allow
+    /// count: a hook in the agent's sandbox carries at most the agent's trust, so it may deny,
+    /// ask, or rewrite, but its allow is no opinion.
+    pub trusted: bool,
 }
 
 /// Runs the session's pre-tool hooks (`tool.pre`, `edit.pre`) and combines what they say.
@@ -402,56 +421,53 @@ impl Engine {
         None
     }
 
-    /// Steps 3 to 6 for a request that passed [`Engine::check`].
-    async fn decide_rest(&self, request: &Request, mode: Mode) -> Outcome {
-        let mut action = request.action.clone();
-        let mut note = None;
+    /// Steps 3 to 6 for a request that passed [`Engine::check`]: the caller may run that
+    /// check, which scans the content, on the blocking pool for large content.
+    pub async fn decide_checked(&self, request: &Request, mode: Mode) -> Outcome {
+        let mut outcome = Outcome::of(
+            Decision::new(Verdict::Ask, "", Source::Mode(mode)),
+            request.action.clone(),
+        );
         let mut hook_verdict = None;
         if let Some(advice) = self.hooks.advise(request, mode).await {
-            note = advice.note.clone();
+            outcome.note = advice.note.clone();
             let source = Source::Hook(advice.hook.clone());
             if let Some(argv) = advice.rewrite {
-                let Action::Exec { cwd, .. } = &action else {
-                    let decision = Decision::new(
+                let Action::Exec { cwd, .. } = &outcome.action else {
+                    outcome.decision = Decision::new(
                         Verdict::Deny,
                         "a hook tried to rewrite an action that isn't a command",
                         source,
                     );
-                    return Outcome {
-                        decision,
-                        action,
-                        note,
-                    };
+                    return outcome;
                 };
-                action = Action::Exec {
+                outcome.action = Action::Exec {
                     argv,
                     cwd: cwd.clone(),
                 };
+                outcome.rewritten_by = Some(advice.rewritten_by.unwrap_or(advice.hook.clone()));
                 let rewritten = Request {
-                    action: action.clone(),
+                    action: outcome.action.clone(),
                     content: request.content.clone(),
                 };
                 if let Some(decision) = self.check(&rewritten, mode) {
-                    return Outcome {
-                        decision,
-                        action,
-                        note,
-                    };
+                    outcome.decision = decision;
+                    return outcome;
                 }
             }
-            if let Some(verdict) = advice.verdict {
-                let reason = advice.reason.unwrap_or_else(|| {
-                    format!("hook {} said {}", advice.hook, verdict_name(verdict))
-                });
-                hook_verdict = Some(Decision::new(verdict, reason, source));
+            match advice.verdict {
+                Some(Verdict::Allow) if !advice.trusted => {}
+                Some(verdict) => {
+                    let reason = advice.reason.unwrap_or_else(|| {
+                        format!("hook {} said {}", advice.hook, verdict_name(verdict))
+                    });
+                    hook_verdict = Some(Decision::new(verdict, reason, source));
+                }
+                None => {}
             }
         }
-        let decision = self.decide_from(&action, mode, hook_verdict).await;
-        Outcome {
-            decision,
-            action,
-            note,
-        }
+        outcome.decision = self.decide_from(&outcome.action, mode, hook_verdict).await;
+        outcome
     }
 
     /// Steps 3's verdict (if any) and 4 to 6, for `action`.
@@ -516,24 +532,17 @@ impl Policy for Engine {
     fn decide<'a>(&'a self, request: &'a Request, mode: Mode) -> BoxFuture<'a, Outcome> {
         Box::pin(async move {
             if let Action::Network { .. } = request.action {
-                return Outcome {
-                    decision: Decision::new(
-                        Verdict::Deny,
-                        "network access is governed by the agent profile's [network] allow list",
-                        Source::NetworkAllowlist,
-                    ),
-                    action: request.action.clone(),
-                    note: None,
-                };
+                let decision = Decision::new(
+                    Verdict::Deny,
+                    "network access is governed by the agent profile's [network] allow list",
+                    Source::NetworkAllowlist,
+                );
+                return Outcome::of(decision, request.action.clone());
             }
             if let Some(decision) = self.check(request, mode) {
-                return Outcome {
-                    decision,
-                    action: request.action.clone(),
-                    note: None,
-                };
+                return Outcome::of(decision, request.action.clone());
             }
-            self.decide_rest(request, mode).await
+            self.decide_checked(request, mode).await
         })
     }
 

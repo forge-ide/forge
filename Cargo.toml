@@ -16,6 +16,7 @@ forge-config = { path = "crates/forge-config" }
 forge-events = { path = "crates/forge-events" }
 forge-fake-agent = { path = "crates/forge-fake-agent" }
 forge-git = { path = "crates/forge-git" }
+forge-hooks = { path = "crates/forge-hooks" }
 forge-policy = { path = "crates/forge-policy" }
 forge-sandbox = { path = "crates/forge-sandbox" }
 forge-session = { path = "crates/forge-session" }

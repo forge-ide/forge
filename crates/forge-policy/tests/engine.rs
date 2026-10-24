@@ -76,7 +76,9 @@ fn hook(verdict: Option<Verdict>) -> HookAdvice {
         verdict,
         reason: verdict.map(|_| "hook says so".into()),
         rewrite: None,
+        rewritten_by: None,
         note: Some("a note".into()),
+        trusted: true,
     }
 }
 
@@ -207,6 +209,34 @@ async fn hook_verdicts_decide_before_allow_rules_and_mode() {
 }
 
 #[tokio::test]
+async fn an_untrusted_hook_can_tighten_but_its_allow_is_no_opinion() {
+    let untrusted = |verdict| HookAdvice {
+        trusted: false,
+        ..hook(Some(verdict))
+    };
+    let e = engine(
+        "",
+        FixedHooks::new(untrusted(Verdict::Allow)),
+        Arc::new(NoClassifier),
+    );
+    let o = e.decide(&exec(&["npm", "install"]), Mode::Ask).await;
+    assert_eq!(o.decision.verdict, Verdict::Ask);
+    assert_eq!(o.decision.source.to_string(), "mode:ask");
+    assert_eq!(o.note.as_deref(), Some("a note"));
+    let e = engine(
+        "",
+        FixedHooks::new(untrusted(Verdict::Deny)),
+        Arc::new(NoClassifier),
+    );
+    let d = e
+        .decide(&exec(&["npm", "install"]), Mode::FullAccess)
+        .await
+        .decision;
+    assert_eq!(d.verdict, Verdict::Deny);
+    assert_eq!(d.source.to_string(), "hook:check");
+}
+
+#[tokio::test]
 async fn a_hook_allow_does_not_override_an_ask_rule() {
     let e = engine(
         "[[ask]]\nexec = [\"npm *\"]\n",
@@ -240,7 +270,9 @@ async fn rewrites_go_through_denies_and_guards_again() {
         verdict: None,
         reason: None,
         rewrite: Some(argv.iter().map(|s| s.to_string()).collect()),
+        rewritten_by: None,
         note: None,
+        trusted: false,
     };
     let e = engine(
         "[[allow]]\nexec = [\"pnpm *\"]\n",

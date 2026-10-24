@@ -41,6 +41,28 @@ pub fn toolchains(home: &Path, var: impl Fn(&str) -> Option<String>) -> Toolchai
     }
 }
 
+/// Whether every tier already shows `path` read-only, as a system or toolchain file, given the
+/// user's `home` and the daemon's environment `var`. Both `path` and what it resolves to must
+/// be there, so a link can't lead out. Callers use it to keep paths a project names, such as
+/// hook programs, inside what the sandbox shows instead of widening it. Blocking.
+pub fn shows_read_only(home: &Path, path: &Path, var: impl Fn(&str) -> Option<String>) -> bool {
+    let Ok(target) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    let tools = toolchains(home, var);
+    let roots: Vec<PathBuf> = SYSTEM_READ_ONLY
+        .iter()
+        .map(PathBuf::from)
+        .chain(tools.all().into_iter().map(Path::to_path_buf))
+        .flat_map(|root| {
+            let real = canonical(&root);
+            std::iter::once(root).chain(real)
+        })
+        .collect();
+    let inside = |p: &Path| p.is_absolute() && roots.iter().any(|root| p.starts_with(root));
+    inside(path) && inside(&target)
+}
+
 /// Where the toolchains live, whether or not they exist.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Toolchains {

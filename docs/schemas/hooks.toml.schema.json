@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HooksConfig",
+  "description": "A hooks file. A missing file has no hooks.",
+  "type": "object",
+  "properties": {
+    "hook": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/HookConfig"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "HookActionType": {
+      "type": "string",
+      "enum": ["exec", "edit", "mcp", "git"]
+    },
+    "HookConfig": {
+      "description": "One hook.",
+      "type": "object",
+      "properties": {
+        "event": {
+          "$ref": "#/$defs/HookEvent"
+        },
+        "match": {
+          "description": "Run only for matching actions; every action when unset.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HookMatch"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "description": "Shown in decisions (`hook:<name>`) and the timeline: 1 to 64 letters, digits, `.`, `_`,\nor `-`. Defaults to the file name of the program.",
+          "type": ["string", "null"]
+        },
+        "run": {
+          "description": "Program and arguments. A program or argument given as a relative path under\n`.forge/hooks/` is taken from the project root, never a session's worktree; any other\nrelative program is refused. A bare program name is found through the daemon's `PATH` and\nmust be in a system or toolchain directory the sandbox already shows.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout_ms": {
+          "description": "Defaults to 5000 for tool and edit hooks and 300000 for `task.done`; at most 600000.",
+          "type": ["integer", "null"],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "where": {
+          "description": "Where the hook runs; only `sandbox`, the session's own sandbox, is supported so far.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HookPlace"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": ["event", "run"]
+    },
+    "HookEvent": {
+      "type": "string",
+      "enum": [
+        "session.start",
+        "tool.pre",
+        "tool.post",
+        "edit.pre",
+        "edit.post",
+        "commit.pre",
+        "task.done",
+        "approval.requested"
+      ]
+    },
+    "HookMatch": {
+      "description": "Which actions a hook runs for.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "description": "The action type: `exec`, `edit`, `mcp`, or `git`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HookActionType"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "argv": {
+          "description": "A glob over a command's space-joined argv, as in policy `exec` patterns; it matches the\nwhole line or any simple command in it.",
+          "type": ["string", "null"]
+        },
+        "path": {
+          "description": "A gitignore-style glob over an edit's repo-relative path, as in policy `edit` patterns.",
+          "type": ["string", "null"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "HookPlace": {
+      "type": "string",
+      "enum": ["sandbox", "daemon"]
+    }
+  }
+}
