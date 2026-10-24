@@ -1,6 +1,8 @@
 target/
 # Session worktrees are copies of the repo with their own checks.
 .worktrees/
+# Sample repos for the smoke checklist, each with its own checks.
+tests/fixtures/repos/
 dist/
 pnpm-lock.yaml
 packages/client/src/generated/

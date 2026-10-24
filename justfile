@@ -73,4 +73,15 @@ test-e2e:
     @exit 1
 
 # Everything CI runs.
+# Copy a sample repo (rust, typescript, python, go) into DEST as a fresh git repo, for the
+# manual smoke checklist in docs/smoke.md.
+smoke-repo lang dest:
+    test -d "tests/fixtures/repos/{{lang}}" || { echo "no sample repo {{lang}}; pick rust, typescript, python, or go" >&2; exit 1; }
+    test ! -e "{{dest}}" || { echo "{{dest}} already exists" >&2; exit 1; }
+    cp -R "tests/fixtures/repos/{{lang}}" "{{dest}}"
+    git -C "{{dest}}" init --quiet --initial-branch=main
+    git -C "{{dest}}" add -A
+    git -C "{{dest}}" -c user.name=Forge -c user.email=forge@localhost commit --quiet -m "Sample {{lang}} repo"
+    @echo "{{dest}}: open it with forge project open {{dest}}"
+
 ci: fmt-check lint test gen-check

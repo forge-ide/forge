@@ -11,7 +11,9 @@ runtime = "node"
 
 [launch]
 args = []
-env = { INITIAL_AGENT_MODE = "read-only", NO_BROWSER = "1" }
+# Sign in with OPENAI_API_KEY, which in the sandbox is the proxy's placeholder, so the
+# auth.json Codex writes in its scratch home holds no secret.
+env = { INITIAL_AGENT_MODE = "read-only", NO_BROWSER = "1", DEFAULT_AUTH_REQUEST = '{"methodId":"api-key"}' }
 
 [auth]
 secrets = ["OPENAI_API_KEY"]
