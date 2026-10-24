@@ -9,6 +9,8 @@
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::worktree::{GitDirs, GitError};
@@ -22,6 +24,10 @@ pub const MAX_COMMIT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Longest any one git command may run.
 const GIT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Most output read from any one git command. Past it git is killed and the commit refused:
+/// the size check before staging is a moment's look, and a file can grow after it.
+const MAX_GIT_OUTPUT: u64 = 32 * 1024 * 1024;
 
 /// What a commit would record.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -269,31 +275,35 @@ fn run(
     }
     // Read both pipes off this thread, so a full pipe can't stall the wait, and kill git if
     // it runs too long.
+    let over = Arc::new(AtomicBool::new(false));
     let reader = |pipe: Option<Box<dyn Read + Send>>| {
+        let over = over.clone();
         std::thread::spawn(move || {
             let mut out = Vec::new();
-            if let Some(mut pipe) = pipe {
-                let _ = pipe.read_to_end(&mut out);
+            if let Some(pipe) = pipe {
+                let _ = pipe.take(MAX_GIT_OUTPUT + 1).read_to_end(&mut out);
+            }
+            if out.len() as u64 > MAX_GIT_OUTPUT {
+                over.store(true, Ordering::SeqCst);
             }
             out
         })
     };
-    let stdout = reader(
-        child
-            .stdout
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
-    let stderr = reader(
-        child
-            .stderr
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
+    let boxed = |p: Option<Box<dyn Read + Send>>| p;
+    let stdout = reader(boxed(child.stdout.take().map(|p| Box::new(p) as _)));
+    let stderr = reader(boxed(child.stderr.take().map(|p| Box::new(p) as _)));
     let deadline = Instant::now() + GIT_TIMEOUT;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
+            // Past the cap nobody reads its output, so git would wait forever.
+            Ok(None) if over.load(Ordering::SeqCst) => {
+                let _ = child.kill();
+                break child.wait().map_err(|source| GitError::Io {
+                    context: "running git".into(),
+                    source,
+                })?;
+            }
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -313,6 +323,12 @@ fn run(
     };
     let stdout = stdout.join().unwrap_or_default();
     let stderr = stderr.join().unwrap_or_default();
+    if over.load(Ordering::SeqCst) {
+        return Err(GitError::Command {
+            args: args.join(" "),
+            stderr: format!("output over {} MiB", MAX_GIT_OUTPUT / 1024 / 1024),
+        });
+    }
     if !status.success() {
         return Err(GitError::Command {
             args: args.join(" "),
@@ -456,6 +472,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(staged.changed, ["small.txt"]);
+    }
+
+    #[test]
+    fn git_output_past_the_cap_refuses_the_commit_instead_of_filling_memory() {
+        let (_dir, repo, wt, dirs, private) = setup();
+        let index = index_path(&private);
+        // Under the size check, but its diff is more than the daemon reads.
+        let line = "x".repeat(1023) + "\n";
+        std::fs::write(wt.join("big.txt"), line.repeat(40 * 1024)).unwrap();
+        let started = Instant::now();
+        match stage(&dirs, &wt, "feat/x", None, &index) {
+            Err(CommitError::Git(GitError::Command { stderr, .. })) => {
+                assert!(stderr.contains("output over"), "{stderr}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "git was killed, not waited out"
+        );
+        assert_eq!(
+            git(&repo, &["rev-parse", "feat/x"]),
+            git(&repo, &["rev-parse", "main"])
+        );
     }
 
     #[test]

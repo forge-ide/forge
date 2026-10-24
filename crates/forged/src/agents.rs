@@ -32,9 +32,10 @@ pub fn builtin(manifest: &Manifest) -> AgentProfileConfig {
 /// Profile `id` for the project at `root`: its `.forge/agents/<id>.toml`, else the built-in
 /// profile of that ID. `Ok(None)` if neither exists. Blocking.
 ///
-/// A project file may adjust a built-in profile (its mode, model, secrets, network), but not
-/// run another program under its name or take it out of the sandbox: the built-in IDs are
-/// what a user picks trusting Forge's defaults, and a cloned repo supplies the file.
+/// A project file may tighten a built-in profile (its mode, model, a stronger tier, fewer
+/// secrets), but not run another program under its name, weaken its sandbox, or widen its
+/// network or secrets: the built-in IDs are what a user picks trusting Forge's defaults, and a
+/// cloned repo supplies the file.
 pub fn load(root: &Path, id: &str) -> Result<Option<AgentProfileConfig>, ApiError> {
     let path =
         AgentProfileConfig::path(root, id).map_err(|e| ApiError::validation(e.to_string()))?;
@@ -48,10 +49,30 @@ pub fn load(root: &Path, id: &str) -> Result<Option<AgentProfileConfig>, ApiErro
                 if profile.command.is_some() {
                     problems.push("command can't be set".to_owned());
                 }
-                if profile.allow_unsandboxed
-                    || profile.sandbox == Some(forge_config::ProfileSandbox::Unsandboxed)
-                {
+                if profile.allow_unsandboxed {
                     problems.push("it can't run unsandboxed".to_owned());
+                }
+                // Only the built-in tier or a stronger one; the profile can't weaken it.
+                if matches!(
+                    profile.sandbox,
+                    Some(
+                        forge_config::ProfileSandbox::Light
+                            | forge_config::ProfileSandbox::Unsandboxed
+                    )
+                ) {
+                    problems.push("sandbox must be standard or container".to_owned());
+                }
+                // A repo widening a built-in's network or secrets widens a default a user
+                // trusted; a file of another ID can, visibly, as its own profile.
+                if !profile.network.allow.is_empty() {
+                    problems.push("network.allow can't add hosts".to_owned());
+                }
+                if let Some(extra) = profile
+                    .env_secrets
+                    .iter()
+                    .find(|s| !manifest.auth.secrets.contains(s))
+                {
+                    problems.push(format!("env_secrets can't add {extra}"));
                 }
                 if !problems.is_empty() {
                     return Err(ApiError::validation(format!(
@@ -238,5 +259,52 @@ fn sign_in(
         (true, None)
     } else {
         (false, Some(fixes.join("; ")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with_file(
+        id: &str,
+        text: &str,
+    ) -> (
+        tempfile::TempDir,
+        Result<Option<AgentProfileConfig>, ApiError>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = AgentProfileConfig::path(dir.path(), id).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, text).unwrap();
+        let loaded = load(dir.path(), id);
+        (dir, loaded)
+    }
+
+    #[test]
+    fn a_project_file_may_tighten_a_built_in_profile_but_not_widen_it() {
+        for ok in [
+            "agent = \"claude-code\"\nmode = \"ask\"\n",
+            "agent = \"claude-code\"\nmodel = \"m\"\nsandbox = \"container\"\n",
+            "agent = \"claude-code\"\nsandbox = \"standard\"\nenv_secrets = [\"ANTHROPIC_API_KEY\"]\n",
+        ] {
+            assert!(with_file("claude", ok).1.unwrap().is_some(), "{ok}");
+        }
+        for bad in [
+            "agent = \"codex\"\n",
+            "agent = \"claude-code\"\ncommand = [\"/bin/sh\"]\n",
+            "agent = \"claude-code\"\nallow_unsandboxed = true\n",
+            "agent = \"claude-code\"\nsandbox = \"unsandboxed\"\n",
+            "agent = \"claude-code\"\nsandbox = \"light\"\n",
+            "agent = \"claude-code\"\n[network]\nallow = [\"attacker.example\"]\n",
+            "agent = \"claude-code\"\nenv_secrets = [\"OPENAI_API_KEY\"]\n",
+        ] {
+            let (_dir, loaded) = with_file("claude", bad);
+            let err = loaded.unwrap_err();
+            assert!(err.detail().contains("built-in profile"), "{bad}: {err:?}");
+        }
+        // Another ID is the project's own profile, shown as such.
+        let (_dir, loaded) = with_file("mine", "agent = \"claude-code\"\nsandbox = \"light\"\n");
+        assert!(loaded.unwrap().is_some());
     }
 }

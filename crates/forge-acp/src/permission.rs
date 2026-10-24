@@ -30,11 +30,53 @@ pub enum Target {
     Unknown,
 }
 
-/// The commands an agent reported in its tool calls, by tool call ID, as first reported.
+/// The commands and file changes an agent reported in its tool calls, by tool call ID, as
+/// first reported.
 #[derive(Debug, Default)]
-pub struct ToolCommands(VecDeque<(String, String)>);
+pub struct ToolCommands(VecDeque<(String, String)>, VecDeque<(String, Vec<Change>)>);
+
+/// A file a tool call reported it changes: the path its diff names (for a move, where the file
+/// goes) and whether it is deleted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Change {
+    pub path: PathBuf,
+    pub delete: bool,
+}
 
 impl ToolCommands {
+    /// Remember the files `call`'s diffs change, if it reports any and none were remembered
+    /// for it yet.
+    pub fn record_changes(&mut self, id: &str, content: &[acp::ToolCallContent]) {
+        let changes: Vec<Change> = content
+            .iter()
+            .filter_map(|c| match c {
+                acp::ToolCallContent::Diff(diff) => Some(Change {
+                    path: diff.path.clone(),
+                    delete: diff
+                        .meta
+                        .as_ref()
+                        .and_then(|m| m.get("kind")?.as_str())
+                        .is_some_and(|k| k == "delete"),
+                }),
+                _ => None,
+            })
+            .collect();
+        if changes.is_empty() || self.1.iter().any(|(known, _)| known == id) {
+            return;
+        }
+        if self.1.len() == REMEMBERED_COMMANDS {
+            self.1.pop_front();
+        }
+        self.1.push_back((id.to_owned(), changes));
+    }
+
+    fn changes(&self, id: &str) -> Option<&[Change]> {
+        self.1
+            .iter()
+            .find(|(known, _)| known == id)
+            .map(|(_, changes)| changes.as_slice())
+    }
+
     /// Remember `call`'s command, if it reports one and none was remembered for it yet.
     pub fn record(&mut self, id: &str, raw_input: Option<&serde_json::Value>) {
         let Some(command) = raw_input.and_then(|r| r.get("command")?.as_str()) else {
@@ -88,26 +130,38 @@ pub fn target(
             }
         }
         acp::ToolKind::Edit | acp::ToolKind::Delete | acp::ToolKind::Move => {
-            // Every path the request names: a patch or a move changes them all.
-            let mut paths: Vec<PathBuf> = fields
-                .locations
-                .iter()
-                .flatten()
-                .map(|l| l.path.clone())
-                .collect();
-            if let Some(path) = raw.and_then(|r| r.get("path")?.as_str()) {
-                paths.push(PathBuf::from(path));
-            }
-            if paths.is_empty() {
-                return Target::Unknown;
-            }
             let kind = if kind == acp::ToolKind::Delete {
                 EditKind::Delete
             } else {
                 EditKind::Modify
             };
+            // Every path the request names: a patch or a move changes them all.
+            let mut paths: Vec<(PathBuf, EditKind)> = fields
+                .locations
+                .iter()
+                .flatten()
+                .map(|l| (l.path.clone(), kind))
+                .collect();
+            if let Some(path) = raw.and_then(|r| r.get("path")?.as_str()) {
+                paths.push((PathBuf::from(path), kind));
+            }
+            // And every file its tool call's diffs change: Codex names only a patch's sources in
+            // the request, while its diffs name where moved files go, and which are deleted.
+            let id = &req.tool_call.tool_call_id.0;
+            match commands.changes(id) {
+                Some(changes) => paths.extend(changes.iter().map(|c| {
+                    let kind = if c.delete { EditKind::Delete } else { kind };
+                    (c.path.clone(), kind)
+                })),
+                // Without its diffs (too large to report), what a Codex patch writes is unknown.
+                None if source == CommandSource::ToolCallArgv => return Target::Unknown,
+                None => {}
+            }
+            if paths.is_empty() {
+                return Target::Unknown;
+            }
             let mut edits: Vec<Action> = Vec::new();
-            for path in paths {
+            for (path, kind) in paths {
                 // Resolved as a write would be, so the path decided is the file that would
                 // really change: a symlink the agent planted can't carry an allowed edit
                 // elsewhere. One path that can't be resolved leaves nothing to decide.
@@ -483,6 +537,51 @@ mod tests {
         );
         let req = request(acp::ToolKind::Edit, |f| f);
         assert_eq!(decide(&req, &ws, CommandSource::RawInput), Target::Unknown);
+    }
+
+    #[test]
+    fn a_codex_patch_is_decided_on_where_its_diffs_move_and_delete_files() {
+        let (_dir, ws) = workspace();
+        let mut commands = ToolCommands::default();
+        let diff = |path: &std::path::Path, kind: &str| {
+            let mut meta = serde_json::Map::new();
+            meta.insert("kind".into(), kind.into());
+            acp::ToolCallContent::Diff(acp::Diff::new(path.to_path_buf(), "x").meta(meta))
+        };
+        commands.record_changes(
+            "t1",
+            &[
+                diff(&ws.cwd().join(".github/workflows/ci.yml"), "update"),
+                diff(&ws.cwd().join("old.rs"), "delete"),
+            ],
+        );
+        // The request itself names only the patch's source.
+        let req = request(acp::ToolKind::Edit, |f| {
+            f.locations(vec![acp::ToolCallLocation::new(ws.cwd().join("a.rs"))])
+        });
+        let edit = |path: &str, kind| Action::Edit {
+            path: path.into(),
+            kind,
+        };
+        assert_eq!(
+            target(&req, &ws, CommandSource::ToolCallArgv, &commands),
+            Target::Edits(vec![
+                edit("a.rs", EditKind::Modify),
+                edit(".github/workflows/ci.yml", EditKind::Modify),
+                edit("old.rs", EditKind::Delete),
+            ])
+        );
+        // A Codex patch whose diffs weren't reported names nothing Forge can allow.
+        let none = ToolCommands::default();
+        assert_eq!(
+            target(&req, &ws, CommandSource::ToolCallArgv, &none),
+            Target::Unknown
+        );
+        // Other agents' edits are decided on what the request names.
+        assert_eq!(
+            target(&req, &ws, CommandSource::RawInput, &none),
+            Target::Action(edit("a.rs", EditKind::Modify))
+        );
     }
 
     #[test]

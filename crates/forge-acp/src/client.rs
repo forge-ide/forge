@@ -936,12 +936,17 @@ impl Handlers {
     async fn update(&self, notification: SessionNotification) {
         let payload = match notification.update {
             SessionUpdate::ToolCall(call) => {
-                lock(&self.commands).record(&call.tool_call_id.0, call.raw_input.as_ref());
+                let mut commands = lock(&self.commands);
+                commands.record(&call.tool_call_id.0, call.raw_input.as_ref());
+                commands.record_changes(&call.tool_call_id.0, &call.content);
                 return;
             }
             SessionUpdate::ToolCallUpdate(update) => {
-                lock(&self.commands)
-                    .record(&update.tool_call_id.0, update.fields.raw_input.as_ref());
+                let mut commands = lock(&self.commands);
+                commands.record(&update.tool_call_id.0, update.fields.raw_input.as_ref());
+                if let Some(content) = &update.fields.content {
+                    commands.record_changes(&update.tool_call_id.0, content);
+                }
                 return;
             }
             SessionUpdate::AgentMessageChunk(chunk) => {

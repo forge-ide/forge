@@ -116,7 +116,7 @@ async fn lists_built_in_and_project_profiles_with_install_and_sign_in_status() {
     std::fs::create_dir_all(&agents).unwrap();
     std::fs::write(
         agents.join("gemini.toml"),
-        "agent = \"gemini\"\nenv_secrets = [\"ANTHROPIC_API_KEY\"]\n",
+        "agent = \"gemini\"\nmodel = \"gemini-pro\"\nenv_secrets = [\"GEMINI_API_KEY\"]\n",
     )
     .unwrap();
     // A repo can adjust a built-in profile, but not swap its program or leave the sandbox.
@@ -144,7 +144,7 @@ async fn lists_built_in_and_project_profiles_with_install_and_sign_in_status() {
     assert_eq!(ids, ["broken", "claude", "codex", "custom", "gemini"]);
 
     let gemini = by_id(&listed, "gemini");
-    assert!(!gemini.installed && gemini.authenticated, "{gemini:?}");
+    assert!(!gemini.installed && !gemini.authenticated, "{gemini:?}");
     assert!(
         gemini.problem.as_deref().unwrap().contains("not installed"),
         "{gemini:?}"
