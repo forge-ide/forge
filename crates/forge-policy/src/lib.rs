@@ -547,6 +547,29 @@ impl Policy for Engine {
     }
 }
 
+/// The `exec` pattern that matches exactly `action` in a policy file, or why there is none.
+/// Only a command that is one plain simple command whose words hold no spaces or tabs has one:
+/// allow rules match nothing else, and the pattern matches the space-joined argv, so a word
+/// with a space in it would also match the same text split into more words. Edits have none
+/// yet, since an edit pattern also matches everything under the path.
+pub fn exact_pattern(action: &Action) -> Result<String, String> {
+    let Action::Exec { argv, .. } = action else {
+        return Err("only commands can be remembered in a policy file".into());
+    };
+    let cmd = exec::CommandLine::parse(argv);
+    if !cmd.simple {
+        return Err(
+            "a rule can only name a single plain command, with no shell syntax, \
+                    wrapper, or expansion"
+                .into(),
+        );
+    }
+    if cmd.words.iter().any(|w| w.contains([' ', '\t'])) {
+        return Err("a rule can't tell a word with a space in it from two words".into());
+    }
+    Ok(exec::escape(&cmd.line))
+}
+
 /// The verdict when nothing earlier decided, and why.
 ///
 /// | Action | Ask | Accept edits | Auto | Full access |

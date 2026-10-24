@@ -139,7 +139,7 @@ impl Secret {
         Self(value.into())
     }
 
-    /// The value, for the one place that sends it.
+    /// The value, for sending it, and for the secret scan that keeps it out of the log.
     pub fn expose(&self) -> &str {
         &self.0
     }

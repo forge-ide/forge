@@ -18,8 +18,8 @@ use agent_client_protocol::schema::v1::{
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 use forge_api::TurnId;
 use forge_api::events::{
-    AgentMessageBody, AgentPlanBody, EditBody, EventPayload, PlanEntry, PolicyDecisionBody,
-    TerminalOutputBody, ToolCallBody, ToolResultBody, Verdict,
+    AgentMessageBody, AgentPlanBody, EditBody, EventPayload, PlanEntry, TerminalOutputBody,
+    ToolCallBody, ToolResultBody,
 };
 use forge_api::model::{Action, EditKind};
 use forge_sandbox::SessionSandbox;
@@ -36,47 +36,71 @@ use crate::workspace::{PathError, Workspace};
 const STDERR_TAIL: usize = 20;
 /// Longest tool output kept in a `tool.result` event.
 const RESULT_OUTPUT_LIMIT: usize = 4096;
+/// The error code for a write or terminal the gate refused.
+const REFUSED: i32 = -32003;
 
 /// Where session events go. The session layer appends them to the event log.
 pub trait EventSink: Send + Sync + 'static {
     fn emit(&self, payload: EventPayload) -> BoxFuture<'_, ()>;
 }
 
-/// A permission request, as an [`Action`] when the agent's description maps to one.
+/// What the agent is asking to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GateKind {
+    /// A permission request: the agent asks before using a tool of its own.
+    Permission,
+    /// A file write through the client.
+    Write,
+    /// A command in a client terminal.
+    Terminal,
+}
+
+/// An action the agent wants to take, for the [`Gate`] to decide. `action` is `None` when a
+/// permission request describes nothing Forge can map to an action.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PermissionQuery {
+pub struct GateRequest {
+    pub kind: GateKind,
     pub tool_call_id: String,
     pub title: String,
     pub action: Option<Action>,
+    /// The content of a write, for the secret scan.
+    pub content: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PermissionDecision {
-    pub allow: bool,
-    pub reason: String,
-    /// Which rule or component decided.
-    pub source: String,
+pub enum GateVerdict {
+    Allow,
+    Deny(String),
+    /// The turn was cancelled while the request waited.
+    Cancelled,
 }
 
-/// Answers the agent's permission requests.
-pub trait PermissionHandler: Send + Sync + 'static {
-    fn decide(&self, query: PermissionQuery) -> BoxFuture<'_, PermissionDecision>;
+/// Decides every permission request, write, and terminal before it happens, recording the
+/// decision. A decision may wait on a human.
+pub trait Gate: Send + Sync + 'static {
+    fn decide(&self, request: GateRequest) -> BoxFuture<'_, GateVerdict>;
 }
 
-/// Denies every request with a fixed reason.
+/// Allows everything; for tests.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AllowAll;
+
+impl Gate for AllowAll {
+    fn decide(&self, _: GateRequest) -> BoxFuture<'_, GateVerdict> {
+        Box::pin(async { GateVerdict::Allow })
+    }
+}
+
+/// Denies everything with a fixed reason; for tests.
 #[derive(Clone, Debug)]
 pub struct DenyAll {
     pub reason: String,
 }
 
-impl PermissionHandler for DenyAll {
-    fn decide(&self, _: PermissionQuery) -> BoxFuture<'_, PermissionDecision> {
-        let decision = PermissionDecision {
-            allow: false,
-            reason: self.reason.clone(),
-            source: "default".into(),
-        };
-        Box::pin(async move { decision })
+impl Gate for DenyAll {
+    fn decide(&self, _: GateRequest) -> BoxFuture<'_, GateVerdict> {
+        let verdict = GateVerdict::Deny(self.reason.clone());
+        Box::pin(async move { verdict })
     }
 }
 
@@ -145,7 +169,7 @@ impl AcpClient {
         workspace: Workspace,
         sandbox: Arc<dyn SessionSandbox>,
         sink: Arc<dyn EventSink>,
-        permissions: Arc<dyn PermissionHandler>,
+        gate: Arc<dyn Gate>,
     ) -> Result<Self, AcpError> {
         let (program, args) = command.argv.split_first().ok_or(AcpError::NoCommand)?;
         let mut child = sandbox
@@ -174,7 +198,7 @@ impl AcpClient {
         let handlers = Arc::new(Handlers {
             workspace,
             sink,
-            permissions,
+            gate,
             terminals: terminals.clone(),
             turn: turn.clone(),
         });
@@ -357,7 +381,7 @@ fn kill_group(pid: Option<u32>) {
 struct Handlers {
     workspace: Workspace,
     sink: Arc<dyn EventSink>,
-    permissions: Arc<dyn PermissionHandler>,
+    gate: Arc<dyn Gate>,
     terminals: Arc<Terminals>,
     turn: Arc<Mutex<Option<TurnId>>>,
 }
@@ -401,14 +425,17 @@ async fn connect(
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async move |req: WriteTextFileRequest, responder, _cx| {
-                reply(responder, write.write(req).await)
+            async move |req: WriteTextFileRequest, responder, cx: ConnectionTo<Agent>| {
+                // The gate may wait on a human; don't hold the dispatch loop.
+                let h = write.clone();
+                cx.spawn(async move { reply(responder, h.write(req).await) })
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async move |req: CreateTerminalRequest, responder, _cx| {
-                reply(responder, create.create_terminal(req).await)
+            async move |req: CreateTerminalRequest, responder, cx: ConnectionTo<Agent>| {
+                let h = create.clone();
+                cx.spawn(async move { reply(responder, h.create_terminal(req).await) })
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -514,16 +541,30 @@ impl Handlers {
         } else {
             EditKind::Create
         };
-        self.sink
-            .emit(EventPayload::ToolCall(ToolCallBody {
-                tool_call_id: id.clone(),
-                action: Action::Edit {
-                    path: resolved.display.clone(),
-                    kind,
-                },
-                title: format!("Write {}", resolved.display),
-            }))
-            .await;
+        let action = Action::Edit {
+            path: resolved.display.clone(),
+            kind,
+        };
+        let title = format!("Write {}", resolved.display);
+        self.call(&id, &action, &title).await;
+        let request = GateRequest {
+            kind: GateKind::Write,
+            tool_call_id: id.clone(),
+            title,
+            action: Some(action),
+            content: Some(content.clone()),
+        };
+        self.allowed(request).await?;
+        // The decision may have waited on a human while the agent's processes kept running,
+        // so resolve again: a parent directory swapped for a symlink in the meantime must not
+        // carry the write somewhere else.
+        let again = self.workspace.resolve_write(&req.path);
+        if again.as_ref().map(|r| &r.path) != Ok(&path) {
+            let reason = "the path changed while the write waited for a decision".to_owned();
+            self.result(&id, "failed", Some(reason.clone())).await;
+            return Err(agent_client_protocol::Error::new(REFUSED, reason));
+        }
+        let old = tokio::fs::read_to_string(&path).await.ok().or(old);
         let new = content.clone();
         let written = tokio::task::spawn_blocking(move || write_file(&path, &content))
             .await
@@ -575,16 +616,20 @@ impl Handlers {
             ));
         }
         let argv = terminal_argv(&req.command, &req.args, &env);
-        self.sink
-            .emit(EventPayload::ToolCall(ToolCallBody {
-                tool_call_id: id.clone(),
-                action: Action::Exec {
-                    argv: argv.clone(),
-                    cwd: cwd.display.clone(),
-                },
-                title: format!("Run {}", argv.join(" ")),
-            }))
-            .await;
+        let action = Action::Exec {
+            argv: argv.clone(),
+            cwd: cwd.display.clone(),
+        };
+        let title = format!("Run {}", argv.join(" "));
+        self.call(&id, &action, &title).await;
+        let request = GateRequest {
+            kind: GateKind::Terminal,
+            tool_call_id: id.clone(),
+            title,
+            action: Some(action),
+            content: None,
+        };
+        self.allowed(request).await?;
         let limit = req
             .output_byte_limit
             .and_then(|n| usize::try_from(n).ok())
@@ -655,39 +700,22 @@ impl Handlers {
         req: RequestPermissionRequest,
     ) -> AcpResult<RequestPermissionResponse> {
         let fields = &req.tool_call.fields;
-        let query = PermissionQuery {
+        let request = GateRequest {
+            kind: GateKind::Permission,
             tool_call_id: req.tool_call.tool_call_id.0.to_string(),
             title: fields.title.clone().unwrap_or_default(),
             action: permission_action(&req, &self.workspace),
+            content: None,
         };
-        if let Some(action) = &query.action {
-            self.sink
-                .emit(EventPayload::ToolCall(ToolCallBody {
-                    tool_call_id: query.tool_call_id.clone(),
-                    action: action.clone(),
-                    title: query.title.clone(),
-                }))
+        if let Some(action) = &request.action {
+            self.call(&request.tool_call_id, action, &request.title)
                 .await;
         }
-        let tool_call_id = query.tool_call_id.clone();
-        let decision = self.permissions.decide(query).await;
-        self.sink
-            .emit(EventPayload::PolicyDecision(PolicyDecisionBody {
-                tool_call_id,
-                verdict: if decision.allow {
-                    Verdict::Allow
-                } else {
-                    Verdict::Deny
-                },
-                reason: decision.reason,
-                source: decision.source,
-            }))
-            .await;
         use acp::PermissionOptionKind as Kind;
-        let wanted: &[Kind] = if decision.allow {
-            &[Kind::AllowOnce, Kind::AllowAlways]
-        } else {
-            &[Kind::RejectOnce, Kind::RejectAlways]
+        let wanted: &[Kind] = match self.gate.decide(request).await {
+            GateVerdict::Allow => &[Kind::AllowOnce, Kind::AllowAlways],
+            GateVerdict::Deny(_) => &[Kind::RejectOnce, Kind::RejectAlways],
+            GateVerdict::Cancelled => &[],
         };
         let choice = wanted
             .iter()
@@ -699,6 +727,30 @@ impl Handlers {
             None => RequestPermissionOutcome::Cancelled,
         };
         Ok(RequestPermissionResponse::new(outcome))
+    }
+
+    /// Record that the agent wants to take `action`.
+    async fn call(&self, id: &str, action: &Action, title: &str) {
+        self.sink
+            .emit(EventPayload::ToolCall(ToolCallBody {
+                tool_call_id: id.to_owned(),
+                action: action.clone(),
+                title: title.to_owned(),
+            }))
+            .await;
+    }
+
+    /// Ask the gate about a write or terminal; on a refusal, record the failed result and
+    /// return the error for the agent.
+    async fn allowed(&self, request: GateRequest) -> AcpResult<()> {
+        let id = request.tool_call_id.clone();
+        let reason = match self.gate.decide(request).await {
+            GateVerdict::Allow => return Ok(()),
+            GateVerdict::Deny(reason) => format!("refused by policy: {reason}"),
+            GateVerdict::Cancelled => "cancelled".to_owned(),
+        };
+        self.result(&id, "failed", Some(reason.clone())).await;
+        Err(agent_client_protocol::Error::new(REFUSED, reason))
     }
 
     async fn update(&self, notification: SessionNotification) {
@@ -796,11 +848,12 @@ fn permission_action(req: &RequestPermissionRequest, workspace: &Workspace) -> O
                 .and_then(|l| l.first())
                 .map(|l| l.path.clone())
                 .or_else(|| raw.and_then(|r| r.get("path")?.as_str().map(PathBuf::from)))?;
-            let path = if path.is_absolute() {
-                workspace.resolve_write(&path).ok()?.display
-            } else {
-                path.to_string_lossy().replace('\\', "/")
-            };
+            // Resolved as a write would be, so the path decided is the file that would really
+            // change: a symlink the agent planted can't carry an allowed edit elsewhere.
+            let path = workspace
+                .resolve_write(&workspace.cwd().join(path))
+                .ok()?
+                .display;
             let kind = if fields.kind == Some(acp::ToolKind::Delete) {
                 EditKind::Delete
             } else {

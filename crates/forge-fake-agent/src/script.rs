@@ -25,8 +25,9 @@ pub enum Step {
     Read(String),
     /// Write a file through the client.
     Write(WriteStep),
-    /// Run a command in a client terminal and wait for it to exit.
-    Exec(Vec<String>),
+    /// Run a command in a client terminal and wait for it to exit: `exec: [argv...]`, or
+    /// `exec: { argv: [...], expect: deny }` for a command the client should refuse.
+    Exec(ExecStep),
     /// Ask the client for permission.
     RequestPermission(PermissionStep),
     /// Fail the turn unless the last permission request got this answer.
@@ -44,6 +45,41 @@ pub enum Step {
 pub struct WriteStep {
     pub path: String,
     pub content: String,
+    /// `deny` if the client should refuse the write; the turn fails if it doesn't.
+    #[serde(default)]
+    pub expect: Option<Expected>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(from = "ExecForm")]
+pub struct ExecStep {
+    pub argv: Vec<String>,
+    /// `deny` if the client should refuse to run it; the turn fails if it doesn't.
+    pub expect: Option<Expected>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ExecForm {
+    Argv(Vec<String>),
+    Full(FullExec),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FullExec {
+    argv: Vec<String>,
+    #[serde(default)]
+    expect: Option<Expected>,
+}
+
+impl From<ExecForm> for ExecStep {
+    fn from(form: ExecForm) -> Self {
+        match form {
+            ExecForm::Argv(argv) => Self { argv, expect: None },
+            ExecForm::Full(FullExec { argv, expect }) => Self { argv, expect },
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -148,6 +184,38 @@ steps:
             })
         );
         assert_eq!(script.steps[9], Step::EndTurn);
+    }
+
+    #[test]
+    fn writes_and_commands_can_expect_a_refusal() {
+        let script = Script::parse(
+            r#"
+steps:
+  - write: { path: .env, content: "x", expect: deny }
+  - exec: { argv: ["git", "push"], expect: deny }
+  - exec: { argv: ["true"] }
+"#,
+        )
+        .unwrap();
+        let Step::Write(w) = &script.steps[0] else {
+            panic!("not a write: {:?}", script.steps[0]);
+        };
+        assert_eq!(w.expect, Some(Expected::Deny));
+        assert_eq!(
+            script.steps[1],
+            Step::Exec(ExecStep {
+                argv: vec!["git".into(), "push".into()],
+                expect: Some(Expected::Deny),
+            })
+        );
+        assert_eq!(
+            script.steps[2],
+            Step::Exec(ExecStep {
+                argv: vec!["true".into()],
+                expect: None,
+            })
+        );
+        assert!(Script::parse("steps:\n  - exec: { argv: [a], mode: x }\n").is_err());
     }
 
     #[test]

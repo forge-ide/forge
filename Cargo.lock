@@ -1262,8 +1262,10 @@ version = "0.0.0"
 dependencies = [
  "forge-acp",
  "forge-api",
+ "forge-config",
  "forge-events",
  "forge-git",
+ "forge-policy",
  "forge-sandbox",
  "futures-util",
  "thiserror 2.0.21",
@@ -1282,6 +1284,7 @@ dependencies = [
  "forge-config",
  "forge-events",
  "forge-git",
+ "forge-policy",
  "forge-sandbox",
  "forge-session",
  "futures-util",
@@ -1292,6 +1295,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
+ "toml 1.1.8+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
 ]

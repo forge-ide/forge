@@ -85,11 +85,11 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 ### M4: Policy engine, guards, hooks, approvals
 
 - [x] `Action`, `Decision`, and the evaluation order from the component architecture.
-- [ ] Layered TOML rules: managed, user, project, session.
+- [x] Layered TOML rules: managed, user, project, session.
 - [ ] Guards: secret scan on edits and output, protected paths.
 - [ ] Shell hook runtime for `tool.pre`, `tool.post`, `edit.pre`, `edit.post`, `task.done`.
-- [ ] Modes: Ask, Accept edits, rules-only Auto, Full access.
-- [ ] `approval.list`, `approval.decide`; ACP permission requests wait on them.
+- [x] Modes: Ask, Accept edits, rules-only Auto, Full access.
+- [x] `approval.list`, `approval.decide`; ACP permission requests wait on them.
 - [ ] `commit.pre` shell hook; default deny rules for manual git commands that write shared state (`git commit`, `git push`, and `git stash` and `git branch` except their read-only forms), with a reason pointing agents at `git_commit`.
 
 **Done when:** the policy golden tests pass, and an API test shows an Ask decision blocking the fake agent until `approval.decide` arrives.

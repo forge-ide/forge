@@ -9,16 +9,20 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use forge_acp::{AcpClient, AcpError, AgentCommand, DenyAll, EventSink, Root, Workspace};
+use forge_acp::{AcpClient, AcpError, AgentCommand, EventSink, Root, Workspace};
 use forge_api::events::{
     EventPayload, PromptBody, SessionStateBody, TurnEndedBody, TurnSource, TurnStartedBody,
 };
 use forge_api::events::{NetworkBody, Verdict};
 use forge_api::methods::{BranchCollision, CollisionResolution};
-use forge_api::model::{Mode, Project, SandboxTier, Session, SessionState, Usage};
-use forge_api::{ApiError, ErrorData, ErrorKind, ProjectId, SessionId, Timestamp, TurnId};
+use forge_api::model::{Action, Mode, Project, SandboxTier, Session, SessionState, Usage};
+use forge_api::{
+    ApiError, ApprovalId, ErrorData, ErrorKind, ProjectId, SessionId, Timestamp, TurnId,
+};
+use forge_config::{PolicyRule, RuleListName};
 use forge_events::EventLog;
 use forge_git::{CreateMode, GitError, Worktrees, worktree_path};
+use forge_policy::{Engine, NoClassifier, NoHooks, Policy, Rules, SecretScanner};
 use forge_sandbox::proxy::{
     Allowlist, Connection, Limits, Proxy, ProxyConfig, PublicDns, SecretRoute, Tls, Upstream,
 };
@@ -29,8 +33,9 @@ use crate::naming::{RepoName, decide};
 use crate::state::{accepts_prompt, can_close, can_transition, is_live};
 use crate::store::{SessionStore, StoreError, WorktreeRecord};
 
-/// Why agents' permission requests are denied until a policy engine decides them.
-const NO_POLICY: &str = "no policy engine is configured to approve requests";
+mod approvals;
+
+use approvals::{Pending, SessionGate, redact_payload};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -65,13 +70,22 @@ pub struct AgentLaunch {
     pub network: Allowlist,
     /// Secrets the proxy injects, with their values from the keyring.
     pub secrets: Vec<SecretRoute>,
+    /// The managed, user, and project policy layers, compiled.
+    pub rules: Arc<Rules>,
 }
 
-/// Finds how to start a session's agent from its profile. The daemon implements it from
-/// config.
+/// Finds how to start a session's agent from its profile and the policy files, and records
+/// decisions remembered for the project. The daemon implements it from config.
 pub trait AgentResolver: Send + Sync + 'static {
     /// Blocking; may read config files.
     fn launch(&self, session: &Session) -> Result<AgentLaunch, ApiError>;
+    /// Append `rule` to the session's project policy file. Blocking.
+    fn remember_in_project(
+        &self,
+        session: &Session,
+        list: RuleListName,
+        rule: PolicyRule,
+    ) -> Result<(), ApiError>;
 }
 
 /// Where sandboxes put their session-private dirs, and whose home they hide.
@@ -104,6 +118,17 @@ struct Live {
     /// Serializes state changes for the session.
     lock: tokio::sync::Mutex<()>,
     agent: Mutex<Option<Arc<AcpClient>>>,
+    /// The running agent's policy engine, rebuilt from the policy files at each launch.
+    policy: Mutex<Option<Arc<Engine>>>,
+    /// Decisions remembered for the session, replayed into each new engine.
+    remembered: Mutex<Vec<(Action, forge_api::events::Verdict)>>,
+    /// Asks waiting in the inbox.
+    pending: Mutex<HashMap<ApprovalId, Pending>>,
+    /// Actions a human allowed in a permission request, each good for one matching write or
+    /// terminal in the same turn.
+    grants: Mutex<Vec<Action>>,
+    /// For the agent with the next prompt: approvals a daemon restart cancelled.
+    resume_note: Mutex<Option<String>>,
 }
 
 /// Owns every session's lifecycle.
@@ -141,9 +166,11 @@ impl SessionManager {
     }
 
     /// After a daemon restart: sessions that were mid-turn become Paused and sessions that were
-    /// provisioning become Failed, each with an event saying why. Nothing resumes on its own.
+    /// provisioning become Failed, each with an event saying why, and pending approvals are
+    /// cancelled, which the agent hears with its next prompt. Nothing resumes on its own.
     pub async fn recover(self: &Arc<Self>) -> Result<(), SessionError> {
         use SessionState::*;
+        self.cancel_stale_approvals().await?;
         let stale = self
             .blocking(|store| store.in_states(&[Provisioning, Working, Waiting]))
             .await?;
@@ -280,6 +307,10 @@ impl SessionManager {
             return Err(invalid_state(&session, "take a prompt"));
         }
         self.register_log(id).await?;
+        let text = match lock(&live.resume_note).take() {
+            Some(note) => format!("{note}\n\n{text}"),
+            None => text,
+        };
         let turn = self.begin_turn(&session, text.clone(), source).await?;
         let manager = self.clone();
         let (session_id, turn_id) = (id.clone(), turn.clone());
@@ -287,12 +318,12 @@ impl SessionManager {
         Ok(turn)
     }
 
-    /// Ask the agent to stop the current turn.
+    /// Ask the agent to stop the current turn; anything waiting for approval is cancelled.
     pub async fn cancel(&self, id: &SessionId) -> Result<(), SessionError> {
         let live = self.live(id);
         let _guard = live.lock.lock().await;
         let session = self.get(id).await?;
-        if session.state != SessionState::Working {
+        if !matches!(session.state, SessionState::Working | SessionState::Waiting) {
             return Err(invalid_state(&session, "be cancelled"));
         }
         let agent = lock(&live.agent).clone();
@@ -306,7 +337,8 @@ impl SessionManager {
         };
         agent
             .cancel()
-            .map_err(|e| ApiError::new(ErrorKind::AgentUnavailable, e.to_string()).into())
+            .map_err(|e| ApiError::new(ErrorKind::AgentUnavailable, e.to_string()))?;
+        self.cancel_pending(&live, id).await
     }
 
     /// Stop the agent and mark the session Done; its worktrees stay for review and cleanup.
@@ -450,6 +482,15 @@ impl SessionManager {
         .map_err(|e| e.to_string())??;
         let (mut launch, worktrees, workspace, upstream) = found;
         let secrets = std::mem::take(&mut launch.secrets);
+        let rules = launch.rules.clone();
+        // Commands and edits holding an injected secret's value ask, and the value never
+        // reaches the log.
+        let scanner = Arc::new(SecretScanner::new(
+            secrets
+                .iter()
+                .map(|s| s.value.expose().to_owned())
+                .collect(),
+        ));
         let proxy = self
             .start_proxy(session, launch.network.clone(), secrets, upstream)
             .await?;
@@ -474,11 +515,28 @@ impl SessionManager {
         let sink = Arc::new(SessionSink {
             log: self.log.clone(),
             session: session.id.clone(),
+            scanner: scanner.clone(),
         });
-        let permissions = Arc::new(DenyAll {
-            reason: NO_POLICY.into(),
+        let engine = Arc::new(Engine::new(
+            rules,
+            scanner.clone(),
+            Arc::new(NoHooks),
+            Arc::new(NoClassifier),
+        ));
+        let live = self.live(&session.id);
+        for (action, verdict) in lock(&live.remembered).iter() {
+            engine.remember(action, *verdict);
+        }
+        *lock(&live.policy) = Some(engine.clone());
+        let gate = Arc::new(SessionGate {
+            manager: Arc::downgrade(self),
+            session: session.id.clone(),
+            live: live.clone(),
+            engine,
+            scanner,
+            sink: sink.clone(),
         });
-        AcpClient::start(command, workspace, sandbox, sink, permissions)
+        AcpClient::start(command, workspace, sandbox, sink, gate)
             .await
             .map(Arc::new)
             .map_err(|e| format!("starting the agent: {e}"))
@@ -579,6 +637,9 @@ impl SessionManager {
             Err(reason) => Err(reason),
         };
         let _guard = live.lock.lock().await;
+        // Whatever still waits can't be answered once the turn is over.
+        self.cancel_pending(&live, id).await?;
+        lock(&live.grants).clear();
         let session = self.get(id).await?;
         let stop_reason = outcome.as_deref().unwrap_or("error").to_owned();
         self.emit(
@@ -725,14 +786,16 @@ struct RepoPlan {
     mode: CreateMode,
 }
 
-/// Appends a session's ACP events to the event log.
+/// Appends a session's ACP events to the event log, with secrets redacted.
 struct SessionSink {
     log: Arc<EventLog>,
     session: SessionId,
+    scanner: Arc<SecretScanner>,
 }
 
 impl EventSink for SessionSink {
     fn emit(&self, payload: EventPayload) -> BoxFuture<'_, ()> {
+        let payload = redact_payload(&self.scanner, payload);
         Box::pin(async move {
             if let Err(e) = self.log.emit(&self.session, None, payload).await {
                 tracing::error!(session_id = %self.session, error = %e, "appending an agent event");

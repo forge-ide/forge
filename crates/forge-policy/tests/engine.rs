@@ -607,3 +607,28 @@ async fn a_deny_whose_pattern_is_already_complete_denies_whatever_follows() {
         .decision;
     assert_eq!(d.source, Source::GitSharedState);
 }
+
+#[test]
+fn exact_patterns_match_only_the_action_they_came_from() {
+    use forge_policy::exact_pattern;
+    let exec = |argv: &[&str]| Action::Exec {
+        argv: argv.iter().map(|s| s.to_string()).collect(),
+        cwd: ".".into(),
+    };
+    assert_eq!(
+        exact_pattern(&exec(&["/usr/bin/touch", "a*b"])),
+        Ok(r"touch a\*b".into())
+    );
+    assert!(exact_pattern(&exec(&["sh", "-c", "$CMD"])).is_err());
+    assert!(exact_pattern(&exec(&["FOO=1", "touch", "x"])).is_err());
+    // `rm -rf build cache` would also match the same words split apart.
+    assert!(exact_pattern(&exec(&["rm", "-rf", "build cache"])).is_err());
+    assert!(exact_pattern(&exec(&["echo", "a\tb"])).is_err());
+    assert!(
+        exact_pattern(&Action::Edit {
+            path: "notes/a.txt".into(),
+            kind: forge_policy::EditKind::Create,
+        })
+        .is_err()
+    );
+}

@@ -276,13 +276,15 @@ pub async fn open(client: &mut Client, repo: &Path) -> Project {
         .unwrap()
 }
 
+/// Params for a fake-agent session in Full access, so scripted commands run without waiting on
+/// approvals; approval tests set the mode they test.
 pub fn create_params(project: &Project, title: &str, prompt: &str) -> SessionCreateParams {
     SessionCreateParams {
         project_id: project.id.clone(),
         agent_profile: "fake".into(),
         title: title.into(),
         prompt: prompt.into(),
-        mode: Mode::AcceptEdits,
+        mode: Mode::FullAccess,
         sandbox: Some(SandboxTier::Unsandboxed),
         branch: None,
         on_collision: None,

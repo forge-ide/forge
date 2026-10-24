@@ -17,7 +17,9 @@ pub mod user;
 pub use agent::{AGENTS_DIR, AgentProfileConfig, InvalidProfileId, ProfileMode, ProfileSandbox};
 pub use branches::{BranchConfig, BranchRules};
 pub use paths::{Paths, PathsError};
-pub use policy::{PROJECT_POLICY_FILE, PolicyConfig, PolicyRule, ProtectedConfig};
+pub use policy::{
+    PROJECT_POLICY_FILE, PolicyConfig, PolicyRule, ProtectedConfig, RuleListName, append_rule,
+};
 pub use project::{PROJECT_CONFIG_FILE, ProjectConfig, RepoConfig};
 pub use user::{SandboxConfig, UserConfig};
 

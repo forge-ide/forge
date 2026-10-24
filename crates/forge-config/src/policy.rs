@@ -111,6 +111,78 @@ impl PolicyConfig {
     }
 }
 
+/// The rule lists in a policy file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuleListName {
+    Deny,
+    Ask,
+    Allow,
+}
+
+/// Append `rule` to `list` in the policy file at `path`, creating the file if needed and
+/// keeping its text (comments included) as it is. The result must still load, or the file is
+/// left alone. The file is replaced in one step, so readers never see half of it, and appends
+/// in this process run one at a time, so none is lost.
+pub fn append_rule(path: &Path, list: RuleListName, rule: &PolicyRule) -> Result<(), ConfigError> {
+    static APPENDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one_at_a_time = APPENDING.lock().unwrap_or_else(|p| p.into_inner());
+    #[derive(Serialize)]
+    struct One<'a> {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        deny: Option<[&'a PolicyRule; 1]>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ask: Option<[&'a PolicyRule; 1]>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        allow: Option<[&'a PolicyRule; 1]>,
+    }
+    let one = One {
+        deny: (list == RuleListName::Deny).then_some([rule]),
+        ask: (list == RuleListName::Ask).then_some([rule]),
+        allow: (list == RuleListName::Allow).then_some([rule]),
+    };
+    let io = |source| ConfigError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+    let snippet = toml::to_string(&one).map_err(|e| ConfigError::Parse {
+        path: path.to_path_buf(),
+        message: e.to_string(),
+    })?;
+    let mut text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(io(e)),
+    };
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    text.push_str(&snippet);
+    let config: PolicyConfig = toml::from_str(&text).map_err(|e| ConfigError::Parse {
+        path: path.to_path_buf(),
+        message: format!("adding a rule would break the file: {e}"),
+    })?;
+    let problems = config.validate();
+    if !problems.is_empty() {
+        return Err(ConfigError::Invalid {
+            path: path.to_path_buf(),
+            problems,
+        });
+    }
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir).map_err(io)?;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+    let tmp = dir.join(format!(
+        ".{}.{}.tmp",
+        name.unwrap_or_default(),
+        std::process::id()
+    ));
+    std::fs::write(&tmp, &text).map_err(io)?;
+    std::fs::rename(&tmp, path).map_err(io)
+}
+
 /// Edit patterns are repo-relative: a leading `/` anchors to the repo root, as in gitignore.
 /// No empty patterns, bare `/`, or `..`.
 fn path_problems(at: &str, key: &str, patterns: &[String]) -> Vec<String> {
@@ -141,6 +213,61 @@ mod tests {
         let path = dir.path().join("policy.toml");
         std::fs::write(&path, text).unwrap();
         PolicyConfig::load(&path)
+    }
+
+    fn exact(exec: &str) -> PolicyRule {
+        PolicyRule {
+            exec: vec![exec.into()],
+            reason: Some("remembered".into()),
+            ..PolicyRule::default()
+        }
+    }
+
+    #[test]
+    fn appended_rules_keep_the_file_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".forge/policy.toml");
+        append_rule(&path, RuleListName::Allow, &exact(r#"echo "a\*b""#)).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "# team rules\n{}[protected]\npaths = [\"x\"]",
+                std::fs::read_to_string(&path).unwrap()
+            ),
+        )
+        .unwrap();
+        append_rule(&path, RuleListName::Deny, &exact("rm -rf x")).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# team rules\n[[allow]]\n"), "{text}");
+        let config = PolicyConfig::load(&path).unwrap();
+        assert_eq!(config.allow, [exact(r#"echo "a\*b""#)]);
+        assert_eq!(config.deny, [exact("rm -rf x")]);
+        assert_eq!(config.protected.paths, ["x"]);
+    }
+
+    #[test]
+    fn concurrent_appends_all_land() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.toml");
+        std::thread::scope(|scope| {
+            for i in 0..8 {
+                let path = &path;
+                scope.spawn(move || {
+                    append_rule(path, RuleListName::Deny, &exact(&format!("rm {i}"))).unwrap()
+                });
+            }
+        });
+        assert_eq!(PolicyConfig::load(&path).unwrap().deny.len(), 8);
+    }
+
+    #[test]
+    fn a_rule_that_would_break_the_file_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.toml");
+        let inline = "allow = [{ exec = [\"ls\"] }]\n";
+        std::fs::write(&path, inline).unwrap();
+        assert!(append_rule(&path, RuleListName::Allow, &exact("pwd")).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), inline);
     }
 
     #[test]
