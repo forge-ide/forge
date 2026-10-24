@@ -1,0 +1,30 @@
+# Gemini CLI, which speaks ACP itself.
+id = "gemini"
+name = "Gemini CLI"
+profile = "gemini"
+
+[package]
+npm = "@google/gemini-cli"
+version = "0.65.0"
+bin = "gemini"
+runtime = "node"
+
+[launch]
+args = ["--acp", "--approval-mode", "default"]
+env = { GEMINI_CLI_TRUST_WORKSPACE = "true" }
+
+[auth]
+secrets = ["GEMINI_API_KEY"]
+
+[permissions]
+# Shell requests carry no rawInput; the title is the command line.
+command = "title"
+
+[quirks]
+notes = [
+    "Shell permission requests carry no rawInput, only the command line as their title.",
+    "Runs shell commands and reads files itself; writes and edits go through ACP's file methods.",
+    "Auto-allows a list of read-only shell commands unless a policy rule with an args pattern asks; the shim's policy asks for every shell command.",
+    "Starts no MCP servers in an untrusted folder, so the shim trusts the worktree; its settings go in the system tier and its policy (passed with --policy, which replaces ~/.gemini/policies) in the user tier, both above the repo's.",
+    "Google sign-in keeps credentials in the real home, which the sandbox hides; Forge uses an API key from the keyring.",
+]

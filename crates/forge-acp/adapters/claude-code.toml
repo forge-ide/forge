@@ -1,0 +1,29 @@
+# Claude Code through the Claude Agent ACP adapter.
+id = "claude-code"
+name = "Claude Code"
+profile = "claude"
+
+[package]
+npm = "@agentclientprotocol/claude-agent-acp"
+version = "0.95.0"
+bin = "claude-agent-acp"
+runtime = "node"
+
+[launch]
+args = []
+env = { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", DISABLE_AUTOUPDATER = "1" }
+
+[auth]
+secrets = ["ANTHROPIC_API_KEY"]
+
+[permissions]
+# Bash requests carry `rawInput.command` as one shell string.
+command = "raw-input"
+
+[quirks]
+notes = [
+    "Runs its Read, Write, Edit, and Bash tools itself, never through ACP's file or terminal methods; the sandbox bounds them and Forge decides them from their permission requests.",
+    "Reads its settings files from the worktree (.claude/settings*.json) unless told not to; the shim turns every settings source off so a repo can't pre-allow tools.",
+    "Takes its starting mode from settings, so Forge sets the ACP mode to `default` after session/new and checks that it took.",
+    "Subscription sign-in (claude.ai) keeps credentials in the real home, which the sandbox hides; Forge uses an API key from the keyring.",
+]

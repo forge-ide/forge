@@ -5,6 +5,7 @@
 //! [`Gate`] before each permission request, write, and terminal, and turns what happens into
 //! session events for an [`EventSink`].
 
+pub mod adapters;
 pub mod client;
 pub mod terminal;
 pub mod workspace;

@@ -56,6 +56,16 @@ pub struct ProjectGetParams {
     pub project_id: ProjectId,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentListParams {
+    /// List this project's profiles: the built-in ones and its `.forge/agents/` files. Without
+    /// it, only the built-in profiles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub project_id: Option<ProjectId>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionCreateParams {
@@ -421,7 +431,7 @@ methods! {
     ProjectOpen = "project.open": ProjectOpenParams => Project;
     ProjectList = "project.list": Empty => Vec<Project>;
     ProjectGet = "project.get": ProjectGetParams => Project;
-    AgentList = "agent.list": Empty => Vec<AgentProfile>;
+    AgentList = "agent.list": AgentListParams => Vec<AgentProfile>;
     SessionCreate = "session.create": SessionCreateParams => Session;
     SessionPrompt = "session.prompt": SessionPromptParams => TurnResult;
     SessionCancel = "session.cancel": SessionIdParams => Empty;

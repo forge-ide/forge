@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::db::Db;
-use crate::{projects, sessions};
+use crate::{agents, projects, sessions};
 
 /// Most events one `events.query` returns.
 const MAX_QUERY_LIMIT: u32 = 1000;
@@ -31,6 +31,8 @@ pub struct State {
     pub sessions: Arc<SessionManager>,
     pub sandbox: Arc<dyn forge_sandbox::Sandbox>,
     pub paths: Paths,
+    /// Where agents' secrets come from.
+    pub secrets: Arc<dyn forge_sandbox::secrets::SecretStore>,
 }
 
 /// Work to run once a request's response is queued, such as replaying events to a new
@@ -197,6 +199,9 @@ async fn dispatch(
         }
         ProjectGet::NAME => {
             run::<ProjectGet>(params, async |p| get_project(state, p.project_id).await).await
+        }
+        AgentList::NAME => {
+            run::<AgentList>(params, async |p| agents::list(state, p.project_id).await).await
         }
         SessionCreate::NAME => {
             run::<SessionCreate>(params, async |p| sessions::create(state, p).await).await

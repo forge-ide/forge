@@ -1,0 +1,31 @@
+# Codex through the Codex ACP adapter, which drives `codex app-server`.
+id = "codex"
+name = "Codex"
+profile = "codex"
+
+[package]
+npm = "@agentclientprotocol/codex-acp"
+version = "2.2.2"
+bin = "codex-acp"
+runtime = "node"
+
+[launch]
+args = []
+env = { INITIAL_AGENT_MODE = "read-only", NO_BROWSER = "1" }
+
+[auth]
+secrets = ["OPENAI_API_KEY"]
+
+[permissions]
+# Approval requests strip the shell prefix from the command; the tool call that precedes
+# them carries Codex's whole argv, shell-quoted.
+command = "tool-call-argv"
+
+[quirks]
+notes = [
+    "No adapter mode sends every command to the client: Forge runs it in `read-only`, where edits and anything that writes or needs the network ask, while read-only commands run in Codex's own sandbox without a permission request.",
+    "Codex wraps commands in the user's login shell (`bash -lc`); the shim turns login shells and the shell snapshot off, so commands arrive as `<shell> -c <script>`. A user whose passwd shell is zsh or fish gets an ask for every command.",
+    "Runs commands and applies patches itself, never through ACP's file or terminal methods.",
+    "Offers to save an exec-policy rule with an approval; Forge never picks it.",
+    "ChatGPT sign-in keeps credentials in the real home, which the sandbox hides; Forge uses an API key from the keyring.",
+]

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use forge_acp::AgentCommand;
+use forge_acp::{AgentCommand, adapters};
 use forge_api::methods::{
     BranchPreview, BranchPreviewParams, SessionCreateParams, SessionOutcome, SessionSetModeParams,
 };
@@ -139,18 +139,19 @@ async fn branch_rules(
 }
 
 async fn load_profile(root: &Path, id: &str) -> Result<AgentProfileConfig, HandlerError> {
-    let path =
-        AgentProfileConfig::path(root, id).map_err(|e| ApiError::validation(e.to_string()))?;
-    let file = path.clone();
-    let loaded = tokio::task::spawn_blocking(move || AgentProfileConfig::load(&file))
+    let (dir, name) = (root.to_path_buf(), id.to_owned());
+    let loaded = tokio::task::spawn_blocking(move || crate::agents::load(&dir, &name))
         .await
         .map_err(anyhow::Error::from)?;
-    match loaded {
-        Ok(Some(profile)) => Ok(profile),
-        Ok(None) => {
-            Err(ApiError::not_found(format!("agent profile {id:?}: no {}", path.display())).into())
-        }
-        Err(e) => Err(ApiError::validation(e.to_string()).into()),
+    match loaded? {
+        Some(profile) => Ok(profile),
+        None => Err(ApiError::not_found(format!(
+            "agent profile {id:?}: no {} and no built-in profile of that name",
+            Path::new(forge_config::AGENTS_DIR)
+                .join(format!("{id}.toml"))
+                .display()
+        ))
+        .into()),
     }
 }
 
@@ -213,10 +214,7 @@ impl ProfileResolver {
             .map_err(|e| ApiError::new(ErrorKind::AgentUnavailable, e.to_string()))?
             .ok_or_else(|| ApiError::not_found(format!("project {}", session.project_id)))?;
         let id = &session.agent_profile;
-        let path =
-            AgentProfileConfig::path(&root, id).map_err(|e| ApiError::validation(e.to_string()))?;
-        let profile = AgentProfileConfig::load(&path)
-            .map_err(|e| ApiError::validation(e.to_string()))?
+        let profile = crate::agents::load(&root, id)?
             .ok_or_else(|| ApiError::not_found(format!("agent profile {id:?}")))?;
         Ok((root, profile))
     }
@@ -251,10 +249,13 @@ impl AgentResolver for ProfileResolver {
         sandbox_tier(Some(session.sandbox), &profile, id, &self.sandbox.tiers())?;
         let network = allowlist(&profile, id)?;
         let secrets = self.routes(&profile, id)?;
-        let mut argv = profile.command.ok_or_else(|| {
+        let command = crate::agents::command(&profile).ok_or_else(|| {
             ApiError::new(
                 ErrorKind::AgentUnavailable,
-                format!("agent profile {id:?} has no command"),
+                format!(
+                    "agent profile {id:?}: agent {:?} is not in Forge's registry, so the profile must set command",
+                    profile.agent
+                ),
             )
         })?;
         let user = UserConfig::load(&self.paths.user_config())
@@ -263,16 +264,22 @@ impl AgentResolver for ProfileResolver {
             &user.sandbox.read_only,
             &[&self.home, &self.paths.data_dir, &self.paths.runtime_dir],
         )?;
-        // The agent program must be visible inside the sandbox; run it by its real path, since
-        // a symlink to it may sit in a hidden directory.
-        let program = resolve_program(&argv[0]).ok_or_else(|| {
-            ApiError::new(
-                ErrorKind::AgentUnavailable,
-                format!("agent profile {id:?}: {} is not installed", argv[0]),
-            )
-        })?;
-        argv[0] = program.display().to_string();
-        read_only.push(program);
+        // The agent must be visible inside the sandbox: its program by its real path (a
+        // symlink to it may sit in a hidden directory), and for an npm adapter, node and the
+        // adapter's package.
+        let manifest = adapters::manifest(&profile.agent);
+        let plan = adapters::plan(manifest, &command, std::env::var_os("PATH").as_deref())
+            .map_err(|e| {
+                let install = manifest
+                    .map(|m| format!("; install it with `{}`", m.install_command().join(" ")))
+                    .unwrap_or_default();
+                ApiError::new(
+                    ErrorKind::AgentUnavailable,
+                    format!("agent profile {id:?}: {e}{install}"),
+                )
+            })?;
+        read_only.extend(plan.read_only);
+        let argv = plan.argv;
         let rules = Arc::new(policy_rules(&self.paths, &root)?);
         let hooks = project_hooks(&root, &self.home)?;
         // Hook scripts come from the project root, shown read-only, so the agent can't change
@@ -395,19 +402,6 @@ fn resolve(path: &Path) -> PathBuf {
     }
 }
 
-/// `program` as an absolute, canonical path, looked up in `PATH` when it has no slash.
-fn resolve_program(program: &str) -> Option<PathBuf> {
-    let found = if program.contains('/') {
-        PathBuf::from(program)
-    } else {
-        let path = std::env::var_os("PATH")?;
-        std::env::split_paths(&path)
-            .map(|dir| dir.join(program))
-            .find(|candidate| candidate.is_file())?
-    };
-    std::fs::canonicalize(found).ok().filter(|p| p.is_file())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,14 +439,5 @@ mod tests {
         // Protecting a missing dir behind a symlink still refuses its resolved parent.
         let protected = link.join("data/forge");
         assert!(checked_read_only(&[real.join("data")], &[&protected]).is_err());
-    }
-
-    #[test]
-    fn programs_resolve_through_path_to_their_real_file() {
-        let sh = resolve_program("sh").unwrap();
-        assert!(sh.is_absolute() && sh.is_file());
-        assert_eq!(resolve_program(sh.to_str().unwrap()), Some(sh));
-        assert_eq!(resolve_program("forge-no-such-program"), None);
-        assert_eq!(resolve_program("/"), None);
     }
 }
