@@ -10,10 +10,26 @@ use crate::{Layer, PolicyError, RuleList};
 
 /// Paths agents may never edit through Forge, whatever the files say.
 pub const BUILTIN_PROTECTED: &[&str] = &[
-    ".env", ".env.*", "*.pem", "*.key", ".forge/",
-    // Both run code on the user's machine outside the sandbox: direnv loads `.envrc` on
-    // entering the directory, and husky's git hooks run on the user's own commits.
-    ".envrc", ".husky/",
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    ".forge/",
+    // Files that run code on the user's machine, outside the sandbox: direnv loads `.envrc`
+    // (which often sources `.envrc.local`, and caches in `.direnv/`) on entering the
+    // directory; husky, lefthook, pre-commit, and a `core.hooksPath` of `.githooks/` run git
+    // hooks on the user's own commits; mise runs tasks and env hooks from `.mise.toml`; and
+    // VS Code runs `.vscode/tasks.json`.
+    ".envrc",
+    ".envrc.local",
+    ".direnv/",
+    ".husky/",
+    ".githooks/",
+    "lefthook.yml",
+    "lefthook.yaml",
+    ".pre-commit-config.yaml",
+    ".mise.toml",
+    ".vscode/tasks.json",
 ];
 
 /// Every layer's rules, compiled once per session launch.

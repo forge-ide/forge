@@ -671,16 +671,27 @@ async fn files_that_run_code_on_the_users_machine_are_protected() {
     for path in [
         ".envrc",
         "services/api/.envrc",
+        ".envrc.local",
+        ".direnv/python-3/bin/activate",
         ".husky/pre-commit",
         "web/.husky/_/h",
+        ".githooks/pre-push",
+        "lefthook.yml",
+        "lefthook.yaml",
+        ".pre-commit-config.yaml",
+        ".mise.toml",
+        ".vscode/tasks.json",
     ] {
         let d = e.decide(&edit(path), Mode::FullAccess).await.decision;
         assert_eq!(d.verdict, Verdict::Deny, "{path}");
         assert_eq!(d.source, Source::ProtectedPath, "{path}");
     }
-    let d = e
-        .decide(&edit("docs/envrc.md"), Mode::FullAccess)
-        .await
-        .decision;
-    assert_eq!(d.verdict, Verdict::Allow);
+    for path in [
+        "docs/envrc.md",
+        ".vscode/settings.json",
+        "web/.vscode/tasks.json",
+    ] {
+        let d = e.decide(&edit(path), Mode::FullAccess).await.decision;
+        assert_eq!(d.verdict, Verdict::Allow, "{path}");
+    }
 }
