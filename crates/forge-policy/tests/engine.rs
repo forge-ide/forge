@@ -664,3 +664,45 @@ fn exact_patterns_match_only_the_action_they_came_from() {
         .is_err()
     );
 }
+
+#[tokio::test]
+async fn files_that_run_code_on_the_users_machine_are_protected() {
+    let e = plain("[[allow]]\nedit = [\"**\"]\n");
+    for path in [
+        ".envrc",
+        "services/api/.envrc",
+        ".envrc.local",
+        ".direnv/python-3/bin/activate",
+        ".husky/pre-commit",
+        "web/.husky/_/h",
+        ".githooks/pre-push",
+        "lefthook.yml",
+        "lefthook.yaml",
+        ".pre-commit-config.yaml",
+        ".lefthook.yml",
+        "lefthook-local.yaml",
+        "mise.toml",
+        ".mise.toml",
+        "mise.local.toml",
+        ".mise/tasks/build",
+        ".config/mise.toml",
+        ".vscode/tasks.json",
+        ".vscode/launch.json",
+        ".vscode/settings.json",
+        "forge.code-workspace",
+        "tools/dev.code-workspace",
+    ] {
+        let d = e.decide(&edit(path), Mode::FullAccess).await.decision;
+        assert_eq!(d.verdict, Verdict::Deny, "{path}");
+        assert_eq!(d.source, Source::ProtectedPath, "{path}");
+    }
+    for path in [
+        "docs/envrc.md",
+        ".vscode/extensions.json",
+        "web/.vscode/tasks.json",
+        "docs/mise.md",
+    ] {
+        let d = e.decide(&edit(path), Mode::FullAccess).await.decision;
+        assert_eq!(d.verdict, Verdict::Allow, "{path}");
+    }
+}

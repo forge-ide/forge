@@ -18,6 +18,7 @@ use futures_util::future::BoxFuture;
 use tokio::sync::oneshot;
 
 use super::{Live, SessionError, SessionManager, SessionSink, invalid_state, lock};
+use crate::redact::redact_action;
 use crate::store::ApprovalOutcome;
 
 /// Content longer than this is scanned for secrets on the blocking pool.
@@ -548,77 +549,9 @@ fn describe(action: &Action) -> String {
     }
 }
 
-/// `action` with secrets in its text replaced, for the event log and the inbox.
-pub(super) fn redact_action(scanner: &SecretScanner, action: &Action) -> Action {
-    let redact = |text: &str| scanner.redact(text).into_owned();
-    match action {
-        Action::Exec { argv, cwd } => Action::Exec {
-            argv: argv.iter().map(|a| redact(a)).collect(),
-            cwd: redact(cwd),
-        },
-        Action::Edit { path, kind } => Action::Edit {
-            path: redact(path),
-            kind: *kind,
-        },
-        other => other.clone(),
-    }
-}
-
-/// `payload` with secrets replaced in the parts that carry an agent's text: actions, titles,
-/// and reasons.
-pub(super) fn redact_payload(scanner: &SecretScanner, payload: EventPayload) -> EventPayload {
-    match payload {
-        EventPayload::ToolCall(mut b) => {
-            b.action = redact_action(scanner, &b.action);
-            b.title = scanner.redact(&b.title).into_owned();
-            EventPayload::ToolCall(b)
-        }
-        EventPayload::PolicyDecision(mut b) => {
-            b.reason = scanner.redact(&b.reason).into_owned();
-            EventPayload::PolicyDecision(b)
-        }
-        EventPayload::ApprovalRequested(mut b) => {
-            b.action = redact_action(scanner, &b.action);
-            b.reason = scanner.redact(&b.reason).into_owned();
-            EventPayload::ApprovalRequested(b)
-        }
-        other => other,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn redaction_covers_argv_titles_and_reasons() {
-        let scanner = SecretScanner::new(vec!["hunter2-injected".into()]);
-        let token = format!("ghp_{}", "a".repeat(36));
-        let action = Action::Exec {
-            argv: vec![
-                "curl".into(),
-                format!("-Htoken {token}"),
-                "hunter2-injected".into(),
-            ],
-            cwd: ".".into(),
-        };
-        let shown = format!("{:?}", redact_action(&scanner, &action));
-        assert!(
-            !shown.contains(&token) && !shown.contains("hunter2"),
-            "{shown}"
-        );
-        let call = redact_payload(
-            &scanner,
-            EventPayload::ToolCall(forge_api::events::ToolCallBody {
-                tool_call_id: "t".into(),
-                action,
-                title: format!("Run curl {token}"),
-            }),
-        );
-        let shown = format!("{call:?}");
-        assert!(!shown.contains(&token), "{shown}");
-        assert!(shown.contains("[redacted:github-token]"), "{shown}");
-    }
 
     #[test]
     fn grants_cover_the_same_argv_or_path() {

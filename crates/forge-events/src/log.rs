@@ -40,9 +40,15 @@ pub enum LogError {
 }
 
 /// Rewrites event bodies before they are written or published, e.g. to replace secrets with
-/// placeholders.
+/// placeholders. Gets the session, whose injected secrets it may know.
 pub trait Redactor: Send + Sync {
-    fn redact(&self, payload: &mut EventPayload);
+    fn redact(&self, session: &SessionId, payload: &mut EventPayload);
+}
+
+impl<T: Redactor + ?Sized> Redactor for Arc<T> {
+    fn redact(&self, session: &SessionId, payload: &mut EventPayload) {
+        (**self).redact(session, payload);
+    }
 }
 
 /// A [`Redactor`] that changes nothing.
@@ -50,7 +56,7 @@ pub trait Redactor: Send + Sync {
 pub struct NoRedaction;
 
 impl Redactor for NoRedaction {
-    fn redact(&self, _: &mut EventPayload) {}
+    fn redact(&self, _: &SessionId, _: &mut EventPayload) {}
 }
 
 /// Where a session's event log lives.
@@ -210,7 +216,7 @@ impl EventLog {
         parent: Option<u64>,
         mut payload: EventPayload,
     ) -> Result<Event, LogError> {
-        self.redactor.redact(&mut payload);
+        self.redactor.redact(session, &mut payload);
         let mut inner = lock(&self.inner);
         let stream_seq = inner.next_stream;
         let log = inner
@@ -802,7 +808,7 @@ mod tests {
     struct Mask;
 
     impl Redactor for Mask {
-        fn redact(&self, payload: &mut EventPayload) {
+        fn redact(&self, _: &SessionId, payload: &mut EventPayload) {
             if let EventPayload::AgentMessage(b) = payload {
                 b.delta = b.delta.replace("hunter2", "[secret]");
             }

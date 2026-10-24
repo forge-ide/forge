@@ -29,7 +29,7 @@ use tokio::process::Child;
 use tokio::sync::{oneshot, watch};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-use crate::terminal::{DEFAULT_OUTPUT_LIMIT, ExitInfo, Terminals};
+use crate::terminal::{DEFAULT_OUTPUT_LIMIT, ExitInfo, Pipe, Terminals};
 use crate::workspace::{PathError, Workspace};
 
 /// Lines of the agent's stderr kept for crash reports.
@@ -42,6 +42,11 @@ const REFUSED: i32 = -32003;
 /// Where session events go. The session layer appends them to the event log.
 pub trait EventSink: Send + Sync + 'static {
     fn emit(&self, payload: EventPayload) -> BoxFuture<'_, ()>;
+
+    /// A chunk of a terminal's output, from one of its pipes.
+    fn terminal_output(&self, _pipe: Pipe, body: TerminalOutputBody) -> BoxFuture<'_, ()> {
+        self.emit(EventPayload::TerminalOutput(body))
+    }
 }
 
 /// What the agent is asking to do.
@@ -512,13 +517,20 @@ fn tool_call_id() -> String {
     format!("tc_{}", ulid::Ulid::new())
 }
 
-/// The last `RESULT_OUTPUT_LIMIT` bytes of `text`.
+/// At most the last `RESULT_OUTPUT_LIMIT` bytes of `text`. A cut never starts inside a word:
+/// the end of a secret cut short would no longer look like one, and redaction would miss it.
 fn tail(text: &str) -> String {
     let mut start = text.len().saturating_sub(RESULT_OUTPUT_LIMIT);
+    if start == 0 {
+        return text.to_owned();
+    }
     while !text.is_char_boundary(start) {
         start += 1;
     }
-    text[start..].to_owned()
+    let after_space = text[start..]
+        .find(char::is_whitespace)
+        .map_or(text.len(), |i| start + i);
+    text[after_space..].trim_start().to_owned()
 }
 
 impl Handlers {
@@ -679,14 +691,11 @@ impl Handlers {
             &cwd.path,
             &env,
             limit,
-            Arc::new(move |chunk| {
+            Arc::new(move |pipe, chunk| {
                 let (h, terminal_id) = (out.clone(), terminal_id.clone());
                 Box::pin(async move {
                     h.sink
-                        .emit(EventPayload::TerminalOutput(TerminalOutputBody {
-                            terminal_id,
-                            chunk,
-                        }))
+                        .terminal_output(pipe, TerminalOutputBody { terminal_id, chunk })
                         .await;
                 })
             }),
@@ -1017,6 +1026,21 @@ mod tests {
         );
         let req = permission(serde_json::json!({ "command": ["ls", "-la"] }));
         assert_eq!(argv(permission_action(&req, &ws)), ["ls", "-la"]);
+    }
+
+    #[test]
+    fn output_tails_never_start_inside_a_word() {
+        assert_eq!(tail("short output"), "short output");
+        let token = format!("ghp_{}", "a".repeat(36));
+        let text = format!(
+            "{}{token} end\nlast line\n",
+            "x".repeat(RESULT_OUTPUT_LIMIT)
+        );
+        let cut = tail(&text);
+        assert!(cut.len() <= RESULT_OUTPUT_LIMIT);
+        assert_eq!(cut, "end\nlast line\n");
+        // One unbroken word longer than the limit leaves nothing rather than a fragment.
+        assert_eq!(tail(&"y".repeat(RESULT_OUTPUT_LIMIT + 10)), "");
     }
 
     #[test]

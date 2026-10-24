@@ -204,8 +204,9 @@ pub struct ProfileResolver {
     pub secrets: Arc<dyn SecretStore>,
 }
 
-impl AgentResolver for ProfileResolver {
-    fn launch(&self, session: &Session) -> Result<AgentLaunch, ApiError> {
+impl ProfileResolver {
+    /// The session's project root and agent profile.
+    fn profile(&self, session: &Session) -> Result<(PathBuf, AgentProfileConfig), ApiError> {
         let root = self
             .db
             .project_root(&session.project_id)
@@ -217,9 +218,12 @@ impl AgentResolver for ProfileResolver {
         let profile = AgentProfileConfig::load(&path)
             .map_err(|e| ApiError::validation(e.to_string()))?
             .ok_or_else(|| ApiError::not_found(format!("agent profile {id:?}")))?;
-        sandbox_tier(Some(session.sandbox), &profile, id, &self.sandbox.tiers())?;
-        let network = allowlist(&profile, id)?;
-        let secrets = known_secrets(&profile, id)?
+        Ok((root, profile))
+    }
+
+    /// The secrets the profile injects, with their values from the keyring.
+    fn routes(&self, profile: &AgentProfileConfig, id: &str) -> Result<Vec<SecretRoute>, ApiError> {
+        known_secrets(profile, id)?
             .into_iter()
             .map(|secret| {
                 let value = self.secrets.get(secret.name).map_err(|e| {
@@ -230,7 +234,23 @@ impl AgentResolver for ProfileResolver {
                 })?;
                 Ok(SecretRoute { secret, value })
             })
-            .collect::<Result<Vec<_>, ApiError>>()?;
+            .collect()
+    }
+}
+
+impl AgentResolver for ProfileResolver {
+    fn secret_values(&self, session: &Session) -> Result<Vec<String>, ApiError> {
+        let (_, profile) = self.profile(session)?;
+        let routes = self.routes(&profile, &session.agent_profile)?;
+        Ok(routes.iter().map(|r| r.value.expose().to_owned()).collect())
+    }
+
+    fn launch(&self, session: &Session) -> Result<AgentLaunch, ApiError> {
+        let (root, profile) = self.profile(session)?;
+        let id = &session.agent_profile;
+        sandbox_tier(Some(session.sandbox), &profile, id, &self.sandbox.tiers())?;
+        let network = allowlist(&profile, id)?;
+        let secrets = self.routes(&profile, id)?;
         let mut argv = profile.command.ok_or_else(|| {
             ApiError::new(
                 ErrorKind::AgentUnavailable,

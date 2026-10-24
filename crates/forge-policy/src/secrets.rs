@@ -12,9 +12,10 @@ use regex::Regex;
 
 /// Built-in patterns, as `(kind, regex)`. Earlier entries win where matches overlap.
 const PATTERNS: &[(&str, &str)] = &[
+    // The whole block, through its END line, or to the end of the text when it isn't closed.
     (
         "private-key",
-        r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----",
+        r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----(?:[\s\S]*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----|[\s\S]*)",
     ),
     ("aws-access-key", r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
     ("github-token", r"\bgh[pousr]_[A-Za-z0-9]{36,}\b"),
@@ -37,6 +38,11 @@ const PATTERNS: &[(&str, &str)] = &[
     ("sendgrid-key", r"SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}"),
 ];
 
+/// The first line of a private key block.
+const KEY_BEGIN: &str = r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----";
+/// The last line of a private key block.
+const KEY_END: &str = r"-----END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----";
+
 /// Values shorter than this aren't scanned for, since they'd match ordinary text.
 const MIN_VALUE_LEN: usize = 8;
 
@@ -54,6 +60,8 @@ pub struct Finding {
 pub struct SecretScanner {
     patterns: Vec<(&'static str, Regex)>,
     values: Vec<String>,
+    key_begin: Regex,
+    key_end: Regex,
 }
 
 impl Default for SecretScanner {
@@ -74,7 +82,38 @@ impl SecretScanner {
             .into_iter()
             .filter(|v| v.len() >= MIN_VALUE_LEN)
             .collect();
-        Self { patterns, values }
+        Self {
+            patterns,
+            values,
+            key_begin: Regex::new(KEY_BEGIN).expect("built-in patterns compile"),
+            key_end: Regex::new(KEY_END).expect("built-in patterns compile"),
+        }
+    }
+
+    /// The length of the longest value scanned for, in bytes.
+    pub fn longest_value(&self) -> usize {
+        self.values.iter().map(String::len).max().unwrap_or(0)
+    }
+
+    /// The length of the longest value scanned for that spans lines, or 0.
+    pub fn longest_multiline_value(&self) -> usize {
+        self.values
+            .iter()
+            .filter(|v| v.contains('\n'))
+            .map(String::len)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Where a private key block starts in `text` without its END line after it.
+    pub fn open_key_block(&self, text: &str) -> Option<usize> {
+        let begin = self.key_begin.find_iter(text).last()?;
+        (!self.key_end.is_match(&text[begin.end()..])).then_some(begin.start())
+    }
+
+    /// Where the first private key END line in `text` ends.
+    pub fn key_block_end(&self, text: &str) -> Option<usize> {
+        self.key_end.find(text).map(|m| m.end())
     }
 
     /// Every secret in `text`, in order, without overlaps.
@@ -92,6 +131,7 @@ impl SecretScanner {
                 range: m.range(),
             }));
         }
+
         // Keep the first-listed finding where two overlap: values, then patterns in order.
         // Kept findings never overlap, so a new one need only be checked against its
         // neighbours by start.
@@ -108,9 +148,31 @@ impl SecretScanner {
         kept.into_values().collect()
     }
 
-    /// `text` with each secret replaced by `[redacted:<kind>]`.
+    /// Like [`SecretScanner::scan`], for text that may have been cut from longer text (a
+    /// chunk of output, the end of long output): an END line of a private key with no BEGIN
+    /// before it means everything up to it is key material. Edits and command lines are never
+    /// cut, so the policy engine scans them plainly.
+    pub fn scan_cut(&self, text: &str) -> Vec<Finding> {
+        let mut found = self.scan(text);
+        if let Some(end) = self.key_end.find(text)
+            && !self.key_begin.is_match(&text[..end.start()])
+        {
+            found.retain(|f| f.range.start >= end.end());
+            found.insert(
+                0,
+                Finding {
+                    kind: "private-key",
+                    range: 0..end.end(),
+                },
+            );
+        }
+        found
+    }
+
+    /// `text` with each secret replaced by `[redacted:<kind>]`, treating it as possibly cut
+    /// (see [`SecretScanner::scan_cut`]), as for what Forge records.
     pub fn redact<'t>(&self, text: &'t str) -> Cow<'t, str> {
-        let found = self.scan(text);
+        let found = self.scan_cut(text);
         if found.is_empty() {
             return Cow::Borrowed(text);
         }
@@ -216,6 +278,44 @@ mod tests {
             start.elapsed() < std::time::Duration::from_secs(5),
             "{:?}",
             start.elapsed()
+        );
+    }
+
+    #[test]
+    fn whole_key_blocks_are_redacted_even_cut_short() {
+        let s = SecretScanner::default();
+        let key = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\nq1w2e3r4\n-----END RSA PRIVATE KEY-----";
+        assert_eq!(
+            s.redact(&format!("preamble\n{key}\ntrailer")),
+            "preamble\n[redacted:private-key]\ntrailer"
+        );
+        // Not closed: to the end of the text.
+        assert_eq!(
+            s.redact("x\n-----BEGIN PRIVATE KEY-----\nMIIE\nabcd"),
+            "x\n[redacted:private-key]"
+        );
+        // Its head cut off: from the start of the text through the END line, but only for
+        // text that may have been cut, not for policy's plain scan.
+        assert_eq!(
+            s.redact("q1w2e3r4\n-----END RSA PRIVATE KEY-----\nafter"),
+            "[redacted:private-key]\nafter"
+        );
+        assert!(
+            s.kinds("docs: a key ends with -----END PRIVATE KEY-----")
+                .is_empty()
+        );
+        assert_eq!(
+            s.open_key_block("a\n-----BEGIN EC PRIVATE KEY-----\nMHc"),
+            Some(2)
+        );
+        assert_eq!(s.open_key_block(key), None);
+        assert_eq!(
+            s.key_block_end("ab\n-----END PRIVATE KEY-----\nc"),
+            Some(28)
+        );
+        assert_eq!(
+            SecretScanner::new(vec!["0123456789abcdef".into()]).longest_value(),
+            16
         );
     }
 

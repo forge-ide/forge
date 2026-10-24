@@ -9,7 +9,42 @@ use crate::paths::{PathPatterns, normalize};
 use crate::{Layer, PolicyError, RuleList};
 
 /// Paths agents may never edit through Forge, whatever the files say.
-pub const BUILTIN_PROTECTED: &[&str] = &[".env", ".env.*", "*.pem", "*.key", ".forge/"];
+pub const BUILTIN_PROTECTED: &[&str] = &[
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    ".forge/",
+    // Files a developer tool runs code from on the user's machine, outside the sandbox, when
+    // they open, enter, or commit to the project:
+    // direnv, on entering the directory;
+    ".envrc",
+    ".envrc.local",
+    ".direnv/",
+    // git hooks on the user's own commits (husky, a `core.hooksPath` of `.githooks/`,
+    // lefthook, pre-commit);
+    ".husky/",
+    ".githooks/",
+    "lefthook.yml",
+    "lefthook.yaml",
+    ".lefthook.yml",
+    ".lefthook.yaml",
+    "lefthook-local.yml",
+    "lefthook-local.yaml",
+    ".pre-commit-config.yaml",
+    // mise tasks and env hooks;
+    "mise.toml",
+    ".mise.toml",
+    "mise.local.toml",
+    ".mise.local.toml",
+    ".mise/",
+    ".config/mise.toml",
+    // VS Code tasks, launch configurations, and settings that name programs to run.
+    ".vscode/tasks.json",
+    ".vscode/launch.json",
+    ".vscode/settings.json",
+    "*.code-workspace",
+];
 
 /// Every layer's rules, compiled once per session launch.
 #[derive(Clone, Debug)]

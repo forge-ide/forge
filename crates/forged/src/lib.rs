@@ -62,11 +62,13 @@ pub async fn run(paths: Paths, shutdown: impl Future<Output = ()>) -> anyhow::Re
 /// The event log and session manager over an open database, with interrupted sessions
 /// recovered.
 async fn open_state(db: db::Db, paths: Paths) -> anyhow::Result<Arc<rpc::State>> {
+    // Every event is redacted before it is written or published.
+    let redactor = forge_session::SecretRedactor::new();
     let log = Arc::new(
         forge_events::EventLog::open(
             db.shared(),
             Arc::new(forge_events::Hub::new()),
-            Box::new(forge_events::NoRedaction),
+            Box::new(redactor.clone()),
         )
         .context("opening the event log")?,
     );
@@ -95,6 +97,7 @@ async fn open_state(db: db::Db, paths: Paths) -> anyhow::Result<Arc<rpc::State>>
             sessions: paths.data_dir.join("sessions"),
             home,
         },
+        redactor,
     );
     sessions
         .recover()
