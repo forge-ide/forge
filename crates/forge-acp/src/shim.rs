@@ -167,21 +167,6 @@ fn strip_json_comments(text: &str) -> String {
     out
 }
 
-/// The most extensions whose manifests are checked for a server named after Forge's; a
-/// launch with more is refused.
-const MAX_EXTENSIONS: usize = 256;
-
-/// Where the extension installed in `dir` was linked from, if it is a link: Gemini then
-/// loads its manifest from there.
-fn linked_extension(dir: &Path) -> Option<PathBuf> {
-    let raw = read_settings(&dir.join(".gemini-extension-install.json")).ok()??;
-    let meta: serde_json::Value = serde_json::from_slice(&raw).ok()?;
-    if meta.get("type")?.as_str()? != "link" {
-        return None;
-    }
-    Some(PathBuf::from(meta.get("source")?.as_str()?))
-}
-
 /// The repo files each agent reads its project config from, which a shim takes from the
 /// branch's last commit (Claude) or checks against it (Codex and Gemini, whose CLIs read them
 /// from the worktree at startup, and can't be pointed elsewhere).
@@ -754,38 +739,11 @@ pub fn home_config(
                 }),
                 None => Err(failed(format!("{path} isn't JSON Forge can check"))),
             };
+            // Extensions aren't checked: Gemini registers the server ACP offers first and
+            // skips an extension's server of a name it already has.
             if let Some(raw) = read_settings(&home.join(".gemini/settings.json")).map_err(failed)? {
                 check(&raw, "~/.gemini/settings.json".into())?;
                 out.files.push((".gemini/settings.json".into(), raw));
-            }
-            // Extensions, linked in read-only, can add MCP servers too.
-            if let Ok(dirs) = std::fs::read_dir(home.join(".gemini/extensions")) {
-                let dirs: Vec<_> = dirs.flatten().take(MAX_EXTENSIONS + 1).collect();
-                if dirs.len() > MAX_EXTENSIONS {
-                    return Err(failed(format!(
-                        "~/.gemini/extensions has more than {MAX_EXTENSIONS} extensions, more \
-                         than Forge checks"
-                    )));
-                }
-                for dir in dirs {
-                    let (manifest_path, shown) = match linked_extension(&dir.path()) {
-                        Some(source) => {
-                            let path = source.join("gemini-extension.json");
-                            let shown = path.display().to_string();
-                            (path, shown)
-                        }
-                        None => (
-                            dir.path().join("gemini-extension.json"),
-                            format!(
-                                "~/.gemini/extensions/{}/gemini-extension.json",
-                                dir.file_name().to_string_lossy()
-                            ),
-                        ),
-                    };
-                    if let Some(raw) = read_settings(&manifest_path).map_err(failed)? {
-                        check(&raw, shown)?;
-                    }
-                }
             }
         }
         _ => {}
@@ -1597,31 +1555,6 @@ mod tests {
             ),
             None
         );
-        assert_eq!(
-            taken(
-                "gemini",
-                ".gemini/extensions/x/gemini-extension.json",
-                gemini
-            )
-            .as_deref(),
-            Some("~/.gemini/extensions/x/gemini-extension.json")
-        );
-        // A linked extension's manifest is where it was linked from.
-        let home = tempfile::tempdir().unwrap();
-        let source = home.path().join("src/ext");
-        std::fs::create_dir_all(&source).unwrap();
-        std::fs::write(source.join("gemini-extension.json"), gemini).unwrap();
-        let link = home.path().join(".gemini/extensions/linked");
-        std::fs::create_dir_all(&link).unwrap();
-        std::fs::write(
-            link.join(".gemini-extension-install.json"),
-            json!({ "type": "link", "source": source }).to_string(),
-        )
-        .unwrap();
-        assert!(matches!(
-            home_config(manifest("gemini"), home.path(), None),
-            Err(ShimError::ServerNameTaken { path, .. }) if path == source.join("gemini-extension.json").display().to_string()
-        ));
         // Other servers are fine.
         assert_eq!(
             taken(
@@ -1673,9 +1606,9 @@ mod tests {
         ));
     }
 
-    /// What Gemini would read but Forge can't check refuses the launch, rather than passing:
+    /// Settings Gemini would read but Forge can't check refuse the launch, rather than passing:
     /// a file serde can't parse may still be one Gemini reads (JavaScript takes a lone
-    /// surrogate escape), and extensions past the most Forge checks would go unchecked.
+    /// surrogate escape).
     #[test]
     fn gemini_config_forge_cant_check_refuses_the_launch() {
         let refused = |files: &[(&str, &str)]| {
@@ -1692,22 +1625,7 @@ mod tests {
         };
         let surrogate = r#"{"x": "\ud800", "mcpServers": {"forge": {}}}"#;
         assert!(refused(&[(".gemini/settings.json", surrogate)]));
-        assert!(refused(&[(
-            ".gemini/extensions/x/gemini-extension.json",
-            surrogate
-        )]));
         assert!(!refused(&[(".gemini/settings.json", "{}")]));
-        let many: Vec<(String, &str)> = (0..=MAX_EXTENSIONS)
-            .map(|i| {
-                (
-                    format!(".gemini/extensions/e{i}/gemini-extension.json"),
-                    "{}",
-                )
-            })
-            .collect();
-        let many: Vec<(&str, &str)> = many.iter().map(|(p, c)| (p.as_str(), *c)).collect();
-        assert!(refused(&many));
-        assert!(!refused(&many[1..]));
 
         // The repo's committed settings, too.
         let dir = tempfile::tempdir().unwrap();
