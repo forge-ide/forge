@@ -152,8 +152,6 @@ struct Live {
     resume_note: Mutex<Option<String>>,
     /// The running agent's hooks.
     hooks: Mutex<Option<Arc<dyn HookRunner>>>,
-    /// The user's real login an agent keeps itself, whose session copy is saved back to it.
-    own_login: Mutex<Option<PathBuf>>,
     /// The running agent's event sink, whose held-back stream text is flushed when a turn
     /// ends.
     sink: Mutex<Option<Arc<SessionSink>>>,
@@ -429,13 +427,7 @@ impl SessionManager {
             .await?;
         // The copies of the user's agent settings don't outlive the session.
         let scratch = self.dirs.sessions.join(id.to_string());
-        let own_login = lock(&live.own_login).take();
         let cleared = tokio::task::spawn_blocking(move || {
-            if let Some(token) = &own_login
-                && let Err(e) = shim::save_login(token, &scratch.join("shim"))
-            {
-                tracing::warn!(error = %e, "saving the agent's refreshed login");
-            }
             shim::clear_home(&scratch.join("home"))?;
             match std::fs::remove_dir_all(scratch.join("shim")) {
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
@@ -630,7 +622,6 @@ impl SessionManager {
             target.index.clone(),
             target.branch.clone(),
         );
-        *lock(&self.live(&session.id).own_login) = launch.home.own_login.clone();
         let setup = tokio::task::spawn_blocking(move || {
             // The agent's repo config as the branch committed it, read before anything runs.
             let (git_dirs, worktree, index, branch) = repo_git;
@@ -648,12 +639,6 @@ impl SessionManager {
             // A fresh dir for the shim's files each launch, shown read-only: the agent can't
             // change what its own settings say, or plant anything the daemon would follow.
             let shim_dir = scratch.join("shim");
-            // The last launch's refreshed login goes back to the user's before the copy goes.
-            if let Some(token) = &launch.home.own_login
-                && let Err(e) = shim::save_login(token, &shim_dir)
-            {
-                tracing::warn!(error = %e, "saving the agent's refreshed login");
-            }
             match std::fs::remove_dir_all(&shim_dir) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

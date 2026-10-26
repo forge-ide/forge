@@ -477,9 +477,9 @@ pub struct HomeConfig {
     /// key in Claude's `env`): the agent reads them as it would outside Forge, but the log
     /// redactor hides them, and a command carrying one asks.
     pub secrets: Vec<String>,
-    /// The login an agent keeps and refreshes itself, in the user's real config: copied into
-    /// the session at each launch ([`stage`]), and its refreshed token copied back
-    /// ([`save_login`]).
+    /// The login an agent keeps and refreshes itself, in the user's real config, copied into
+    /// the session at each launch ([`stage`]). Nothing goes back: its refresh token doesn't
+    /// rotate, and a session's copy could name any file or account.
     pub own_login: Option<PathBuf>,
 }
 
@@ -502,8 +502,8 @@ pub struct Staged {
 /// For Antigravity: an empty `config/` (no hooks, MCP servers, or skills of the user's), a
 /// login dir holding copies of the user's token and auth settings, and a trust list that marks
 /// the worktree untrusted, so it never runs a repo's hooks. The trust list and settings stay
-/// read-only; the session writes only the token, its conversations, and its artifacts, none of
-/// which reaches the user's real config but a refreshed token.
+/// read-only; the session writes only the token copy, its conversations, and its artifacts, none
+/// of which reaches the user's real config.
 pub fn stage(home: &HomeConfig, shim_dir: &Path, worktree: &Path) -> std::io::Result<Staged> {
     let Some(token) = &home.own_login else {
         return Ok(Staged::default());
@@ -537,37 +537,6 @@ pub fn stage(home: &HomeConfig, shim_dir: &Path, worktree: &Path) -> std::io::Re
             login.join("settings.json"),
         ],
     })
-}
-
-/// Copy a refreshed token from the session's copy in `shim_dir` back to the user's real login
-/// `token`: only its `refresh_token`, a non-empty string, and only when it changed, so nothing
-/// else the session wrote reaches the user's other clients.
-pub fn save_login(token: &Path, shim_dir: &Path) -> Result<(), String> {
-    let copy = staged_home(shim_dir).join("antigravity-acp/acp_token.json");
-    let Some(raw) = read_settings(&copy)? else {
-        return Ok(());
-    };
-    let Some(fresh) = serde_json::from_slice::<serde_json::Value>(&raw)
-        .ok()
-        .and_then(|v| v.get("refresh_token")?.as_str().map(str::to_owned))
-        .filter(|t| !t.is_empty())
-    else {
-        return Ok(());
-    };
-    let Some(raw) = read_settings(token)? else {
-        return Ok(());
-    };
-    let mut real: serde_json::Value =
-        serde_json::from_slice(&raw).map_err(|e| format!("{}: {e}", token.display()))?;
-    if real.get("refresh_token").and_then(|v| v.as_str()) == Some(fresh.as_str()) {
-        return Ok(());
-    }
-    real["refresh_token"] = fresh.into();
-    let dir = token.parent().expect("a file has a parent");
-    let temp = dir.join(".acp_token.json.forge");
-    let _ = std::fs::remove_file(&temp);
-    write_new(&temp, real.to_string().as_bytes()).map_err(|e| e.to_string())?;
-    std::fs::rename(&temp, token).map_err(|e| e.to_string())
 }
 
 impl HomeConfig {
@@ -1484,26 +1453,6 @@ mod tests {
             shim_dir.join("gemini").display().to_string()
         );
         assert_eq!(env["AGY_ACP_DISABLE_WORKSPACE_TRUST"], "0");
-
-        // Only a changed refresh token goes back to the real login; nothing else the session
-        // wrote does.
-        let unchanged = std::fs::read(&token).unwrap();
-        save_login(&token, &shim_dir).unwrap();
-        assert_eq!(std::fs::read(&token).unwrap(), unchanged);
-        std::fs::write(
-            login.join("acp_token.json"),
-            r#"{"client_id":"evil","refresh_token":"1//rotated","token_uri":"https://evil.example/token"}"#,
-        )
-        .unwrap();
-        save_login(&token, &shim_dir).unwrap();
-        let saved: Value = serde_json::from_slice(&std::fs::read(&token).unwrap()).unwrap();
-        assert_eq!(saved["refresh_token"], "1//rotated");
-        assert_eq!(saved["client_id"], "cid");
-        assert_eq!(saved["token_uri"], "https://oauth2.googleapis.com/token");
-        assert_eq!(
-            std::fs::read_to_string(real.join("trusted_workspaces.json")).unwrap(),
-            r#"{"trusted":["/"],"untrusted":[]}"#
-        );
     }
 
     /// Forge lets its own server's tools through without asking (they ask Forge when they
