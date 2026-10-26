@@ -665,6 +665,7 @@ impl SessionManager {
                 home: dirs.home,
                 read_only,
                 read_write: staged.read_write,
+                home_locked: shim::home_locked(manifest),
                 proxy: Some(proxy.clone()),
             };
             let sandbox = sandbox

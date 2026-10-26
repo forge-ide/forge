@@ -15,7 +15,7 @@ use forge_sandbox::proxy::{
     Resolve, SecretRoute,
 };
 use forge_sandbox::secrets::{PLACEHOLDER, Secret};
-use forge_sandbox::{SessionSandbox, Spec, WorktreeMount};
+use forge_sandbox::{HomeLock, SessionSandbox, Spec, WorktreeMount};
 use tempfile::TempDir;
 
 const PROBE: &str = env!("CARGO_BIN_EXE_forge-sandbox-probe");
@@ -193,8 +193,23 @@ impl Fixture {
                 .chain(locked)
                 .collect(),
             read_write: vec![self.home.join(".agent/login")],
+            home_locked: vec![
+                HomeLock {
+                    path: ".claude/shell-snapshots".into(),
+                    dir: true,
+                },
+                HomeLock {
+                    path: ".claude/daemon.json".into(),
+                    dir: false,
+                },
+            ],
             proxy: Some(self.proxy.clone()),
         })
+    }
+
+    /// The sandbox home, as the host sees it.
+    fn scratch_home(&self) -> PathBuf {
+        self.root.join("data/sessions/s1/home")
     }
 }
 
@@ -424,6 +439,7 @@ async fn escape_suite(tier: SandboxTier) {
     proxy_checks(sb, &fx).await;
     env_checks(sb, &fx).await;
     startup_file_checks(sb, &fx).await;
+    home_checks(sb, &fx, tier).await;
     // Standard shows the CPU topology (allocators need it) and nothing else of /sys.
     #[cfg(target_os = "linux")]
     if tier == SandboxTier::Standard {
@@ -509,6 +525,9 @@ const PINNED: &[&str] = &[
     "BASH_ENV",
     "ENV",
     "SHLVL",
+    "GIT_CONFIG_GLOBAL",
+    "XDG_CONFIG_HOME",
+    "PYTHONNOUSERSITE",
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "ALL_PROXY",
@@ -599,20 +618,26 @@ async fn startup_file_checks(sb: &dyn SessionSandbox, fx: &Fixture) {
         assert!(output.status.success(), "{script}: {output:?}");
         String::from_utf8_lossy(&output.stdout).into_owned()
     };
-    let plant = r#"printf 'touch "$HOME/startup-ran"
-' > "$HOME/.zshenv" && cp "$HOME/.zshenv" "$HOME/bash-env" && rm -f "$HOME/startup-ran""#;
+    // The home's root is read-only, so the files shells read by default are planted from
+    // outside, as an earlier launch could have left them; the agent can still write the
+    // home's writable dirs, so a terminal's own env pointing at one is tried too.
+    let payload = "touch \"$HOME/.cache/startup-ran\"\n";
+    for file in [".zshenv", ".bashrc"] {
+        std::fs::write(fx.scratch_home().join(file), payload).unwrap();
+    }
+    let plant = r#"printf 'touch "$HOME/.cache/startup-ran"
+' > "$HOME/.cache/.zshenv" && cp "$HOME/.cache/.zshenv" "$HOME/.cache/bash-env" && rm -f "$HOME/.cache/startup-ran""#;
     sh(plant, &[]).await;
     let home = sh(r#"printf %s "$HOME""#, &[]).await;
-    // A terminal's own env can't point either shell back at them.
     let pointed = vec![
-        ("BASH_ENV".to_owned(), format!("{home}/bash-env")),
-        ("ZDOTDIR".to_owned(), home.clone()),
+        ("BASH_ENV".to_owned(), format!("{home}/.cache/bash-env")),
+        ("ZDOTDIR".to_owned(), format!("{home}/.cache")),
     ];
     for env in [vec![], pointed] {
         for shell in ["zsh", "bash"] {
             let ran = sh(
                 &format!(
-                    r#"command -v {shell} >/dev/null || exit 0; {shell} -c true; test -e "$HOME/startup-ran" && echo ran; true"#
+                    r#"command -v {shell} >/dev/null || exit 0; {shell} -c true; test -e "$HOME/.cache/startup-ran" && echo ran; true"#
                 ),
                 &env,
             )
@@ -627,7 +652,6 @@ async fn startup_file_checks(sb: &dyn SessionSandbox, fx: &Fixture) {
 
     // bash sources ~/.bashrc for `-c` when its stdin is a socket, as if run by rshd, unless
     // SHLVL says it's nested; Node gives its children socketpairs for stdio.
-    sh(r#"cp "$HOME/.zshenv" "$HOME/.bashrc""#, &[]).await;
     if std::path::Path::new("/bin/bash").exists() {
         let (theirs, _ours) = std::os::unix::net::UnixStream::pair().unwrap();
         let status = sb
@@ -642,11 +666,123 @@ async fn startup_file_checks(sb: &dyn SessionSandbox, fx: &Fixture) {
             .await
             .unwrap();
         assert!(status.success());
-        let ran = sh(r#"test -e "$HOME/startup-ran" && echo ran; true"#, &[]).await;
+        let ran = sh(
+            r#"test -e "$HOME/.cache/startup-ran" && echo ran; true"#,
+            &[],
+        )
+        .await;
+        assert_eq!(ran.trim(), "", "bash on a socket ran a ~/.bashrc");
+    }
+}
+
+/// The home's root, and `~/.config`, are read-only, so nothing the agent writes there is read
+/// by a shell, git, or fish; its writable dirs are writable, but for what is locked inside them
+/// (where the tier can lock); Python leaves its user site alone; git reads no global config;
+/// and `PATH` names nothing the sandbox can write.
+async fn home_checks(sb: &dyn SessionSandbox, fx: &Fixture, tier: SandboxTier) {
+    let sh = async |script: &str| {
+        let output = sb
+            .command("/bin/sh", &["-c".into(), script.into()], &fx.mine.path, &[])
+            .stdin(Stdio::null())
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success(), "{script}: {output:?}");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let writes = |files: &[&str]| {
+        files
+            .iter()
+            .map(|f| {
+                format!(
+                    r#"mkdir -p "$(dirname "$HOME/{f}")" 2>/dev/null; (printf x > "$HOME/{f}") 2>/dev/null && echo {f};"#
+                )
+            })
+            .collect::<String>()
+    };
+    let root = [
+        ".profile",
+        ".bash_profile",
+        ".bash_login",
+        ".bashrc",
+        ".zshenv",
+        ".cshrc",
+        ".tcshrc",
+        ".login",
+        ".gitconfig",
+        ".config/git/config",
+        ".config/fish/config.fish",
+        ".cargo/config.toml",
+        ".gradle/init.d/x.gradle",
+        "bin/ls",
+        ".claude.json",
+    ];
+    let written = sh(&(writes(&root) + " true")).await;
+    assert_eq!(
+        written.trim(),
+        "",
+        "{tier:?} let these be written in the home"
+    );
+    let writable = [".claude/x", ".cache/x", ".local/x", ".npm/x", "go/x"];
+    let written = sh(&(writes(&writable) + " true")).await;
+    assert_eq!(
+        written.split_whitespace().collect::<Vec<_>>(),
+        writable,
+        "{tier:?} should let the home's writable dirs be written"
+    );
+    // Light can't keep a path read-only inside a writable one.
+    if tier != SandboxTier::Light {
+        let script = r#"(printf x > "$HOME/.claude/shell-snapshots/s.sh") 2>/dev/null && echo snapshot; (printf x > "$HOME/.claude/daemon.json") 2>/dev/null && echo daemon; rm -rf "$HOME/.claude/shell-snapshots" 2>/dev/null; mv "$HOME/.claude/daemon.json" "$HOME/.claude/d" 2>/dev/null && echo moved; true"#;
         assert_eq!(
-            ran.trim(),
+            sh(script).await.trim(),
             "",
-            "bash on a socket ran the ~/.bashrc the agent wrote"
+            "{tier:?} let a locked path change"
+        );
+        assert!(fx.scratch_home().join(".claude/shell-snapshots").is_dir());
+        assert_eq!(
+            std::fs::read(fx.scratch_home().join(".claude/daemon.json")).unwrap(),
+            b""
+        );
+    }
+    // Python's user site, in the writable ~/.local, isn't read.
+    let pth = r#"command -v python3 >/dev/null || exit 0
+site=$(python3 -c 'import site; print(site.getusersitepackages())') && mkdir -p "$site" &&
+printf 'import os; open(os.path.join(os.environ["HOME"], ".cache", "pth-ran"), "w")
+' > "$site/x.pth" &&
+python3 -c pass; test -e "$HOME/.cache/pth-ran" && echo ran; true"#;
+    assert_eq!(
+        sh(pth).await.trim(),
+        "",
+        "{tier:?}: python ran a .pth the agent wrote"
+    );
+    // git reads no global config, so no pager or alias of the agent's runs: not even one
+    // planted from outside, as an earlier launch could have left it.
+    std::fs::write(
+        fx.scratch_home().join(".gitconfig"),
+        "[alias]\n\tst = status\n",
+    )
+    .unwrap();
+    let git = r#"command -v git >/dev/null || exit 0; git config --global --list 2>/dev/null; git config --global alias.st status 2>/dev/null && echo set; true"#;
+    assert_eq!(
+        sh(git).await.trim(),
+        "",
+        "{tier:?}: git has a global config"
+    );
+    // PATH names no directory the sandbox can write, and nothing relative.
+    let home = sh(r#"printf %s "$HOME""#).await;
+    let path = sh(r#"printf %s "$PATH""#).await;
+    for entry in path.split(':') {
+        assert!(entry.starts_with('/'), "{tier:?}: PATH has {entry:?}");
+        assert!(
+            !entry.starts_with(&home)
+                || !forge_sandbox::HOME_WRITABLE
+                    .iter()
+                    .any(|d| Path::new(entry).starts_with(Path::new(&home).join(d))),
+            "{tier:?}: PATH has the writable {entry}"
+        );
+        assert!(
+            !Path::new(entry).starts_with(&fx.mine.path),
+            "{tier:?}: PATH has {entry}"
         );
     }
 }

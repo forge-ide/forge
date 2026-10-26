@@ -41,6 +41,27 @@ justification; a command run without them fails before it starts.";
 /// MCP servers).
 pub const AGENT_HOME_ENTRIES: &[&str] = &[".claude", ".claude.json", ".codex", ".gemini", ".env"];
 
+/// What an agent keeps in its writable home dir that it runs by itself, so the sandbox keeps
+/// it read-only and empty where the tier can (see [`forge_sandbox::Spec::home_locked`]): Claude
+/// Code sources a shell snapshot before every Bash command, an env file from `session-env`,
+/// and restarts background jobs from `jobs`, `daemon`, and `daemon.json`, without asking.
+pub fn home_locked(manifest: Option<&Manifest>) -> Vec<forge_sandbox::HomeLock> {
+    let lock = |path: &str, dir: bool| forge_sandbox::HomeLock {
+        path: path.into(),
+        dir,
+    };
+    match manifest.map(|m| m.id.as_str()) {
+        Some("claude-code") => vec![
+            lock(".claude/shell-snapshots", true),
+            lock(".claude/session-env", true),
+            lock(".claude/jobs", true),
+            lock(".claude/daemon", true),
+            lock(".claude/daemon.json", false),
+        ],
+        _ => vec![],
+    }
+}
+
 /// What a shim needs to know about the session.
 pub struct ShimContext<'a> {
     /// The session's shim dir: empty, owned by the daemon, shown read-only in the sandbox at
@@ -1648,6 +1669,21 @@ mod tests {
             prepare(manifest("gemini"), &cx),
             Err(ShimError::Read { .. })
         ));
+    }
+
+    #[test]
+    fn claudes_locked_paths_are_inside_its_writable_dir() {
+        let locked = home_locked(manifest("claude-code"));
+        assert!(
+            locked
+                .iter()
+                .any(|l| l.path.ends_with("shell-snapshots") && l.dir)
+        );
+        for lock in &locked {
+            assert!(lock.path.starts_with(".claude"), "{lock:?}");
+        }
+        assert!(forge_sandbox::HOME_WRITABLE.contains(&".claude"));
+        assert!(home_locked(manifest("codex")).is_empty());
     }
 
     #[test]

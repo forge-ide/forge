@@ -37,7 +37,7 @@ pub mod helper;
 
 pub use env::{PASSTHROUGH_VARS, STARTUP_FILES_OFF, is_passed_through, is_valid_name};
 pub use unsandboxed::{SIGN_IN_VARS, Unsandboxed};
-pub use view::{SYSTEM_READ_ONLY, View, shows_read_only, toolchains};
+pub use view::{HOME_WRITABLE, SYSTEM_READ_ONLY, View, shows_read_only, toolchains};
 
 /// File name of the helper binary, installed next to `forged`.
 pub const HELPER: &str = "forge-sandbox-exec";
@@ -118,9 +118,21 @@ pub struct Spec {
     /// Extra paths visible read-write, at their real paths: an agent's own login dir. The
     /// caller checks they hold nothing else of the user's.
     pub read_write: Vec<PathBuf>,
+    /// Paths inside the home's writable dirs ([`HOME_WRITABLE`]) that stay read-only and
+    /// empty: where an agent keeps scripts it runs without asking. Only the tiers that can
+    /// mount one over the other (Standard, and Seatbelt) keep them so; Light can't.
+    pub home_locked: Vec<HomeLock>,
     /// The session's egress proxy, the only way out to the network. Without one a sandboxed
     /// session has no network at all. The sandbox keeps it running while it lives.
     pub proxy: Option<Arc<proxy::Proxy>>,
+}
+
+/// A path in the sandbox home, relative to it, kept read-only and empty.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HomeLock {
+    pub path: PathBuf,
+    /// A directory, or else a file.
+    pub dir: bool,
 }
 
 #[derive(Debug, thiserror::Error)]

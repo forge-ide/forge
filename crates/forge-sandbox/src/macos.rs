@@ -82,7 +82,7 @@ impl Sandbox for Seatbelt {
             SandboxTier::Light | SandboxTier::Standard => {
                 let view = View::new(&spec)?;
                 crate::view::refuse_locked(&view, "Seatbelt")?;
-                let mut env = crate::env::from_daemon();
+                let mut env = crate::env::from_daemon_in(&view);
                 env.push(("HOME".into(), view.scratch_home.display().to_string()));
                 env.push(("TMPDIR".into(), view.scratch_tmp.display().to_string()));
                 env.extend(crate::env::startup_files_off());
@@ -180,6 +180,16 @@ fn profile(view: &View, proxy_port: Option<u16>) -> String {
         p.push_str(&format!("  (literal {})\n", quote(dev)));
     }
     p.push_str(")\n");
+    // Later rules win: what stays read-only inside the home's writable dirs.
+    let locked = view.locked_in_home();
+    if !locked.is_empty() {
+        p.push_str("(deny file-write*\n");
+        for (path, dir) in locked {
+            let kind = if dir { "subpath" } else { "literal" };
+            p.push_str(&format!("  ({kind} {})\n", quote_path(&path)));
+        }
+        p.push_str(")\n");
+    }
     if let Some(port) = proxy_port {
         p.push_str(&format!(
             "(allow system-socket (socket-domain AF_INET) (socket-domain AF_INET6))\n\
@@ -228,6 +238,10 @@ mod tests {
             home: "/Users/u".into(),
             scratch_home: "/private/var/s/home".into(),
             scratch_tmp: "/private/var/s/tmp".into(),
+            home_locked: vec![crate::HomeLock {
+                path: ".claude/jobs".into(),
+                dir: true,
+            }],
         };
         let p = profile(&view, None);
         assert!(p.starts_with("(version 1)\n(deny default)"));
@@ -236,6 +250,11 @@ mod tests {
         assert!(writes.contains("\"/Users/u/repo/.worktrees/feat/x\""));
         assert!(writes.contains("\"/Users/u/repo/.git/worktrees/x\""));
         assert!(!writes.contains("\"/Users/u/repo/.git\""));
+        // The home's root is read-only; its writable dirs aren't, but for what is locked.
+        assert!(!writes.contains("(subpath \"/private/var/s/home\")"));
+        assert!(writes.contains("(subpath \"/private/var/s/home/.cache\")"));
+        let denied = &p[p.find("(deny file-write*").unwrap()..];
+        assert!(denied.contains("(subpath \"/private/var/s/home/.claude/jobs\")"));
         assert!(!p.contains("(subpath \"/Users/u\")"));
         assert!(!p.contains("network"));
         let with_proxy = profile(&view, Some(41234));

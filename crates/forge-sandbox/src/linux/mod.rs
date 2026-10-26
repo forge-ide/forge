@@ -131,7 +131,7 @@ impl Light {
             connect_ports,
             forward: None,
         };
-        let mut env = crate::env::from_daemon();
+        let mut env = crate::env::from_daemon_in(view);
         env.push(("HOME".into(), view.scratch_home.display().to_string()));
         env.push(("TMPDIR".into(), view.scratch_tmp.display().to_string()));
         env.extend(crate::env::startup_files_off());
@@ -208,7 +208,7 @@ impl Bwrap {
                 socket: PROXY_SOCKET.into(),
             }
         });
-        let mut env = crate::env::from_daemon();
+        let mut env = crate::env::from_daemon_in(view);
         env.push(("HOME".into(), view.home.display().to_string()));
         env.push(("TMPDIR".into(), "/tmp".into()));
         env.extend(crate::env::startup_files_off());
@@ -301,6 +301,16 @@ fn bwrap_args(view: &View, helper: &Path) -> Vec<String> {
     }
     bind(&mut args, "--bind", &view.scratch_tmp, Path::new("/tmp"));
     bind(&mut args, "--bind", &view.scratch_home, &view.home);
+    // The home's writable dirs, as mounts of their own, so they stay writable when the rest
+    // of the home is made read-only at the end.
+    for dir in crate::HOME_WRITABLE {
+        bind(
+            &mut args,
+            "--bind",
+            &view.scratch_home.join(dir),
+            &view.home.join(dir),
+        );
+    }
     for path in view.toolchains.iter().chain(&view.extra) {
         bind(&mut args, "--ro-bind", path, path);
     }
@@ -317,7 +327,19 @@ fn bwrap_args(view: &View, helper: &Path) -> Vec<String> {
     for path in view.locked() {
         bind(&mut args, "--ro-bind", &path, &path);
     }
+    for lock in &view.home_locked {
+        bind(
+            &mut args,
+            "--ro-bind",
+            &view.scratch_home.join(&lock.path),
+            &view.home.join(&lock.path),
+        );
+    }
     bind(&mut args, "--ro-bind", helper, helper);
+    // Last, once bubblewrap has made every mount point it needs in the home: the home itself
+    // read-only. The remount isn't recursive, so the mounts inside it keep theirs.
+    args.push("--remount-ro".to_owned());
+    args.push(view.home.display().to_string());
     args
 }
 
@@ -453,6 +475,10 @@ mod tests {
             home: "/home/u".into(),
             scratch_home: "/data/sessions/s/home".into(),
             scratch_tmp: "/data/sessions/s/tmp".into(),
+            home_locked: vec![crate::HomeLock {
+                path: ".claude/jobs".into(),
+                dir: true,
+            }],
         }
     }
 
@@ -497,6 +523,23 @@ mod tests {
         );
         // The scratch home goes first, so what is visible inside home covers it.
         assert!(home < cargo && cargo < git && git < admin && admin < wt);
+        // Its writable dirs are mounts of their own, before what shows inside them; a locked
+        // path inside one is mounted over it; and then the home is made read-only.
+        let cache = position(
+            &args,
+            &["--bind", "/data/sessions/s/home/.cache", "/home/u/.cache"],
+        );
+        let jobs = position(
+            &args,
+            &[
+                "--ro-bind",
+                "/data/sessions/s/home/.claude/jobs",
+                "/home/u/.claude/jobs",
+            ],
+        );
+        let ro = position(&args, &["--remount-ro", "/home/u"]);
+        assert!(home < cache && cache < cargo && wt < jobs && jobs < ro);
+        assert_eq!(ro, args.len() - 2, "the remount comes last");
         // The main checkout and the real home are never bound.
         assert!(!args.iter().any(|a| a == "/home/u/repo" || a == "/"));
     }

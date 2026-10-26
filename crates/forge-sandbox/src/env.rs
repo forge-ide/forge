@@ -8,17 +8,23 @@
 pub const PASSTHROUGH_VARS: &[&str] =
     &["PATH", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ", "TERM"];
 
-/// Shell startup files a sandboxed process doesn't read, set in every sandbox: zsh reads
-/// `$ZDOTDIR/.zshenv` (by default in the writable home) before every `-c` script, bash and sh
-/// read the file `$BASH_ENV` and `$ENV` name, and bash reads `~/.bashrc` for `-c` when its
-/// stdin is a socket (as Node gives its children) unless `SHLVL` says it is nested. Any of
-/// them would run code the agent wrote ahead of a command Forge decided. `/dev/null` is no
-/// directory, so nothing can be put there.
+/// Startup and config files a sandboxed process doesn't read, set in every sandbox, since any
+/// of them could run code the agent wrote ahead of a command Forge decided: zsh reads
+/// `$ZDOTDIR/.zshenv` before every `-c` script, bash and sh read the file `$BASH_ENV` and
+/// `$ENV` name, bash reads `~/.bashrc` for `-c` when its stdin is a socket (as Node gives its
+/// children) unless `SHLVL` says it is nested, git reads its global config (a pager or alias
+/// runs programs), fish and git read `$XDG_CONFIG_HOME`, and Python runs the `.pth` files of
+/// its user site in the writable `~/.local`. The home's root and `~/.config` are read-only
+/// too; these hold even where a command points elsewhere. `/dev/null` is no directory, so
+/// nothing can be put there.
 pub const STARTUP_FILES_OFF: &[(&str, &str)] = &[
     ("ZDOTDIR", "/dev/null"),
     ("BASH_ENV", ""),
     ("ENV", ""),
     ("SHLVL", "1"),
+    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ("XDG_CONFIG_HOME", "/dev/null"),
+    ("PYTHONNOUSERSITE", "1"),
 ];
 
 /// [`STARTUP_FILES_OFF`], as variables.
@@ -36,6 +42,18 @@ pub fn is_passed_through(name: &str) -> bool {
 /// The allowlisted subset of `vars`, in order.
 pub(crate) fn passthrough(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, String)> {
     vars.filter(|(name, _)| is_passed_through(name)).collect()
+}
+
+/// The daemon's own allowlisted variables, for a sandbox showing `view`: its `PATH` without
+/// the entries a sandboxed process could write to ([`crate::View::safe_path`]).
+pub(crate) fn from_daemon_in(view: &crate::View) -> Vec<(String, String)> {
+    passthrough(std::env::vars())
+        .into_iter()
+        .map(|(k, v)| {
+            let v = if k == "PATH" { view.safe_path(&v) } else { v };
+            (k, v)
+        })
+        .collect()
 }
 
 /// The daemon's own allowlisted variables.
