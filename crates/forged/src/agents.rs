@@ -305,9 +305,10 @@ pub fn credentials(
         _ => {}
     }
     fixes.extend(missing.into_iter().map(|(_, fix)| fix));
+    // An agent that keeps its own login needs no secret; its shim checks the login is there.
     if routes.is_empty()
         && fixes.is_empty()
-        && let Some(m) = manifest
+        && let Some(m) = manifest.filter(|m| m.auth.own_login.is_none())
     {
         fixes.push(format!(
             "add env_secrets = {:?} to the profile; {} signs in with an API key from the keyring",
@@ -556,6 +557,12 @@ mod tests {
         assert_eq!(fixes, ["store OPENAI_API_KEY"]);
         // Nor an agent outside the registry.
         assert!(credentials(&profile, None, &Store(&[]), home.path()).is_err());
+        // One that keeps its own login needs no secret from the keyring.
+        let own = adapters::manifest("antigravity").unwrap();
+        let signed = credentials(&builtin(own), Some(own), &Store(&[]), home.path())
+            .ok()
+            .unwrap();
+        assert!(signed.routes.is_empty() && signed.login.is_none());
     }
 
     #[test]

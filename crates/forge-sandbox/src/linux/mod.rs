@@ -27,6 +27,9 @@ const DEVICES_RW: &[&str] = &["/dev/null", "/dev/zero", "/dev/full"];
 /// Devices every sandboxed process may read.
 const DEVICES_RO: &[&str] = &["/dev/urandom", "/dev/random"];
 
+/// The CPU topology Standard shows read-only.
+const CPU_INFO: &str = "/sys/devices/system/cpu";
+
 /// The Linux backends, with availability probed once.
 pub struct Linux {
     helper: PathBuf,
@@ -283,6 +286,16 @@ fn bwrap_args(view: &View, helper: &Path) -> Vec<String> {
         bind(&mut args, "--ro-bind", path, path);
     }
     args.extend(["--proc", "/proc", "--dev", "/dev"].map(str::to_owned));
+    // CPU topology, read-only: allocators such as tcmalloc refuse to start without
+    // `/sys/devices/system/cpu/possible`. Nothing else of /sys is shown.
+    if Path::new(CPU_INFO).is_dir() {
+        bind(
+            &mut args,
+            "--ro-bind",
+            Path::new(CPU_INFO),
+            Path::new(CPU_INFO),
+        );
+    }
     bind(&mut args, "--bind", &view.scratch_tmp, Path::new("/tmp"));
     bind(&mut args, "--bind", &view.scratch_home, &view.home);
     for path in view.toolchains.iter().chain(&view.extra) {

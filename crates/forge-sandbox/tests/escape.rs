@@ -414,6 +414,19 @@ async fn escape_suite(tier: SandboxTier) {
     proxy_checks(sb, &fx).await;
     env_checks(sb, &fx).await;
     startup_file_checks(sb, &fx).await;
+    // Standard shows the CPU topology (allocators need it) and nothing else of /sys.
+    #[cfg(target_os = "linux")]
+    if tier == SandboxTier::Standard {
+        let possible = Path::new("/sys/devices/system/cpu/possible");
+        if possible.exists() {
+            allowed(sb, &cwd, "read", possible).await;
+        }
+        let other = Escape::List("/sys/class".into());
+        assert!(
+            !attempt(sb, &fx, &other).await,
+            "Standard shows /sys beyond the CPU topology"
+        );
+    }
     #[cfg(target_os = "linux")]
     assert!(
         !preload_escapes(sb, &fx).await,

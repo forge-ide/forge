@@ -40,5 +40,7 @@ notes = [
     "Runs commands itself, after asking; the request's rawInput.CommandLine is the shell line. Writes and edits go through ACP's file methods; reads of the worktree and its own dirs are its own.",
     "MCP tool calls ask with kind `other` and `_meta.is_mcp_tool_call`, naming the server and tool; Forge lets its own server's through.",
     "Its `yolo` mode approves everything without asking the client, and a resumed session restores its mode; Forge sets `default` on every session and never resumes one.",
+    "Its harness writes its built-in skills into the working directory (skills/system/...), so a worktree shows an untracked skills/ after a session; git_commit commits only the paths it names.",
+    "Its allocator (tcmalloc) won't start without /sys/devices/system/cpu, which the Standard tier shows read-only for it; nothing else of /sys is shown.",
     "Runs a repo's .agents/hooks.json only for a trusted workspace; the trust list is in the directory it writes, so a session won't start while it trusts the worktree or a folder above it.",
 ]
