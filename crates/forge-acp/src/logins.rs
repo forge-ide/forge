@@ -371,6 +371,8 @@ mod tests {
         std::fs::write(path, contents).unwrap();
     }
 
+    // On macOS, Claude's login is in the keychain, which these tests don't fake.
+    #[cfg(not(target_os = "macos"))]
     fn claude(token: &str, expires_ms: u64) -> String {
         json!({
             "claudeAiOauth": {"accessToken": token, "refreshToken": "refresh-secret", "expiresAt": expires_ms},

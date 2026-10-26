@@ -564,7 +564,11 @@ mod tests {
         assert_eq!(fixes, ["store OPENAI_API_KEY"]);
         // Nor an agent outside the registry.
         assert!(credentials(&profile, None, &Store(&[]), home.path()).is_err());
-        // One that keeps its own login needs no secret from the keyring.
+    }
+
+    #[test]
+    fn an_agent_that_keeps_its_own_login_needs_no_keyring_secret() {
+        let home = tempfile::tempdir().unwrap();
         let own = adapters::manifest("antigravity").unwrap();
         let signed = credentials(&builtin(own), Some(own), &Store(&[]), home.path())
             .ok()
