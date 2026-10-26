@@ -104,6 +104,9 @@ pub struct SessionSetup {
     /// The ACP mode the agent must be in before the first prompt. The session fails to start
     /// if the agent doesn't offer it.
     pub mode: Option<String>,
+    /// Where to copy the agent's stderr as it comes, for a sign-in: the agent may print the
+    /// URL to finish in a browser there.
+    pub stderr_log: Option<std::path::PathBuf>,
 }
 
 /// An MCP server the agent reaches over Streamable HTTP.
@@ -331,21 +334,23 @@ impl AcpClient {
         cwd: &Path,
         sandbox: Arc<dyn SessionSandbox>,
     ) -> Result<Vec<SignInMethod>, AcpError> {
-        let client = Self::sign_in_connection(command, cwd, sandbox).await?;
+        let client = Self::sign_in_connection(command, cwd, sandbox, None).await?;
         let agent = client.initialize().await;
         client.shutdown().await;
         Ok(sign_in_methods(&agent?.auth_methods))
     }
 
     /// Sign in with the agent's own (non-terminal) method `method`: the agent does the whole
-    /// flow (a browser, a stored key) and keeps what it gets, as it would outside Forge.
+    /// flow (a browser, a stored key) and keeps what it gets, as it would outside Forge. Its
+    /// stderr is copied to `stderr_log` as it comes, for the URL it may print.
     pub async fn authenticate(
         command: AgentCommand,
         cwd: &Path,
         sandbox: Arc<dyn SessionSandbox>,
         method: &str,
+        stderr_log: Option<std::path::PathBuf>,
     ) -> Result<(), AcpError> {
-        let client = Self::sign_in_connection(command, cwd, sandbox).await?;
+        let client = Self::sign_in_connection(command, cwd, sandbox, stderr_log).await?;
         let result = async {
             let agent = client.initialize().await?;
             let offered = sign_in_methods(&agent.auth_methods);
@@ -375,6 +380,7 @@ impl AcpClient {
         command: AgentCommand,
         cwd: &Path,
         sandbox: Arc<dyn SessionSandbox>,
+        stderr_log: Option<std::path::PathBuf>,
     ) -> Result<Self, AcpError> {
         let workspace = Workspace::new(vec![crate::Root {
             name: "sign-in".into(),
@@ -383,7 +389,10 @@ impl AcpClient {
         .map_err(|e| AcpError::Protocol(e.to_string()))?;
         Self::spawn(
             command,
-            SessionSetup::default(),
+            SessionSetup {
+                stderr_log,
+                ..SessionSetup::default()
+            },
             workspace,
             sandbox,
             Arc::new(NoEvents),
@@ -431,10 +440,13 @@ impl AcpClient {
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
-        let stderr_done = child
-            .stderr
-            .take()
-            .map(|stderr| tokio::spawn(read_stderr(stderr, stderr_tail.clone())));
+        let stderr_done = child.stderr.take().map(|stderr| {
+            tokio::spawn(read_stderr(
+                stderr,
+                stderr_tail.clone(),
+                setup.stderr_log.clone(),
+            ))
+        });
 
         let terminals = Arc::new(Terminals::new(sandbox));
         let turn = Arc::new(Mutex::new(None));
@@ -610,9 +622,27 @@ async fn supervise(
     let _ = exit.send(Some(info));
 }
 
-async fn read_stderr(stderr: tokio::process::ChildStderr, tail: Arc<Mutex<VecDeque<String>>>) {
+async fn read_stderr(
+    stderr: tokio::process::ChildStderr,
+    tail: Arc<Mutex<VecDeque<String>>>,
+    log: Option<std::path::PathBuf>,
+) {
+    use tokio::io::AsyncWriteExt;
+    let mut log = match log {
+        Some(path) => tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(path)
+            .await
+            .ok(),
+        None => None,
+    };
     let mut lines = BufReader::new(stderr).lines();
     while let Ok(Some(line)) = lines.next_line().await {
+        if let Some(file) = &mut log {
+            let _ = file.write_all(format!("{line}\n").as_bytes()).await;
+        }
         let mut tail = lock(&tail);
         if tail.len() == STDERR_TAIL {
             tail.pop_front();

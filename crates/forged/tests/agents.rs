@@ -354,4 +354,7 @@ steps:
         .unwrap();
     // In the real home, where the agent keeps it outside Forge.
     assert!(home.path().join(".fake/login").is_file());
+    // What it printed, for `forge agent sign-in` to show: the link to open without a browser.
+    let log = std::fs::read_to_string(home.path().join("data/sign-in/gemini.log")).unwrap();
+    assert!(log.contains("https://login.example.test/fake"), "{log}");
 }

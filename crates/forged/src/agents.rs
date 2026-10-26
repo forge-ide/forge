@@ -343,6 +343,11 @@ fn sign_in(
     }
 }
 
+/// Where an agent's output during `agent.signIn` goes, under the data dir.
+pub fn sign_in_log(data_dir: &Path, agent: &str) -> std::path::PathBuf {
+    data_dir.join("sign-in").join(format!("{agent}.log"))
+}
+
 /// How long an agent's own sign-in may take: the user finishes it in a browser.
 const SIGN_IN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
@@ -428,6 +433,9 @@ pub async fn sign_in_methods(
 /// user's real home, so it keeps the login where it would outside Forge.
 pub async fn sign_in_with(state: &State, agent: &str, method: &str) -> Result<(), HandlerError> {
     let (command, cwd) = sign_in_command(state, agent).await?;
+    // What the agent prints, for `forge agent sign-in` to show (the URL to open, say).
+    let log = sign_in_log(&state.paths.data_dir, agent);
+    let _ = tokio::fs::remove_file(&log).await;
     let signed = tokio::time::timeout(
         SIGN_IN_TIMEOUT,
         forge_acp::AcpClient::authenticate(
@@ -435,6 +443,7 @@ pub async fn sign_in_with(state: &State, agent: &str, method: &str) -> Result<()
             &cwd,
             std::sync::Arc::new(forge_sandbox::Unsandboxed::for_sign_in()),
             method,
+            Some(log),
         ),
     )
     .await

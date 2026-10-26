@@ -40,8 +40,13 @@ impl Unsandboxed {
 /// What an agent's own sign-in needs beyond the allowlist, to open the user's browser.
 pub const SIGN_IN_VARS: &[&str] = &[
     "DISPLAY",
+    // Without it, an X server refuses the browser ("no authorization protocol specified").
+    "XAUTHORITY",
     "WAYLAND_DISPLAY",
     "XDG_RUNTIME_DIR",
+    // What `xdg-open` picks the user's browser by.
+    "XDG_SESSION_TYPE",
+    "XDG_CURRENT_DESKTOP",
     "DBUS_SESSION_BUS_ADDRESS",
     "BROWSER",
 ];

@@ -140,6 +140,8 @@ pub async fn serve(
                         format!("no agent sign-in method {}", req.method_id.0),
                     ));
                 };
+                // As a real agent's browser sign-in does, when it can't open one.
+                eprintln!("Open https://login.example.test/fake to sign in");
                 match write_login(auth) {
                     Ok(()) => responder.respond(AuthenticateResponse::new()),
                     Err(e) => {

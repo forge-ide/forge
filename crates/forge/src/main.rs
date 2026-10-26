@@ -372,19 +372,46 @@ async fn sign_in(client: &mut Client, agent: String, method: Option<String>) -> 
         }
         None => {
             eprintln!(
-                "Signing in to {agent} with {}; finish in your browser if it opens.",
+                "Signing in to {agent} with {}; finish in your browser. If none opens, open the \
+                 link {agent} prints below.",
                 chosen.name
             );
-            client
+            // The daemon copies what the agent prints to its sign-in log; show it as it comes.
+            let log = Paths::from_env()?
+                .data_dir
+                .join("sign-in")
+                .join(format!("{agent}.log"));
+            let echo = tokio::spawn(follow(log));
+            let signed = client
                 .call::<AgentSignIn>(&AgentSignInParams {
                     agent: agent.clone(),
                     method_id: chosen.id.clone(),
                 })
-                .await?;
+                .await;
+            echo.abort();
+            signed?;
         }
     }
     eprintln!("{agent} is signed in.");
     Ok(())
+}
+
+/// Print `path`'s lines to stderr as they're written, from when it appears.
+async fn follow(path: PathBuf) {
+    let mut shown = 0;
+    loop {
+        if let Ok(text) = tokio::fs::read_to_string(&path).await {
+            // A shorter file is a new sign-in's: the daemon replaced the last one's.
+            if text.len() < shown {
+                shown = 0;
+            }
+            if let Some(new) = text.get(shown..).filter(|t| !t.is_empty()) {
+                eprint!("{new}");
+                shown = text.len();
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
 }
 
 fn print(value: &impl Serialize) -> anyhow::Result<()> {

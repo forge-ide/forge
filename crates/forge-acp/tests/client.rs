@@ -445,7 +445,7 @@ steps:
     // A terminal method is never sent as `authenticate`, nor is one the agent doesn't offer.
     for id in ["cli", "other"] {
         assert!(
-            AcpClient::authenticate(command(), &fx.root(), unsandboxed(), id)
+            AcpClient::authenticate(command(), &fx.root(), unsandboxed(), id, None)
                 .await
                 .is_err(),
             "{id}"
@@ -453,7 +453,7 @@ steps:
     }
     assert!(!home.join(".fake/login").exists());
     // The agent's own method signs it in, and it keeps the login for the next process.
-    AcpClient::authenticate(command(), &fx.root(), unsandboxed(), "browser")
+    AcpClient::authenticate(command(), &fx.root(), unsandboxed(), "browser", None)
         .await
         .unwrap();
     assert!(home.join(".fake/login").is_file());
