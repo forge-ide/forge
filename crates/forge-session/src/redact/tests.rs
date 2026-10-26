@@ -100,6 +100,7 @@ fn every_string_and_key_of_every_event_is_redacted_with_the_sessions_values() {
             }),
         },
         title: "injected-value-1".into(),
+        source: Default::default(),
     });
     let mut copy = call.clone();
     redactor.redact(&session, &mut call);

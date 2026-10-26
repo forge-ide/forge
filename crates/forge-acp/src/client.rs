@@ -19,7 +19,7 @@ use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 use forge_api::TurnId;
 use forge_api::events::{
     AgentMessageBody, AgentPlanBody, EditBody, EventPayload, PlanEntry, TerminalOutputBody,
-    ToolCallBody, ToolResultBody,
+    ToolCallBody, ToolCallSource, ToolResultBody,
 };
 use forge_api::model::{Action, EditKind};
 use forge_sandbox::SessionSandbox;
@@ -1125,13 +1125,19 @@ impl Handlers {
         Ok(RequestPermissionResponse::new(outcome))
     }
 
-    /// Record that the agent wants to take `action`.
+    /// Record that the agent wants to take `action`, which Forge decides.
     async fn call(&self, id: &str, action: &Action, title: &str) {
+        self.call_from(id, action, title, ToolCallSource::Forge)
+            .await;
+    }
+
+    async fn call_from(&self, id: &str, action: &Action, title: &str, source: ToolCallSource) {
         self.sink
             .emit(EventPayload::ToolCall(ToolCallBody {
                 tool_call_id: id.to_owned(),
                 action: action.clone(),
                 title: title.to_owned(),
+                source,
             }))
             .await;
     }
@@ -1287,7 +1293,8 @@ impl Handlers {
             _ => return,
         };
         let id = call.tool_call_id.0.to_string();
-        self.call(&id, &action, &call.title).await;
+        self.call_from(&id, &action, &call.title, ToolCallSource::Agent)
+            .await;
         let status = match call.status {
             acp::ToolCallStatus::Completed => "completed",
             _ => "failed",

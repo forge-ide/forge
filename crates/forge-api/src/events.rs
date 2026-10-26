@@ -209,6 +209,21 @@ pub struct ToolCallBody {
     pub tool_call_id: String,
     pub action: Action,
     pub title: String,
+    /// Who decided the call. Events recorded before it existed read as Forge.
+    #[serde(default)]
+    pub source: ToolCallSource,
+}
+
+/// Who decided a tool call.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolCallSource {
+    /// Forge's gate: a `policy.decision` follows.
+    #[default]
+    Forge,
+    /// The agent, which ran it without asking Forge (as it does commands it deems
+    /// read-only). Reported once it finished; the sandbox still bounded it.
+    Agent,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
@@ -465,6 +480,30 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&body).unwrap()["ref"],
             "refs/forge/x/cp/1"
+        );
+    }
+
+    #[test]
+    fn tool_calls_say_who_decided_them_and_old_ones_read_as_forge() {
+        let old = json!({
+            "kind": "tool.call",
+            "body": {
+                "toolCallId": "t",
+                "action": { "type": "exec", "argv": ["ls"], "cwd": "." },
+                "title": "ls"
+            }
+        });
+        let EventPayload::ToolCall(body) = serde_json::from_value(old).unwrap() else {
+            panic!("not a tool call");
+        };
+        assert_eq!(body.source, ToolCallSource::Forge);
+        let agent = EventPayload::ToolCall(ToolCallBody {
+            source: ToolCallSource::Agent,
+            ..body
+        });
+        assert_eq!(
+            serde_json::to_value(&agent).unwrap()["body"]["source"],
+            "agent"
         );
     }
 

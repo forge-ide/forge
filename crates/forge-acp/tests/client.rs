@@ -11,7 +11,7 @@ use forge_acp::{
     GateVerdict, McpEndpoint, Root, SessionSetup, TerminalSignIn, Workspace,
 };
 use forge_api::TurnId;
-use forge_api::events::{EventKind, EventPayload};
+use forge_api::events::{EventKind, EventPayload, ToolCallSource};
 use forge_api::model::{Action, EditKind};
 use futures_util::future::BoxFuture;
 
@@ -313,6 +313,10 @@ steps:
         ]
     );
     let events = fx.sink.0.lock().unwrap().clone();
+    assert!(events.iter().all(|e| match e {
+        EventPayload::ToolCall(c) => c.source == ToolCallSource::Forge,
+        _ => true,
+    }));
     assert!(matches!(&events[3], EventPayload::ToolResult(b)
         if b.status == "failed" && b.output.as_deref() == Some("refused by policy: no")));
     client.shutdown().await;
@@ -410,7 +414,10 @@ steps:
     let seen: Vec<_> = events
         .iter()
         .map(|e| match e {
-            EventPayload::ToolCall(c) => (Some(c.action.clone()), None, None),
+            EventPayload::ToolCall(c) => {
+                assert_eq!(c.source, ToolCallSource::Agent);
+                (Some(c.action.clone()), None, None)
+            }
             EventPayload::ToolResult(r) => (None, Some(r.status.clone()), r.output.clone()),
             other => panic!("unexpected {other:?}"),
         })

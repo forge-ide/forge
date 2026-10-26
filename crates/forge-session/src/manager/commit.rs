@@ -73,6 +73,7 @@ async fn run(
             tool_call_id: id.clone(),
             action: action.clone(),
             title: title.clone(),
+            source: Default::default(),
         }))
         .await;
     let fail = async |reason: String| {
