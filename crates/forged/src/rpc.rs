@@ -205,6 +205,19 @@ async fn dispatch(
         AgentList::NAME => {
             run::<AgentList>(params, async |p| agents::list(state, p.project_id).await).await
         }
+        AgentSignInMethods::NAME => {
+            run::<AgentSignInMethods>(params, async |p| {
+                agents::sign_in_methods(state, &p.agent).await
+            })
+            .await
+        }
+        AgentSignIn::NAME => {
+            run::<AgentSignIn>(params, async |p| {
+                agents::sign_in_with(state, &p.agent, &p.method_id).await?;
+                Ok(forge_api::methods::Empty {})
+            })
+            .await
+        }
         SessionCreate::NAME => {
             run::<SessionCreate>(params, async |p| sessions::create(state, p).await).await
         }

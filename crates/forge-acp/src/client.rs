@@ -1,6 +1,7 @@
 //! The ACP connection to one agent process.
 
 use std::collections::VecDeque;
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -208,10 +209,58 @@ pub enum AcpError {
     Exited(AgentExit),
     #[error("agent: {0}")]
     Protocol(String),
+    /// The agent needs signing in first; these are the ways it offers.
+    #[error("the agent isn't signed in")]
+    AuthRequired { methods: Vec<SignInMethod> },
+}
+
+/// A way an agent offers to sign in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignInMethod {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    /// For a terminal method: how to run the agent, interactively, to sign in.
+    pub terminal: Option<TerminalSignIn>,
+}
+
+/// A terminal sign-in: the agent's own launch with these args appended and this env added.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalSignIn {
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
+fn sign_in_methods(methods: &[acp::AuthMethod]) -> Vec<SignInMethod> {
+    methods
+        .iter()
+        .map(|m| SignInMethod {
+            id: m.id().0.to_string(),
+            name: m.name().to_owned(),
+            description: m.description().map(str::to_owned),
+            terminal: match m {
+                acp::AuthMethod::Terminal(t) => Some(TerminalSignIn {
+                    args: t.args.clone(),
+                    env: t.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                }),
+                _ => None,
+            },
+        })
+        .collect()
+}
+
+/// Events from a sign-in connection, which has none worth keeping.
+struct NoEvents;
+
+impl EventSink for NoEvents {
+    fn emit(&self, _: EventPayload) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
 }
 
 /// A connected agent with one ACP session.
 pub struct AcpClient {
+    cwd: std::path::PathBuf,
     conn: ConnectionTo<Agent>,
     session: acp::SessionId,
     turn: Arc<Mutex<Option<TurnId>>>,
@@ -224,6 +273,141 @@ impl AcpClient {
     /// Start the agent in the workspace inside `sandbox`, initialize ACP, and open a session.
     /// The agent's terminals run in the same sandbox.
     pub async fn start(
+        command: AgentCommand,
+        setup: SessionSetup,
+        workspace: Workspace,
+        sandbox: Arc<dyn SessionSandbox>,
+        sink: Arc<dyn EventSink>,
+        gate: Arc<dyn Gate>,
+    ) -> Result<Self, AcpError> {
+        let mcp_servers = setup.mcp_servers.clone();
+        let meta = setup.meta.clone();
+        let mode = setup.mode.clone();
+        let mut client = Self::spawn(command, setup, workspace, sandbox, sink, gate).await?;
+        let cwd = client.cwd.clone();
+        let opened = async {
+            let agent = client.initialize().await?;
+            // Forge's tools are reached over HTTP; an agent that can't do that goes without.
+            let http = agent.agent_capabilities.mcp_capabilities.http;
+            if !http && !mcp_servers.is_empty() {
+                tracing::warn!(
+                    "the agent can't reach MCP servers over HTTP; it gets none of Forge's tools"
+                );
+            }
+            let servers = mcp_servers
+                .iter()
+                .filter(|_| http)
+                .map(|s| acp::McpServer::Http(acp::McpServerHttp::new(&s.name, &s.url)))
+                .collect();
+            let session = client
+                .request(NewSessionRequest::new(cwd).mcp_servers(servers).meta(meta))
+                .await
+                .map_err(|e| match e {
+                    AcpError::AuthRequired { .. } => AcpError::AuthRequired {
+                        methods: sign_in_methods(&agent.auth_methods),
+                    },
+                    other => other,
+                })?;
+            if let Some(mode) = &mode {
+                client.enter_mode(&session, mode).await?;
+            }
+            Ok(session)
+        };
+        match opened.await {
+            Ok(session) => {
+                client.session = session.session_id;
+                Ok(client)
+            }
+            Err(e) => {
+                client.shutdown().await;
+                Err(e)
+            }
+        }
+    }
+
+    /// The sign-in methods the agent advertises, from a connection with no session.
+    pub async fn sign_in_methods(
+        command: AgentCommand,
+        cwd: &Path,
+        sandbox: Arc<dyn SessionSandbox>,
+    ) -> Result<Vec<SignInMethod>, AcpError> {
+        let client = Self::sign_in_connection(command, cwd, sandbox).await?;
+        let agent = client.initialize().await;
+        client.shutdown().await;
+        Ok(sign_in_methods(&agent?.auth_methods))
+    }
+
+    /// Sign in with the agent's own (non-terminal) method `method`: the agent does the whole
+    /// flow (a browser, a stored key) and keeps what it gets, as it would outside Forge.
+    pub async fn authenticate(
+        command: AgentCommand,
+        cwd: &Path,
+        sandbox: Arc<dyn SessionSandbox>,
+        method: &str,
+    ) -> Result<(), AcpError> {
+        let client = Self::sign_in_connection(command, cwd, sandbox).await?;
+        let result = async {
+            let agent = client.initialize().await?;
+            let offered = sign_in_methods(&agent.auth_methods);
+            match offered.iter().find(|m| m.id == method) {
+                None => Err(AcpError::Protocol(format!(
+                    "the agent offers no sign-in method {method:?}"
+                ))),
+                // A client must never send `authenticate` for a terminal method.
+                Some(m) if m.terminal.is_some() => Err(AcpError::Protocol(format!(
+                    "{method:?} signs in in a terminal, by running the agent with its args"
+                ))),
+                Some(_) => {
+                    client
+                        .request(acp::AuthenticateRequest::new(method.to_owned()))
+                        .await?;
+                    Ok(())
+                }
+            }
+        }
+        .await;
+        client.shutdown().await;
+        result
+    }
+
+    /// A connection for signing in: nothing to read, write, or run, and every request refused.
+    async fn sign_in_connection(
+        command: AgentCommand,
+        cwd: &Path,
+        sandbox: Arc<dyn SessionSandbox>,
+    ) -> Result<Self, AcpError> {
+        let workspace = Workspace::new(vec![crate::Root {
+            name: "sign-in".into(),
+            path: cwd.to_path_buf(),
+        }])
+        .map_err(|e| AcpError::Protocol(e.to_string()))?;
+        Self::spawn(
+            command,
+            SessionSetup::default(),
+            workspace,
+            sandbox,
+            Arc::new(NoEvents),
+            Arc::new(DenyAll {
+                reason: "signing in runs nothing".into(),
+            }),
+        )
+        .await
+    }
+
+    /// `initialize`, offering terminal sign-ins: Forge's CLI runs them.
+    async fn initialize(&self) -> Result<acp::InitializeResponse, AcpError> {
+        let capabilities = acp::ClientCapabilities::new()
+            .fs(acp::FileSystemCapabilities::new()
+                .read_text_file(true)
+                .write_text_file(true))
+            .terminal(true)
+            .auth(acp::AuthCapabilities::new().terminal(true));
+        self.request(InitializeRequest::new(ProtocolVersion::V1).client_capabilities(capabilities))
+            .await
+    }
+
+    /// Start the agent process and connect to it.
+    async fn spawn(
         command: AgentCommand,
         setup: SessionSetup,
         workspace: Workspace,
@@ -293,7 +477,8 @@ impl AcpClient {
             exit_tx,
         ));
 
-        let mut client = Self {
+        let client = Self {
+            cwd,
             conn: conn_rx
                 .await
                 .map_err(|_| AcpError::Protocol("connection closed during setup".into()))?,
@@ -303,49 +488,7 @@ impl AcpClient {
             exit: exit_rx,
             kill: Mutex::new(Some(kill_tx)),
         };
-        let capabilities = acp::ClientCapabilities::new()
-            .fs(acp::FileSystemCapabilities::new()
-                .read_text_file(true)
-                .write_text_file(true))
-            .terminal(true);
-        let init = InitializeRequest::new(ProtocolVersion::V1).client_capabilities(capabilities);
-        let opened = async {
-            let agent = client.request(init).await?;
-            // Forge's tools are reached over HTTP; an agent that can't do that goes without.
-            let http = agent.agent_capabilities.mcp_capabilities.http;
-            if !http && !setup.mcp_servers.is_empty() {
-                tracing::warn!(
-                    "the agent can't reach MCP servers over HTTP; it gets none of Forge's tools"
-                );
-            }
-            let servers = setup
-                .mcp_servers
-                .iter()
-                .filter(|_| http)
-                .map(|s| acp::McpServer::Http(acp::McpServerHttp::new(&s.name, &s.url)))
-                .collect();
-            let session = client
-                .request(
-                    NewSessionRequest::new(cwd)
-                        .mcp_servers(servers)
-                        .meta(setup.meta.clone()),
-                )
-                .await?;
-            if let Some(mode) = &setup.mode {
-                client.enter_mode(&session, mode).await?;
-            }
-            Ok(session)
-        };
-        match opened.await {
-            Ok(session) => {
-                client.session = session.session_id;
-                Ok(client)
-            }
-            Err(e) => {
-                client.shutdown().await;
-                Err(e)
-            }
-        }
+        Ok(client)
     }
 
     /// Put a new session in ACP mode `mode`, which the agent must offer. An agent may pick its
@@ -427,6 +570,9 @@ impl AcpClient {
                 .await;
                 match exited {
                     Ok(Ok(info)) => Err(AcpError::Exited(info.clone().expect("checked"))),
+                    _ if e.code == agent_client_protocol::ErrorCode::AuthRequired => {
+                        Err(AcpError::AuthRequired { methods: vec![] })
+                    }
                     _ => Err(AcpError::Protocol(e.to_string())),
                 }
             }

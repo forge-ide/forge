@@ -740,10 +740,21 @@ impl SessionManager {
         });
         tools.set(gate.clone(), target);
         *lock(&live.preamble) = shim::first_prompt_preamble(manifest);
+        let agent = manifest.map(|m| m.id.clone());
         AcpClient::start(command, setup, workspace, sandbox, sink, gate)
             .await
             .map(Arc::new)
-            .map_err(|e| format!("starting the agent: {e}"))
+            .map_err(|e| match (e, agent) {
+                (AcpError::AuthRequired { methods }, Some(agent)) => {
+                    let ways: Vec<&str> = methods.iter().map(|m| m.name.as_str()).collect();
+                    format!(
+                        "the agent isn't signed in; sign in with `forge agent sign-in {agent}` \
+                         ({})",
+                        ways.join(", ")
+                    )
+                }
+                (e, _) => format!("starting the agent: {e}"),
+            })
     }
 
     /// Start the session's egress proxy, logging each connection as a `network` event. The

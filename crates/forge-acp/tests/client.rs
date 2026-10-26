@@ -8,7 +8,7 @@ use std::time::Duration;
 use forge_acp::adapters::CommandSource;
 use forge_acp::{
     AcpClient, AcpError, AgentCommand, AllowAll, DenyAll, EventSink, Gate, GateKind, GateRequest,
-    GateVerdict, McpEndpoint, Root, SessionSetup, Workspace,
+    GateVerdict, McpEndpoint, Root, SessionSetup, TerminalSignIn, Workspace,
 };
 use forge_api::TurnId;
 use forge_api::events::{EventKind, EventPayload};
@@ -371,6 +371,93 @@ steps:
             cwd: ".".into()
         })]
     );
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_agent_that_needs_signing_in_offers_its_methods_and_signs_in_with_authenticate() {
+    let fx = Fixture::new();
+    let home = fx.dir.path().join("agent-home");
+    let script = fx.dir.path().join("auth.yaml");
+    std::fs::write(
+        &script,
+        r#"
+auth:
+  login: .fake/login
+  methods:
+    - { id: browser, name: "Log in with a browser" }
+    - { id: cli, name: "Log in in a terminal", kind: terminal, args: ["--login"] }
+steps:
+  - end_turn
+"#,
+    )
+    .unwrap();
+    let command = || AgentCommand {
+        argv: vec![
+            fake_agent().to_str().unwrap().into(),
+            script.to_str().unwrap().into(),
+        ],
+        env: vec![("FORGE_FAKE_AGENT_HOME".into(), home.display().to_string())],
+    };
+    let workspace = || {
+        Workspace::new(vec![Root {
+            name: "wt".into(),
+            path: fx.root(),
+        }])
+        .unwrap()
+    };
+    let open = async || {
+        AcpClient::start(
+            command(),
+            SessionSetup::default(),
+            workspace(),
+            unsandboxed(),
+            fx.sink.clone(),
+            Arc::new(AllowAll),
+        )
+        .await
+    };
+    // Not signed in: the session is refused, naming both ways to sign in.
+    let methods = match open().await {
+        Err(AcpError::AuthRequired { methods }) => methods,
+        other => panic!("expected auth_required, got {:?}", other.err()),
+    };
+    let listed = AcpClient::sign_in_methods(command(), &fx.root(), unsandboxed())
+        .await
+        .unwrap();
+    assert_eq!(methods, listed);
+    assert_eq!(
+        listed
+            .iter()
+            .map(|m| (m.id.as_str(), m.terminal.clone()))
+            .collect::<Vec<_>>(),
+        [
+            ("browser", None),
+            (
+                "cli",
+                Some(TerminalSignIn {
+                    args: vec!["--login".to_owned()],
+                    env: vec![]
+                })
+            )
+        ]
+    );
+    // A terminal method is never sent as `authenticate`, nor is one the agent doesn't offer.
+    for id in ["cli", "other"] {
+        assert!(
+            AcpClient::authenticate(command(), &fx.root(), unsandboxed(), id)
+                .await
+                .is_err(),
+            "{id}"
+        );
+    }
+    assert!(!home.join(".fake/login").exists());
+    // The agent's own method signs it in, and it keeps the login for the next process.
+    AcpClient::authenticate(command(), &fx.root(), unsandboxed(), "browser")
+        .await
+        .unwrap();
+    assert!(home.join(".fake/login").is_file());
+    let client = open().await.unwrap();
     client.shutdown().await;
 }
 

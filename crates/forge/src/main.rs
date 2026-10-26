@@ -45,6 +45,14 @@ enum AgentCmd {
     /// List the built-in profiles, and a project's own when PROJECT_ID is given. Each says
     /// whether its agent is installed and signed in, and if not, how to fix that.
     List { project_id: Option<ProjectId> },
+    /// Sign a registry agent in with one of its own methods, outside the sandbox, as you
+    /// would outside Forge. Without --method, lists the agent's methods unless it has one.
+    SignIn {
+        /// Registry key: `claude-code`, `codex`, `gemini`, or another adapter.
+        agent: String,
+        #[arg(long)]
+        method: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -179,6 +187,7 @@ async fn run(command: Cmd) -> anyhow::Result<()> {
                 .call::<AgentList>(&AgentListParams { project_id })
                 .await?,
         ),
+        Cmd::Agent(AgentCmd::SignIn { agent, method }) => sign_in(&mut client, agent, method).await,
         Cmd::Session(cmd) => session(&mut client, cmd).await,
         Cmd::Approval(ApprovalCmd::List { project }) => print(
             &client
@@ -327,6 +336,55 @@ async fn connect() -> anyhow::Result<(Client, HelloResult)> {
         );
     }
     Ok((client, hello))
+}
+
+/// Sign `agent` in: a terminal method runs here, interactively; any other, the daemon runs, and
+/// the agent does the flow itself.
+async fn sign_in(client: &mut Client, agent: String, method: Option<String>) -> anyhow::Result<()> {
+    let methods = client
+        .call::<AgentSignInMethods>(&AgentRefParams {
+            agent: agent.clone(),
+        })
+        .await?;
+    let chosen = match (&method, methods.as_slice()) {
+        (Some(id), _) => methods
+            .iter()
+            .find(|m| m.id == *id)
+            .with_context(|| format!("{agent} offers no sign-in method {id:?}"))?,
+        (None, [only]) => only,
+        (None, []) => bail!("{agent} offers no way to sign in over ACP"),
+        (None, _) => return print(&methods),
+    };
+    match &chosen.terminal {
+        Some(terminal) => {
+            let (program, args) = terminal
+                .argv
+                .split_first()
+                .context("the sign-in command is empty")?;
+            let status = std::process::Command::new(program)
+                .args(args)
+                .envs(terminal.env.iter().cloned())
+                .status()
+                .with_context(|| format!("running {program}"))?;
+            if !status.success() {
+                bail!("{} didn't finish: {status}", chosen.name);
+            }
+        }
+        None => {
+            eprintln!(
+                "Signing in to {agent} with {}; finish in your browser if it opens.",
+                chosen.name
+            );
+            client
+                .call::<AgentSignIn>(&AgentSignInParams {
+                    agent: agent.clone(),
+                    method_id: chosen.id.clone(),
+                })
+                .await?;
+        }
+    }
+    eprintln!("{agent} is signed in.");
+    Ok(())
 }
 
 fn print(value: &impl Serialize) -> anyhow::Result<()> {

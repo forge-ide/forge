@@ -122,6 +122,31 @@ pub struct AgentProfile {
     pub problem: Option<String>,
 }
 
+/// A way an agent offers to sign in, as it advertises it over ACP.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SignInMethod {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub description: Option<String>,
+    /// For a method the agent runs in a terminal: the whole command, which the client runs
+    /// interactively outside the sandbox, as the user would. Without it, `agent.signIn` runs
+    /// the method, and the agent does the flow itself (a browser, say).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub terminal: Option<TerminalSignIn>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalSignIn {
+    pub argv: Vec<String>,
+    /// Added to the client's own environment.
+    pub env: Vec<(String, String)>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {

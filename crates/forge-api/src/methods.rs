@@ -10,7 +10,7 @@ use crate::ids::{
 };
 use crate::model::{
     AgentProfile, Approval, Changeset, Hunk, LineRange, Mode, Platform, Project, SandboxTier,
-    Session, SessionState, Thread, ThreadStatus,
+    Session, SessionState, SignInMethod, Thread, ThreadStatus,
 };
 
 /// A daemon method: its wire name and the types of its params and result.
@@ -64,6 +64,23 @@ pub struct AgentListParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub project_id: Option<ProjectId>,
+}
+
+/// A registry agent, for signing in. Only registry agents sign in: signing in runs the agent
+/// outside the sandbox, so never a command from a project's profile file.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRefParams {
+    /// Registry key: `claude-code`, `codex`, `gemini`, or another adapter.
+    pub agent: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSignInParams {
+    pub agent: String,
+    /// One of the agent's non-terminal sign-in methods, from `agent.signInMethods`.
+    pub method_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -432,6 +449,8 @@ methods! {
     ProjectList = "project.list": Empty => Vec<Project>;
     ProjectGet = "project.get": ProjectGetParams => Project;
     AgentList = "agent.list": AgentListParams => Vec<AgentProfile>;
+    AgentSignInMethods = "agent.signInMethods": AgentRefParams => Vec<SignInMethod>;
+    AgentSignIn = "agent.signIn": AgentSignInParams => Empty;
     SessionCreate = "session.create": SessionCreateParams => Session;
     SessionPrompt = "session.prompt": SessionPromptParams => TurnResult;
     SessionCancel = "session.cancel": SessionIdParams => Empty;

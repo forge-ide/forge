@@ -32,6 +32,18 @@ struct State {
     mcp: Option<String>,
 }
 
+/// Where `auth`'s login file is: under `$FORGE_FAKE_AGENT_HOME` if set (tests, whose sandbox
+/// sets `HOME` itself), else `$HOME`.
+pub fn login_file(auth: &script::AuthScript) -> Option<PathBuf> {
+    std::env::var_os("FORGE_FAKE_AGENT_HOME")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(|home| PathBuf::from(home).join(&auth.login))
+}
+
+fn signed_in(auth: Option<&script::AuthScript>) -> bool {
+    auth.is_none_or(|a| login_file(a).is_some_and(|f| f.is_file()))
+}
+
 struct Shared {
     state: Mutex<State>,
     cancelled: AtomicBool,
@@ -67,6 +79,8 @@ pub async fn serve(
     script: Script,
     transport: impl ConnectTo<Agent> + 'static,
 ) -> Result<(), agent_client_protocol::Error> {
+    let auth = script.auth.clone();
+    let (auth_init, auth_session, auth_login) = (auth.clone(), auth.clone(), auth);
     let shared = Arc::new(Shared {
         state: Mutex::new(State {
             steps: script.steps,
@@ -85,17 +99,62 @@ pub async fn serve(
         .name("forge-fake-agent")
         .on_receive_request(
             async move |init: InitializeRequest, responder, _cx| {
+                let terminal = init.client_capabilities.auth.terminal;
+                let methods: Vec<AuthMethod> = auth_init
+                    .iter()
+                    .flat_map(|a| a.methods.iter())
+                    .filter_map(|m| match m.kind.as_str() {
+                        "terminal" if terminal => Some(AuthMethod::Terminal(
+                            AuthMethodTerminal::new(m.id.clone(), m.name.clone())
+                                .args(m.args.clone()),
+                        )),
+                        "terminal" => None,
+                        _ => Some(AuthMethod::Agent(AuthMethodAgent::new(
+                            m.id.clone(),
+                            m.name.clone(),
+                        ))),
+                    })
+                    .collect();
                 responder.respond(
-                    InitializeResponse::new(init.protocol_version).agent_capabilities(
-                        AgentCapabilities::new()
-                            .mcp_capabilities(McpCapabilities::new().http(true)),
-                    ),
+                    InitializeResponse::new(init.protocol_version)
+                        .agent_capabilities(
+                            AgentCapabilities::new()
+                                .mcp_capabilities(McpCapabilities::new().http(true)),
+                        )
+                        .auth_methods(methods),
                 )
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
+            async move |req: AuthenticateRequest, responder, _cx| {
+                let method = auth_login.as_ref().and_then(|a| {
+                    a.methods
+                        .iter()
+                        .find(|m| *m.id == *req.method_id.0 && m.kind == "agent")
+                        .map(|_| a)
+                });
+                let Some(auth) = method else {
+                    return responder.respond_with_error(agent_client_protocol::Error::new(
+                        -32602,
+                        format!("no agent sign-in method {}", req.method_id.0),
+                    ));
+                };
+                match write_login(auth) {
+                    Ok(()) => responder.respond(AuthenticateResponse::new()),
+                    Err(e) => {
+                        responder.respond_with_error(agent_client_protocol::Error::new(-32603, e))
+                    }
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
             async move |req: NewSessionRequest, responder, _cx| {
+                if !signed_in(auth_session.as_ref()) {
+                    return responder
+                        .respond_with_error(agent_client_protocol::Error::auth_required());
+                }
                 let mut state = on_session.state();
                 state.cwd = req.cwd;
                 state.mcp = req.mcp_servers.iter().find_map(|s| match s {
@@ -137,6 +196,15 @@ pub async fn serve(
         )
         .connect_to(transport)
         .await
+}
+
+/// Sign in: write the login file.
+pub fn write_login(auth: &script::AuthScript) -> Result<(), String> {
+    let file = login_file(auth).ok_or("no HOME")?;
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&file, "signed in").map_err(|e| e.to_string())
 }
 
 async fn run_turn(

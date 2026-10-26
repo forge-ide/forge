@@ -334,6 +334,110 @@ fn sign_in(
     }
 }
 
+/// How long an agent's own sign-in may take: the user finishes it in a browser.
+const SIGN_IN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// The registry agent `agent`, as it runs outside the sandbox to sign in: its built-in command
+/// (never a profile file's), its manifest's environment, and an empty working directory.
+async fn sign_in_command(
+    state: &State,
+    agent: &str,
+) -> Result<(forge_acp::AgentCommand, std::path::PathBuf), HandlerError> {
+    let manifest = adapters::manifest(agent)
+        .ok_or_else(|| ApiError::not_found(format!("no agent {agent:?} in Forge's registry")))?;
+    let plan = adapters::plan(
+        Some(manifest),
+        &manifest.default_command(),
+        std::env::var_os("PATH").as_deref(),
+    )
+    .map_err(|e| {
+        ApiError::new(
+            forge_api::ErrorKind::AgentUnavailable,
+            format!(
+                "{e}; install it with {}",
+                manifest.install_command().join(" ")
+            ),
+        )
+    })?;
+    let cwd = state.paths.data_dir.join("sign-in");
+    tokio::fs::create_dir_all(&cwd)
+        .await
+        .map_err(|e| HandlerError::Internal(e.into()))?;
+    let env = manifest
+        .launch
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    Ok((
+        forge_acp::AgentCommand {
+            argv: plan.argv,
+            env,
+        },
+        cwd,
+    ))
+}
+
+fn sign_in_failed(agent: &str, e: forge_acp::AcpError) -> HandlerError {
+    ApiError::new(
+        forge_api::ErrorKind::AgentUnavailable,
+        format!("{agent} sign-in: {e}"),
+    )
+    .into()
+}
+
+/// `agent.signInMethods`: the ways the agent offers to sign in, asked of the agent itself.
+/// A terminal method comes with the whole command the client runs.
+pub async fn sign_in_methods(
+    state: &State,
+    agent: &str,
+) -> Result<Vec<forge_api::model::SignInMethod>, HandlerError> {
+    let (command, cwd) = sign_in_command(state, agent).await?;
+    let base = command.clone();
+    let methods = forge_acp::AcpClient::sign_in_methods(
+        command,
+        &cwd,
+        std::sync::Arc::new(forge_sandbox::Unsandboxed::for_sign_in()),
+    )
+    .await
+    .map_err(|e| sign_in_failed(agent, e))?;
+    Ok(methods
+        .into_iter()
+        .map(|m| forge_api::model::SignInMethod {
+            id: m.id,
+            name: m.name,
+            description: m.description,
+            terminal: m.terminal.map(|t| forge_api::model::TerminalSignIn {
+                argv: base.argv.iter().cloned().chain(t.args).collect(),
+                env: base.env.iter().cloned().chain(t.env).collect(),
+            }),
+        })
+        .collect())
+}
+
+/// `agent.signIn`: run one of the agent's own sign-in methods, outside the sandbox with the
+/// user's real home, so it keeps the login where it would outside Forge.
+pub async fn sign_in_with(state: &State, agent: &str, method: &str) -> Result<(), HandlerError> {
+    let (command, cwd) = sign_in_command(state, agent).await?;
+    let signed = tokio::time::timeout(
+        SIGN_IN_TIMEOUT,
+        forge_acp::AcpClient::authenticate(
+            command,
+            &cwd,
+            std::sync::Arc::new(forge_sandbox::Unsandboxed::for_sign_in()),
+            method,
+        ),
+    )
+    .await
+    .map_err(|_| {
+        ApiError::new(
+            forge_api::ErrorKind::AgentUnavailable,
+            format!("{agent} sign-in didn't finish within 10 minutes"),
+        )
+    })?;
+    signed.map_err(|e| sign_in_failed(agent, e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

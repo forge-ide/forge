@@ -36,7 +36,7 @@ mod macos;
 pub mod helper;
 
 pub use env::{PASSTHROUGH_VARS, STARTUP_FILES_OFF, is_passed_through, is_valid_name};
-pub use unsandboxed::Unsandboxed;
+pub use unsandboxed::{SIGN_IN_VARS, Unsandboxed};
 pub use view::{SYSTEM_READ_ONLY, View, shows_read_only, toolchains};
 
 /// File name of the helper binary, installed next to `forged`.

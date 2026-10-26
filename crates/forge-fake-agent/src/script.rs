@@ -10,6 +10,35 @@ pub struct Script {
     /// Each step is a one-key map (`- read: path`) or a bare name (`- end_turn`).
     #[serde(with = "serde_norway::with::singleton_map_recursive")]
     pub steps: Vec<Step>,
+    /// Sign-in the agent needs before it opens a session, as a real agent keeps it: a login
+    /// file in its home that a sign-in writes and later processes find.
+    #[serde(default)]
+    pub auth: Option<AuthScript>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthScript {
+    /// The login file, relative to `$HOME` (or `$FORGE_FAKE_AGENT_HOME`).
+    pub login: String,
+    /// The methods `initialize` advertises; terminal ones only to a client that runs them.
+    pub methods: Vec<AuthMethodScript>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthMethodScript {
+    pub id: String,
+    pub name: String,
+    /// `agent` (signed in by `authenticate`) or `terminal` (by running the agent with `args`).
+    #[serde(default = "agent_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+fn agent_kind() -> String {
+    "agent".into()
 }
 
 /// One scripted action. Steps run in order; `end_turn` finishes the current prompt and the next

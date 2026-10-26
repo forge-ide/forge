@@ -7,7 +7,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use common::*;
-use forge_api::methods::{AgentList, AgentListParams};
+use forge_api::methods::{
+    AgentList, AgentListParams, AgentRefParams, AgentSignIn, AgentSignInMethods, AgentSignInParams,
+};
 use forge_api::model::AgentProfile;
 
 fn executable(path: &Path, text: &str) {
@@ -235,4 +237,85 @@ async fn an_agents_own_sign_in_counts_when_the_keyring_has_no_key() {
         "{fix}"
     );
     daemon.stop();
+}
+
+/// Signing in runs the registry agent itself, outside the sandbox with the real home, and asks
+/// it how it signs in: its own method signs it in where it keeps logins; a terminal method
+/// comes back as the whole command for the CLI to run.
+#[tokio::test]
+async fn a_registry_agent_lists_its_sign_ins_and_signs_in_with_its_own_method() {
+    let home = temp_home();
+    let prefix = home.path().join("npm");
+    npm_install(&prefix, "@google/gemini-cli", "gemini", "0.65.0");
+    let script = home.path().join("auth.yaml");
+    std::fs::write(
+        &script,
+        r#"
+auth:
+  login: .fake/login
+  methods:
+    - { id: browser, name: "Log in with a browser" }
+    - { id: cli, name: "Log in in a terminal", kind: terminal, args: ["--login"] }
+steps:
+  - end_turn
+"#,
+    )
+    .unwrap();
+    // `node` runs the fake agent in its place, whatever program it is given.
+    executable(
+        &prefix.join("bin/node"),
+        &format!(
+            "#!/bin/sh\nexec {} {}\n",
+            fake_agent().display(),
+            script.display()
+        ),
+    );
+    let path = format!("{}:/usr/bin:/bin", prefix.join("bin").display());
+    let daemon = Daemon::start_with(home.path(), |cmd| {
+        cmd.env("PATH", &path);
+    });
+    let mut client = daemon.client().await;
+    let gemini = || AgentRefParams {
+        agent: "gemini".into(),
+    };
+
+    let methods = client.call::<AgentSignInMethods>(&gemini()).await.unwrap();
+    let ids: Vec<_> = methods.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["browser", "cli"]);
+    assert_eq!(methods[0].terminal, None);
+    let terminal = methods[1].terminal.as_ref().unwrap();
+    // The agent's own launch, as the session would start it, with the method's args.
+    assert!(terminal.argv[0].ends_with("/node"), "{terminal:?}");
+    assert!(
+        terminal.argv[1].ends_with("@google/gemini-cli/index.js"),
+        "{terminal:?}"
+    );
+    assert_eq!(terminal.argv.last().map(String::as_str), Some("--login"));
+
+    // Only registry agents sign in, so never a command from a repo's profile file.
+    let unknown = client
+        .call::<AgentSignInMethods>(&AgentRefParams {
+            agent: "custom".into(),
+        })
+        .await;
+    assert!(unknown.is_err());
+    // A terminal method isn't the daemon's to run.
+    let terminal = client
+        .call::<AgentSignIn>(&AgentSignInParams {
+            agent: "gemini".into(),
+            method_id: "cli".into(),
+        })
+        .await;
+    assert!(terminal.is_err());
+    assert!(!home.path().join(".fake/login").exists());
+
+    client
+        .call::<AgentSignIn>(&AgentSignInParams {
+            agent: "gemini".into(),
+            method_id: "browser".into(),
+        })
+        .await
+        .unwrap();
+    // In the real home, where the agent keeps it outside Forge.
+    assert!(home.path().join(".fake/login").is_file());
 }

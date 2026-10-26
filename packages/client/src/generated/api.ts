@@ -164,6 +164,29 @@ export type AgentProfile = {
   problem?: string;
 };
 
+/**
+ * A way an agent offers to sign in, as it advertises it over ACP.
+ */
+export type SignInMethod = {
+  id: string;
+  name: string;
+  description?: string;
+  /**
+   * For a method the agent runs in a terminal: the whole command, which the client runs
+   * interactively outside the sandbox, as the user would. Without it, `agent.signIn` runs
+   * the method, and the agent does the flow itself (a browser, say).
+   */
+  terminal?: TerminalSignIn;
+};
+
+export type TerminalSignIn = {
+  argv: Array<string>;
+  /**
+   * Added to the client's own environment.
+   */
+  env: Array<[string, string]>;
+};
+
 export type Usage = { inputTokens: number; outputTokens: number; costUsd?: number };
 
 export type Session = {
@@ -484,6 +507,25 @@ export type AgentListParams = {
   projectId?: ProjectId;
 };
 
+/**
+ * A registry agent, for signing in. Only registry agents sign in: signing in runs the agent
+ * outside the sandbox, so never a command from a project's profile file.
+ */
+export type AgentRefParams = {
+  /**
+   * Registry key: `claude-code`, `codex`, `gemini`, or another adapter.
+   */
+  agent: string;
+};
+
+export type AgentSignInParams = {
+  agent: string;
+  /**
+   * One of the agent's non-terminal sign-in methods, from `agent.signInMethods`.
+   */
+  methodId: string;
+};
+
 export type SessionCreateParams = {
   projectId: ProjectId;
   agentProfile: string;
@@ -634,6 +676,8 @@ export type Methods = {
   "project.list": { params: Empty; result: Array<Project> };
   "project.get": { params: ProjectGetParams; result: Project };
   "agent.list": { params: AgentListParams; result: Array<AgentProfile> };
+  "agent.signInMethods": { params: AgentRefParams; result: Array<SignInMethod> };
+  "agent.signIn": { params: AgentSignInParams; result: Empty };
   "session.create": { params: SessionCreateParams; result: Session };
   "session.prompt": { params: SessionPromptParams; result: TurnResult };
   "session.cancel": { params: SessionIdParams; result: Empty };
