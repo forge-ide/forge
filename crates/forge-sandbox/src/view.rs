@@ -165,6 +165,16 @@ impl View {
         paths
     }
 
+    /// Extra read-only paths inside an extra read-write one, which must stay read-only: only
+    /// a tier that can mount one over the other (Standard) keeps them so.
+    pub fn locked(&self) -> Vec<PathBuf> {
+        self.extra
+            .iter()
+            .filter(|p| self.extra_rw.iter().any(|rw| p.starts_with(rw)))
+            .cloned()
+            .collect()
+    }
+
     /// Everything read-write: worktrees, their own git dirs, and the scratch dirs.
     pub fn read_write(&self) -> Vec<PathBuf> {
         let mut paths = Vec::new();
@@ -176,6 +186,18 @@ impl View {
         paths.push(self.scratch_tmp.clone());
         paths.extend(self.extra_rw.iter().cloned());
         paths
+    }
+}
+
+/// Refuse a view with [`View::locked`] paths in a tier whose rules only add up, so a read-only
+/// path inside a writable one would be writable.
+pub(crate) fn refuse_locked(view: &View, tier: &str) -> Result<(), crate::SandboxError> {
+    match view.locked().first() {
+        Some(path) => Err(crate::SandboxError::Invalid(format!(
+            "the {tier} sandbox can't keep {} read-only inside a writable directory",
+            path.display()
+        ))),
+        None => Ok(()),
     }
 }
 

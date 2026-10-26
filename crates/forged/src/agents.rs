@@ -453,8 +453,15 @@ pub async fn sign_in_with(state: &State, agent: &str, method: &str) -> Result<()
             forge_api::ErrorKind::AgentUnavailable,
             format!("{agent} sign-in didn't finish within 10 minutes"),
         )
-    })?;
-    signed.map_err(|e| sign_in_failed(agent, e))
+    });
+    // The link it printed is good only for this sign-in; give the CLI a moment to show the
+    // last lines, then remove it.
+    let log = sign_in_log(&state.paths.data_dir, agent);
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let _ = tokio::fs::remove_file(log).await;
+    });
+    signed?.map_err(|e| sign_in_failed(agent, e))
 }
 
 #[cfg(test)]

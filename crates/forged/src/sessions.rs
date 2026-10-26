@@ -324,8 +324,6 @@ impl AgentResolver for ProfileResolver {
             &home.read_only(),
             &protected,
         )?);
-        // Its own login dir, read-write: never one holding the home or Forge's dirs.
-        checked_read_only("the agent's own login", &home.writable, &protected)?;
         Ok(AgentLaunch {
             command: AgentCommand { argv, env: vec![] },
             agent: manifest.map(|m| m.id.clone()),

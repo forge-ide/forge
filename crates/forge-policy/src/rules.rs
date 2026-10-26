@@ -50,6 +50,11 @@ pub const BUILTIN_PROTECTED: &[&str] = &[
     ".claude/",
     ".codex/",
     ".gemini/",
+    // Antigravity's workspace hooks.
+    ".agents/",
+    ".agent/",
+    "_agents/",
+    "_agent/",
 ];
 
 /// Every layer's rules, compiled once per session launch.

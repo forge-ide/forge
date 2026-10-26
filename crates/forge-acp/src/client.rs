@@ -107,6 +107,9 @@ pub struct SessionSetup {
     /// Where to copy the agent's stderr as it comes, for a sign-in: the agent may print the
     /// URL to finish in a browser there.
     pub stderr_log: Option<std::path::PathBuf>,
+    /// Whether the agent's `_meta` names MCP tools in its permission requests (see
+    /// [`crate::adapters::Permissions::mcp_meta`]).
+    pub mcp_meta: bool,
 }
 
 /// An MCP server the agent reaches over Streamable HTTP.
@@ -458,6 +461,7 @@ impl AcpClient {
             terminals: terminals.clone(),
             turn: turn.clone(),
             command_source: setup.command_source,
+            mcp_meta: setup.mcp_meta,
             own_servers: setup.mcp_servers.iter().map(|s| s.name.clone()).collect(),
             commands: Mutex::new(ToolCommands::default()),
         });
@@ -671,6 +675,7 @@ struct Handlers {
     terminals: Arc<Terminals>,
     turn: Arc<Mutex<Option<TurnId>>>,
     command_source: CommandSource,
+    mcp_meta: bool,
     /// The MCP servers Forge offers the agent, whose tools ask Forge themselves.
     own_servers: Vec<String>,
     /// Commands the agent reported in its tool calls.
@@ -1029,7 +1034,13 @@ impl Handlers {
         let fields = &req.tool_call.fields;
         let target = {
             let commands = lock(&self.commands);
-            permission::target(&req, &self.workspace, self.command_source, &commands)
+            permission::target(
+                &req,
+                &self.workspace,
+                self.command_source,
+                self.mcp_meta,
+                &commands,
+            )
         };
         let asks: Vec<(Option<Action>, Unmapped)> = match target {
             // A tool of Forge's own server asks Forge itself when it runs, as it does for

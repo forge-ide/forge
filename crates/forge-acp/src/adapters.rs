@@ -115,6 +115,10 @@ pub struct Auth {
 pub struct Permissions {
     /// Where an execute permission request carries its command.
     pub command: CommandSource,
+    /// Its permission requests for MCP tools say so in `_meta` (`is_mcp_tool_call`, with the
+    /// server and tool), which Forge then trusts; other agents' `_meta` never names a tool.
+    #[serde(default)]
+    pub mcp_meta: bool,
 }
 
 /// Where an agent's execute permission requests carry the command they ask about.
@@ -148,9 +152,11 @@ impl Manifest {
                 (Some(url), Some(sha))
                     if cfg!(all(target_os = "linux", target_arch = "x86_64")) =>
                 {
-                    let dir = format!("~/{}/{}", archive.dir, self.package.version);
+                    let dir = format!("\"$HOME/{}/{}\"", archive.dir, self.package.version);
+                    let zip = format!("\"$HOME/{}/{}.zip\"", archive.dir, self.package.version);
                     format!(
-                        "mkdir -p {dir} && curl -fL {url} -o {dir}.zip && echo '{sha}  {dir}.zip' | sha256sum -c && unzip -o {dir}.zip -d {dir} && rm {dir}.zip"
+                        "mkdir -p {dir} && curl -fL {url} -o {zip} && echo \"{sha}  $HOME/{}/{}.zip\" | sha256sum -c && unzip -o {zip} -d {dir} && rm {zip}",
+                        archive.dir, self.package.version
                     )
                 }
                 _ => format!("{} isn't available for this platform", self.name),
@@ -377,9 +383,17 @@ mod tests {
         // Its install command fetches the pinned zip and checks its hash.
         let install = m.install_command().join(" ");
         if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-            assert!(
-                install.contains("sha256sum -c") && install.contains("1.4.3"),
-                "{install}"
+            let dir = "$HOME/.local/share/forge/agents/antigravity-acp/1.4.3";
+            let archive = m.package.archive.as_ref().unwrap();
+            let (url, sha) = (
+                archive.linux_x86_64.clone().unwrap(),
+                archive.linux_x86_64_sha256.clone().unwrap(),
+            );
+            assert_eq!(
+                install,
+                format!(
+                    "mkdir -p \"{dir}\" && curl -fL {url} -o \"{dir}.zip\" && echo \"{sha}  {dir}.zip\" | sha256sum -c && unzip -o \"{dir}.zip\" -d \"{dir}\" && rm \"{dir}.zip\""
+                )
             );
         }
     }

@@ -97,17 +97,6 @@ pub enum ShimError {
     /// The agent keeps its own login, and it isn't there.
     #[error("{agent} isn't signed in; sign in with `forge agent sign-in {id}`")]
     NotSignedIn { agent: String, id: String },
-    /// The agent would run the repo's hooks without asking: its own trust list, which it
-    /// writes, trusts the worktree.
-    #[error(
-        "{agent} trusts {path}, so it would run the repo's hooks without asking Forge; remove it \
-         from {list}, then start {agent} again"
-    )]
-    WorkspaceTrusted {
-        agent: String,
-        path: String,
-        list: String,
-    },
 }
 
 /// Whether a TOML config defines `[mcp_servers.<MCP_SERVER>]`. One that doesn't parse is
@@ -152,6 +141,14 @@ pub fn repo_config(agent: &str) -> &'static [&'static str] {
         // A trusted worktree's .env is loaded into Gemini's environment, which every shell
         // command inherits.
         "gemini" => &[".gemini/settings.json", ".gemini/.env", ".env"],
+        // Its workspace hooks, which it runs only for a trusted workspace; Forge's copy of its
+        // trust list trusts none, and these are checked too.
+        "antigravity" => &[
+            ".agents/hooks.json",
+            ".agent/hooks.json",
+            "_agents/hooks.json",
+            "_agent/hooks.json",
+        ],
         _ => &[],
     }
 }
@@ -206,6 +203,7 @@ pub fn prepare(manifest: Option<&Manifest>, cx: &ShimContext<'_>) -> Result<Shim
         return Ok(shim);
     };
     shim.setup.command_source = manifest.permissions.command;
+    shim.setup.mcp_meta = manifest.permissions.mcp_meta;
     shim.env.extend(
         manifest
             .launch
@@ -246,7 +244,7 @@ pub fn prepare(manifest: Option<&Manifest>, cx: &ShimContext<'_>) -> Result<Shim
         "claude-code" => claude(&mut shim, cx, manifest)?,
         "codex" => codex(&mut shim, cx),
         "gemini" => gemini(&mut shim, cx).map_err(failed)?,
-        "antigravity" => antigravity(&mut shim, cx, manifest)?,
+        "antigravity" => antigravity(&mut shim, cx),
         _ => {}
     }
     Ok(shim)
@@ -392,29 +390,18 @@ fn codex(shim: &mut Shim, cx: &ShimContext<'_>) {
     shim.setup.mode = Some("read-only".into());
 }
 
-/// Antigravity: its config at the real `~/.gemini`, of which the sandbox shows only its own
-/// login dir, and the `default` mode, which asks the client about every command and edit
-/// (its `auto_edit` and `yolo` modes don't). Refused while its trust list trusts the worktree
-/// or a folder above it, since it runs a trusted repo's hooks without asking.
-fn antigravity(
-    shim: &mut Shim,
-    cx: &ShimContext<'_>,
-    manifest: &Manifest,
-) -> Result<(), ShimError> {
-    let worktree = std::fs::canonicalize(cx.worktree).unwrap_or_else(|_| cx.worktree.to_path_buf());
-    for trusted in &cx.home.trusted {
-        let resolved = std::fs::canonicalize(trusted).unwrap_or_else(|_| trusted.clone());
-        if worktree.starts_with(&resolved) || cx.worktree.starts_with(trusted) {
-            return Err(ShimError::WorkspaceTrusted {
-                agent: manifest.name.clone(),
-                path: trusted.display().to_string(),
-                list: "~/.gemini/antigravity-acp/trusted_workspaces.json".into(),
-            });
-        }
-    }
-    shim.env.extend(cx.home.env.iter().cloned());
+/// Antigravity: its config in the session's own copy ([`stage`]), and the `default` mode,
+/// which asks the client about every command and edit (its `auto_edit` and `yolo` modes
+/// don't).
+fn antigravity(shim: &mut Shim, cx: &ShimContext<'_>) {
+    shim.env.push((
+        "GEMINI_HOME".into(),
+        staged_home(cx.dir).display().to_string(),
+    ));
+    // Set, it would trust every workspace.
+    shim.env
+        .push(("AGY_ACP_DISABLE_WORKSPACE_TRUST".into(), "0".into()));
     shim.setup.mode = Some("default".into());
-    Ok(())
 }
 
 /// Gemini CLI: a policy file passed with `--policy`, which replaces `~/.gemini/policies` (the
@@ -490,13 +477,97 @@ pub struct HomeConfig {
     /// key in Claude's `env`): the agent reads them as it would outside Forge, but the log
     /// redactor hides them, and a command carrying one asks.
     pub secrets: Vec<String>,
-    /// Real dirs the sandbox shows read-write at their own paths: the login an agent keeps
-    /// and refreshes itself.
-    pub writable: Vec<PathBuf>,
-    /// Variables pointing the agent at its config.
-    pub env: Vec<(String, String)>,
-    /// Folders the agent's own trust list trusts, where it runs a repo's hooks unasked.
-    pub trusted: Vec<PathBuf>,
+    /// The login an agent keeps and refreshes itself, in the user's real config: copied into
+    /// the session at each launch ([`stage`]), and its refreshed token copied back
+    /// ([`save_login`]).
+    pub own_login: Option<PathBuf>,
+}
+
+/// Where a session's copy of an agent's own config is: the shim dir's `gemini/` (Antigravity's
+/// `GEMINI_HOME`), read-only but for its login dir and its artifacts dir.
+fn staged_home(shim_dir: &Path) -> PathBuf {
+    shim_dir.join("gemini")
+}
+
+/// What the sandbox must show for a session's own copy of an agent's config.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Staged {
+    /// Dirs inside the read-only shim dir that the session writes.
+    pub read_write: Vec<PathBuf>,
+    /// Files inside those that stay read-only (its trust list, its auth settings).
+    pub read_only: Vec<PathBuf>,
+}
+
+/// Make the session's copy of the agent's own config in `shim_dir`, before the sandbox starts.
+/// For Antigravity: an empty `config/` (no hooks, MCP servers, or skills of the user's), a
+/// login dir holding copies of the user's token and auth settings, and a trust list that marks
+/// the worktree untrusted, so it never runs a repo's hooks. The trust list and settings stay
+/// read-only; the session writes only the token, its conversations, and its artifacts, none of
+/// which reaches the user's real config but a refreshed token.
+pub fn stage(home: &HomeConfig, shim_dir: &Path, worktree: &Path) -> std::io::Result<Staged> {
+    let Some(token) = &home.own_login else {
+        return Ok(Staged::default());
+    };
+    let root = staged_home(shim_dir);
+    let login = root.join("antigravity-acp");
+    let artifacts = root.join("artifacts");
+    for dir in [root.join("config"), artifacts.clone(), login.clone()] {
+        std::fs::create_dir_all(&dir)?;
+    }
+    let real = token.parent().expect("a file has a parent");
+    write_new(&login.join("acp_token.json"), &std::fs::read(token)?)?;
+    let settings = match std::fs::read(real.join("settings.json")) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            br#"{"auth":{"type":"oauth-personal"}}"#.to_vec()
+        }
+        Err(e) => return Err(e),
+    };
+    write_new(&login.join("settings.json"), &settings)?;
+    let worktree = std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+    let trust = json!({ "trusted": [], "untrusted": [worktree] });
+    write_new(
+        &login.join("trusted_workspaces.json"),
+        trust.to_string().as_bytes(),
+    )?;
+    Ok(Staged {
+        read_write: vec![login.clone(), artifacts],
+        read_only: vec![
+            login.join("trusted_workspaces.json"),
+            login.join("settings.json"),
+        ],
+    })
+}
+
+/// Copy a refreshed token from the session's copy in `shim_dir` back to the user's real login
+/// `token`: only its `refresh_token`, a non-empty string, and only when it changed, so nothing
+/// else the session wrote reaches the user's other clients.
+pub fn save_login(token: &Path, shim_dir: &Path) -> Result<(), String> {
+    let copy = staged_home(shim_dir).join("antigravity-acp/acp_token.json");
+    let Some(raw) = read_settings(&copy)? else {
+        return Ok(());
+    };
+    let Some(fresh) = serde_json::from_slice::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|v| v.get("refresh_token")?.as_str().map(str::to_owned))
+        .filter(|t| !t.is_empty())
+    else {
+        return Ok(());
+    };
+    let Some(raw) = read_settings(token)? else {
+        return Ok(());
+    };
+    let mut real: serde_json::Value =
+        serde_json::from_slice(&raw).map_err(|e| format!("{}: {e}", token.display()))?;
+    if real.get("refresh_token").and_then(|v| v.as_str()) == Some(fresh.as_str()) {
+        return Ok(());
+    }
+    real["refresh_token"] = fresh.into();
+    let dir = token.parent().expect("a file has a parent");
+    let temp = dir.join(".acp_token.json.forge");
+    let _ = std::fs::remove_file(&temp);
+    write_new(&temp, real.to_string().as_bytes()).map_err(|e| e.to_string())?;
+    std::fs::rename(&temp, token).map_err(|e| e.to_string())
 }
 
 impl HomeConfig {
@@ -626,26 +697,7 @@ pub fn home_config(
                     agent: manifest.name.clone(),
                     id: manifest.id.clone(),
                 })?;
-            let dir = token.parent().expect("a file has a parent");
-            let real = std::fs::canonicalize(dir).map_err(|e| failed(e.to_string()))?;
-            out.writable.push(real);
-            out.env.push((
-                "GEMINI_HOME".into(),
-                home.join(".gemini").display().to_string(),
-            ));
-            if let Some(raw) =
-                read_settings(&dir.join("trusted_workspaces.json")).map_err(failed)?
-            {
-                let list: serde_json::Value = serde_json::from_slice(&raw)
-                    .map_err(|e| failed(format!("its trusted_workspaces.json: {e}")))?;
-                out.trusted = list
-                    .get("trusted")
-                    .and_then(|t| t.as_array())
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|p| p.as_str().map(PathBuf::from))
-                    .collect();
-            }
+            out.own_login = Some(token.clone());
             // Its token's secrets, for the redactor; Google rarely rotates a refresh token.
             if let Some(raw) = read_settings(&token).map_err(failed)?
                 && let Ok(token) = serde_json::from_slice::<serde_json::Value>(&raw)
@@ -924,9 +976,7 @@ mod tests {
         links: Vec::new(),
         claude_settings: None,
         secrets: Vec::new(),
-        writable: Vec::new(),
-        env: Vec::new(),
-        trusted: Vec::new(),
+        own_login: None,
     };
 
     fn context<'a>(dir: &'a Path, var: &'a dyn Fn(&str) -> Option<String>) -> ShimContext<'a> {
@@ -1354,74 +1404,106 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_keeps_its_own_login_in_its_real_dir_and_never_a_trusted_worktree() {
+    fn antigravity_works_on_a_copy_of_its_login_and_trusts_no_worktree() {
         let home = tempfile::tempdir().unwrap();
         let config = |home: &Path| home_config(manifest("antigravity"), home, None);
         // Not signed in: refused, naming how to sign in.
         let err = config(home.path()).unwrap_err().to_string();
         assert!(err.contains("forge agent sign-in antigravity"), "{err}");
-        let dir = home.path().join(".gemini/antigravity-acp");
-        std::fs::create_dir_all(&dir).unwrap();
+        let real = home.path().join(".gemini/antigravity-acp");
+        std::fs::create_dir_all(&real).unwrap();
+        let token = real.join("acp_token.json");
         std::fs::write(
-            dir.join("acp_token.json"),
+            &token,
             r#"{"client_id":"cid","client_secret":"GOCSPX-secretvalue","refresh_token":"1//refreshvalue","token_uri":"https://oauth2.googleapis.com/token"}"#,
         )
         .unwrap();
-        std::fs::write(dir.join("../oauth_creds.json"), "gemini cli's own").unwrap();
+        // What the user's other Antigravity clients trust, which a session never sees.
+        std::fs::write(
+            real.join("trusted_workspaces.json"),
+            r#"{"trusted":["/"],"untrusted":[]}"#,
+        )
+        .unwrap();
         let got = config(home.path()).unwrap();
-        // Its own dir read-write, at its real path, and nothing else of ~/.gemini.
-        assert_eq!(got.writable, [std::fs::canonicalize(&dir).unwrap()]);
+        assert_eq!(got.own_login.as_deref(), Some(token.as_path()));
         assert!(got.links.is_empty() && got.files.is_empty());
-        assert_eq!(
-            got.env,
-            [(
-                "GEMINI_HOME".to_owned(),
-                home.path().join(".gemini").display().to_string()
-            )]
-        );
-        // The token's secrets are redacted from the log.
         for value in ["GOCSPX-secretvalue", "1//refreshvalue"] {
             assert!(got.secrets.iter().any(|s| s == value), "{value}");
         }
 
-        // The session runs in `default`, never its auto-approving modes.
         let shim_dir = home.path().join("shim");
         std::fs::create_dir(&shim_dir).unwrap();
         let worktree = home.path().join("repo/.worktrees/feat/x");
         std::fs::create_dir_all(&worktree).unwrap();
-        let prepared = |got: &HomeConfig| {
-            prepare(
-                manifest("antigravity"),
-                &ShimContext {
-                    home: got,
-                    worktree: &worktree,
-                    ..context(&shim_dir, &no_vars)
-                },
-            )
-        };
-        let shim = prepared(&got).unwrap();
-        assert_eq!(shim.setup.mode.as_deref(), Some("default"));
-        assert!(shim.env.contains(&got.env[0]));
-        // Trusting the worktree, or a folder above it, would run the repo's hooks unasked.
-        for trusted in [worktree.clone(), home.path().join("repo")] {
-            std::fs::write(
-                dir.join("trusted_workspaces.json"),
-                serde_json::json!({ "trusted": [trusted], "untrusted": [] }).to_string(),
-            )
-            .unwrap();
-            let got = config(home.path()).unwrap();
-            assert!(
-                matches!(prepared(&got), Err(ShimError::WorkspaceTrusted { .. })),
-                "{trusted:?}"
-            );
-        }
-        std::fs::write(
-            dir.join("trusted_workspaces.json"),
-            serde_json::json!({ "trusted": [home.path().join("other")], "untrusted": [] })
-                .to_string(),
+        let staged = stage(&got, &shim_dir, &worktree).unwrap();
+        let login = shim_dir.join("gemini/antigravity-acp");
+        assert_eq!(
+            staged.read_write,
+            [login.clone(), shim_dir.join("gemini/artifacts")]
+        );
+        assert_eq!(
+            staged.read_only,
+            [
+                login.join("trusted_workspaces.json"),
+                login.join("settings.json")
+            ]
+        );
+        // No hooks, MCP servers, or skills of the user's; the worktree untrusted.
+        assert_eq!(
+            std::fs::read_dir(shim_dir.join("gemini/config"))
+                .unwrap()
+                .count(),
+            0
+        );
+        let trust: Value =
+            serde_json::from_slice(&std::fs::read(login.join("trusted_workspaces.json")).unwrap())
+                .unwrap();
+        assert_eq!(trust["trusted"], json!([]));
+        assert_eq!(
+            trust["untrusted"],
+            json!([std::fs::canonicalize(&worktree).unwrap()])
+        );
+        assert_eq!(
+            std::fs::read(login.join("acp_token.json")).unwrap(),
+            std::fs::read(&token).unwrap()
+        );
+
+        let shim = prepare(
+            manifest("antigravity"),
+            &ShimContext {
+                home: &got,
+                worktree: &worktree,
+                ..context(&shim_dir, &no_vars)
+            },
         )
         .unwrap();
-        assert!(prepared(&config(home.path()).unwrap()).is_ok());
+        assert_eq!(shim.setup.mode.as_deref(), Some("default"));
+        let env: std::collections::HashMap<_, _> = shim.env.iter().cloned().collect();
+        assert_eq!(
+            env["GEMINI_HOME"],
+            shim_dir.join("gemini").display().to_string()
+        );
+        assert_eq!(env["AGY_ACP_DISABLE_WORKSPACE_TRUST"], "0");
+
+        // Only a changed refresh token goes back to the real login; nothing else the session
+        // wrote does.
+        let unchanged = std::fs::read(&token).unwrap();
+        save_login(&token, &shim_dir).unwrap();
+        assert_eq!(std::fs::read(&token).unwrap(), unchanged);
+        std::fs::write(
+            login.join("acp_token.json"),
+            r#"{"client_id":"evil","refresh_token":"1//rotated","token_uri":"https://evil.example/token"}"#,
+        )
+        .unwrap();
+        save_login(&token, &shim_dir).unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(&token).unwrap()).unwrap();
+        assert_eq!(saved["refresh_token"], "1//rotated");
+        assert_eq!(saved["client_id"], "cid");
+        assert_eq!(saved["token_uri"], "https://oauth2.googleapis.com/token");
+        assert_eq!(
+            std::fs::read_to_string(real.join("trusted_workspaces.json")).unwrap(),
+            r#"{"trusted":["/"],"untrusted":[]}"#
+        );
     }
 
     /// Forge lets its own server's tools through without asking (they ask Forge when they

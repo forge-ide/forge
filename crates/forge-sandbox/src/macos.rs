@@ -81,6 +81,7 @@ impl Sandbox for Seatbelt {
             SandboxTier::Unsandboxed => Ok(Arc::new(Unsandboxed::with_proxy(spec.proxy))),
             SandboxTier::Light | SandboxTier::Standard => {
                 let view = View::new(&spec)?;
+                crate::view::refuse_locked(&view, "Seatbelt")?;
                 let mut env = crate::env::from_daemon();
                 env.push(("HOME".into(), view.scratch_home.display().to_string()));
                 env.push(("TMPDIR".into(), view.scratch_tmp.display().to_string()));

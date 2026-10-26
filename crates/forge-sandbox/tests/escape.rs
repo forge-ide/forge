@@ -165,6 +165,16 @@ impl Fixture {
     }
 
     fn sandbox(&self, tier: SandboxTier) -> Arc<dyn SessionSandbox> {
+        self.sandbox_with(tier, vec![]).unwrap()
+    }
+
+    /// With `locked` paths shown read-only besides the probe, which may lie inside the
+    /// read-write `.agent/login`.
+    fn sandbox_with(
+        &self,
+        tier: SandboxTier,
+        locked: Vec<PathBuf>,
+    ) -> Result<Arc<dyn SessionSandbox>, forge_sandbox::SandboxError> {
         let backend = forge_sandbox::system(PathBuf::from(HELPER));
         let status = backend
             .tiers()
@@ -174,17 +184,17 @@ impl Fixture {
         if let Some(why) = status.unavailable {
             panic!("the {tier:?} tier is unavailable on this machine: {why}");
         }
-        backend
-            .prepare(Spec {
-                tier,
-                worktrees: vec![self.mine.clone()],
-                scratch: self.root.join("data/sessions/s1"),
-                home: self.home.clone(),
-                read_only: vec![PathBuf::from(PROBE)],
-                read_write: vec![self.home.join(".agent/login")],
-                proxy: Some(self.proxy.clone()),
-            })
-            .unwrap()
+        backend.prepare(Spec {
+            tier,
+            worktrees: vec![self.mine.clone()],
+            scratch: self.root.join("data/sessions/s1"),
+            home: self.home.clone(),
+            read_only: std::iter::once(PathBuf::from(PROBE))
+                .chain(locked)
+                .collect(),
+            read_write: vec![self.home.join(".agent/login")],
+            proxy: Some(self.proxy.clone()),
+        })
     }
 }
 
@@ -421,11 +431,12 @@ async fn escape_suite(tier: SandboxTier) {
         if possible.exists() {
             allowed(sb, &cwd, "read", possible).await;
         }
-        let other = Escape::List("/sys/class".into());
-        assert!(
-            !attempt(sb, &fx, &other).await,
-            "Standard shows /sys beyond the CPU topology"
-        );
+        for other in ["/sys/class", "/sys/devices/system/cpu/vulnerabilities"] {
+            assert!(
+                !attempt(sb, &fx, &Escape::List(other.into())).await,
+                "Standard shows {other}"
+            );
+        }
     }
     #[cfg(target_os = "linux")]
     assert!(
@@ -729,6 +740,51 @@ async fn light_escapes_fail() {
 #[ignore = "needs a sandbox-capable host; run `just test-sandbox`"]
 async fn standard_escapes_fail() {
     escape_suite(SandboxTier::Standard).await;
+}
+
+/// A read-only path inside a read-write one stays read-only in Standard (Antigravity's trust
+/// list inside its own dir); the tiers that can't express that refuse rather than make it
+/// writable.
+#[tokio::test]
+#[ignore = "needs a sandbox-capable host; run `just test-sandbox`"]
+async fn a_read_only_path_inside_a_writable_one_stays_read_only() {
+    let fx = Fixture::new().await;
+    let locked = fx.home.join(".agent/login/locked");
+    std::fs::write(&locked, "as Forge wrote it\n").unwrap();
+    #[cfg(target_os = "linux")]
+    {
+        let sb = fx
+            .sandbox_with(SandboxTier::Standard, vec![locked.clone()])
+            .unwrap();
+        let cwd = fx.mine.path.clone();
+        allowed(
+            sb.as_ref(),
+            &cwd,
+            "write",
+            &fx.home.join(".agent/login/beside"),
+        )
+        .await;
+        let attempt_write = |path: &Path| {
+            let script = format!(
+                "printf changed > {0} 2>/dev/null; mv /dev/null {0} 2>/dev/null; rm -f {0} 2>/dev/null; true",
+                path.display()
+            );
+            sb.command("/bin/sh", &["-c".into(), script], &cwd, &[])
+                .stdin(Stdio::null())
+                .output()
+        };
+        attempt_write(&locked).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&locked).unwrap(),
+            "as Forge wrote it\n",
+            "the read-only file inside the writable dir was changed"
+        );
+    }
+    let light = fx.sandbox_with(SandboxTier::Light, vec![locked]);
+    assert!(
+        light.is_err(),
+        "Light can't keep a path read-only inside a writable one"
+    );
 }
 
 /// Killing the command's process group ends everything in a Standard sandbox, even a process

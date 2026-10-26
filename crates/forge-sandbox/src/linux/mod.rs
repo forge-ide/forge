@@ -27,8 +27,13 @@ const DEVICES_RW: &[&str] = &["/dev/null", "/dev/zero", "/dev/full"];
 /// Devices every sandboxed process may read.
 const DEVICES_RO: &[&str] = &["/dev/urandom", "/dev/random"];
 
-/// The CPU topology Standard shows read-only.
-const CPU_INFO: &str = "/sys/devices/system/cpu";
+/// Which CPUs exist, which Standard shows read-only; not the rest of the CPU tree (which
+/// mitigations are on, frequencies).
+const CPU_INFO: &[&str] = &[
+    "/sys/devices/system/cpu/possible",
+    "/sys/devices/system/cpu/online",
+    "/sys/devices/system/cpu/present",
+];
 
 /// The Linux backends, with availability probed once.
 pub struct Linux {
@@ -69,11 +74,11 @@ impl Sandbox for Linux {
         require(&self.statuses, spec.tier)?;
         match spec.tier {
             SandboxTier::Unsandboxed => Ok(Arc::new(Unsandboxed::with_proxy(spec.proxy))),
-            SandboxTier::Light => Ok(Arc::new(Light::new(
-                self.helper.clone(),
-                &View::new(&spec)?,
-                spec.proxy,
-            ))),
+            SandboxTier::Light => {
+                let view = View::new(&spec)?;
+                crate::view::refuse_locked(&view, "Light")?;
+                Ok(Arc::new(Light::new(self.helper.clone(), &view, spec.proxy)))
+            }
             SandboxTier::Standard => {
                 let view = View::new(&spec)?;
                 let socket = match &spec.proxy {
@@ -286,15 +291,13 @@ fn bwrap_args(view: &View, helper: &Path) -> Vec<String> {
         bind(&mut args, "--ro-bind", path, path);
     }
     args.extend(["--proc", "/proc", "--dev", "/dev"].map(str::to_owned));
-    // CPU topology, read-only: allocators such as tcmalloc refuse to start without
+    // Which CPUs exist, read-only: allocators such as tcmalloc refuse to start without
     // `/sys/devices/system/cpu/possible`. Nothing else of /sys is shown.
-    if Path::new(CPU_INFO).is_dir() {
-        bind(
-            &mut args,
-            "--ro-bind",
-            Path::new(CPU_INFO),
-            Path::new(CPU_INFO),
-        );
+    for file in CPU_INFO {
+        let path = Path::new(file);
+        if path.is_file() {
+            bind(&mut args, "--ro-bind", path, path);
+        }
     }
     bind(&mut args, "--bind", &view.scratch_tmp, Path::new("/tmp"));
     bind(&mut args, "--bind", &view.scratch_home, &view.home);
@@ -309,6 +312,10 @@ fn bwrap_args(view: &View, helper: &Path) -> Vec<String> {
     // After the home, so one inside it shows through at its real path.
     for path in &view.extra_rw {
         bind(&mut args, "--bind", path, path);
+    }
+    // Then what must stay read-only inside them, mounted over.
+    for path in view.locked() {
+        bind(&mut args, "--ro-bind", &path, &path);
     }
     bind(&mut args, "--ro-bind", helper, helper);
     args

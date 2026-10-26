@@ -215,6 +215,7 @@ pub fn target(
     req: &RequestPermissionRequest,
     workspace: &Workspace,
     source: CommandSource,
+    mcp_meta: bool,
     commands: &ToolCommands,
 ) -> Target {
     let fields = &req.tool_call.fields;
@@ -233,7 +234,7 @@ pub fn target(
     }
     // A request that is itself marked as an MCP tool call names its server and tool in
     // `_meta.mcp`, and the tool's arguments in `rawInput.arguments` (Antigravity's).
-    if let Some(action) = mcp_call(req.tool_call.meta.as_ref(), raw) {
+    if let Some(action) = mcp_call(req.tool_call.meta.as_ref(), raw).filter(|_| mcp_meta) {
         return Target::Action(action);
     }
     let Some(kind) = fields.kind else {
@@ -244,9 +245,16 @@ pub fn target(
             let argv = match source {
                 CommandSource::RawInput => raw_command(raw),
                 CommandSource::Title => fields.title.as_deref().map(shell_line),
-                CommandSource::CommandLine => raw
-                    .and_then(|r| r.get("CommandLine")?.as_str())
-                    .map(shell_line),
+                // It runs the command in `Cwd`: one outside the worktree names nothing Forge
+                // decides there.
+                CommandSource::CommandLine => {
+                    let cwd = raw.and_then(|r| r.get("Cwd")?.as_str());
+                    let inside = cwd
+                        .is_none_or(|c| workspace.resolve_read(&workspace.cwd().join(c)).is_ok());
+                    raw.and_then(|r| r.get("CommandLine")?.as_str())
+                        .filter(|_| inside)
+                        .map(shell_line)
+                }
                 CommandSource::ToolCallArgv => {
                     let id = &req.tool_call.tool_call_id.0;
                     match commands.get(id) {
@@ -478,7 +486,7 @@ mod tests {
     }
 
     fn decide(req: &RequestPermissionRequest, ws: &Workspace, source: CommandSource) -> Target {
-        target(req, ws, source, &ToolCommands::default())
+        target(req, ws, source, false, &ToolCommands::default())
     }
 
     #[test]
@@ -535,7 +543,7 @@ mod tests {
         });
         // Nothing reported for the call: nothing to decide.
         assert_eq!(
-            target(&req, &ws, CommandSource::ToolCallArgv, &commands),
+            target(&req, &ws, CommandSource::ToolCallArgv, false, &commands),
             Target::Unknown
         );
         let reported = serde_json::json!({ "command": "/usr/bin/bash -c 'cargo test'" });
@@ -543,7 +551,13 @@ mod tests {
         // A later report for the same call doesn't replace the first.
         commands.record("t1", Some(&serde_json::json!({ "command": "ls" })));
         assert_eq!(
-            exec(target(&req, &ws, CommandSource::ToolCallArgv, &commands)),
+            exec(target(
+                &req,
+                &ws,
+                CommandSource::ToolCallArgv,
+                false,
+                &commands
+            )),
             ["/usr/bin/bash", "-c", "cargo test"]
         );
         // A login shell stays one, so allow rules still never match it.
@@ -553,7 +567,13 @@ mod tests {
             Some(&serde_json::json!({ "command": r#"bash -lc 'echo "a b" '"'"'c'"'"''"# })),
         );
         assert_eq!(
-            exec(target(&req, &ws, CommandSource::ToolCallArgv, &commands)),
+            exec(target(
+                &req,
+                &ws,
+                CommandSource::ToolCallArgv,
+                false,
+                &commands
+            )),
             ["bash", "-lc", r#"echo "a b" 'c'"#]
         );
         // A line that isn't only quoted words is decided as a shell line.
@@ -561,7 +581,13 @@ mod tests {
         let line = "bash -c 'x' && curl $HOST";
         commands.record("t1", Some(&serde_json::json!({ "command": line })));
         assert_eq!(
-            exec(target(&req, &ws, CommandSource::ToolCallArgv, &commands)),
+            exec(target(
+                &req,
+                &ws,
+                CommandSource::ToolCallArgv,
+                false,
+                &commands
+            )),
             ["sh", "-c", line]
         );
     }
@@ -576,13 +602,19 @@ mod tests {
         // A call Codex never reported stays unknown.
         let mut commands = ToolCommands::default();
         assert_eq!(
-            target(&req, &ws, CommandSource::ToolCallArgv, &commands),
+            target(&req, &ws, CommandSource::ToolCallArgv, false, &commands),
             Target::Unknown
         );
         // One it reported as a read, which carries no command: the approval's own.
         commands.record_read("t1");
         assert_eq!(
-            exec(target(&req, &ws, CommandSource::ToolCallArgv, &commands)),
+            exec(target(
+                &req,
+                &ws,
+                CommandSource::ToolCallArgv,
+                false,
+                &commands
+            )),
             ["/usr/bin/bash", "-c", "sed -n '1,5p' Cargo.toml"]
         );
         // With its shell prefix stripped, the script is a shell line.
@@ -594,14 +626,26 @@ mod tests {
                 f.raw_input(serde_json::json!({ "command": line }))
             });
             assert_eq!(
-                exec(target(&req, &ws, CommandSource::ToolCallArgv, &commands)),
+                exec(target(
+                    &req,
+                    &ws,
+                    CommandSource::ToolCallArgv,
+                    false,
+                    &commands
+                )),
                 ["sh", "-c", script]
             );
         }
         // A command the call reported wins over the approval's.
         commands.record("t1", Some(&serde_json::json!({ "command": "cargo test" })));
         assert_eq!(
-            exec(target(&req, &ws, CommandSource::ToolCallArgv, &commands)),
+            exec(target(
+                &req,
+                &ws,
+                CommandSource::ToolCallArgv,
+                false,
+                &commands
+            )),
             ["cargo", "test"]
         );
     }
@@ -623,7 +667,7 @@ mod tests {
         let mut commands = ToolCommands::default();
         // Without the tool call: nothing to decide.
         assert_eq!(
-            target(&req, &ws, CommandSource::ToolCallArgv, &commands),
+            target(&req, &ws, CommandSource::ToolCallArgv, false, &commands),
             Target::Unknown
         );
         let args = serde_json::json!({ "message": "Add notes", "paths": ["NOTES.md"] });
@@ -632,14 +676,14 @@ mod tests {
         // A call that isn't reported as an MCP tool call doesn't count.
         commands.record_mcp("t1", None, Some(&input));
         assert_eq!(
-            target(&req, &ws, CommandSource::ToolCallArgv, &commands),
+            target(&req, &ws, CommandSource::ToolCallArgv, false, &commands),
             Target::Unknown
         );
         let mut call_meta = serde_json::Map::new();
         call_meta.insert("is_mcp_tool_call".into(), true.into());
         commands.record_mcp("t1", Some(&call_meta), Some(&input));
         assert_eq!(
-            target(&req, &ws, CommandSource::ToolCallArgv, &commands),
+            target(&req, &ws, CommandSource::ToolCallArgv, false, &commands),
             Target::Action(Action::Mcp {
                 server: "forge".into(),
                 tool: "git_commit".into(),
@@ -656,7 +700,7 @@ mod tests {
             vec![],
         );
         assert_eq!(
-            target(&plain, &ws, CommandSource::ToolCallArgv, &commands),
+            target(&plain, &ws, CommandSource::ToolCallArgv, false, &commands),
             Target::Unknown
         );
     }
@@ -695,9 +739,7 @@ mod tests {
     fn a_command_line_is_the_shell_line_it_names() {
         let (_dir, ws) = workspace();
         let req = request(acp::ToolKind::Execute, |f| {
-            f.raw_input(
-                serde_json::json!({ "CommandLine": "cargo test && ls", "Cwd": "/elsewhere" }),
-            )
+            f.raw_input(serde_json::json!({ "CommandLine": "cargo test && ls" }))
         });
         assert_eq!(
             exec(decide(&req, &ws, CommandSource::CommandLine)),
@@ -705,6 +747,26 @@ mod tests {
         );
         // Other agents' requests don't carry it there.
         assert_eq!(decide(&req, &ws, CommandSource::RawInput), Target::Unknown);
+        // It runs where `Cwd` says: inside the worktree, decided; outside, nothing to decide.
+        let at = |cwd: &str| {
+            request(acp::ToolKind::Execute, |f| {
+                f.raw_input(serde_json::json!({ "CommandLine": "ls", "Cwd": cwd }))
+            })
+        };
+        let inside = ws.cwd().join("sub");
+        std::fs::create_dir_all(&inside).unwrap();
+        assert_eq!(
+            exec(decide(
+                &at(&inside.display().to_string()),
+                &ws,
+                CommandSource::CommandLine
+            )),
+            ["sh", "-c", "ls"]
+        );
+        assert_eq!(
+            decide(&at("/etc"), &ws, CommandSource::CommandLine),
+            Target::Unknown
+        );
         let none = request(acp::ToolKind::Execute, |f| f);
         assert_eq!(
             decide(&none, &ws, CommandSource::CommandLine),
@@ -726,6 +788,15 @@ mod tests {
             meta
         };
         let args = serde_json::json!({ "message": "m" });
+        let marked = |req: &RequestPermissionRequest| {
+            target(
+                req,
+                &ws,
+                CommandSource::CommandLine,
+                true,
+                &ToolCommands::default(),
+            )
+        };
         let req = |meta| {
             RequestPermissionRequest::new(
                 acp::SessionId::new("s"),
@@ -742,7 +813,7 @@ mod tests {
             )
         };
         assert_eq!(
-            decide(&req(mark(Some("forge"))), &ws, CommandSource::CommandLine),
+            marked(&req(mark(Some("forge")))),
             Target::Action(Action::Mcp {
                 server: "forge".into(),
                 tool: "git_commit".into(),
@@ -750,16 +821,18 @@ mod tests {
             })
         );
         // Without its server, or without the mark, nothing Forge can check.
-        assert_eq!(
-            decide(&req(mark(None)), &ws, CommandSource::CommandLine),
-            Target::Unknown
-        );
+        assert_eq!(marked(&req(mark(None))), Target::Unknown);
         assert_eq!(
             decide(
                 &req(serde_json::Map::new()),
                 &ws,
                 CommandSource::CommandLine
             ),
+            Target::Unknown
+        );
+        // An agent whose manifest doesn't say its `_meta` names MCP tools gets no such mark.
+        assert_eq!(
+            decide(&req(mark(Some("forge"))), &ws, CommandSource::CommandLine),
             Target::Unknown
         );
     }
@@ -904,7 +977,7 @@ mod tests {
             kind,
         };
         assert_eq!(
-            target(&req, &ws, CommandSource::ToolCallArgv, &commands),
+            target(&req, &ws, CommandSource::ToolCallArgv, false, &commands),
             Target::Edits(vec![
                 edit("a.rs", EditKind::Modify),
                 edit(".github/workflows/ci.yml", EditKind::Modify),
@@ -914,12 +987,12 @@ mod tests {
         // A Codex patch whose diffs weren't reported names nothing Forge can allow.
         let none = ToolCommands::default();
         assert_eq!(
-            target(&req, &ws, CommandSource::ToolCallArgv, &none),
+            target(&req, &ws, CommandSource::ToolCallArgv, false, &none),
             Target::Unknown
         );
         // Other agents' edits are decided on what the request names.
         assert_eq!(
-            target(&req, &ws, CommandSource::RawInput, &none),
+            target(&req, &ws, CommandSource::RawInput, false, &none),
             Target::Action(edit("a.rs", EditKind::Modify))
         );
     }

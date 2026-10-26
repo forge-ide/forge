@@ -26,6 +26,7 @@ own_login = ".gemini/antigravity-acp/acp_token.json"
 
 [permissions]
 command = "command-line"
+mcp_meta = true
 
 [network]
 # Its token refresh and the Code Assist endpoints personal accounts are routed to.
@@ -34,13 +35,13 @@ allow = ["oauth2.googleapis.com", "cloudcode-pa.googleapis.com", "daily-cloudcod
 [quirks]
 notes = [
     "Google's official ACP server, a ~1 GB proprietary download (a Python archive and its Go harness, `localharness_external`, run from where they're unpacked). There's no npm package; the install command fetches the pinned zip and checks its SHA-256.",
-    "Keeps its own login in the user's real ~/.gemini/antigravity-acp/ (the user chose this): `forge agent sign-in antigravity` runs its `oauth-personal` method outside the sandbox, which opens a browser. A session sees that one directory read-write, at its real path, and nothing else of ~/.gemini; it refreshes the token itself on every start and writes it back. Google's terms forbid third-party apps on consumer plans from reaching Antigravity except through Google's own clients, and this is Google's client; Forge only runs it.",
+    "Keeps its own login in the user's real ~/.gemini/antigravity-acp/ (the user chose this): `forge agent sign-in antigravity` runs its `oauth-personal` method outside the sandbox, which opens a browser or prints the link. A session works on a copy: GEMINI_HOME is the read-only shim dir's gemini/, with an empty config/ (no hooks, MCP servers, or skills; it reloads hooks before every tool call), and its antigravity-acp/ holds copies of the token and auth settings, a trust list that marks the worktree untrusted (read-only, as are the settings), and the session's conversations. Only a refreshed refresh_token goes back to the real file, at relaunch and close; nothing else the session writes reaches the user's other Antigravity clients (Zed, JetBrains), which share that dir. Google's terms forbid third-party apps on consumer plans from reaching Antigravity except through Google's own clients, and this is Google's client; Forge only runs it.",
     "A session won't start without the token file: with `oauth-personal` in its settings and no token, `session/new` would try a browser sign-in inside the sandbox, wait 5 minutes, and delete the token file.",
     "Its processes talk over loopback ports they pick (the harness's websocket, its credential-injection proxy), so it runs only in the Standard tier on Linux; Light and Seatbelt allow connections only to Forge's proxy.",
-    "Runs commands itself, after asking; the request's rawInput.CommandLine is the shell line. Writes and edits go through ACP's file methods; reads of the worktree and its own dirs are its own.",
+    "Runs commands itself, after asking; the request's rawInput.CommandLine is the shell line, run in rawInput.Cwd, and one whose Cwd is outside the worktree is refused. Writes and edits go through ACP's file methods; reads of the worktree and its own dirs are its own.",
     "MCP tool calls ask with kind `other` and `_meta.is_mcp_tool_call`, naming the server and tool; Forge lets its own server's through.",
     "Its `yolo` mode approves everything without asking the client, and a resumed session restores its mode; Forge sets `default` on every session and never resumes one.",
     "Its harness writes its built-in skills into the working directory (skills/system/...), so a worktree shows an untracked skills/ after a session; git_commit commits only the paths it names.",
-    "Its allocator (tcmalloc) won't start without /sys/devices/system/cpu, which the Standard tier shows read-only for it; nothing else of /sys is shown.",
-    "Runs a repo's .agents/hooks.json only for a trusted workspace; the trust list is in the directory it writes, so a session won't start while it trusts the worktree or a folder above it.",
+    "Its allocator (tcmalloc) won't start without /sys/devices/system/cpu/possible; Standard shows that, online, and present read-only, and nothing else of /sys.",
+    "Runs a repo's .agents/hooks.json (or .agent/, _agents/, _agent/) only for a trusted workspace; Forge's trust list trusts none, those dirs are protected paths, and a launch is refused while their hooks.json differs from the branch's last commit.",
 ]
