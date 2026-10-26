@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use agent_client_protocol::schema::ProtocolVersion;
@@ -15,7 +16,7 @@ use agent_client_protocol::schema::v1::{
     TerminalOutputRequest, TerminalOutputResponse, TextContent, WaitForTerminalExitRequest,
     WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
 };
-use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
+use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, UntypedMessage};
 use forge_api::TurnId;
 use forge_api::events::{
     AgentMessageBody, AgentPlanBody, EditBody, EventPayload, PlanEntry, TerminalOutputBody,
@@ -128,6 +129,8 @@ pub enum GateVerdict {
     /// The extra environment, if kept, is part of the argv as an `env` prefix.
     Rewrite(Vec<String>),
     Deny(String),
+    /// A human refused it, with their note for the agent if they wrote one.
+    HumanDeny(Option<String>),
     /// The turn was cancelled while the request waited.
     Cancelled,
 }
@@ -275,6 +278,8 @@ pub struct AcpClient {
     terminals: Arc<Terminals>,
     exit: watch::Receiver<Option<AgentExit>>,
     kill: Mutex<Option<oneshot::Sender<()>>>,
+    /// Whether the agent takes steering messages.
+    steering: Arc<AtomicBool>,
 }
 
 impl AcpClient {
@@ -295,6 +300,14 @@ impl AcpClient {
         let cwd = client.cwd.clone();
         let opened = async {
             let agent = client.initialize().await?;
+            let steering = agent
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("steering")?.get("supported")?.as_bool())
+                .unwrap_or(false);
+            client
+                .steering
+                .store(steering, std::sync::atomic::Ordering::SeqCst);
             // Forge's tools are reached over HTTP; an agent that can't do that goes without.
             let http = agent.agent_capabilities.mcp_capabilities.http;
             if !http && !mcp_servers.is_empty() {
@@ -455,6 +468,7 @@ impl AcpClient {
 
         let terminals = Arc::new(Terminals::new(sandbox));
         let turn = Arc::new(Mutex::new(None));
+        let steering = Arc::new(AtomicBool::new(false));
         let cwd = workspace.cwd().to_path_buf();
         let handlers = Arc::new(Handlers {
             workspace,
@@ -468,6 +482,7 @@ impl AcpClient {
             commands: Mutex::new(ToolCommands::default()),
             unasked: Mutex::new(VecDeque::new()),
             asked: Mutex::new(VecDeque::new()),
+            steering: steering.clone(),
         });
 
         let (exit_tx, exit_rx) = watch::channel(None);
@@ -507,6 +522,7 @@ impl AcpClient {
             terminals,
             exit: exit_rx,
             kill: Mutex::new(Some(kill_tx)),
+            steering,
         };
         Ok(client)
     }
@@ -689,6 +705,8 @@ struct Handlers {
     unasked: Mutex<VecDeque<acp::ToolCall>>,
     /// Tool calls that asked Forge, which are recorded by their requests.
     asked: Mutex<VecDeque<acp::ToolCallId>>,
+    /// Whether the agent takes steering messages, as its `initialize` said.
+    steering: Arc<AtomicBool>,
 }
 
 type AcpResult<T> = Result<T, agent_client_protocol::Error>;
@@ -784,7 +802,8 @@ async fn connect(
             async move |req: RequestPermissionRequest, responder, cx: ConnectionTo<Agent>| {
                 // A decision may wait on a human; don't hold the dispatch loop.
                 let h = permission.clone();
-                cx.spawn(async move { reply(responder, h.permission(req).await) })
+                let conn = cx.clone();
+                cx.spawn(async move { reply(responder, h.permission(req, &conn).await) })
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -797,6 +816,81 @@ async fn connect(
         )
         .connect_with(transport, main)
         .await
+}
+
+/// The extension request that adds a message to the agent's running turn (Claude's adapter
+/// offers it, saying so in `initialize`'s `_meta.steering.supported`).
+const STEER_METHOD: &str = "_session/steering";
+/// The longest reason or note a steering message carries.
+const STEER_LIMIT: usize = 1024;
+
+/// What to tell an agent whose request for tool call `id` got `verdict`, if anything: Forge's
+/// reason, or a human's note. It goes to the agent as a user message, so nothing in it is the
+/// agent's own text: a policy reason's quoted parts (the paths and commands it names) are
+/// left out, and the call is named only by an ID of plain characters.
+fn steering_text(id: &str, verdict: &GateVerdict) -> Option<String> {
+    let plain = !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let call = if plain {
+        format!("tool call {id}")
+    } else {
+        "a tool call".to_owned()
+    };
+    match verdict {
+        GateVerdict::Deny(reason) => Some(format!(
+            "[forge] Forge refused {call}: {}",
+            one_line(&unquoted(reason))
+        )),
+        GateVerdict::HumanDeny(Some(note)) => Some(format!(
+            "[forge] The user refused {call} and says: {}",
+            one_line(note)
+        )),
+        _ => None,
+    }
+}
+
+/// `text` with each double-quoted part (escapes included) replaced by `"…"`.
+fn unquoted(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '"' {
+            out.push(c);
+            continue;
+        }
+        out.push_str("\"…\"");
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => {
+                    chars.next();
+                }
+                '"' => break,
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// `text` on one line, without control characters, at most [`STEER_LIMIT`] bytes.
+fn one_line(text: &str) -> String {
+    let mut out = text
+        .split(|c: char| c.is_control())
+        .filter(|part| !part.trim().is_empty())
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if out.len() > STEER_LIMIT {
+        let mut end = STEER_LIMIT;
+        while !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+    }
+    out
 }
 
 /// Whether a tool call with `status` has finished.
@@ -1047,6 +1141,7 @@ impl Handlers {
     async fn permission(
         &self,
         req: RequestPermissionRequest,
+        conn: &ConnectionTo<Agent>,
     ) -> AcpResult<RequestPermissionResponse> {
         let fields = &req.tool_call.fields;
         let id = &req.tool_call.tool_call_id;
@@ -1111,11 +1206,35 @@ impl Handlers {
         let wanted: &[Kind] = match verdict {
             GateVerdict::Allow => &[Kind::AllowOnce, Kind::AllowAlways],
             // The agent's own tool can't run a different command.
-            GateVerdict::Deny(_) | GateVerdict::Rewrite(_) => {
+            GateVerdict::Deny(_) | GateVerdict::HumanDeny(_) | GateVerdict::Rewrite(_) => {
                 &[Kind::RejectOnce, Kind::RejectAlways]
             }
             GateVerdict::Cancelled => &[],
         };
+        // A reject tells the agent nothing more, so an agent that takes steering hears why in
+        // its running turn, before the reject lands.
+        if self.steering.load(std::sync::atomic::Ordering::SeqCst)
+            && let Some(text) = steering_text(&req.tool_call.tool_call_id.0, &verdict)
+        {
+            let message = UntypedMessage::new(
+                STEER_METHOD,
+                serde_json::json!({
+                    "sessionId": req.session_id,
+                    "prompt": [{ "type": "text", "text": text }],
+                }),
+            );
+            let sent = match message {
+                Ok(message) => conn.send_request(message).block_task().await.map(drop),
+                Err(e) => Err(e),
+            };
+            match sent {
+                Ok(()) => {
+                    let id = req.tool_call.tool_call_id.0.to_string();
+                    self.result(&id, "failed", Some(text)).await;
+                }
+                Err(e) => tracing::debug!(error = %e, "steering the agent"),
+            }
+        }
         let outcome = match choose(&req.options, wanted) {
             Some(option) => RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
                 option.option_id.clone(),
@@ -1151,6 +1270,10 @@ impl Handlers {
             GateVerdict::Rewrite(argv) if !argv.is_empty() => return Ok(Some(argv)),
             GateVerdict::Rewrite(_) => "refused: a hook rewrote it to nothing".to_owned(),
             GateVerdict::Deny(reason) => format!("refused by policy: {reason}"),
+            GateVerdict::HumanDeny(note) => match note {
+                Some(note) => format!("refused by the user: {note}"),
+                None => "refused by the user".to_owned(),
+            },
             GateVerdict::Cancelled => "cancelled".to_owned(),
         };
         Err(self.refuse(&id, reason).await)

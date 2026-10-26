@@ -465,7 +465,7 @@ impl SessionManager {
         if let Some(pending) = pending {
             let _ = pending.reply.send(match verdict {
                 Verdict::Allow => GateVerdict::Allow,
-                _ => GateVerdict::Deny(note.unwrap_or_else(|| "a human denied it".into())),
+                _ => GateVerdict::HumanDeny(note),
             });
         }
         Ok(())

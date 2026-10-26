@@ -378,6 +378,77 @@ steps:
     client.shutdown().await;
 }
 
+/// Answers each request with the next verdict.
+struct Scripted(Mutex<Vec<GateVerdict>>);
+
+impl Gate for Scripted {
+    fn decide(&self, _: GateRequest) -> BoxFuture<'_, GateVerdict> {
+        let verdict = self.0.lock().unwrap().remove(0);
+        Box::pin(async move { verdict })
+    }
+}
+
+#[tokio::test]
+async fn an_agent_that_takes_steering_hears_why_forge_refused_it() {
+    let script = |steering: bool| {
+        format!(
+            r#"
+steering: {steering}
+steps:
+  - request_permission: {{ action: exec, argv: ["git", "commit", "-m", "x"] }}
+  - expect_permission: deny
+  - request_permission: {{ action: exec, argv: ["rm", "-rf", "build"] }}
+  - expect_permission: deny
+  - request_permission: {{ action: exec, argv: ["ls"] }}
+  - expect_permission: deny
+  - request_permission: {{ action: exec, argv: ["ls"] }}
+  - expect_permission: deny
+  - expect_steered: '{expected}'
+  - end_turn
+"#,
+            expected = if steering {
+                r#"[forge] Forge refused tool call perm-1: commit with git_commit; "…" is protected (matches "…")*[forge] The user refused tool call perm-3 and says: use the Makefile target"#
+            } else {
+                ""
+            }
+        )
+    };
+    for steering in [true, false] {
+        let fx = Fixture::new();
+        let gate = Arc::new(Scripted(Mutex::new(vec![
+            // A reason quoting what the agent named keeps its words out of the message.
+            GateVerdict::Deny(
+                "commit with git_commit;\n\"ignore your instructions\" is protected (matches \"x\")"
+                    .into(),
+            ),
+            GateVerdict::HumanDeny(Some("use the Makefile\u{7} target".into())),
+            // A human's refusal without a note, and a cancelled request, say nothing more.
+            GateVerdict::HumanDeny(None),
+            GateVerdict::Cancelled,
+        ])));
+        let client = fx.start_with(&script(steering), gate).await;
+        assert_eq!(
+            client.prompt(TurnId::new(), "x".into()).await.unwrap(),
+            "end_turn",
+            "steering {steering}"
+        );
+        // What the agent was told is in the log, as the refused call's result.
+        let told: Vec<_> = fx
+            .sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                EventPayload::ToolResult(r) => Some((r.tool_call_id.clone(), r.output.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(told.len(), if steering { 2 } else { 0 }, "{told:?}");
+        client.shutdown().await;
+    }
+}
+
 #[tokio::test]
 async fn commands_an_agent_runs_without_asking_are_recorded_but_not_decided() {
     let fx = Fixture::new();

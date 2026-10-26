@@ -30,6 +30,8 @@ struct State {
     turns: u64,
     /// The URL of the MCP server the client named `forge`.
     mcp: Option<String>,
+    /// The text of each steering message received.
+    steered: Vec<String>,
 }
 
 /// Where `auth`'s login file is: under `$FORGE_FAKE_AGENT_HOME` if set (tests, whose sandbox
@@ -74,6 +76,9 @@ impl Shared {
     }
 }
 
+/// The steering extension's method: a message added to the running turn.
+const STEER_METHOD: &str = "_session/steering";
+
 /// Serve the agent side of one ACP connection until the client disconnects.
 pub async fn serve(
     script: Script,
@@ -89,11 +94,14 @@ pub async fn serve(
             last_permission: None,
             turns: 0,
             mcp: None,
+            steered: Vec::new(),
         }),
         cancelled: AtomicBool::new(false),
         cancel: Notify::new(),
     });
-    let (on_session, on_prompt, on_cancel) = (shared.clone(), shared.clone(), shared);
+    let steering = script.steering;
+    let (on_session, on_prompt, on_cancel, on_steer) =
+        (shared.clone(), shared.clone(), shared.clone(), shared);
     Agent
         .builder()
         .name("forge-fake-agent")
@@ -115,13 +123,19 @@ pub async fn serve(
                         ))),
                     })
                     .collect();
+                let meta = steering.then(|| {
+                    let mut meta = serde_json::Map::new();
+                    meta.insert("steering".into(), json!({ "supported": true }));
+                    meta
+                });
                 responder.respond(
                     InitializeResponse::new(init.protocol_version)
                         .agent_capabilities(
                             AgentCapabilities::new()
                                 .mcp_capabilities(McpCapabilities::new().http(true)),
                         )
-                        .auth_methods(methods),
+                        .auth_methods(methods)
+                        .meta(meta),
                 )
             },
             agent_client_protocol::on_receive_request!(),
@@ -185,6 +199,33 @@ pub async fn serve(
                         }
                     }
                 })
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: agent_client_protocol::UntypedMessage, responder, _cx| {
+                if req.method != STEER_METHOD {
+                    return responder.respond_with_error(agent_client_protocol::Error::new(
+                        -32601,
+                        format!("no method {}", req.method),
+                    ));
+                }
+                let text: String = req.params["prompt"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|b| b["text"].as_str())
+                    .collect();
+                // Kept even when not advertised, so `expect_steered` sees a client that steers
+                // an agent that never said it could take it.
+                on_steer.state().steered.push(text);
+                if !steering {
+                    return responder.respond_with_error(agent_client_protocol::Error::new(
+                        -32601,
+                        format!("no method {}", req.method),
+                    ));
+                }
+                responder.respond(json!({ "outcome": "injected" }))
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -385,6 +426,12 @@ async fn run_turn(
                     &session,
                     SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(id, fields)),
                 )?;
+            }
+            Step::ExpectSteered(pattern) => {
+                let got = shared.state().steered.join("\n");
+                if !glob_match(&pattern, &got) {
+                    return Err(format!("expected steering {pattern:?}, got {got:?}"));
+                }
             }
             Step::ExpectPermission(want) => {
                 let got = shared.state().last_permission;
