@@ -35,8 +35,8 @@ mod macos;
 #[doc(hidden)]
 pub mod helper;
 
-pub use env::{PASSTHROUGH_VARS, is_passed_through, is_valid_name};
-pub use unsandboxed::Unsandboxed;
+pub use env::{PASSTHROUGH_VARS, STARTUP_FILES_OFF, is_passed_through, is_valid_name};
+pub use unsandboxed::{SIGN_IN_VARS, Unsandboxed};
 pub use view::{SYSTEM_READ_ONLY, View, shows_read_only, toolchains};
 
 /// File name of the helper binary, installed next to `forged`.
@@ -115,6 +115,9 @@ pub struct Spec {
     /// Extra paths visible read-only: the agent program and the user config's
     /// `[sandbox] read_only` entries.
     pub read_only: Vec<PathBuf>,
+    /// Extra paths visible read-write, at their real paths: an agent's own login dir. The
+    /// caller checks they hold nothing else of the user's.
+    pub read_write: Vec<PathBuf>,
     /// The session's egress proxy, the only way out to the network. Without one a sandboxed
     /// session has no network at all. The sandbox keeps it running while it lives.
     pub proxy: Option<Arc<proxy::Proxy>>,
@@ -154,6 +157,10 @@ pub trait Sandbox: Send + Sync + 'static {
 /// One session's sandbox. Every process the session starts goes through [`Self::command`].
 pub trait SessionSandbox: Send + Sync + 'static {
     fn tier(&self) -> SandboxTier;
+
+    /// The value the sandbox gives variable `name` (`HTTP_PROXY`, `HOME`, ...), as a process
+    /// inside it sees it.
+    fn var(&self, name: &str) -> Option<String>;
 
     /// A command that runs `program args` in `cwd` inside the sandbox, with the sandbox's
     /// environment plus `env`. `env` (which an agent chooses for its terminals) can't replace

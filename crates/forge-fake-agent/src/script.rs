@@ -10,6 +10,35 @@ pub struct Script {
     /// Each step is a one-key map (`- read: path`) or a bare name (`- end_turn`).
     #[serde(with = "serde_norway::with::singleton_map_recursive")]
     pub steps: Vec<Step>,
+    /// Sign-in the agent needs before it opens a session, as a real agent keeps it: a login
+    /// file in its home that a sign-in writes and later processes find.
+    #[serde(default)]
+    pub auth: Option<AuthScript>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthScript {
+    /// The login file, relative to `$HOME` (or `$FORGE_FAKE_AGENT_HOME`).
+    pub login: String,
+    /// The methods `initialize` advertises; terminal ones only to a client that runs them.
+    pub methods: Vec<AuthMethodScript>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthMethodScript {
+    pub id: String,
+    pub name: String,
+    /// `agent` (signed in by `authenticate`) or `terminal` (by running the agent with `args`).
+    #[serde(default = "agent_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+fn agent_kind() -> String {
+    "agent".into()
 }
 
 /// One scripted action. Steps run in order; `end_turn` finishes the current prompt and the next
@@ -30,9 +59,13 @@ pub enum Step {
     Exec(ExecStep),
     /// Ask the client for permission.
     RequestPermission(PermissionStep),
+    /// Call a tool on the MCP server the client named `forge` at session start. The turn
+    /// fails unless the call succeeds, or with `expect: deny`, unless the tool refuses.
+    McpCall(McpCallStep),
     /// Fail the turn unless the last permission request got this answer.
     ExpectPermission(Expected),
-    /// Stream an agent message.
+    /// Stream an agent message; `{forge_mcp_url}` in it is replaced by the URL of the client's
+    /// `forge` MCP server.
     Message(String),
     /// Wait, unless the turn is cancelled first.
     SleepMs(u64),
@@ -84,12 +117,31 @@ impl From<ExecForm> for ExecStep {
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct McpCallStep {
+    pub tool: String,
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+    #[serde(default)]
+    pub expect: Option<Expected>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PermissionStep {
     pub action: PermissionAction,
     #[serde(default)]
     pub argv: Vec<String>,
     #[serde(default)]
     pub path: Option<String>,
+    /// For an edit: the paths it changes, as its locations (a patch touching several files).
+    #[serde(default)]
+    pub paths: Vec<String>,
+    /// For a parsed read: the command the request names.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// For an MCP tool: its name on the client's `forge` server.
+    #[serde(default)]
+    pub tool: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -97,6 +149,18 @@ pub struct PermissionStep {
 pub enum PermissionAction {
     Exec,
     Edit,
+    /// Read `path`, as a tool of kind `read` with it as the location.
+    Read,
+    /// Fetch a URL, as a tool of kind `fetch`.
+    Fetch,
+    /// Run `command`, reported as Codex reports a command it parses as a read: a tool call
+    /// of kind `read` with `path` as its location and no command, then a request of kind
+    /// `execute` whose `rawInput.command` is the command.
+    ParsedRead,
+    /// Call `tool` on the `forge` server, as Codex asks: a tool call marked
+    /// `is_mcp_tool_call` naming the server and tool, then a request for it marked
+    /// `is_mcp_tool_approval` that names nothing else.
+    McpTool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -169,11 +233,20 @@ steps:
   - expect_permission: deny
   - message: "Done."
   - sleep_ms: 10
+  - mcp_call: { tool: git_commit, arguments: { message: "add f" }, expect: allow }
   - end_turn
 "#,
         )
         .unwrap();
-        assert_eq!(script.steps.len(), 10);
+        assert_eq!(script.steps.len(), 11);
+        assert_eq!(
+            script.steps[9],
+            Step::McpCall(McpCallStep {
+                tool: "git_commit".into(),
+                arguments: serde_json::json!({ "message": "add f" }),
+                expect: Some(Expected::Allow),
+            })
+        );
         assert_eq!(script.steps[0], Step::ExpectPrompt("*retry*".into()));
         assert_eq!(
             script.steps[5],
@@ -181,9 +254,12 @@ steps:
                 action: PermissionAction::Exec,
                 argv: vec!["pnpm".into(), "add".into(), "left-pad".into()],
                 path: None,
+                paths: vec![],
+                command: None,
+                tool: None,
             })
         );
-        assert_eq!(script.steps[9], Step::EndTurn);
+        assert_eq!(script.steps[10], Step::EndTurn);
     }
 
     #[test]

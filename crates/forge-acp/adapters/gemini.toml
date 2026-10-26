@@ -1,0 +1,34 @@
+# Gemini CLI, which speaks ACP itself.
+id = "gemini"
+name = "Gemini CLI"
+profile = "gemini"
+
+[package]
+npm = "@google/gemini-cli"
+version = "0.65.0"
+bin = "gemini"
+runtime = "node"
+
+[launch]
+args = ["--acp", "--approval-mode", "default"]
+env = { GEMINI_CLI_TRUST_WORKSPACE = "true" }
+
+[auth]
+secrets = ["GEMINI_API_KEY"]
+
+[permissions]
+# Shell requests carry no rawInput; the title is the command line.
+command = "title"
+
+[quirks]
+notes = [
+    "Shell permission requests carry no rawInput, only the command line as their title.",
+    "Runs shell commands and reads files itself; writes and edits go through ACP's file methods.",
+    "Auto-allows a list of read-only shell commands unless a policy rule with an args pattern asks; the shim's policy asks for every shell command.",
+    "Starts no MCP server in an untrusted folder, Forge's included, so the shim trusts the worktree, and Gemini reads its .gemini/settings.json (hooks, tool discovery, and MCP servers, which run in the sandbox without asking Forge) and a copy of the user's ~/.gemini/settings.json; a launch is refused while the worktree's .gemini/settings.json, .gemini/.env, or .env differs from the branch's last commit, since Gemini reads them at startup. Forge's policy, passed with --policy (which replaces ~/.gemini/policies, the user's own included), ranks above both, so shell commands, edits, and MCP tools still ask. GEMINI.md, agents, commands, extensions, and skills are linked read-only from the real ~/.gemini.",
+    "Its policy pre-allows git_commit on the server named `forge`, so a launch is refused when ~/.gemini/settings.json, an extension's gemini-extension.json, or the repo's committed .gemini/settings.json defines a server of that name.",
+    "Loads a .env (or .gemini/.env) from the worktree, its parents, or the home dir into its own environment, which every shell command it runs inherits, without replacing variables already set; 0.65 has no flag to skip it. The sandbox home's is cleared each launch, and the variables that redirect where Gemini reads settings, policies, and credentials from are set empty so a repo's .env can't set them.",
+    "A repo's .gemini/commands run shell only when a human invokes them; GEMINI.md, agents, skills, and policies run nothing unasked.",
+    "An invalid policy file is reported on stderr and skipped, not fatal; Forge's is a fixed constant.",
+    "Google sign-in keeps credentials in the real home, which the sandbox hides, and Forge doesn't carry it yet; Gemini signs in with an API key from the keyring.",
+]

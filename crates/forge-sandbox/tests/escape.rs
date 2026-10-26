@@ -72,6 +72,9 @@ impl Fixture {
         std::fs::create_dir_all(home.join(".ssh")).unwrap();
         std::fs::write(home.join(".ssh/id_test"), "PRIVATE KEY\n").unwrap();
         std::fs::write(home.join("notes.txt"), "private\n").unwrap();
+        // An agent's own login dir, which the session shows read-write; its neighbour isn't.
+        std::fs::create_dir_all(home.join(".agent/login")).unwrap();
+        std::fs::create_dir_all(home.join(".agent/other")).unwrap();
 
         let repo = home.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
@@ -132,11 +135,12 @@ impl Fixture {
             resolver: Arc::new(TestDns(upstream_addr)),
             log: Arc::new(move |c| log.lock().unwrap().push(c)),
             limits: Limits::default(),
-            routes: vec![SecretRoute {
-                secret: forge_sandbox::secrets::known("ANTHROPIC_API_KEY").unwrap(),
-                value: Secret::new(ROUTE_SECRET),
-            }],
+            routes: vec![SecretRoute::fixed(
+                forge_sandbox::secrets::known("ANTHROPIC_API_KEY").unwrap(),
+                Secret::new(ROUTE_SECRET),
+            )],
             upstream: Some(Arc::new(PlainUpstream)),
+            local: None,
         })
         .await
         .unwrap();
@@ -161,6 +165,16 @@ impl Fixture {
     }
 
     fn sandbox(&self, tier: SandboxTier) -> Arc<dyn SessionSandbox> {
+        self.sandbox_with(tier, vec![]).unwrap()
+    }
+
+    /// With `locked` paths shown read-only besides the probe, which may lie inside the
+    /// read-write `.agent/login`.
+    fn sandbox_with(
+        &self,
+        tier: SandboxTier,
+        locked: Vec<PathBuf>,
+    ) -> Result<Arc<dyn SessionSandbox>, forge_sandbox::SandboxError> {
         let backend = forge_sandbox::system(PathBuf::from(HELPER));
         let status = backend
             .tiers()
@@ -170,16 +184,17 @@ impl Fixture {
         if let Some(why) = status.unavailable {
             panic!("the {tier:?} tier is unavailable on this machine: {why}");
         }
-        backend
-            .prepare(Spec {
-                tier,
-                worktrees: vec![self.mine.clone()],
-                scratch: self.root.join("data/sessions/s1"),
-                home: self.home.clone(),
-                read_only: vec![PathBuf::from(PROBE)],
-                proxy: Some(self.proxy.clone()),
-            })
-            .unwrap()
+        backend.prepare(Spec {
+            tier,
+            worktrees: vec![self.mine.clone()],
+            scratch: self.root.join("data/sessions/s1"),
+            home: self.home.clone(),
+            read_only: std::iter::once(PathBuf::from(PROBE))
+                .chain(locked)
+                .collect(),
+            read_write: vec![self.home.join(".agent/login")],
+            proxy: Some(self.proxy.clone()),
+        })
     }
 }
 
@@ -303,6 +318,14 @@ fn escapes(fx: &Fixture) -> Vec<(&'static str, Escape)> {
         ),
         ("write in the real home", Write(fx.home.join(".bashrc"))),
         (
+            "write beside a read-write path",
+            Write(fx.home.join(".agent/other/x")),
+        ),
+        (
+            "read beside a read-write path",
+            List(s(fx.home.join(".agent/other"))),
+        ),
+        (
             "reach a host over TCP",
             Tcp(fx.tcp.local_addr().unwrap().to_string()),
         ),
@@ -391,12 +414,30 @@ async fn escape_suite(tier: SandboxTier) {
     // Normal work: the worktree, its git metadata, and temp files.
     allowed(sb, &cwd, "read", &cwd.join("README.md")).await;
     allowed(sb, &cwd, "write", &cwd.join("new.txt")).await;
+    allowed(sb, &cwd, "write", &fx.home.join(".agent/login/token")).await;
+    // Into the real dir, not a scratch copy.
+    assert!(fx.home.join(".agent/login/token").is_file());
     allowed(sb, &cwd, "write", &fx.mine.git_admin.join("forge-probe")).await;
     allowed(sb, &cwd, "read", &fx.repo.join(".git/HEAD")).await;
     allowed(sb, &cwd, "list", Path::new("/usr")).await;
 
     proxy_checks(sb, &fx).await;
     env_checks(sb, &fx).await;
+    startup_file_checks(sb, &fx).await;
+    // Standard shows the CPU topology (allocators need it) and nothing else of /sys.
+    #[cfg(target_os = "linux")]
+    if tier == SandboxTier::Standard {
+        let possible = Path::new("/sys/devices/system/cpu/possible");
+        if possible.exists() {
+            allowed(sb, &cwd, "read", possible).await;
+        }
+        for other in ["/sys/class", "/sys/devices/system/cpu/vulnerabilities"] {
+            assert!(
+                !attempt(sb, &fx, &Escape::List(other.into())).await,
+                "Standard shows {other}"
+            );
+        }
+    }
     #[cfg(target_os = "linux")]
     assert!(
         !preload_escapes(sb, &fx).await,
@@ -464,6 +505,10 @@ const PINNED: &[&str] = &[
     "PATH",
     "HOME",
     "TMPDIR",
+    "ZDOTDIR",
+    "BASH_ENV",
+    "ENV",
+    "SHLVL",
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "ALL_PROXY",
@@ -538,6 +583,72 @@ async fn env_checks(sb: &dyn SessionSandbox, fx: &Fixture) {
         baseline["PATH"],
         "a variable named PATH=... replaced PATH for the shell"
     );
+}
+
+/// Shell startup files the agent can write run nothing: zsh reads `$ZDOTDIR/.zshenv` (by
+/// default in the writable home) before every `-c` script, and bash reads `$BASH_ENV`, so
+/// either would run agent code ahead of a command Forge decided as something else.
+async fn startup_file_checks(sb: &dyn SessionSandbox, fx: &Fixture) {
+    let sh = async |script: &str, env: &[(String, String)]| {
+        let output = sb
+            .command("/bin/sh", &["-c".into(), script.into()], &fx.mine.path, env)
+            .stdin(Stdio::null())
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success(), "{script}: {output:?}");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let plant = r#"printf 'touch "$HOME/startup-ran"
+' > "$HOME/.zshenv" && cp "$HOME/.zshenv" "$HOME/bash-env" && rm -f "$HOME/startup-ran""#;
+    sh(plant, &[]).await;
+    let home = sh(r#"printf %s "$HOME""#, &[]).await;
+    // A terminal's own env can't point either shell back at them.
+    let pointed = vec![
+        ("BASH_ENV".to_owned(), format!("{home}/bash-env")),
+        ("ZDOTDIR".to_owned(), home.clone()),
+    ];
+    for env in [vec![], pointed] {
+        for shell in ["zsh", "bash"] {
+            let ran = sh(
+                &format!(
+                    r#"command -v {shell} >/dev/null || exit 0; {shell} -c true; test -e "$HOME/startup-ran" && echo ran; true"#
+                ),
+                &env,
+            )
+            .await;
+            assert_eq!(
+                ran.trim(),
+                "",
+                "{shell} ran a startup file the agent wrote ({env:?})"
+            );
+        }
+    }
+
+    // bash sources ~/.bashrc for `-c` when its stdin is a socket, as if run by rshd, unless
+    // SHLVL says it's nested; Node gives its children socketpairs for stdio.
+    sh(r#"cp "$HOME/.zshenv" "$HOME/.bashrc""#, &[]).await;
+    if std::path::Path::new("/bin/bash").exists() {
+        let (theirs, _ours) = std::os::unix::net::UnixStream::pair().unwrap();
+        let status = sb
+            .command(
+                "/bin/bash",
+                &["-c".into(), "true".into()],
+                &fx.mine.path,
+                &[],
+            )
+            .stdin(Stdio::from(std::os::fd::OwnedFd::from(theirs)))
+            .status()
+            .await
+            .unwrap();
+        assert!(status.success());
+        let ran = sh(r#"test -e "$HOME/startup-ran" && echo ran; true"#, &[]).await;
+        assert_eq!(
+            ran.trim(),
+            "",
+            "bash on a socket ran the ~/.bashrc the agent wrote"
+        );
+    }
 }
 
 /// Where the preloaded library's constructor tries to write: the hidden home.
@@ -629,6 +740,51 @@ async fn light_escapes_fail() {
 #[ignore = "needs a sandbox-capable host; run `just test-sandbox`"]
 async fn standard_escapes_fail() {
     escape_suite(SandboxTier::Standard).await;
+}
+
+/// A read-only path inside a read-write one stays read-only in Standard (Antigravity's trust
+/// list inside its own dir); the tiers that can't express that refuse rather than make it
+/// writable.
+#[tokio::test]
+#[ignore = "needs a sandbox-capable host; run `just test-sandbox`"]
+async fn a_read_only_path_inside_a_writable_one_stays_read_only() {
+    let fx = Fixture::new().await;
+    let locked = fx.home.join(".agent/login/locked");
+    std::fs::write(&locked, "as Forge wrote it\n").unwrap();
+    #[cfg(target_os = "linux")]
+    {
+        let sb = fx
+            .sandbox_with(SandboxTier::Standard, vec![locked.clone()])
+            .unwrap();
+        let cwd = fx.mine.path.clone();
+        allowed(
+            sb.as_ref(),
+            &cwd,
+            "write",
+            &fx.home.join(".agent/login/beside"),
+        )
+        .await;
+        let attempt_write = |path: &Path| {
+            let script = format!(
+                "printf changed > {0} 2>/dev/null; mv /dev/null {0} 2>/dev/null; rm -f {0} 2>/dev/null; true",
+                path.display()
+            );
+            sb.command("/bin/sh", &["-c".into(), script], &cwd, &[])
+                .stdin(Stdio::null())
+                .output()
+        };
+        attempt_write(&locked).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&locked).unwrap(),
+            "as Forge wrote it\n",
+            "the read-only file inside the writable dir was changed"
+        );
+    }
+    let light = fx.sandbox_with(SandboxTier::Light, vec![locked]);
+    assert!(
+        light.is_err(),
+        "Light can't keep a path read-only inside a writable one"
+    );
 }
 
 /// Killing the command's process group ends everything in a Standard sandbox, even a process

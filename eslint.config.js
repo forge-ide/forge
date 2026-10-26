@@ -11,6 +11,8 @@ export default tseslint.config(
       "target/",
       // Session worktrees are copies of the repo with their own checks.
       ".worktrees/",
+      // Sample repos for the smoke checklist, each with its own checks.
+      "tests/fixtures/repos/",
       "apps/desktop/src-tauri/",
       "packages/client/src/generated/",
     ],

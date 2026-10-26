@@ -37,6 +37,34 @@ impl Unsandboxed {
     }
 }
 
+/// What an agent's own sign-in needs beyond the allowlist, to open the user's browser.
+pub const SIGN_IN_VARS: &[&str] = &[
+    "DISPLAY",
+    // Without it, an X server refuses the browser ("no authorization protocol specified").
+    "XAUTHORITY",
+    "WAYLAND_DISPLAY",
+    "XDG_RUNTIME_DIR",
+    // What `xdg-open` picks the user's browser by.
+    "XDG_SESSION_TYPE",
+    "XDG_CURRENT_DESKTOP",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "BROWSER",
+];
+
+impl Unsandboxed {
+    /// For an agent signing in, which the user starts: the allowlisted environment and the real
+    /// `HOME`, as for [`Unsandboxed::new`], plus [`SIGN_IN_VARS`] so its flow can open a browser.
+    pub fn for_sign_in() -> Self {
+        let mut this = Self::new();
+        for name in SIGN_IN_VARS {
+            if let Ok(value) = std::env::var(name) {
+                this.env.push(((*name).to_owned(), value));
+            }
+        }
+        this
+    }
+}
+
 impl Default for Unsandboxed {
     fn default() -> Self {
         Self::new()
@@ -46,6 +74,10 @@ impl Default for Unsandboxed {
 impl SessionSandbox for Unsandboxed {
     fn tier(&self) -> SandboxTier {
         SandboxTier::Unsandboxed
+    }
+
+    fn var(&self, name: &str) -> Option<String> {
+        crate::env::lookup(&self.env, name)
     }
 
     fn command(

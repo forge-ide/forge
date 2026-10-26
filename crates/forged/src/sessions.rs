@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use forge_acp::AgentCommand;
+use forge_acp::{AgentCommand, adapters, shim};
 use forge_api::methods::{
     BranchPreview, BranchPreviewParams, SessionCreateParams, SessionOutcome, SessionSetModeParams,
 };
@@ -16,7 +16,7 @@ use forge_config::{
 };
 use forge_hooks::HookSet;
 use forge_policy::{Layer, Rules};
-use forge_sandbox::proxy::{Allowlist, SecretRoute};
+use forge_sandbox::proxy::Allowlist;
 use forge_sandbox::secrets::{self, SecretStore};
 use forge_sandbox::{Sandbox, TierStatus};
 use forge_session::{AgentLaunch, AgentResolver, CreateRequest, SessionError};
@@ -139,18 +139,19 @@ async fn branch_rules(
 }
 
 async fn load_profile(root: &Path, id: &str) -> Result<AgentProfileConfig, HandlerError> {
-    let path =
-        AgentProfileConfig::path(root, id).map_err(|e| ApiError::validation(e.to_string()))?;
-    let file = path.clone();
-    let loaded = tokio::task::spawn_blocking(move || AgentProfileConfig::load(&file))
+    let (dir, name) = (root.to_path_buf(), id.to_owned());
+    let loaded = tokio::task::spawn_blocking(move || crate::agents::load(&dir, &name))
         .await
         .map_err(anyhow::Error::from)?;
-    match loaded {
-        Ok(Some(profile)) => Ok(profile),
-        Ok(None) => {
-            Err(ApiError::not_found(format!("agent profile {id:?}: no {}", path.display())).into())
-        }
-        Err(e) => Err(ApiError::validation(e.to_string()).into()),
+    match loaded? {
+        Some(profile) => Ok(profile),
+        None => Err(ApiError::not_found(format!(
+            "agent profile {id:?}: no {} and no built-in profile of that name",
+            Path::new(forge_config::AGENTS_DIR)
+                .join(format!("{id}.toml"))
+                .display()
+        ))
+        .into()),
     }
 }
 
@@ -168,6 +169,18 @@ fn sandbox_tier(
         ProfileSandbox::Container => SandboxTier::Container,
         ProfileSandbox::Unsandboxed => SandboxTier::Unsandboxed,
     });
+    // An agent whose processes talk over loopback ports runs only where the sandbox lets them:
+    // Standard on Linux, in its own network namespace. Elsewhere, only the proxy is reachable.
+    let loopback = adapters::manifest(&profile.agent).is_some_and(|m| m.launch.loopback);
+    if loopback && !(tier == SandboxTier::Standard && cfg!(target_os = "linux")) {
+        return Err(ApiError::new(
+            ErrorKind::SandboxUnavailable,
+            format!(
+                "agent profile {id:?} runs only in the Standard tier on Linux: its processes \
+                 talk over loopback ports, which other tiers don't allow"
+            ),
+        ));
+    }
     if tier == SandboxTier::Unsandboxed && !profile.allow_unsandboxed {
         return Err(ApiError::new(
             ErrorKind::SandboxUnavailable,
@@ -213,36 +226,41 @@ impl ProfileResolver {
             .map_err(|e| ApiError::new(ErrorKind::AgentUnavailable, e.to_string()))?
             .ok_or_else(|| ApiError::not_found(format!("project {}", session.project_id)))?;
         let id = &session.agent_profile;
-        let path =
-            AgentProfileConfig::path(&root, id).map_err(|e| ApiError::validation(e.to_string()))?;
-        let profile = AgentProfileConfig::load(&path)
-            .map_err(|e| ApiError::validation(e.to_string()))?
+        let profile = crate::agents::load(&root, id)?
             .ok_or_else(|| ApiError::not_found(format!("agent profile {id:?}")))?;
         Ok((root, profile))
     }
 
-    /// The secrets the profile injects, with their values from the keyring.
-    fn routes(&self, profile: &AgentProfileConfig, id: &str) -> Result<Vec<SecretRoute>, ApiError> {
-        known_secrets(profile, id)?
-            .into_iter()
-            .map(|secret| {
-                let value = self.secrets.get(secret.name).map_err(|e| {
-                    ApiError::new(
-                        ErrorKind::AgentUnavailable,
-                        format!("agent profile {id:?}: {e}"),
-                    )
-                })?;
-                Ok(SecretRoute { secret, value })
-            })
-            .collect()
+    /// How the profile signs in: the secrets the proxy injects, from the keyring or the
+    /// agent's own login.
+    fn credentials(
+        &self,
+        profile: &AgentProfileConfig,
+        id: &str,
+    ) -> Result<crate::agents::Credentials, ApiError> {
+        known_secrets(profile, id)?;
+        let manifest = adapters::manifest(&profile.agent);
+        crate::agents::credentials(profile, manifest, self.secrets.as_ref(), &self.home).map_err(
+            |fixes| {
+                ApiError::new(
+                    ErrorKind::AgentUnavailable,
+                    format!("agent profile {id:?}: {}", fixes.join("; ")),
+                )
+            },
+        )
     }
 }
 
 impl AgentResolver for ProfileResolver {
     fn secret_values(&self, session: &Session) -> Result<Vec<String>, ApiError> {
         let (_, profile) = self.profile(session)?;
-        let routes = self.routes(&profile, &session.agent_profile)?;
-        Ok(routes.iter().map(|r| r.value.expose().to_owned()).collect())
+        let credentials = self.credentials(&profile, &session.agent_profile)?;
+        Ok(credentials
+            .routes
+            .iter()
+            .filter_map(|r| r.value.current().ok())
+            .map(|v| v.expose().to_owned())
+            .collect())
     }
 
     fn launch(&self, session: &Session) -> Result<AgentLaunch, ApiError> {
@@ -250,39 +268,70 @@ impl AgentResolver for ProfileResolver {
         let id = &session.agent_profile;
         sandbox_tier(Some(session.sandbox), &profile, id, &self.sandbox.tiers())?;
         let network = allowlist(&profile, id)?;
-        let secrets = self.routes(&profile, id)?;
-        let mut argv = profile.command.ok_or_else(|| {
+        let credentials = self.credentials(&profile, id)?;
+        let command = crate::agents::command(&profile).ok_or_else(|| {
             ApiError::new(
                 ErrorKind::AgentUnavailable,
-                format!("agent profile {id:?} has no command"),
+                format!(
+                    "agent profile {id:?}: agent {:?} is not in Forge's registry, so the profile must set command",
+                    profile.agent
+                ),
             )
         })?;
         let user = UserConfig::load(&self.paths.user_config())
             .map_err(|e| ApiError::validation(e.to_string()))?;
         let mut read_only = checked_read_only(
+            "sandbox.read_only in the user config",
             &user.sandbox.read_only,
             &[&self.home, &self.paths.data_dir, &self.paths.runtime_dir],
         )?;
-        // The agent program must be visible inside the sandbox; run it by its real path, since
-        // a symlink to it may sit in a hidden directory.
-        let program = resolve_program(&argv[0]).ok_or_else(|| {
-            ApiError::new(
-                ErrorKind::AgentUnavailable,
-                format!("agent profile {id:?}: {} is not installed", argv[0]),
-            )
-        })?;
-        argv[0] = program.display().to_string();
-        read_only.push(program);
+        // The agent must be visible inside the sandbox: its program by its real path (a
+        // symlink to it may sit in a hidden directory), and for an npm adapter, node and the
+        // adapter's package.
+        let manifest = adapters::manifest(&profile.agent);
+        let plan = adapters::plan(manifest, &command, std::env::var_os("PATH").as_deref())
+            .map_err(|e| {
+                let install = manifest
+                    .map(|m| format!("; install it with `{}`", m.install_command().join(" ")))
+                    .unwrap_or_default();
+                ApiError::new(
+                    ErrorKind::AgentUnavailable,
+                    format!("agent profile {id:?}: {e}{install}"),
+                )
+            })?;
+        read_only.extend(plan.read_only);
+        let argv = plan.argv;
         let rules = Arc::new(policy_rules(&self.paths, &root)?);
         let hooks = project_hooks(&root, &self.home)?;
         // Hook scripts come from the project root, shown read-only, so the agent can't change
         // them from its worktree.
         read_only.extend(hooks.dir().map(Path::to_path_buf));
+        // The user's own settings and extensions, which the agent reads as it would outside
+        // Forge; the links' targets are shown read-only, never the home or Forge's own dirs.
+        let home = shim::home_config(manifest, &self.home, credentials.login.as_ref())
+            .map_err(|e| ApiError::new(ErrorKind::AgentUnavailable, e.to_string()))?;
+        // A link target that holds an agent's config dir or sign-in (through a symlink the
+        // user made, say) is refused too: those hold credentials and transcripts.
+        let agent_dirs: Vec<PathBuf> = shim::AGENT_HOME_ENTRIES
+            .iter()
+            .map(|entry| self.home.join(entry))
+            .collect();
+        let mut protected: Vec<&Path> =
+            vec![&self.home, &self.paths.data_dir, &self.paths.runtime_dir];
+        protected.extend(agent_dirs.iter().map(PathBuf::as_path));
+        read_only.extend(checked_read_only(
+            "the agent's user config",
+            &home.read_only(),
+            &protected,
+        )?);
         Ok(AgentLaunch {
             command: AgentCommand { argv, env: vec![] },
+            agent: manifest.map(|m| m.id.clone()),
             read_only,
             network,
-            secrets,
+            secrets: credentials.routes,
+            login: credentials.login.map(|l| l.kind),
+            home,
             rules,
             hooks: Arc::new(hooks),
             project_root: root,
@@ -331,9 +380,13 @@ fn policy_rules(paths: &Paths, root: &Path) -> Result<Rules, ApiError> {
     Rules::compile(&layers).map_err(|e| ApiError::validation(e.to_string()))
 }
 
-/// The profile's `[network] allow`, as the egress proxy's allowlist.
+/// The profile's `[network] allow`, and its registry agent's own hosts, as the egress proxy's
+/// allowlist.
 fn allowlist(profile: &AgentProfileConfig, id: &str) -> Result<Allowlist, ApiError> {
-    Allowlist::new(&profile.network.allow)
+    let own = adapters::manifest(&profile.agent)
+        .map(|m| m.network.allow.as_slice())
+        .unwrap_or_default();
+    Allowlist::new(profile.network.allow.iter().chain(own))
         .map_err(|e| ApiError::validation(format!("agent profile {id:?}: network.allow: {e}")))
 }
 
@@ -343,7 +396,7 @@ fn known_secrets(
     id: &str,
 ) -> Result<Vec<&'static secrets::KnownSecret>, ApiError> {
     let mut seen = std::collections::HashSet::new();
-    profile
+    let known: Vec<&'static secrets::KnownSecret> = profile
         .env_secrets
         .iter()
         .filter(|name| seen.insert(name.as_str()))
@@ -355,19 +408,36 @@ fn known_secrets(
                 ))
             })
         })
-        .collect()
+        .collect::<Result<_, _>>()?;
+    // Two secrets pointing the same variable at their routes: only one could be used.
+    for (i, a) in known.iter().enumerate() {
+        if let Some(b) = known[i + 1..]
+            .iter()
+            .find(|b| b.base_url_var == a.base_url_var)
+        {
+            return Err(ApiError::validation(format!(
+                "agent profile {id:?}: env_secrets: {} and {} can't both be used; keep one",
+                a.name, b.name
+            )));
+        }
+    }
+    Ok(known)
 }
 
 /// The user config's extra read-only paths, refusing any that would expose a protected dir:
 /// the home dir itself, or anything containing Forge's data or runtime dir.
-fn checked_read_only(paths: &[PathBuf], protected: &[&Path]) -> Result<Vec<PathBuf>, ApiError> {
+fn checked_read_only(
+    what: &str,
+    paths: &[PathBuf],
+    protected: &[&Path],
+) -> Result<Vec<PathBuf>, ApiError> {
     for path in paths {
         let resolved = resolve(path);
         // Compare as written and as resolved, so neither a symlink nor a missing path slips by.
         let covers = |p: &&Path| p.starts_with(path) || resolve(p).starts_with(&resolved);
         if protected.iter().any(covers) {
             return Err(ApiError::validation(format!(
-                "sandbox.read_only in the user config: {} would expose the home dir or Forge's own data",
+                "{what}: {} would expose the home dir, an agent's sign-in, or Forge's own data",
                 path.display()
             )));
         }
@@ -395,19 +465,6 @@ fn resolve(path: &Path) -> PathBuf {
     }
 }
 
-/// `program` as an absolute, canonical path, looked up in `PATH` when it has no slash.
-fn resolve_program(program: &str) -> Option<PathBuf> {
-    let found = if program.contains('/') {
-        PathBuf::from(program)
-    } else {
-        let path = std::env::var_os("PATH")?;
-        std::env::split_paths(&path)
-            .map(|dir| dir.join(program))
-            .find(|candidate| candidate.is_file())?
-    };
-    std::fs::canonicalize(found).ok().filter(|p| p.is_file())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,7 +477,7 @@ mod tests {
             PathBuf::from("/home/u/.local/share/agents"),
             PathBuf::from("/opt/x"),
         ];
-        assert_eq!(checked_read_only(&ok, &[home, data]).unwrap(), ok);
+        assert_eq!(checked_read_only("t", &ok, &[home, data]).unwrap(), ok);
         for bad in [
             "/home/u",
             "/home",
@@ -428,10 +485,28 @@ mod tests {
             "/home/u/.local/share/forge",
         ] {
             assert!(
-                checked_read_only(&[PathBuf::from(bad)], &[home, data]).is_err(),
+                checked_read_only("t", &[PathBuf::from(bad)], &[home, data]).is_err(),
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn an_agent_link_target_holding_its_config_dir_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(home.join(".claude/skills")).unwrap();
+        // The user's own link, back to the dir with the sign-in in it.
+        std::os::unix::fs::symlink(home.join(".claude"), home.join(".claude/agents")).unwrap();
+        let agent_dirs: Vec<PathBuf> = shim::AGENT_HOME_ENTRIES
+            .iter()
+            .map(|e| home.join(e))
+            .collect();
+        let protected: Vec<&Path> = agent_dirs.iter().map(PathBuf::as_path).collect();
+        let target = std::fs::canonicalize(home.join(".claude/agents")).unwrap();
+        assert!(checked_read_only("t", &[target], &protected).is_err());
+        let skills = home.join(".claude/skills");
+        assert!(checked_read_only("t", &[skills], &protected).is_ok());
     }
 
     #[test]
@@ -444,15 +519,6 @@ mod tests {
         assert_eq!(resolve(Path::new("/")), PathBuf::from("/"));
         // Protecting a missing dir behind a symlink still refuses its resolved parent.
         let protected = link.join("data/forge");
-        assert!(checked_read_only(&[real.join("data")], &[&protected]).is_err());
-    }
-
-    #[test]
-    fn programs_resolve_through_path_to_their_real_file() {
-        let sh = resolve_program("sh").unwrap();
-        assert!(sh.is_absolute() && sh.is_file());
-        assert_eq!(resolve_program(sh.to_str().unwrap()), Some(sh));
-        assert_eq!(resolve_program("forge-no-such-program"), None);
-        assert_eq!(resolve_program("/"), None);
+        assert!(checked_read_only("t", &[real.join("data")], &[&protected]).is_err());
     }
 }

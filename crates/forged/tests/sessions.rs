@@ -249,11 +249,17 @@ async fn a_client_killed_mid_stream_resumes_with_after_seq_and_loses_nothing() {
     let received: Vec<Event> = all.into_iter().map(|n| n.event).collect();
     let logged = all_events(&mut client, &session.id).await;
     assert_eq!(received, logged, "no events lost across the reconnect");
-    let messages = logged
+    // Every chunk arrived, in order. Streamed text is held back by up to the longest value the
+    // redactor knows (the proxy's token, at least), so chunks may arrive joined.
+    let text: String = logged
         .iter()
-        .filter(|e| e.payload.kind() == EventKind::AgentMessage)
-        .count();
-    assert_eq!(messages, 20);
+        .filter_map(|e| match &e.payload {
+            EventPayload::AgentMessage(m) => Some(m.delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    let expected: String = (0..20).map(|i| format!("chunk {i} ")).collect();
+    assert_eq!(text, expected);
 }
 
 #[tokio::test]
@@ -715,4 +721,94 @@ async fn a_daemon_restart_pauses_working_sessions() {
         .await
         .unwrap();
     wait_for_state(&mut client, &session.id, SessionState::Working).await;
+}
+
+#[tokio::test]
+async fn each_launch_starts_the_agents_own_config_empty() {
+    let home = temp_home();
+    let repo = git_repo_with_commit(home.path(), "demo");
+    fake_profile(&repo, "fake", "steps:\n  - end_turn\n  - end_turn\n");
+    let daemon = Daemon::start(home.path());
+    let mut client = daemon.client().await;
+    let project = open(&mut client, &repo).await;
+    let session = client
+        .call::<SessionCreate>(&create_params(&project, "feat: homes", "first"))
+        .await
+        .unwrap();
+    subscribe(
+        &mut client,
+        vec![Topic::Session(session.id.clone())],
+        Some(0),
+    )
+    .await;
+    wait_for_state(&mut client, &session.id, SessionState::Review).await;
+    daemon.stop();
+
+    // What an earlier command could have left in the sandbox home.
+    let scratch_home = home
+        .path()
+        .join("data/sessions")
+        .join(session.id.as_str())
+        .join("home");
+    std::fs::create_dir_all(scratch_home.join(".codex/rules")).unwrap();
+    std::fs::write(
+        scratch_home.join(".codex/config.toml"),
+        "notify = [\"sh\"]\n",
+    )
+    .unwrap();
+    let outside = home.path().join("outside.json");
+    std::fs::write(&outside, "{}").unwrap();
+    std::os::unix::fs::symlink(&outside, scratch_home.join(".claude.json")).unwrap();
+    std::fs::write(scratch_home.join(".env"), "BASH_ENV=/x\n").unwrap();
+    std::fs::write(scratch_home.join("notes.txt"), "kept").unwrap();
+
+    let daemon = Daemon::start(home.path());
+    let mut client = daemon.client().await;
+    client
+        .call::<SessionPrompt>(&SessionPromptParams {
+            session_id: session.id.clone(),
+            text: "again".into(),
+        })
+        .await
+        .unwrap();
+    // The second turn's Review, after the relaunch.
+    subscribe(
+        &mut client,
+        vec![Topic::Session(session.id.clone())],
+        Some(0),
+    )
+    .await;
+    let mut reviews = 0;
+    let mut review = entered(SessionState::Review);
+    collect_until(&mut client, |e| {
+        reviews += usize::from(review(e));
+        reviews == 2
+    })
+    .await;
+    assert!(!scratch_home.join(".codex").exists());
+    assert!(!scratch_home.join(".env").exists());
+    assert!(std::fs::symlink_metadata(scratch_home.join(".claude.json")).is_err());
+    assert_eq!(
+        std::fs::read_to_string(&outside).unwrap(),
+        "{}",
+        "the link's target is untouched"
+    );
+    assert_eq!(
+        std::fs::read_to_string(scratch_home.join("notes.txt")).unwrap(),
+        "kept"
+    );
+    // Closing the session removes the agent's config, so copies of the user's settings
+    // don't outlive it.
+    std::fs::create_dir_all(scratch_home.join(".claude")).unwrap();
+    std::fs::write(scratch_home.join(".claude/settings.json"), "{}").unwrap();
+    client
+        .call::<SessionClose>(&SessionCloseParams {
+            session_id: session.id.clone(),
+            outcome: SessionOutcome::Abandoned,
+        })
+        .await
+        .unwrap();
+    assert!(!scratch_home.join(".claude").exists());
+    assert!(!scratch_home.parent().unwrap().join("shim").exists());
+    daemon.stop();
 }

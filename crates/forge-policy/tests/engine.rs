@@ -706,3 +706,68 @@ async fn files_that_run_code_on_the_users_machine_are_protected() {
         assert_eq!(d.verdict, Verdict::Allow, "{path}");
     }
 }
+
+#[tokio::test]
+async fn an_agents_shell_wrapper_is_decided_by_its_script_unless_it_reads_startup_files() {
+    // Codex runs every command as `<shell> -c <script>`; Forge decides that argv as given.
+    let e = plain("[[allow]]\nexec = [\"cargo test*\"]\nmodes = [\"accept-edits\"]\n");
+    for argv in [
+        &["/usr/bin/bash", "-c", "cargo test"][..],
+        &["/bin/sh", "-c", "cargo test --all"],
+    ] {
+        let d = e.decide(&exec(argv), Mode::AcceptEdits).await.decision;
+        assert_eq!(d.verdict, Verdict::Allow, "{argv:?}");
+    }
+    // A login shell, or a shell that always reads startup files from the sandbox's writable
+    // home, never matches an allow rule.
+    for argv in [
+        &["/usr/bin/bash", "-lc", "cargo test"][..],
+        &["bash", "-l", "-c", "cargo test"],
+        &["/usr/bin/zsh", "-c", "cargo test"],
+        &["fish", "-c", "cargo test"],
+    ] {
+        let d = e.decide(&exec(argv), Mode::AcceptEdits).await.decision;
+        assert_eq!(d.verdict, Verdict::Ask, "{argv:?}");
+    }
+}
+
+#[tokio::test]
+async fn commits_are_guarded_by_path_and_scanned_for_secrets() {
+    let e = plain("[protected]\npaths = [\"Cargo.lock\"]\n");
+    for path in [
+        ".envrc",
+        "Cargo.lock",
+        "a/.git/config",
+        "../x",
+        ".forge/policy.toml",
+    ] {
+        let d = e
+            .guard_path(path)
+            .unwrap_or_else(|| panic!("{path} not guarded"));
+        assert_eq!(d.verdict, Verdict::Deny, "{path}");
+    }
+    assert_eq!(e.guard_path("src/lib.rs"), None);
+
+    let commit = || {
+        Request::new(Action::Git {
+            op: "commit".into(),
+        })
+    };
+    let d = e.decide(&commit(), Mode::AcceptEdits).await.decision;
+    assert_eq!(
+        (d.verdict, d.source),
+        (Verdict::Ask, Source::Mode(Mode::AcceptEdits))
+    );
+    let d = e.decide(&commit(), Mode::Auto).await.decision;
+    assert_eq!(d.verdict, Verdict::Allow);
+    // A secret in the lines a commit adds asks, even where the mode would allow it.
+    let key = format!("AKIA{}", "Q".repeat(16));
+    let d = e
+        .decide(
+            &commit().with_content(format!("let k = \"{key}\";\n")),
+            Mode::FullAccess,
+        )
+        .await
+        .decision;
+    assert_eq!((d.verdict, d.source), (Verdict::Ask, Source::SecretScan));
+}

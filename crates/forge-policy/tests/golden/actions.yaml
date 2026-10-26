@@ -11,6 +11,11 @@
 - { type: edit, kind: create, path: certs/server.pem }
 - { type: edit, kind: modify, path: .forge/policy.toml }
 - { type: edit, kind: modify, path: .forge/hooks/check.sh }
+- { type: edit, kind: create, path: .claude/settings.json }
+- { type: edit, kind: create, path: .codex/config.toml }
+- { type: edit, kind: create, path: .gemini/settings.json }
+- { type: edit, kind: modify, path: packages/app/.gemini/settings.json }
+- { type: edit, kind: create, path: .agents/hooks.json }
 - { type: edit, kind: modify, path: .GIT/config }
 - { type: edit, kind: create, path: crates/forged/migrations/0003_approvals.sql }
 - { type: edit, kind: modify, path: .github/workflows/ci.yml }

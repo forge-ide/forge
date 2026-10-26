@@ -90,10 +90,61 @@ pub struct AgentProfile {
     /// Registry key: `claude-code`, `codex`, `gemini`, or another adapter.
     pub agent: String,
     pub installed: bool,
+    /// Every secret the profile names is in the keyring, or for a registry agent with none
+    /// of them there, its own subscription sign-in is present and unexpired.
     pub authenticated: bool,
+    /// The installed version, when Forge can tell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub version: Option<String>,
+    /// The agent's display name, for a registry agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub name: Option<String>,
+    /// The version Forge is tested with, for a registry agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub supported_version: Option<String>,
+    /// The command that installs the supported version, when the agent isn't installed or
+    /// is at another version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub install_command: Option<String>,
+    /// How to sign in, when the agent isn't signed in: the command that stores each missing
+    /// secret in the keyring, or the agent's own command that signs in with a subscription.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub sign_in: Option<String>,
+    /// Why a session with this profile can't start, when Forge can tell before starting one
+    /// (an invalid profile file, an unknown agent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub problem: Option<String>,
+}
+
+/// A way an agent offers to sign in, as it advertises it over ACP.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SignInMethod {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub description: Option<String>,
+    /// For a method the agent runs in a terminal: the whole command, which the client runs
+    /// interactively outside the sandbox, as the user would. Without it, `agent.signIn` runs
+    /// the method, and the agent does the flow itself (a browser, say).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub terminal: Option<TerminalSignIn>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalSignIn {
+    pub argv: Vec<String>,
+    /// Added to the client's own environment.
+    pub env: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]

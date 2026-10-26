@@ -88,6 +88,8 @@ pub struct View {
     pub toolchain_env: Vec<(String, String)>,
     /// The spec's extra read-only paths that exist, canonical.
     pub extra: Vec<PathBuf>,
+    /// The spec's extra read-write paths that exist, canonical.
+    pub extra_rw: Vec<PathBuf>,
     /// Canonical worktrees and git dirs.
     pub worktrees: Vec<WorktreeMount>,
     /// The user's real home, canonical when it exists.
@@ -138,6 +140,11 @@ impl View {
             toolchains: tools.all().into_iter().filter_map(canonical).collect(),
             toolchain_env,
             extra: spec.read_only.iter().filter_map(|p| canonical(p)).collect(),
+            extra_rw: spec
+                .read_write
+                .iter()
+                .filter_map(|p| canonical(p))
+                .collect(),
             worktrees,
             home,
             scratch_home,
@@ -158,6 +165,16 @@ impl View {
         paths
     }
 
+    /// Extra read-only paths inside an extra read-write one, which must stay read-only: only
+    /// a tier that can mount one over the other (Standard) keeps them so.
+    pub fn locked(&self) -> Vec<PathBuf> {
+        self.extra
+            .iter()
+            .filter(|p| self.extra_rw.iter().any(|rw| p.starts_with(rw)))
+            .cloned()
+            .collect()
+    }
+
     /// Everything read-write: worktrees, their own git dirs, and the scratch dirs.
     pub fn read_write(&self) -> Vec<PathBuf> {
         let mut paths = Vec::new();
@@ -167,7 +184,20 @@ impl View {
         }
         paths.push(self.scratch_home.clone());
         paths.push(self.scratch_tmp.clone());
+        paths.extend(self.extra_rw.iter().cloned());
         paths
+    }
+}
+
+/// Refuse a view with [`View::locked`] paths in a tier whose rules only add up, so a read-only
+/// path inside a writable one would be writable.
+pub(crate) fn refuse_locked(view: &View, tier: &str) -> Result<(), crate::SandboxError> {
+    match view.locked().first() {
+        Some(path) => Err(crate::SandboxError::Invalid(format!(
+            "the {tier} sandbox can't keep {} read-only inside a writable directory",
+            path.display()
+        ))),
+        None => Ok(()),
     }
 }
 
@@ -211,6 +241,7 @@ mod tests {
             scratch: root.join("scratch"),
             home: root.join("home"),
             read_only: vec![root.join("missing"), root.join("home/.cargo")],
+            read_write: vec![],
             proxy: None,
         }
     }

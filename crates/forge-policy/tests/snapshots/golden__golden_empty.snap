@@ -52,6 +52,31 @@ edit modify .forge/hooks/check.sh
   accept-edits deny  guard:protected-path
   auto         deny  guard:protected-path
   full-access  deny  guard:protected-path
+edit create .claude/settings.json
+  ask          deny  guard:protected-path
+  accept-edits deny  guard:protected-path
+  auto         deny  guard:protected-path
+  full-access  deny  guard:protected-path
+edit create .codex/config.toml
+  ask          deny  guard:protected-path
+  accept-edits deny  guard:protected-path
+  auto         deny  guard:protected-path
+  full-access  deny  guard:protected-path
+edit create .gemini/settings.json
+  ask          deny  guard:protected-path
+  accept-edits deny  guard:protected-path
+  auto         deny  guard:protected-path
+  full-access  deny  guard:protected-path
+edit modify packages/app/.gemini/settings.json
+  ask          deny  guard:protected-path
+  accept-edits deny  guard:protected-path
+  auto         deny  guard:protected-path
+  full-access  deny  guard:protected-path
+edit create .agents/hooks.json
+  ask          deny  guard:protected-path
+  accept-edits deny  guard:protected-path
+  auto         deny  guard:protected-path
+  full-access  deny  guard:protected-path
 edit modify .GIT/config
   ask          deny  guard:outside-worktree
   accept-edits deny  guard:outside-worktree

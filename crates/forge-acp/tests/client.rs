@@ -5,9 +5,10 @@ use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use forge_acp::adapters::CommandSource;
 use forge_acp::{
     AcpClient, AcpError, AgentCommand, AllowAll, DenyAll, EventSink, Gate, GateKind, GateRequest,
-    GateVerdict, Root, Workspace,
+    GateVerdict, McpEndpoint, Root, SessionSetup, TerminalSignIn, Workspace,
 };
 use forge_api::TurnId;
 use forge_api::events::{EventKind, EventPayload};
@@ -72,6 +73,16 @@ impl Fixture {
     }
 
     async fn start_with(&self, script: &str, gate: Arc<dyn Gate>) -> AcpClient {
+        self.start_setup(script, gate, SessionSetup::default())
+            .await
+    }
+
+    async fn start_setup(
+        &self,
+        script: &str,
+        gate: Arc<dyn Gate>,
+        setup: SessionSetup,
+    ) -> AcpClient {
         let path = self.dir.path().join("script.yaml");
         std::fs::write(&path, script).unwrap();
         let workspace = Workspace::new(vec![Root {
@@ -86,9 +97,16 @@ impl Fixture {
             ],
             env: vec![],
         };
-        AcpClient::start(command, workspace, unsandboxed(), self.sink.clone(), gate)
-            .await
-            .unwrap()
+        AcpClient::start(
+            command,
+            setup,
+            workspace,
+            unsandboxed(),
+            self.sink.clone(),
+            gate,
+        )
+        .await
+        .unwrap()
     }
 }
 
@@ -301,6 +319,149 @@ steps:
 }
 
 #[tokio::test]
+async fn codex_reads_and_forge_tool_approvals_name_what_they_ask() {
+    let fx = Fixture::new();
+    let gate = Arc::new(Recording {
+        verdict: GateVerdict::Allow,
+        asked: Mutex::default(),
+    });
+    let setup = SessionSetup {
+        command_source: CommandSource::ToolCallArgv,
+        mcp_servers: vec![McpEndpoint {
+            name: "forge".into(),
+            url: "http://127.0.0.1:9/mcp".into(),
+        }],
+        ..SessionSetup::default()
+    };
+    let client = fx
+        .start_setup(
+            r#"
+steps:
+  - request_permission: { action: parsed_read, path: README.md, command: "/usr/bin/bash -c \"sed -n '1,5p' README.md\"" }
+  - expect_permission: allow
+  - request_permission: { action: mcp_tool, tool: git_commit }
+  - expect_permission: allow
+  - end_turn
+"#,
+            gate.clone(),
+            setup,
+        )
+        .await;
+    assert_eq!(
+        client.prompt(TurnId::new(), "x".into()).await.unwrap(),
+        "end_turn"
+    );
+    // The read is decided as the command its approval names; Forge's own tool isn't asked
+    // about here, since it asks Forge itself when it runs.
+    let asked: Vec<_> = gate
+        .asked
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| r.action.clone())
+        .collect();
+    assert_eq!(
+        asked,
+        [Some(Action::Exec {
+            argv: vec![
+                "/usr/bin/bash".into(),
+                "-c".into(),
+                "sed -n '1,5p' README.md".into()
+            ],
+            cwd: ".".into()
+        })]
+    );
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_agent_that_needs_signing_in_offers_its_methods_and_signs_in_with_authenticate() {
+    let fx = Fixture::new();
+    let home = fx.dir.path().join("agent-home");
+    let script = fx.dir.path().join("auth.yaml");
+    std::fs::write(
+        &script,
+        r#"
+auth:
+  login: .fake/login
+  methods:
+    - { id: browser, name: "Log in with a browser" }
+    - { id: cli, name: "Log in in a terminal", kind: terminal, args: ["--login"] }
+steps:
+  - end_turn
+"#,
+    )
+    .unwrap();
+    let command = || AgentCommand {
+        argv: vec![
+            fake_agent().to_str().unwrap().into(),
+            script.to_str().unwrap().into(),
+        ],
+        env: vec![("FORGE_FAKE_AGENT_HOME".into(), home.display().to_string())],
+    };
+    let workspace = || {
+        Workspace::new(vec![Root {
+            name: "wt".into(),
+            path: fx.root(),
+        }])
+        .unwrap()
+    };
+    let open = async || {
+        AcpClient::start(
+            command(),
+            SessionSetup::default(),
+            workspace(),
+            unsandboxed(),
+            fx.sink.clone(),
+            Arc::new(AllowAll),
+        )
+        .await
+    };
+    // Not signed in: the session is refused, naming both ways to sign in.
+    let methods = match open().await {
+        Err(AcpError::AuthRequired { methods }) => methods,
+        other => panic!("expected auth_required, got {:?}", other.err()),
+    };
+    let listed = AcpClient::sign_in_methods(command(), &fx.root(), unsandboxed())
+        .await
+        .unwrap();
+    assert_eq!(methods, listed);
+    assert_eq!(
+        listed
+            .iter()
+            .map(|m| (m.id.as_str(), m.terminal.clone()))
+            .collect::<Vec<_>>(),
+        [
+            ("browser", None),
+            (
+                "cli",
+                Some(TerminalSignIn {
+                    args: vec!["--login".to_owned()],
+                    env: vec![]
+                })
+            )
+        ]
+    );
+    // A terminal method is never sent as `authenticate`, nor is one the agent doesn't offer.
+    for id in ["cli", "other"] {
+        assert!(
+            AcpClient::authenticate(command(), &fx.root(), unsandboxed(), id, None)
+                .await
+                .is_err(),
+            "{id}"
+        );
+    }
+    assert!(!home.join(".fake/login").exists());
+    // The agent's own method signs it in, and it keeps the login for the next process.
+    AcpClient::authenticate(command(), &fx.root(), unsandboxed(), "browser", None)
+        .await
+        .unwrap();
+    assert!(home.join(".fake/login").is_file());
+    let client = open().await.unwrap();
+    client.shutdown().await;
+}
+
+#[tokio::test]
 async fn permission_edits_through_a_symlink_or_out_of_the_worktree_map_to_no_action() {
     let fx = Fixture::new();
     std::fs::write(fx.root().join(".env"), "TOKEN=1\n").unwrap();
@@ -442,10 +603,17 @@ async fn an_agent_that_dies_reports_its_exit() {
     let deny = Arc::new(DenyAll {
         reason: String::new(),
     });
-    let err = AcpClient::start(command, workspace, unsandboxed(), fx.sink.clone(), deny)
-        .await
-        .err()
-        .expect("start fails");
+    let err = AcpClient::start(
+        command,
+        SessionSetup::default(),
+        workspace,
+        unsandboxed(),
+        fx.sink.clone(),
+        deny,
+    )
+    .await
+    .err()
+    .expect("start fails");
     match err {
         AcpError::Exited(exit) => {
             assert_eq!(exit.code, Some(7));

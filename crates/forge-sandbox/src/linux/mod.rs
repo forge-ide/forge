@@ -27,6 +27,14 @@ const DEVICES_RW: &[&str] = &["/dev/null", "/dev/zero", "/dev/full"];
 /// Devices every sandboxed process may read.
 const DEVICES_RO: &[&str] = &["/dev/urandom", "/dev/random"];
 
+/// Which CPUs exist, which Standard shows read-only; not the rest of the CPU tree (which
+/// mitigations are on, frequencies).
+const CPU_INFO: &[&str] = &[
+    "/sys/devices/system/cpu/possible",
+    "/sys/devices/system/cpu/online",
+    "/sys/devices/system/cpu/present",
+];
+
 /// The Linux backends, with availability probed once.
 pub struct Linux {
     helper: PathBuf,
@@ -66,11 +74,11 @@ impl Sandbox for Linux {
         require(&self.statuses, spec.tier)?;
         match spec.tier {
             SandboxTier::Unsandboxed => Ok(Arc::new(Unsandboxed::with_proxy(spec.proxy))),
-            SandboxTier::Light => Ok(Arc::new(Light::new(
-                self.helper.clone(),
-                &View::new(&spec)?,
-                spec.proxy,
-            ))),
+            SandboxTier::Light => {
+                let view = View::new(&spec)?;
+                crate::view::refuse_locked(&view, "Light")?;
+                Ok(Arc::new(Light::new(self.helper.clone(), &view, spec.proxy)))
+            }
             SandboxTier::Standard => {
                 let view = View::new(&spec)?;
                 let socket = match &spec.proxy {
@@ -126,6 +134,7 @@ impl Light {
         let mut env = crate::env::from_daemon();
         env.push(("HOME".into(), view.scratch_home.display().to_string()));
         env.push(("TMPDIR".into(), view.scratch_tmp.display().to_string()));
+        env.extend(crate::env::startup_files_off());
         env.extend(view.toolchain_env.iter().cloned());
         if let Some(proxy) = &proxy {
             env.extend(proxy.env(&format!("http://127.0.0.1:{}", proxy.port())));
@@ -142,6 +151,10 @@ impl Light {
 impl SessionSandbox for Light {
     fn tier(&self) -> SandboxTier {
         SandboxTier::Light
+    }
+
+    fn var(&self, name: &str) -> Option<String> {
+        crate::env::lookup(&self.env, name)
     }
 
     fn command(
@@ -198,6 +211,7 @@ impl Bwrap {
         let mut env = crate::env::from_daemon();
         env.push(("HOME".into(), view.home.display().to_string()));
         env.push(("TMPDIR".into(), "/tmp".into()));
+        env.extend(crate::env::startup_files_off());
         env.extend(view.toolchain_env.iter().cloned());
         if let (Some(_), Some(proxy)) = (&forward, &proxy) {
             env.extend(proxy.env(&format!("http://127.0.0.1:{PROXY_PORT}")));
@@ -223,6 +237,10 @@ impl Bwrap {
 impl SessionSandbox for Bwrap {
     fn tier(&self) -> SandboxTier {
         SandboxTier::Standard
+    }
+
+    fn var(&self, name: &str) -> Option<String> {
+        crate::env::lookup(&self.env, name)
     }
 
     fn command(
@@ -273,6 +291,14 @@ fn bwrap_args(view: &View, helper: &Path) -> Vec<String> {
         bind(&mut args, "--ro-bind", path, path);
     }
     args.extend(["--proc", "/proc", "--dev", "/dev"].map(str::to_owned));
+    // Which CPUs exist, read-only: allocators such as tcmalloc refuse to start without
+    // `/sys/devices/system/cpu/possible`. Nothing else of /sys is shown.
+    for file in CPU_INFO {
+        let path = Path::new(file);
+        if path.is_file() {
+            bind(&mut args, "--ro-bind", path, path);
+        }
+    }
     bind(&mut args, "--bind", &view.scratch_tmp, Path::new("/tmp"));
     bind(&mut args, "--bind", &view.scratch_home, &view.home);
     for path in view.toolchains.iter().chain(&view.extra) {
@@ -282,6 +308,14 @@ fn bwrap_args(view: &View, helper: &Path) -> Vec<String> {
         bind(&mut args, "--ro-bind", &w.git_common, &w.git_common);
         bind(&mut args, "--bind", &w.git_admin, &w.git_admin);
         bind(&mut args, "--bind", &w.path, &w.path);
+    }
+    // After the home, so one inside it shows through at its real path.
+    for path in &view.extra_rw {
+        bind(&mut args, "--bind", path, path);
+    }
+    // Then what must stay read-only inside them, mounted over.
+    for path in view.locked() {
+        bind(&mut args, "--ro-bind", &path, &path);
     }
     bind(&mut args, "--ro-bind", helper, helper);
     args
@@ -410,6 +444,7 @@ mod tests {
             toolchains: vec!["/home/u/.cargo".into()],
             toolchain_env: vec![],
             extra: vec![],
+            extra_rw: vec![],
             worktrees: vec![WorktreeMount {
                 path: "/home/u/repo/.worktrees/feat/x".into(),
                 git_common: "/home/u/repo/.git".into(),

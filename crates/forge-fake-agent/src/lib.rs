@@ -17,7 +17,8 @@ use tokio::sync::Notify;
 pub mod script;
 
 pub use script::{
-    ExecStep, Expected, PermissionAction, Script, ScriptError, Step, WriteStep, glob_match,
+    ExecStep, Expected, McpCallStep, PermissionAction, Script, ScriptError, Step, WriteStep,
+    glob_match,
 };
 
 /// Script position and per-connection state.
@@ -27,6 +28,20 @@ struct State {
     cwd: PathBuf,
     last_permission: Option<Expected>,
     turns: u64,
+    /// The URL of the MCP server the client named `forge`.
+    mcp: Option<String>,
+}
+
+/// Where `auth`'s login file is: under `$FORGE_FAKE_AGENT_HOME` if set (tests, whose sandbox
+/// sets `HOME` itself), else `$HOME`.
+pub fn login_file(auth: &script::AuthScript) -> Option<PathBuf> {
+    std::env::var_os("FORGE_FAKE_AGENT_HOME")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(|home| PathBuf::from(home).join(&auth.login))
+}
+
+fn signed_in(auth: Option<&script::AuthScript>) -> bool {
+    auth.is_none_or(|a| login_file(a).is_some_and(|f| f.is_file()))
 }
 
 struct Shared {
@@ -64,6 +79,8 @@ pub async fn serve(
     script: Script,
     transport: impl ConnectTo<Agent> + 'static,
 ) -> Result<(), agent_client_protocol::Error> {
+    let auth = script.auth.clone();
+    let (auth_init, auth_session, auth_login) = (auth.clone(), auth.clone(), auth);
     let shared = Arc::new(Shared {
         state: Mutex::new(State {
             steps: script.steps,
@@ -71,6 +88,7 @@ pub async fn serve(
             cwd: PathBuf::from("/"),
             last_permission: None,
             turns: 0,
+            mcp: None,
         }),
         cancelled: AtomicBool::new(false),
         cancel: Notify::new(),
@@ -81,16 +99,71 @@ pub async fn serve(
         .name("forge-fake-agent")
         .on_receive_request(
             async move |init: InitializeRequest, responder, _cx| {
+                let terminal = init.client_capabilities.auth.terminal;
+                let methods: Vec<AuthMethod> = auth_init
+                    .iter()
+                    .flat_map(|a| a.methods.iter())
+                    .filter_map(|m| match m.kind.as_str() {
+                        "terminal" if terminal => Some(AuthMethod::Terminal(
+                            AuthMethodTerminal::new(m.id.clone(), m.name.clone())
+                                .args(m.args.clone()),
+                        )),
+                        "terminal" => None,
+                        _ => Some(AuthMethod::Agent(AuthMethodAgent::new(
+                            m.id.clone(),
+                            m.name.clone(),
+                        ))),
+                    })
+                    .collect();
                 responder.respond(
                     InitializeResponse::new(init.protocol_version)
-                        .agent_capabilities(AgentCapabilities::new()),
+                        .agent_capabilities(
+                            AgentCapabilities::new()
+                                .mcp_capabilities(McpCapabilities::new().http(true)),
+                        )
+                        .auth_methods(methods),
                 )
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
+            async move |req: AuthenticateRequest, responder, _cx| {
+                let method = auth_login.as_ref().and_then(|a| {
+                    a.methods
+                        .iter()
+                        .find(|m| *m.id == *req.method_id.0 && m.kind == "agent")
+                        .map(|_| a)
+                });
+                let Some(auth) = method else {
+                    return responder.respond_with_error(agent_client_protocol::Error::new(
+                        -32602,
+                        format!("no agent sign-in method {}", req.method_id.0),
+                    ));
+                };
+                // As a real agent's browser sign-in does, when it can't open one.
+                eprintln!("Open https://login.example.test/fake to sign in");
+                match write_login(auth) {
+                    Ok(()) => responder.respond(AuthenticateResponse::new()),
+                    Err(e) => {
+                        responder.respond_with_error(agent_client_protocol::Error::new(-32603, e))
+                    }
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
             async move |req: NewSessionRequest, responder, _cx| {
-                on_session.state().cwd = req.cwd;
+                if !signed_in(auth_session.as_ref()) {
+                    return responder
+                        .respond_with_error(agent_client_protocol::Error::auth_required());
+                }
+                let mut state = on_session.state();
+                state.cwd = req.cwd;
+                state.mcp = req.mcp_servers.iter().find_map(|s| match s {
+                    McpServer::Http(http) if http.name == "forge" => Some(http.url.clone()),
+                    _ => None,
+                });
+                drop(state);
                 responder.respond(NewSessionResponse::new("fake-session"))
             },
             agent_client_protocol::on_receive_request!(),
@@ -125,6 +198,15 @@ pub async fn serve(
         )
         .connect_to(transport)
         .await
+}
+
+/// Sign in: write the login file.
+pub fn write_login(auth: &script::AuthScript) -> Result<(), String> {
+    let file = login_file(auth).ok_or("no HOME")?;
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&file, "signed in").map_err(|e| e.to_string())
 }
 
 async fn run_turn(
@@ -176,6 +258,10 @@ async fn run_turn(
                 update(cx, &session, SessionUpdate::Plan(Plan::new(entries)))?;
             }
             Step::Message(text) => {
+                // `{forge_mcp_url}` stands for the MCP URL the client gave, as an agent that
+                // logs its config would print it.
+                let url = shared.state().mcp.clone().unwrap_or_default();
+                let text = text.replace("{forge_mcp_url}", &url);
                 let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)))
                     .message_id(MessageId::new(message_id.as_str()));
                 update(cx, &session, SessionUpdate::AgentMessageChunk(chunk))?;
@@ -202,23 +288,73 @@ async fn run_turn(
                 )?;
             }
             Step::RequestPermission(p) => {
+                let id = format!("perm-{}", shared.state().next);
+                let mut request_meta = None;
+                match p.action {
+                    PermissionAction::ParsedRead => {
+                        let mut call = ToolCall::new(id.clone(), "Read file").kind(ToolKind::Read);
+                        if let Some(path) = &p.path {
+                            call = call.locations(vec![ToolCallLocation::new(resolve(&cwd, path))]);
+                        }
+                        update(cx, &session, SessionUpdate::ToolCall(call))?;
+                    }
+                    PermissionAction::McpTool => {
+                        let tool = p.tool.clone().ok_or("mcp_tool needs a tool")?;
+                        let mut meta = serde_json::Map::new();
+                        meta.insert("is_mcp_tool_call".into(), true.into());
+                        let call = ToolCall::new(id.clone(), format!("mcp.forge.{tool}"))
+                            .kind(ToolKind::Execute)
+                            .raw_input(json!({ "server": "forge", "tool": tool, "arguments": {} }))
+                            .meta(meta);
+                        update(cx, &session, SessionUpdate::ToolCall(call))?;
+                        let mut meta = serde_json::Map::new();
+                        meta.insert("is_mcp_tool_approval".into(), true.into());
+                        request_meta = Some(meta);
+                    }
+                    _ => {}
+                }
                 let (kind, raw) = match p.action {
+                    PermissionAction::ParsedRead => (
+                        ToolKind::Execute,
+                        json!({ "command": p.command.clone().ok_or("parsed_read needs a command")? }),
+                    ),
+                    PermissionAction::McpTool => (ToolKind::Execute, serde_json::Value::Null),
                     PermissionAction::Exec => (ToolKind::Execute, json!({ "argv": p.argv })),
-                    PermissionAction::Edit => (ToolKind::Edit, json!({ "path": p.path })),
+                    PermissionAction::Edit if p.path.is_some() => {
+                        (ToolKind::Edit, json!({ "path": p.path }))
+                    }
+                    PermissionAction::Edit => (ToolKind::Edit, json!({})),
+                    PermissionAction::Read => (ToolKind::Read, json!({})),
+                    PermissionAction::Fetch => {
+                        (ToolKind::Fetch, json!({ "url": "https://example.com/" }))
+                    }
                 };
-                let fields = ToolCallUpdateFields::new()
-                    .kind(kind)
-                    .title(format!("{:?}", p.action))
-                    .raw_input(raw);
+                let mut fields = ToolCallUpdateFields::new().kind(kind);
+                if p.action != PermissionAction::McpTool {
+                    fields = fields.title(format!("{:?}", p.action)).raw_input(raw);
+                }
+                if p.action == PermissionAction::Read
+                    && let Some(path) = &p.path
+                {
+                    fields = fields.locations(vec![ToolCallLocation::new(resolve(&cwd, path))]);
+                }
+                if !p.paths.is_empty() {
+                    fields = fields.locations(
+                        p.paths
+                            .iter()
+                            .map(|path| ToolCallLocation::new(resolve(&cwd, path)))
+                            .collect::<Vec<_>>(),
+                    );
+                }
                 let options = vec![
                     PermissionOption::new("allow", "Allow", PermissionOptionKind::AllowOnce),
                     PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
                 ];
-                let tool_call =
-                    ToolCallUpdate::new(format!("perm-{}", shared.state().next), fields);
+                let tool_call = ToolCallUpdate::new(id, fields);
                 let resp = request(
                     cx,
-                    RequestPermissionRequest::new(session.clone(), tool_call, options),
+                    RequestPermissionRequest::new(session.clone(), tool_call, options)
+                        .meta(request_meta),
                 )
                 .await?;
                 let answer = match resp.outcome {
@@ -235,11 +371,100 @@ async fn run_turn(
                     return Err(format!("expected permission {want:?}, got {got:?}"));
                 }
             }
+            Step::McpCall(call) => {
+                let url = shared
+                    .state()
+                    .mcp
+                    .clone()
+                    .ok_or("the client offered no forge MCP server")?;
+                let refused = mcp_call(&url, &call.tool, call.arguments).await?;
+                match (refused, call.expect) {
+                    (Some(why), Some(Expected::Deny)) => {
+                        eprintln!("forge-fake-agent: refused as expected: {why}")
+                    }
+                    (Some(why), _) => return Err(format!("{} refused: {why}", call.tool)),
+                    (None, Some(Expected::Deny)) => {
+                        return Err(format!("{}: expected a refusal", call.tool));
+                    }
+                    (None, _) => {}
+                }
+            }
             Step::SleepMs(ms) => {
                 shared.sleep(Duration::from_millis(ms)).await;
             }
         }
     }
+}
+
+/// Initialize the MCP server at `url` and call `tool`: `Some(reason)` if the tool refused.
+async fn mcp_call(
+    url: &str,
+    tool: &str,
+    arguments: serde_json::Value,
+) -> Result<Option<String>, String> {
+    mcp_post(
+        url,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                           "clientInfo": {"name": "forge-fake-agent", "version": "0"}}}),
+    )
+    .await?;
+    let reply = mcp_post(
+        url,
+        &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": tool, "arguments": arguments}}),
+    )
+    .await?;
+    let result = reply
+        .get("result")
+        .ok_or_else(|| format!("{tool}: {reply}"))?;
+    if result["isError"] == true {
+        Ok(Some(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned(),
+        ))
+    } else {
+        Ok(None)
+    }
+}
+
+/// POST one JSON-RPC message to a plain-HTTP URL and read the JSON answer.
+async fn mcp_post(url: &str, message: &serde_json::Value) -> Result<serde_json::Value, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or("the MCP URL isn't http://")?;
+    let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let body = message.to_string();
+    let mut stream = tokio::net::TcpStream::connect(authority)
+        .await
+        .map_err(|e| format!("connecting to {authority}: {e}"))?;
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {authority}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .map_err(|e| e.to_string())?;
+    let response = String::from_utf8_lossy(&response);
+    let (head, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or("malformed MCP response")?;
+    if !head.starts_with("HTTP/1.1 200") {
+        return Err(format!(
+            "MCP server answered {}",
+            head.lines().next().unwrap_or("")
+        ));
+    }
+    serde_json::from_str(body).map_err(|e| format!("MCP response: {e}"))
 }
 
 /// After a cancel, continue the script from the step after the interrupted turn's `end_turn`.
