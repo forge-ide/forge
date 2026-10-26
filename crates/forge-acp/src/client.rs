@@ -128,11 +128,40 @@ pub enum GateVerdict {
     /// Allow a terminal, running this argv instead of the one requested (a hook rewrote it).
     /// The extra environment, if kept, is part of the argv as an `env` prefix.
     Rewrite(Vec<String>),
-    Deny(String),
+    Deny(Refusal),
     /// A human refused it, with their note for the agent if they wrote one.
     HumanDeny(Option<String>),
     /// The turn was cancelled while the request waited.
     Cancelled,
+}
+
+impl GateVerdict {
+    /// A refusal with `reason` and nothing to steer the agent with.
+    pub fn deny(reason: impl Into<String>) -> Self {
+        Self::Deny(Refusal {
+            reason: reason.into(),
+            steer: None,
+        })
+    }
+}
+
+/// Why the gate refused something.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refusal {
+    /// What the agent's write or terminal is answered with, and what Forge records.
+    pub reason: String,
+    /// What an agent that takes steering is told for a refused permission request.
+    pub steer: Option<Steer>,
+}
+
+/// What a refusal tells the agent in its running turn. It goes to the agent as a user message,
+/// so its text is never the agent's own or a repo's framed as Forge's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Steer {
+    /// Forge's own words, from templates that name nothing the agent or a repo wrote.
+    Forge(String),
+    /// A project hook's words, attributed to it.
+    Hook { name: String, note: String },
 }
 
 /// Decides every permission request, write, and terminal before it happens, recording the
@@ -170,7 +199,7 @@ pub struct DenyAll {
 
 impl Gate for DenyAll {
     fn decide(&self, _: GateRequest) -> BoxFuture<'_, GateVerdict> {
-        let verdict = GateVerdict::Deny(self.reason.clone());
+        let verdict = GateVerdict::deny(self.reason.clone());
         Box::pin(async move { verdict })
     }
 }
@@ -825,25 +854,34 @@ const STEER_METHOD: &str = "_session/steering";
 const STEER_LIMIT: usize = 1024;
 
 /// What to tell an agent whose request for tool call `id` got `verdict`, if anything: Forge's
-/// reason, or a human's note. It goes to the agent as a user message, so nothing in it is the
-/// agent's own text: a policy reason's quoted parts (the paths and commands it names) are
-/// left out, and the call is named only by an ID of plain characters.
+/// reason, a hook's words as the hook's, or a human's note. Nothing else of the request's goes
+/// in: the call is named only by an ID of plain characters, and a hook only by a plain name.
 fn steering_text(id: &str, verdict: &GateVerdict) -> Option<String> {
-    let plain = !id.is_empty()
-        && id.len() <= 64
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-    let call = if plain {
-        format!("tool call {id}")
-    } else {
-        "a tool call".to_owned()
+    let call = match plain(id, &['_', '-']) {
+        true => format!("tool call {id}"),
+        false => "a tool call".to_owned(),
     };
     match verdict {
-        GateVerdict::Deny(reason) => Some(format!(
+        GateVerdict::Deny(Refusal {
+            steer: Some(Steer::Forge(reason)),
+            ..
+        }) => Some(format!(
             "[forge] Forge refused {call}: {}",
-            one_line(&unquoted(reason))
+            one_line(reason)
         )),
+        GateVerdict::Deny(Refusal {
+            steer: Some(Steer::Hook { name, note }),
+            ..
+        }) => {
+            let hook = match plain(name, &['_', '-', '.']) {
+                true => format!("A project hook ({name})"),
+                false => "A project hook".to_owned(),
+            };
+            Some(format!(
+                "[forge] {hook} refused {call}. The hook says: {}",
+                one_line(note)
+            ))
+        }
         GateVerdict::HumanDeny(Some(note)) => Some(format!(
             "[forge] The user refused {call} and says: {}",
             one_line(note)
@@ -852,27 +890,12 @@ fn steering_text(id: &str, verdict: &GateVerdict) -> Option<String> {
     }
 }
 
-/// `text` with each double-quoted part (escapes included) replaced by `"…"`.
-fn unquoted(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        if c != '"' {
-            out.push(c);
-            continue;
-        }
-        out.push_str("\"…\"");
-        while let Some(c) = chars.next() {
-            match c {
-                '\\' => {
-                    chars.next();
-                }
-                '"' => break,
-                _ => {}
-            }
-        }
-    }
-    out
+/// Whether `s` is 1 to 64 ASCII letters, digits, and `extra` characters.
+fn plain(s: &str, extra: &[char]) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || extra.contains(&c))
 }
 
 /// `text` on one line, without control characters, at most [`STEER_LIMIT`] bytes.
@@ -1269,7 +1292,7 @@ impl Handlers {
             GateVerdict::Allow => return Ok(None),
             GateVerdict::Rewrite(argv) if !argv.is_empty() => return Ok(Some(argv)),
             GateVerdict::Rewrite(_) => "refused: a hook rewrote it to nothing".to_owned(),
-            GateVerdict::Deny(reason) => format!("refused by policy: {reason}"),
+            GateVerdict::Deny(refusal) => format!("refused by policy: {}", refusal.reason),
             GateVerdict::HumanDeny(note) => match note {
                 Some(note) => format!("refused by the user: {note}"),
                 None => "refused by the user".to_owned(),

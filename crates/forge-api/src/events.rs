@@ -222,7 +222,8 @@ pub enum ToolCallSource {
     #[default]
     Forge,
     /// The agent, which ran it without asking Forge (as it does commands it deems
-    /// read-only). Reported once it finished; the sandbox still bounded it.
+    /// read-only). Reported once it finished, by the agent itself, so best effort: an agent can
+    /// leave one out or misdescribe it. Nothing was decided; the sandbox still bounded it.
     Agent,
 }
 

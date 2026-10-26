@@ -15,7 +15,8 @@ pub mod workspace;
 
 pub use client::{
     AcpClient, AcpError, AgentCommand, AgentExit, AllowAll, DenyAll, EventSink, Gate, GateKind,
-    GateRequest, GateVerdict, McpEndpoint, SessionSetup, SignInMethod, TerminalSignIn, Unmapped,
+    GateRequest, GateVerdict, McpEndpoint, Refusal, SessionSetup, SignInMethod, Steer,
+    TerminalSignIn, Unmapped,
 };
 pub use terminal::Pipe;
 pub use workspace::{PathError, Resolved, Root, Workspace};

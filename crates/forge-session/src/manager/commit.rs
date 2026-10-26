@@ -115,7 +115,7 @@ async fn run(
     };
     match gate.decide(request).await {
         GateVerdict::Allow => {}
-        GateVerdict::Deny(reason) => return fail(reason).await,
+        GateVerdict::Deny(refusal) => return fail(refusal.reason).await,
         GateVerdict::HumanDeny(note) => {
             return fail(note.unwrap_or_else(|| "a human denied it".into())).await;
         }

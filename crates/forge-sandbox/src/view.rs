@@ -225,22 +225,32 @@ impl View {
     }
 
     /// `path` (a `PATH` value) without the entries a sandboxed process could have written
-    /// to: relative or empty ones (the working directory) and those inside a writable path,
-    /// wherever a tier shows it (Standard shows the home's writable dirs at the real home's
-    /// path, and the temp dir at `/tmp`). A program found there would run instead of the
-    /// system one Forge decided.
+    /// to: relative or empty ones (the working directory), and those inside a writable path,
+    /// as named or as they resolve on the host, wherever a tier shows it (Standard shows the
+    /// home's writable dirs at the real home's path, and the temp dir at `/tmp`). Entries that
+    /// don't exist, and those under `/proc`, `/dev`, or `/sys` (whose meaning inside the
+    /// sandbox the host can't resolve), are dropped too. A program found in a dropped entry
+    /// could run instead of the system one Forge decided. Blocking: resolves each entry.
     pub fn safe_path(&self, path: &str) -> String {
+        self.safe_path_by(path, |p| std::fs::canonicalize(p).ok())
+    }
+
+    fn safe_path_by(&self, path: &str, resolve: impl Fn(&Path) -> Option<PathBuf>) -> String {
         let mut writable = self.read_write();
         writable.extend(HOME_WRITABLE.iter().map(|d| self.home.join(d)));
         writable.push(PathBuf::from("/tmp"));
+        let inside = |p: &Path| writable.iter().any(|w| p.starts_with(w));
         path.split(':')
             .filter(|entry| {
                 let entry = Path::new(entry);
-                entry.is_absolute()
+                let plain = entry.is_absolute()
                     && !entry
                         .components()
                         .any(|c| matches!(c, std::path::Component::ParentDir))
-                    && !writable.iter().any(|w| entry.starts_with(w))
+                    && !["/proc", "/dev", "/sys"]
+                        .iter()
+                        .any(|p| entry.starts_with(p));
+                plain && !inside(entry) && resolve(entry).is_some_and(|real| !inside(&real))
             })
             .collect::<Vec<_>>()
             .join(":")
@@ -438,9 +448,21 @@ mod tests {
             "/opt/tool/bin".to_owned(),
         ]
         .join(":");
+        // Entries resolve as named, but for a link into a writable dir and one that's gone.
+        let resolve = |p: &Path| match p.to_str() {
+            Some("/opt/link/bin") => Some(PathBuf::from("/data/s/home/.local/bin")),
+            Some("/opt/gone/bin") => None,
+            _ => Some(p.to_path_buf()),
+        };
+        let path = format!(
+            "{path}:/opt/link/bin:/opt/gone/bin:/proc/self/root/usr/bin:/tmpx/bin:/devtools/bin"
+        );
         assert_eq!(
-            view.safe_path(&path),
-            format!("/usr/bin:{}/.cargo/bin:/opt/tool/bin", home.display())
+            view.safe_path_by(&path, resolve),
+            format!(
+                "/usr/bin:{}/.cargo/bin:/opt/tool/bin:/tmpx/bin:/devtools/bin",
+                home.display()
+            )
         );
     }
 
