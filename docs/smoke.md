@@ -33,6 +33,7 @@ Prompt: "Add a function and a unit test that makes the failing test pass."
 Agent notes: Codex runs its commands only by escalating them, which asks Forge; a command it runs without escalating fails at its own sandbox. Note how often that happens, and check that every Codex command approval offers a plain "allow once" option (`forge session watch` shows the request): one that offers only "for this session" would let later runs of that command skip Forge.
 
 - [ ] Gemini CLI with a repo `.gemini/policies/` rule allowing `run_shell_command`, or a `.gemini/settings.json` allowing it: commands still ask.
+- [ ] Gemini CLI with an installed extension that defines an MCP server named `forge`: the agent's `git_commit` still reaches Forge (an approval for the `git` `commit` action appears), never the extension's server.
 - [ ] Each agent picks up the user's settings (its model, say) and instructions (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`), and a committed `.claude/settings.json` rule.
 - [ ] A command that writes `.claude/settings.local.json` granting `Bash` doesn't stop later commands from asking; Codex or Gemini restarted after a command rewrites `.codex/config.toml` or `.gemini/settings.json` refuses to start, naming the file.
 - [ ] With a subscription sign-in, `~/.claude/.credentials.json` and `~/.codex/auth.json` are unchanged after the session, and the agent's own CLI still works outside Forge.

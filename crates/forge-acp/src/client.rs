@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use agent_client_protocol::schema::ProtocolVersion;
@@ -15,11 +16,11 @@ use agent_client_protocol::schema::v1::{
     TerminalOutputRequest, TerminalOutputResponse, TextContent, WaitForTerminalExitRequest,
     WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
 };
-use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
+use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, UntypedMessage};
 use forge_api::TurnId;
 use forge_api::events::{
     AgentMessageBody, AgentPlanBody, EditBody, EventPayload, PlanEntry, TerminalOutputBody,
-    ToolCallBody, ToolResultBody,
+    ToolCallBody, ToolCallSource, ToolResultBody,
 };
 use forge_api::model::{Action, EditKind};
 use forge_sandbox::SessionSandbox;
@@ -36,6 +37,8 @@ use crate::workspace::{PathError, Workspace};
 
 /// Lines of the agent's stderr kept for crash reports.
 const STDERR_TAIL: usize = 20;
+/// Tool calls remembered while they run without asking Forge.
+const REMEMBERED_CALLS: usize = 256;
 /// Longest tool output kept in a `tool.result` event.
 const RESULT_OUTPUT_LIMIT: usize = 4096;
 /// The error code for a write or terminal the gate refused.
@@ -125,9 +128,40 @@ pub enum GateVerdict {
     /// Allow a terminal, running this argv instead of the one requested (a hook rewrote it).
     /// The extra environment, if kept, is part of the argv as an `env` prefix.
     Rewrite(Vec<String>),
-    Deny(String),
+    Deny(Refusal),
+    /// A human refused it, with their note for the agent if they wrote one.
+    HumanDeny(Option<String>),
     /// The turn was cancelled while the request waited.
     Cancelled,
+}
+
+impl GateVerdict {
+    /// A refusal with `reason` and nothing to steer the agent with.
+    pub fn deny(reason: impl Into<String>) -> Self {
+        Self::Deny(Refusal {
+            reason: reason.into(),
+            steer: None,
+        })
+    }
+}
+
+/// Why the gate refused something.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refusal {
+    /// What the agent's write or terminal is answered with, and what Forge records.
+    pub reason: String,
+    /// What an agent that takes steering is told for a refused permission request.
+    pub steer: Option<Steer>,
+}
+
+/// What a refusal tells the agent in its running turn. It goes to the agent as a user message,
+/// so its text is never the agent's own or a repo's framed as Forge's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Steer {
+    /// Forge's own words, from templates that name nothing the agent or a repo wrote.
+    Forge(String),
+    /// A project hook's words, attributed to it.
+    Hook { name: String, note: String },
 }
 
 /// Decides every permission request, write, and terminal before it happens, recording the
@@ -165,7 +199,7 @@ pub struct DenyAll {
 
 impl Gate for DenyAll {
     fn decide(&self, _: GateRequest) -> BoxFuture<'_, GateVerdict> {
-        let verdict = GateVerdict::Deny(self.reason.clone());
+        let verdict = GateVerdict::deny(self.reason.clone());
         Box::pin(async move { verdict })
     }
 }
@@ -273,6 +307,8 @@ pub struct AcpClient {
     terminals: Arc<Terminals>,
     exit: watch::Receiver<Option<AgentExit>>,
     kill: Mutex<Option<oneshot::Sender<()>>>,
+    /// Whether the agent takes steering messages.
+    steering: Arc<AtomicBool>,
 }
 
 impl AcpClient {
@@ -293,6 +329,14 @@ impl AcpClient {
         let cwd = client.cwd.clone();
         let opened = async {
             let agent = client.initialize().await?;
+            let steering = agent
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("steering")?.get("supported")?.as_bool())
+                .unwrap_or(false);
+            client
+                .steering
+                .store(steering, std::sync::atomic::Ordering::SeqCst);
             // Forge's tools are reached over HTTP; an agent that can't do that goes without.
             let http = agent.agent_capabilities.mcp_capabilities.http;
             if !http && !mcp_servers.is_empty() {
@@ -453,6 +497,7 @@ impl AcpClient {
 
         let terminals = Arc::new(Terminals::new(sandbox));
         let turn = Arc::new(Mutex::new(None));
+        let steering = Arc::new(AtomicBool::new(false));
         let cwd = workspace.cwd().to_path_buf();
         let handlers = Arc::new(Handlers {
             workspace,
@@ -464,6 +509,9 @@ impl AcpClient {
             mcp_meta: setup.mcp_meta,
             own_servers: setup.mcp_servers.iter().map(|s| s.name.clone()).collect(),
             commands: Mutex::new(ToolCommands::default()),
+            unasked: Mutex::new(VecDeque::new()),
+            asked: Mutex::new(VecDeque::new()),
+            steering: steering.clone(),
         });
 
         let (exit_tx, exit_rx) = watch::channel(None);
@@ -503,6 +551,7 @@ impl AcpClient {
             terminals,
             exit: exit_rx,
             kill: Mutex::new(Some(kill_tx)),
+            steering,
         };
         Ok(client)
     }
@@ -680,6 +729,13 @@ struct Handlers {
     own_servers: Vec<String>,
     /// Commands the agent reported in its tool calls.
     commands: Mutex<ToolCommands>,
+    /// Tool calls the agent reported that haven't asked Forge, as reported so far: one that
+    /// finishes without asking is recorded then.
+    unasked: Mutex<VecDeque<acp::ToolCall>>,
+    /// Tool calls that asked Forge, which are recorded by their requests.
+    asked: Mutex<VecDeque<acp::ToolCallId>>,
+    /// Whether the agent takes steering messages, as its `initialize` said.
+    steering: Arc<AtomicBool>,
 }
 
 type AcpResult<T> = Result<T, agent_client_protocol::Error>;
@@ -775,7 +831,8 @@ async fn connect(
             async move |req: RequestPermissionRequest, responder, cx: ConnectionTo<Agent>| {
                 // A decision may wait on a human; don't hold the dispatch loop.
                 let h = permission.clone();
-                cx.spawn(async move { reply(responder, h.permission(req).await) })
+                let conn = cx.clone();
+                cx.spawn(async move { reply(responder, h.permission(req, &conn).await) })
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -788,6 +845,83 @@ async fn connect(
         )
         .connect_with(transport, main)
         .await
+}
+
+/// The extension request that adds a message to the agent's running turn (Claude's adapter
+/// offers it, saying so in `initialize`'s `_meta.steering.supported`).
+const STEER_METHOD: &str = "_session/steering";
+/// The longest reason or note a steering message carries.
+const STEER_LIMIT: usize = 1024;
+
+/// What to tell an agent whose request for tool call `id` got `verdict`, if anything: Forge's
+/// reason, a hook's words as the hook's, or a human's note. Nothing else of the request's goes
+/// in: the call is named only by an ID of plain characters, and a hook only by a plain name.
+fn steering_text(id: &str, verdict: &GateVerdict) -> Option<String> {
+    let call = match plain(id, &['_', '-']) {
+        true => format!("tool call {id}"),
+        false => "a tool call".to_owned(),
+    };
+    match verdict {
+        GateVerdict::Deny(Refusal {
+            steer: Some(Steer::Forge(reason)),
+            ..
+        }) => Some(format!(
+            "[forge] Forge refused {call}: {}",
+            one_line(reason)
+        )),
+        GateVerdict::Deny(Refusal {
+            steer: Some(Steer::Hook { name, note }),
+            ..
+        }) => {
+            let hook = match plain(name, &['_', '-', '.']) {
+                true => format!("A project hook ({name})"),
+                false => "A project hook".to_owned(),
+            };
+            Some(format!(
+                "[forge] {hook} refused {call}. The hook says: {}",
+                one_line(note)
+            ))
+        }
+        GateVerdict::HumanDeny(Some(note)) => Some(format!(
+            "[forge] The user refused {call} and says: {}",
+            one_line(note)
+        )),
+        _ => None,
+    }
+}
+
+/// Whether `s` is 1 to 64 ASCII letters, digits, and `extra` characters.
+fn plain(s: &str, extra: &[char]) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || extra.contains(&c))
+}
+
+/// `text` on one line, without control characters, at most [`STEER_LIMIT`] bytes.
+fn one_line(text: &str) -> String {
+    let mut out = text
+        .split(|c: char| c.is_control())
+        .filter(|part| !part.trim().is_empty())
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if out.len() > STEER_LIMIT {
+        let mut end = STEER_LIMIT;
+        while !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+    }
+    out
+}
+
+/// Whether a tool call with `status` has finished.
+fn finished(status: Option<acp::ToolCallStatus>) -> bool {
+    matches!(
+        status,
+        Some(acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed)
+    )
 }
 
 fn tool_call_id() -> String {
@@ -1030,8 +1164,20 @@ impl Handlers {
     async fn permission(
         &self,
         req: RequestPermissionRequest,
+        conn: &ConnectionTo<Agent>,
     ) -> AcpResult<RequestPermissionResponse> {
         let fields = &req.tool_call.fields;
+        let id = &req.tool_call.tool_call_id;
+        lock(&self.unasked).retain(|c| c.tool_call_id != *id);
+        {
+            let mut asked = lock(&self.asked);
+            if !asked.contains(id) {
+                if asked.len() == REMEMBERED_CALLS {
+                    asked.pop_front();
+                }
+                asked.push_back(id.clone());
+            }
+        }
         let target = {
             let commands = lock(&self.commands);
             permission::target(
@@ -1083,11 +1229,35 @@ impl Handlers {
         let wanted: &[Kind] = match verdict {
             GateVerdict::Allow => &[Kind::AllowOnce, Kind::AllowAlways],
             // The agent's own tool can't run a different command.
-            GateVerdict::Deny(_) | GateVerdict::Rewrite(_) => {
+            GateVerdict::Deny(_) | GateVerdict::HumanDeny(_) | GateVerdict::Rewrite(_) => {
                 &[Kind::RejectOnce, Kind::RejectAlways]
             }
             GateVerdict::Cancelled => &[],
         };
+        // A reject tells the agent nothing more, so an agent that takes steering hears why in
+        // its running turn, before the reject lands.
+        if self.steering.load(std::sync::atomic::Ordering::SeqCst)
+            && let Some(text) = steering_text(&req.tool_call.tool_call_id.0, &verdict)
+        {
+            let message = UntypedMessage::new(
+                STEER_METHOD,
+                serde_json::json!({
+                    "sessionId": req.session_id,
+                    "prompt": [{ "type": "text", "text": text }],
+                }),
+            );
+            let sent = match message {
+                Ok(message) => conn.send_request(message).block_task().await.map(drop),
+                Err(e) => Err(e),
+            };
+            match sent {
+                Ok(()) => {
+                    let id = req.tool_call.tool_call_id.0.to_string();
+                    self.result(&id, "failed", Some(text)).await;
+                }
+                Err(e) => tracing::debug!(error = %e, "steering the agent"),
+            }
+        }
         let outcome = match choose(&req.options, wanted) {
             Some(option) => RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
                 option.option_id.clone(),
@@ -1097,13 +1267,19 @@ impl Handlers {
         Ok(RequestPermissionResponse::new(outcome))
     }
 
-    /// Record that the agent wants to take `action`.
+    /// Record that the agent wants to take `action`, which Forge decides.
     async fn call(&self, id: &str, action: &Action, title: &str) {
+        self.call_from(id, action, title, ToolCallSource::Forge)
+            .await;
+    }
+
+    async fn call_from(&self, id: &str, action: &Action, title: &str, source: ToolCallSource) {
         self.sink
             .emit(EventPayload::ToolCall(ToolCallBody {
                 tool_call_id: id.to_owned(),
                 action: action.clone(),
                 title: title.to_owned(),
+                source,
             }))
             .await;
     }
@@ -1116,7 +1292,11 @@ impl Handlers {
             GateVerdict::Allow => return Ok(None),
             GateVerdict::Rewrite(argv) if !argv.is_empty() => return Ok(Some(argv)),
             GateVerdict::Rewrite(_) => "refused: a hook rewrote it to nothing".to_owned(),
-            GateVerdict::Deny(reason) => format!("refused by policy: {reason}"),
+            GateVerdict::Deny(refusal) => format!("refused by policy: {}", refusal.reason),
+            GateVerdict::HumanDeny(note) => match note {
+                Some(note) => format!("refused by the user: {note}"),
+                None => "refused by the user".to_owned(),
+            },
             GateVerdict::Cancelled => "cancelled".to_owned(),
         };
         Err(self.refuse(&id, reason).await)
@@ -1128,33 +1308,66 @@ impl Handlers {
         agent_client_protocol::Error::new(REFUSED, reason)
     }
 
+    /// Remember what a tool call reports, for its permission request.
+    fn record_call(&self, call: &acp::ToolCall) {
+        let mut commands = lock(&self.commands);
+        commands.record(&call.tool_call_id.0, call.raw_input.as_ref());
+        commands.record_changes(&call.tool_call_id.0, &call.content);
+        commands.record_mcp(
+            &call.tool_call_id.0,
+            call.meta.as_ref(),
+            call.raw_input.as_ref(),
+        );
+        let names_command = call
+            .raw_input
+            .as_ref()
+            .is_some_and(|r| r.get("command").is_some());
+        if matches!(call.kind, acp::ToolKind::Read | acp::ToolKind::Search) && !names_command {
+            commands.record_read(&call.tool_call_id.0);
+        }
+    }
+
     async fn update(&self, notification: SessionNotification) {
         let payload = match notification.update {
             SessionUpdate::ToolCall(call) => {
-                let mut commands = lock(&self.commands);
-                commands.record(&call.tool_call_id.0, call.raw_input.as_ref());
-                commands.record_changes(&call.tool_call_id.0, &call.content);
-                commands.record_mcp(
-                    &call.tool_call_id.0,
-                    call.meta.as_ref(),
-                    call.raw_input.as_ref(),
-                );
-                let names_command = call
-                    .raw_input
-                    .as_ref()
-                    .is_some_and(|r| r.get("command").is_some());
-                if matches!(call.kind, acp::ToolKind::Read | acp::ToolKind::Search)
-                    && !names_command
-                {
-                    commands.record_read(&call.tool_call_id.0);
+                self.record_call(&call);
+                if lock(&self.asked).contains(&call.tool_call_id) {
+                    return;
+                }
+                if finished(Some(call.status)) {
+                    self.ran_unasked(call).await;
+                } else {
+                    let mut unasked = lock(&self.unasked);
+                    if unasked.len() == REMEMBERED_CALLS {
+                        unasked.pop_front();
+                    }
+                    unasked.push_back(call);
                 }
                 return;
             }
             SessionUpdate::ToolCallUpdate(update) => {
-                let mut commands = lock(&self.commands);
-                commands.record(&update.tool_call_id.0, update.fields.raw_input.as_ref());
-                if let Some(content) = &update.fields.content {
-                    commands.record_changes(&update.tool_call_id.0, content);
+                {
+                    let mut commands = lock(&self.commands);
+                    commands.record(&update.tool_call_id.0, update.fields.raw_input.as_ref());
+                    if let Some(content) = &update.fields.content {
+                        commands.record_changes(&update.tool_call_id.0, content);
+                    }
+                }
+                let done = {
+                    let mut unasked = lock(&self.unasked);
+                    let Some(i) = unasked
+                        .iter()
+                        .position(|c| c.tool_call_id == update.tool_call_id)
+                    else {
+                        return;
+                    };
+                    unasked[i].update(update.fields.clone());
+                    finished(update.fields.status)
+                        .then(|| unasked.remove(i))
+                        .flatten()
+                };
+                if let Some(call) = done {
+                    self.ran_unasked(call).await;
                 }
                 return;
             }
@@ -1191,6 +1404,60 @@ impl Handlers {
             _ => return,
         };
         self.sink.emit(payload).await;
+    }
+
+    /// Record `call`, which finished without asking Forge (an agent runs commands it deems
+    /// read-only by itself), when it names an action: as a tool call and its result, with no
+    /// policy decision.
+    async fn ran_unasked(&self, call: acp::ToolCall) {
+        let fields = acp::ToolCallUpdateFields::new()
+            .kind(call.kind)
+            .title(call.title.clone())
+            .raw_input(call.raw_input.clone())
+            .locations(call.locations.clone());
+        let request = RequestPermissionRequest::new(
+            "unasked",
+            acp::ToolCallUpdate::new(call.tool_call_id.clone(), fields).meta(call.meta.clone()),
+            vec![],
+        );
+        let target = {
+            let commands = lock(&self.commands);
+            permission::target(
+                &request,
+                &self.workspace,
+                self.command_source,
+                self.mcp_meta,
+                &commands,
+            )
+        };
+        let action = match target {
+            // Forge's own tools record themselves when they run.
+            Target::Action(Action::Mcp { server, .. }) if self.own_servers.contains(&server) => {
+                return;
+            }
+            Target::Action(action) => action,
+            _ => return,
+        };
+        let id = call.tool_call_id.0.to_string();
+        self.call_from(&id, &action, &call.title, ToolCallSource::Agent)
+            .await;
+        let status = match call.status {
+            acp::ToolCallStatus::Completed => "completed",
+            _ => "failed",
+        };
+        let text: Vec<&str> = call
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                acp::ToolCallContent::Content(acp::Content {
+                    content: ContentBlock::Text(t),
+                    ..
+                }) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let output = (!text.is_empty()).then(|| tail(&text.join("\n")));
+        self.result(&id, status, output).await;
     }
 
     async fn result(&self, id: &str, status: &str, output: Option<String>) {

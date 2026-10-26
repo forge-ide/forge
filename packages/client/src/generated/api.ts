@@ -371,7 +371,20 @@ export type PlanEntry = { content: string; status: string };
 
 export type AgentPlanBody = { entries: Array<PlanEntry> };
 
-export type ToolCallBody = { toolCallId: string; action: Action; title: string };
+export type ToolCallBody = {
+  toolCallId: string;
+  action: Action;
+  title: string;
+  /**
+   * Who decided the call. Events recorded before it existed read as Forge.
+   */
+  source: ToolCallSource;
+};
+
+/**
+ * Who decided a tool call.
+ */
+export type ToolCallSource = "forge" | "agent";
 
 export type ToolResultBody = {
   toolCallId: string;

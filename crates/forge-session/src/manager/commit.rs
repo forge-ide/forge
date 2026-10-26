@@ -73,6 +73,7 @@ async fn run(
             tool_call_id: id.clone(),
             action: action.clone(),
             title: title.clone(),
+            source: Default::default(),
         }))
         .await;
     let fail = async |reason: String| {
@@ -114,7 +115,10 @@ async fn run(
     };
     match gate.decide(request).await {
         GateVerdict::Allow => {}
-        GateVerdict::Deny(reason) => return fail(reason).await,
+        GateVerdict::Deny(refusal) => return fail(refusal.reason).await,
+        GateVerdict::HumanDeny(note) => {
+            return fail(note.unwrap_or_else(|| "a human denied it".into())).await;
+        }
         GateVerdict::Cancelled => return fail("the turn was cancelled".into()).await,
         GateVerdict::Rewrite(_) => {
             return fail("a hook rewrote the commit, which can't be rewritten".into()).await;

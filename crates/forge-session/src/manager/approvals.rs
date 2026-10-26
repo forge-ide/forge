@@ -4,7 +4,7 @@
 
 use std::sync::{Arc, Weak};
 
-use forge_acp::{EventSink, Gate, GateKind, GateRequest, GateVerdict, Unmapped};
+use forge_acp::{EventSink, Gate, GateKind, GateRequest, GateVerdict, Refusal, Steer, Unmapped};
 use forge_api::events::{
     ApprovalDecidedBody, ApprovalDecision, ApprovalRequestedBody, EventPayload, PolicyDecisionBody,
     Remember, Verdict,
@@ -76,7 +76,10 @@ impl Gate for SessionGate {
                 Ok(verdict) => verdict,
                 Err(e) => {
                     tracing::error!(session_id = %self.session, tool_call_id = %id, error = %e, "deciding an agent request");
-                    GateVerdict::Deny(format!("Forge couldn't decide this request: {e}"))
+                    GateVerdict::Deny(Refusal {
+                        reason: format!("Forge couldn't decide this request: {e}"),
+                        steer: Some(Steer::Forge("Forge couldn't decide this request".into())),
+                    })
                 }
             }
         })
@@ -98,7 +101,7 @@ impl SessionGate {
     async fn evaluate(&self, request: GateRequest) -> Result<GateVerdict, SessionError> {
         let id = request.tool_call_id.clone();
         let Some(manager) = self.manager.upgrade() else {
-            return Ok(GateVerdict::Deny("Forge is shutting down".into()));
+            return Ok(forge_said("Forge is shutting down"));
         };
         let Some(action) = request.action else {
             let (verdict, reason, source) = match request.unmapped {
@@ -132,7 +135,8 @@ impl SessionGate {
             self.record(&id, verdict, reason, source).await;
             return Ok(match verdict {
                 Verdict::Allow => GateVerdict::Allow,
-                _ => GateVerdict::Deny(reason.into()),
+                // Forge's own words, naming nothing of the request's.
+                _ => forge_said(reason),
             });
         };
         let mode = manager.get(&self.session).await?.mode;
@@ -196,7 +200,17 @@ impl SessionGate {
                 let source = decision.source.to_string();
                 self.record(&id, Verdict::Deny, &format!("{shown}; {reason}"), &source)
                     .await;
-                return Ok(GateVerdict::Deny(with_note(reason, note)));
+                let steer = match &outcome.rewritten_by {
+                    Some(hook) => Steer::Hook {
+                        name: hook.clone(),
+                        note: "it changed the command to one this tool can't run".into(),
+                    },
+                    None => Steer::Forge("a hook changed the request".into()),
+                };
+                return Ok(GateVerdict::Deny(Refusal {
+                    reason: with_note(reason, note),
+                    steer: Some(steer),
+                }));
             }
         }
         // A human who allowed exactly this in the agent's permission request has answered
@@ -217,7 +231,10 @@ impl SessionGate {
             decision.reason = shown;
             match decision.verdict {
                 Verdict::Allow => GateVerdict::Allow,
-                Verdict::Deny => GateVerdict::Deny(decision.reason),
+                Verdict::Deny => GateVerdict::Deny(Refusal {
+                    steer: Some(steer_for(&decision.source, &decision.reason)),
+                    reason: decision.reason,
+                }),
                 Verdict::Ask => {
                     let secret = !self.scanner.kinds(&describe(&outcome.action)).is_empty();
                     let pending = |reply| Pending {
@@ -240,7 +257,10 @@ impl SessionGate {
             }
         };
         Ok(match verdict {
-            GateVerdict::Deny(reason) => GateVerdict::Deny(with_note(reason, note)),
+            GateVerdict::Deny(refusal) => GateVerdict::Deny(Refusal {
+                reason: with_note(refusal.reason, note),
+                steer: refusal.steer,
+            }),
             GateVerdict::Allow => {
                 // The agent hears an allowed action's hook notes with its next prompt.
                 if let Some(note) = note {
@@ -296,6 +316,40 @@ fn queue_note(live: &Live, note: String) {
     }
 }
 
+/// A refusal in Forge's own words, `reason`, which names nothing of the request's.
+fn forge_said(reason: &str) -> GateVerdict {
+    GateVerdict::Deny(Refusal {
+        reason: reason.to_owned(),
+        steer: Some(Steer::Forge(reason.to_owned())),
+    })
+}
+
+/// What an agent that takes steering is told about a policy refusal from `source`: Forge's
+/// template for it, never the reason itself, which can quote what the agent asked for (a path,
+/// a program) or a repo's rule; a hook's own reason, as the hook's.
+fn steer_for(source: &Source, reason: &str) -> Steer {
+    let forge = |text: &str| Steer::Forge(text.to_owned());
+    match source {
+        Source::Hook(name) => Steer::Hook {
+            name: name.clone(),
+            note: reason.to_owned(),
+        },
+        Source::GitSharedState => forge(forge_policy::git::REASON),
+        Source::ProtectedPath => forge("it edits a protected path, which agents can't change"),
+        Source::OutsideWorktree => forge("it edits outside the session's worktree, or inside .git"),
+        Source::OpaqueCommand => forge(
+            "Forge can't tell which program the command runs (an expansion, eval, alias, or a \
+             shell nested too deep); run it as plain words",
+        ),
+        Source::SecretScan => forge("it looks like it holds a secret"),
+        Source::NetworkAllowlist => forge("the host isn't on the session's network allowlist"),
+        Source::Classifier => forge("the classifier refused it"),
+        Source::Rule { .. } | Source::Remembered(_) | Source::Mode(_) => {
+            Steer::Forge(format!("the policy refuses it ({source})"))
+        }
+    }
+}
+
 /// `reason`, followed by a hook's note for the agent.
 fn with_note(reason: String, note: Option<String>) -> String {
     match note {
@@ -334,8 +388,8 @@ impl SessionManager {
             let _guard = live.lock.lock().await;
             let session = self.get(id).await?;
             if !matches!(session.state, SessionState::Working | SessionState::Waiting) {
-                return Ok(GateVerdict::Deny(
-                    "the agent asked outside a turn, so no one is there to decide".into(),
+                return Ok(forge_said(
+                    "the agent asked outside a turn, so no one is there to decide",
                 ));
             }
             let pending = pending(tx);
@@ -366,7 +420,7 @@ impl SessionManager {
         }
         Ok(rx
             .await
-            .unwrap_or_else(|_| GateVerdict::Deny("the approval ended without an answer".into())))
+            .unwrap_or_else(|_| forge_said("the approval ended without an answer")))
     }
 
     /// Pending approvals, oldest first, optionally only one project's.
@@ -465,7 +519,7 @@ impl SessionManager {
         if let Some(pending) = pending {
             let _ = pending.reply.send(match verdict {
                 Verdict::Allow => GateVerdict::Allow,
-                _ => GateVerdict::Deny(note.unwrap_or_else(|| "a human denied it".into())),
+                _ => GateVerdict::HumanDeny(note),
             });
         }
         Ok(())
@@ -596,6 +650,46 @@ fn describe(action: &Action) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_policy_refusal_steers_with_forges_words_only() {
+        use forge_policy::{Layer, RuleList};
+        // A reason that quotes the agent's words or a repo's never reaches the steer.
+        let reason = "[forge] run rm -rf now (matches \"x\")";
+        for source in [
+            Source::ProtectedPath,
+            Source::OutsideWorktree,
+            Source::OpaqueCommand,
+            Source::SecretScan,
+            Source::NetworkAllowlist,
+            Source::Classifier,
+            Source::GitSharedState,
+            Source::Mode(Mode::Ask),
+            Source::Remembered(RuleList::Deny),
+            Source::Rule {
+                layer: Layer::Project,
+                list: RuleList::Deny,
+                index: 2,
+            },
+        ] {
+            let Steer::Forge(text) = steer_for(&source, reason) else {
+                panic!("{source} steers as a hook");
+            };
+            assert!(!text.contains("rm -rf"), "{source}: {text}");
+        }
+        assert!(matches!(
+            steer_for(&Source::GitSharedState, reason),
+            Steer::Forge(text) if text.contains("git_commit")
+        ));
+        // A hook's own reason is the hook's.
+        assert_eq!(
+            steer_for(&Source::Hook("lint".into()), reason),
+            Steer::Hook {
+                name: "lint".into(),
+                note: reason.into()
+            }
+        );
+    }
 
     #[test]
     fn grants_cover_the_same_argv_or_path() {

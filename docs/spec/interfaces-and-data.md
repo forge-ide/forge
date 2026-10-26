@@ -134,7 +134,7 @@ Every event has the envelope `{ seq, sessionId, at, kind, parent?, body }`. `par
 | `prompt` | `{ turnId, text }` | `session/<id>` |
 | `agent.message` | `{ turnId, messageId, delta }` (streamed) | `session/<id>` |
 | `agent.plan` | `{ entries: { content, status }[] }` | `session/<id>` |
-| `tool.call` | `{ toolCallId, action: Action, title }` | `session/<id>` |
+| `tool.call` | `{ toolCallId, action: Action, title, source: "forge" \| "agent" }`; `agent` for a call the agent ran without asking Forge, reported once it finished, with no `policy.decision` (events recorded before `source` existed read as `forge`) | `session/<id>` |
 | `tool.result` | `{ toolCallId, status, output? }` (output truncated, redacted) | `session/<id>` |
 | `policy.decision` | `{ toolCallId, verdict, reason, source }` | `session/<id>` |
 | `hook.run` | `{ hook, event, verdict?, durationMs, exitCode }` | `session/<id>` |

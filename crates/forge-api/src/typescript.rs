@@ -86,6 +86,7 @@ pub fn generate() -> String {
         .add::<PlanEntry>()
         .add::<AgentPlanBody>()
         .add::<ToolCallBody>()
+        .add::<ToolCallSource>()
         .add::<ToolResultBody>()
         .add::<Verdict>()
         .add::<PolicyDecisionBody>()

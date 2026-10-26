@@ -41,6 +41,27 @@ justification; a command run without them fails before it starts.";
 /// MCP servers).
 pub const AGENT_HOME_ENTRIES: &[&str] = &[".claude", ".claude.json", ".codex", ".gemini", ".env"];
 
+/// What an agent keeps in its writable home dir that it runs by itself, so the sandbox keeps
+/// it read-only and empty where the tier can (see [`forge_sandbox::Spec::home_locked`]): Claude
+/// Code sources a shell snapshot before every Bash command, an env file from `session-env`,
+/// and restarts background jobs from `jobs`, `daemon`, and `daemon.json`, without asking.
+pub fn home_locked(manifest: Option<&Manifest>) -> Vec<forge_sandbox::HomeLock> {
+    let lock = |path: &str, dir: bool| forge_sandbox::HomeLock {
+        path: path.into(),
+        dir,
+    };
+    match manifest.map(|m| m.id.as_str()) {
+        Some("claude-code") => vec![
+            lock(".claude/shell-snapshots", true),
+            lock(".claude/session-env", true),
+            lock(".claude/jobs", true),
+            lock(".claude/daemon", true),
+            lock(".claude/daemon.json", false),
+        ],
+        _ => vec![],
+    }
+}
+
 /// What a shim needs to know about the session.
 pub struct ShimContext<'a> {
     /// The session's shim dir: empty, owned by the daemon, shown read-only in the sandbox at
@@ -112,24 +133,60 @@ fn toml_names_forge(raw: &[u8]) -> bool {
         })
 }
 
-/// Whether a JSON config's `mcpServers` has a server named [`MCP_SERVER`]. Gemini's may hold
-/// comments, so one that doesn't parse counts if it has the name as a key anywhere.
-fn json_names_forge(raw: &[u8]) -> bool {
-    match serde_json::from_slice::<serde_json::Value>(raw) {
-        Ok(v) => v
-            .get("mcpServers")
+/// Whether a Gemini JSON config's `mcpServers` has a server named [`MCP_SERVER`], read as
+/// Gemini reads it: comments stripped, then parsed as JSON. `None` if it doesn't parse, which
+/// isn't proof Gemini can't read it (JavaScript takes a lone surrogate escape serde refuses),
+/// so the caller refuses the launch.
+fn json_names_forge(raw: &[u8]) -> Option<bool> {
+    let text = std::str::from_utf8(raw).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&strip_json_comments(text)).ok()?;
+    Some(
+        v.get("mcpServers")
             .is_some_and(|s| s.get(MCP_SERVER).is_some()),
-        Err(_) => {
-            let text = String::from_utf8_lossy(raw);
-            let key = format!("\"{MCP_SERVER}\"");
-            text.match_indices(&key)
-                .any(|(i, _)| text[i + key.len()..].trim_start().starts_with(':'))
-        }
-    }
+    )
 }
 
-/// The most extensions whose manifests are checked for a server named after Forge's.
-const MAX_EXTENSIONS: usize = 256;
+/// `text` with its `//` and `/* */` comments blanked out, as Gemini's `strip-json-comments`
+/// does: markers inside strings are text, and an unclosed comment runs to the end.
+fn strip_json_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_string = false;
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            match c {
+                '\\' => out.extend(chars.next()),
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match (c, chars.peek()) {
+            ('"', _) => {
+                in_string = true;
+                out.push(c);
+            }
+            ('/', Some('/')) => {
+                while chars.next_if(|&c| c != '\n').is_some() {}
+                out.push(' ');
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                let mut last = ' ';
+                for c in chars.by_ref() {
+                    if last == '*' && c == '/' {
+                        break;
+                    }
+                    last = c;
+                }
+                out.push(' ');
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
 
 /// The repo files each agent reads its project config from, which a shim takes from the
 /// branch's last commit (Claude) or checks against it (Codex and Gemini, whose CLIs read them
@@ -227,13 +284,29 @@ pub fn prepare(manifest: Option<&Manifest>, cx: &ShimContext<'_>) -> Result<Shim
         };
         match (manifest.id.as_str(), path.as_str()) {
             ("codex", ".codex/config.toml") => toml_names_forge(raw.as_bytes()),
-            ("gemini", ".gemini/settings.json") => json_names_forge(raw.as_bytes()),
+            // One it can't check is refused below.
+            ("gemini", ".gemini/settings.json") => {
+                json_names_forge(raw.as_bytes()).unwrap_or(false)
+            }
             _ => false,
         }
     }) {
         return Err(ShimError::ServerNameTaken {
             agent: manifest.name.clone(),
             path: path.clone(),
+        });
+    }
+    if manifest.id == "gemini"
+        && let Some((path, _)) = cx.committed.iter().find(|(path, raw)| {
+            path == ".gemini/settings.json"
+                && raw
+                    .as_deref()
+                    .is_some_and(|raw| json_names_forge(raw.as_bytes()).is_none())
+        })
+    {
+        return Err(ShimError::Read {
+            agent: manifest.name.clone(),
+            why: format!("{path} in the repo isn't JSON Forge can check"),
         });
     }
     let failed = |source| ShimError::Write {
@@ -679,31 +752,19 @@ pub fn home_config(
             }
         }
         "gemini" => {
+            let check = |raw: &[u8], path: String| match json_names_forge(raw) {
+                Some(false) => Ok(()),
+                Some(true) => Err(ShimError::ServerNameTaken {
+                    agent: manifest.name.clone(),
+                    path,
+                }),
+                None => Err(failed(format!("{path} isn't JSON Forge can check"))),
+            };
+            // Extensions aren't checked: Gemini registers the server ACP offers first and
+            // skips an extension's server of a name it already has.
             if let Some(raw) = read_settings(&home.join(".gemini/settings.json")).map_err(failed)? {
-                if json_names_forge(&raw) {
-                    return Err(ShimError::ServerNameTaken {
-                        agent: manifest.name.clone(),
-                        path: "~/.gemini/settings.json".into(),
-                    });
-                }
+                check(&raw, "~/.gemini/settings.json".into())?;
                 out.files.push((".gemini/settings.json".into(), raw));
-            }
-            // Extensions, linked in read-only, can add MCP servers too.
-            if let Ok(dirs) = std::fs::read_dir(home.join(".gemini/extensions")) {
-                for dir in dirs.flatten().take(MAX_EXTENSIONS) {
-                    let manifest_path = dir.path().join("gemini-extension.json");
-                    if let Some(raw) = read_settings(&manifest_path).map_err(failed)?
-                        && json_names_forge(&raw)
-                    {
-                        return Err(ShimError::ServerNameTaken {
-                            agent: manifest.name.clone(),
-                            path: format!(
-                                "~/.gemini/extensions/{}/gemini-extension.json",
-                                dir.file_name().to_string_lossy()
-                            ),
-                        });
-                    }
-                }
             }
         }
         _ => {}
@@ -1358,14 +1419,20 @@ mod tests {
             };
             // As committed, or absent from both: fine.
             assert_eq!(attempt(None), None, "{agent} {path}");
-            std::fs::write(worktree.join(path), "committed").unwrap();
-            assert_eq!(attempt(Some("committed")), None, "{agent} {path}");
+            // Contents each agent can read.
+            let committed = if path.ends_with(".json") {
+                r#"{"committed": true}"#
+            } else {
+                "committed"
+            };
+            std::fs::write(worktree.join(path), committed).unwrap();
+            assert_eq!(attempt(Some(committed)), None, "{agent} {path}");
             // Written in the session, added, or removed: refused.
             std::fs::write(worktree.join(path), "rewritten").unwrap();
-            assert_eq!(attempt(Some("committed")).as_deref(), Some(path));
+            assert_eq!(attempt(Some(committed)).as_deref(), Some(path));
             assert_eq!(attempt(None).as_deref(), Some(path));
             std::fs::remove_file(worktree.join(path)).unwrap();
-            assert_eq!(attempt(Some("committed")).as_deref(), Some(path));
+            assert_eq!(attempt(Some(committed)).as_deref(), Some(path));
             // A symlink is never the committed file.
             std::os::unix::fs::symlink("/nonexistent", worktree.join(path)).unwrap();
             assert_eq!(attempt(None).as_deref(), Some(path));
@@ -1485,20 +1552,29 @@ mod tests {
             taken("gemini", ".gemini/settings.json", gemini).as_deref(),
             Some("~/.gemini/settings.json")
         );
-        // Gemini's settings may hold comments, which JSON doesn't parse.
-        let commented = "{\n  // mine\n  \"mcpServers\": { \"forge\" : {} }\n}";
-        assert_eq!(
-            taken("gemini", ".gemini/settings.json", commented).as_deref(),
-            Some("~/.gemini/settings.json")
-        );
+        // Gemini's settings may hold comments, which it strips before parsing, wherever they
+        // are; and a key may be spelled with escapes.
+        for commented in [
+            "{\n  // mine\n  \"mcpServers\": { \"forge\" : {} }\n}",
+            "{\"mcpServers\": { \"forge\" /* x */ : {} }}",
+            "{\"mcpServers\": { \"forge\" // x\n : {} }}",
+            "{\"mcpServers\": { \"for\\u0067e\": {} }}",
+            "{/* \"mcpServers\": {} */ \"mcpServers\": { \"forge\": {} }}",
+        ] {
+            assert_eq!(
+                taken("gemini", ".gemini/settings.json", commented).as_deref(),
+                Some("~/.gemini/settings.json"),
+                "{commented}"
+            );
+        }
+        // Comment markers inside strings are text.
         assert_eq!(
             taken(
                 "gemini",
-                ".gemini/extensions/x/gemini-extension.json",
-                gemini
-            )
-            .as_deref(),
-            Some("~/.gemini/extensions/x/gemini-extension.json")
+                ".gemini/settings.json",
+                "{\"url\": \"http://x/*\", \"mcpServers\": {\"docs\": {}}, \"y\": \"*/\"}"
+            ),
+            None
         );
         // Other servers are fine.
         assert_eq!(
@@ -1549,6 +1625,65 @@ mod tests {
             prepare(manifest("gemini"), &cx),
             Err(ShimError::ServerNameTaken { path, .. }) if path == ".gemini/settings.json"
         ));
+    }
+
+    /// Settings Gemini would read but Forge can't check refuse the launch, rather than passing:
+    /// a file serde can't parse may still be one Gemini reads (JavaScript takes a lone
+    /// surrogate escape).
+    #[test]
+    fn gemini_config_forge_cant_check_refuses_the_launch() {
+        let refused = |files: &[(&str, &str)]| {
+            let home = tempfile::tempdir().unwrap();
+            for (rel, contents) in files {
+                let path = home.path().join(rel);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, contents).unwrap();
+            }
+            matches!(
+                home_config(manifest("gemini"), home.path(), None),
+                Err(ShimError::Read { .. })
+            )
+        };
+        let surrogate = r#"{"x": "\ud800", "mcpServers": {"forge": {}}}"#;
+        assert!(refused(&[(".gemini/settings.json", surrogate)]));
+        assert!(!refused(&[(".gemini/settings.json", "{}")]));
+
+        // The repo's committed settings, too.
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("wt");
+        std::fs::create_dir_all(worktree.join(".gemini")).unwrap();
+        std::fs::write(worktree.join(".gemini/settings.json"), surrogate).unwrap();
+        let shim_dir = dir.path().join("shim");
+        std::fs::create_dir(&shim_dir).unwrap();
+        let no_vars = |_: &str| None;
+        let committed = [(
+            ".gemini/settings.json".to_owned(),
+            Some(surrogate.to_owned()),
+        )];
+        let cx = ShimContext {
+            worktree: &worktree,
+            committed: &committed,
+            ..context(&shim_dir, &no_vars)
+        };
+        assert!(matches!(
+            prepare(manifest("gemini"), &cx),
+            Err(ShimError::Read { .. })
+        ));
+    }
+
+    #[test]
+    fn claudes_locked_paths_are_inside_its_writable_dir() {
+        let locked = home_locked(manifest("claude-code"));
+        assert!(
+            locked
+                .iter()
+                .any(|l| l.path.ends_with("shell-snapshots") && l.dir)
+        );
+        for lock in &locked {
+            assert!(lock.path.starts_with(".claude"), "{lock:?}");
+        }
+        assert!(forge_sandbox::HOME_WRITABLE.contains(&".claude"));
+        assert!(home_locked(manifest("codex")).is_empty());
     }
 
     #[test]
