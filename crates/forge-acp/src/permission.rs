@@ -31,9 +31,14 @@ pub enum Target {
 }
 
 /// The commands and file changes an agent reported in its tool calls, by tool call ID, as
-/// first reported.
+/// first reported, the calls it reported as reads that name no command, and its MCP tool calls.
 #[derive(Debug, Default)]
-pub struct ToolCommands(VecDeque<(String, String)>, VecDeque<(String, Vec<Change>)>);
+pub struct ToolCommands(
+    VecDeque<(String, String)>,
+    VecDeque<(String, Vec<Change>)>,
+    VecDeque<String>,
+    VecDeque<(String, Action)>,
+);
 
 /// A file a tool call reported it changes: the path its diff names (for a move, where the file
 /// goes) and whether it is deleted.
@@ -99,6 +104,63 @@ impl ToolCommands {
         self.0.push_back((id.to_owned(), command.to_owned()));
     }
 
+    /// Remember that `id` was reported as a read or search with no command: Codex reports a
+    /// command it parses as one that way, and only its approval names the command.
+    pub fn record_read(&mut self, id: &str) {
+        if self.2.iter().any(|known| known == id) {
+            return;
+        }
+        if self.2.len() == REMEMBERED_COMMANDS {
+            self.2.pop_front();
+        }
+        self.2.push_back(id.to_owned());
+    }
+
+    /// Remember `call` as the MCP tool call it reports, if it is one: Codex reports them with
+    /// `is_mcp_tool_call` in `_meta` and the server, tool, and arguments as `rawInput`.
+    pub fn record_mcp(
+        &mut self,
+        id: &str,
+        meta: Option<&serde_json::Map<String, serde_json::Value>>,
+        raw_input: Option<&serde_json::Value>,
+    ) {
+        let marked = meta
+            .and_then(|m| m.get("is_mcp_tool_call")?.as_bool())
+            .unwrap_or(false);
+        let (Some(raw), true) = (raw_input, marked) else {
+            return;
+        };
+        let (Some(server), Some(tool)) = (
+            raw.get("server").and_then(|v| v.as_str()),
+            raw.get("tool").and_then(|v| v.as_str()),
+        ) else {
+            return;
+        };
+        if self.3.iter().any(|(known, _)| known == id) {
+            return;
+        }
+        if self.3.len() == REMEMBERED_COMMANDS {
+            self.3.pop_front();
+        }
+        let action = Action::Mcp {
+            server: server.to_owned(),
+            tool: tool.to_owned(),
+            args: raw.get("arguments").cloned().unwrap_or_default(),
+        };
+        self.3.push_back((id.to_owned(), action));
+    }
+
+    fn mcp(&self, id: &str) -> Option<&Action> {
+        self.3
+            .iter()
+            .find(|(known, _)| known == id)
+            .map(|(_, action)| action)
+    }
+
+    fn reported_read(&self, id: &str) -> bool {
+        self.2.iter().any(|known| known == id)
+    }
+
     fn get(&self, id: &str) -> Option<&str> {
         self.0
             .iter()
@@ -117,6 +179,18 @@ pub fn target(
 ) -> Target {
     let fields = &req.tool_call.fields;
     let raw = fields.raw_input.as_ref();
+    // An approval for an MCP tool call names only the call, which reported the tool.
+    let mcp_approval = req
+        .meta
+        .as_ref()
+        .and_then(|m| m.get("is_mcp_tool_approval")?.as_bool())
+        .unwrap_or(false);
+    if mcp_approval {
+        return match commands.mcp(&req.tool_call.tool_call_id.0) {
+            Some(action) => Target::Action(action.clone()),
+            None => Target::Unknown,
+        };
+    }
     let Some(kind) = fields.kind else {
         return Target::Unknown;
     };
@@ -126,7 +200,20 @@ pub fn target(
                 CommandSource::RawInput => raw_command(raw),
                 CommandSource::Title => fields.title.as_deref().map(shell_line),
                 CommandSource::ToolCallArgv => {
-                    commands.get(&req.tool_call.tool_call_id.0).map(quoted_argv)
+                    let id = &req.tool_call.tool_call_id.0;
+                    match commands.get(id) {
+                        Some(line) => Some(quoted_argv(line)),
+                        // The approval's command, which loses its shell prefix where Codex
+                        // recognizes the shell: a script left as one quoted word is the
+                        // shell line it was.
+                        None if commands.reported_read(id) => raw
+                            .and_then(|r| r.get("command")?.as_str())
+                            .map(|line| match quoted_argv(line).as_slice() {
+                                [script] => shell_line(script),
+                                _ => quoted_argv(line),
+                            }),
+                        None => None,
+                    }
                 }
             };
             match argv {
@@ -428,6 +515,101 @@ mod tests {
         assert_eq!(
             exec(target(&req, &ws, CommandSource::ToolCallArgv, &commands)),
             ["sh", "-c", line]
+        );
+    }
+
+    #[test]
+    fn a_reported_read_is_decided_as_the_command_its_approval_names() {
+        let (_dir, ws) = workspace();
+        let full = r#"/usr/bin/bash -c "sed -n '1,5p' Cargo.toml""#;
+        let req = request(acp::ToolKind::Execute, |f| {
+            f.raw_input(serde_json::json!({ "command": full }))
+        });
+        // A call Codex never reported stays unknown.
+        let mut commands = ToolCommands::default();
+        assert_eq!(
+            target(&req, &ws, CommandSource::ToolCallArgv, &commands),
+            Target::Unknown
+        );
+        // One it reported as a read, which carries no command: the approval's own.
+        commands.record_read("t1");
+        assert_eq!(
+            exec(target(&req, &ws, CommandSource::ToolCallArgv, &commands)),
+            ["/usr/bin/bash", "-c", "sed -n '1,5p' Cargo.toml"]
+        );
+        // With its shell prefix stripped, the script is a shell line.
+        for (line, script) in [
+            (r#""sed -n '1,5p' Cargo.toml""#, "sed -n '1,5p' Cargo.toml"),
+            ("cat a && rm b", "cat a && rm b"),
+        ] {
+            let req = request(acp::ToolKind::Execute, |f| {
+                f.raw_input(serde_json::json!({ "command": line }))
+            });
+            assert_eq!(
+                exec(target(&req, &ws, CommandSource::ToolCallArgv, &commands)),
+                ["sh", "-c", script]
+            );
+        }
+        // A command the call reported wins over the approval's.
+        commands.record("t1", Some(&serde_json::json!({ "command": "cargo test" })));
+        assert_eq!(
+            exec(target(&req, &ws, CommandSource::ToolCallArgv, &commands)),
+            ["cargo", "test"]
+        );
+    }
+
+    #[test]
+    fn an_mcp_tool_approval_is_the_tool_call_it_belongs_to() {
+        let (_dir, ws) = workspace();
+        let mut meta = serde_json::Map::new();
+        meta.insert("is_mcp_tool_approval".into(), true.into());
+        let req = RequestPermissionRequest::new(
+            acp::SessionId::new("s"),
+            acp::ToolCallUpdate::new(
+                "t1",
+                acp::ToolCallUpdateFields::new().kind(acp::ToolKind::Execute),
+            ),
+            vec![],
+        )
+        .meta(meta);
+        let mut commands = ToolCommands::default();
+        // Without the tool call: nothing to decide.
+        assert_eq!(
+            target(&req, &ws, CommandSource::ToolCallArgv, &commands),
+            Target::Unknown
+        );
+        let args = serde_json::json!({ "message": "Add notes", "paths": ["NOTES.md"] });
+        let input =
+            serde_json::json!({ "server": "forge", "tool": "git_commit", "arguments": args });
+        // A call that isn't reported as an MCP tool call doesn't count.
+        commands.record_mcp("t1", None, Some(&input));
+        assert_eq!(
+            target(&req, &ws, CommandSource::ToolCallArgv, &commands),
+            Target::Unknown
+        );
+        let mut call_meta = serde_json::Map::new();
+        call_meta.insert("is_mcp_tool_call".into(), true.into());
+        commands.record_mcp("t1", Some(&call_meta), Some(&input));
+        assert_eq!(
+            target(&req, &ws, CommandSource::ToolCallArgv, &commands),
+            Target::Action(Action::Mcp {
+                server: "forge".into(),
+                tool: "git_commit".into(),
+                args,
+            })
+        );
+        // Without the approval's mark, the same request is a command with none reported.
+        let plain = RequestPermissionRequest::new(
+            acp::SessionId::new("s"),
+            acp::ToolCallUpdate::new(
+                "t1",
+                acp::ToolCallUpdateFields::new().kind(acp::ToolKind::Execute),
+            ),
+            vec![],
+        );
+        assert_eq!(
+            target(&plain, &ws, CommandSource::ToolCallArgv, &commands),
+            Target::Unknown
         );
     }
 

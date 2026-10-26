@@ -107,6 +107,12 @@ pub struct PermissionStep {
     /// For an edit: the paths it changes, as its locations (a patch touching several files).
     #[serde(default)]
     pub paths: Vec<String>,
+    /// For a parsed read: the command the request names.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// For an MCP tool: its name on the client's `forge` server.
+    #[serde(default)]
+    pub tool: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -118,6 +124,14 @@ pub enum PermissionAction {
     Read,
     /// Fetch a URL, as a tool of kind `fetch`.
     Fetch,
+    /// Run `command`, reported as Codex reports a command it parses as a read: a tool call
+    /// of kind `read` with `path` as its location and no command, then a request of kind
+    /// `execute` whose `rawInput.command` is the command.
+    ParsedRead,
+    /// Call `tool` on the `forge` server, as Codex asks: a tool call marked
+    /// `is_mcp_tool_call` naming the server and tool, then a request for it marked
+    /// `is_mcp_tool_approval` that names nothing else.
+    McpTool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -212,6 +226,8 @@ steps:
                 argv: vec!["pnpm".into(), "add".into(), "left-pad".into()],
                 path: None,
                 paths: vec![],
+                command: None,
+                tool: None,
             })
         );
         assert_eq!(script.steps[10], Step::EndTurn);

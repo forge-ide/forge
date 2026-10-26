@@ -218,7 +218,37 @@ async fn run_turn(
                 )?;
             }
             Step::RequestPermission(p) => {
+                let id = format!("perm-{}", shared.state().next);
+                let mut request_meta = None;
+                match p.action {
+                    PermissionAction::ParsedRead => {
+                        let mut call = ToolCall::new(id.clone(), "Read file").kind(ToolKind::Read);
+                        if let Some(path) = &p.path {
+                            call = call.locations(vec![ToolCallLocation::new(resolve(&cwd, path))]);
+                        }
+                        update(cx, &session, SessionUpdate::ToolCall(call))?;
+                    }
+                    PermissionAction::McpTool => {
+                        let tool = p.tool.clone().ok_or("mcp_tool needs a tool")?;
+                        let mut meta = serde_json::Map::new();
+                        meta.insert("is_mcp_tool_call".into(), true.into());
+                        let call = ToolCall::new(id.clone(), format!("mcp.forge.{tool}"))
+                            .kind(ToolKind::Execute)
+                            .raw_input(json!({ "server": "forge", "tool": tool, "arguments": {} }))
+                            .meta(meta);
+                        update(cx, &session, SessionUpdate::ToolCall(call))?;
+                        let mut meta = serde_json::Map::new();
+                        meta.insert("is_mcp_tool_approval".into(), true.into());
+                        request_meta = Some(meta);
+                    }
+                    _ => {}
+                }
                 let (kind, raw) = match p.action {
+                    PermissionAction::ParsedRead => (
+                        ToolKind::Execute,
+                        json!({ "command": p.command.clone().ok_or("parsed_read needs a command")? }),
+                    ),
+                    PermissionAction::McpTool => (ToolKind::Execute, serde_json::Value::Null),
                     PermissionAction::Exec => (ToolKind::Execute, json!({ "argv": p.argv })),
                     PermissionAction::Edit if p.path.is_some() => {
                         (ToolKind::Edit, json!({ "path": p.path }))
@@ -229,10 +259,10 @@ async fn run_turn(
                         (ToolKind::Fetch, json!({ "url": "https://example.com/" }))
                     }
                 };
-                let mut fields = ToolCallUpdateFields::new()
-                    .kind(kind)
-                    .title(format!("{:?}", p.action))
-                    .raw_input(raw);
+                let mut fields = ToolCallUpdateFields::new().kind(kind);
+                if p.action != PermissionAction::McpTool {
+                    fields = fields.title(format!("{:?}", p.action)).raw_input(raw);
+                }
                 if p.action == PermissionAction::Read
                     && let Some(path) = &p.path
                 {
@@ -250,11 +280,11 @@ async fn run_turn(
                     PermissionOption::new("allow", "Allow", PermissionOptionKind::AllowOnce),
                     PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
                 ];
-                let tool_call =
-                    ToolCallUpdate::new(format!("perm-{}", shared.state().next), fields);
+                let tool_call = ToolCallUpdate::new(id, fields);
                 let resp = request(
                     cx,
-                    RequestPermissionRequest::new(session.clone(), tool_call, options),
+                    RequestPermissionRequest::new(session.clone(), tool_call, options)
+                        .meta(request_meta),
                 )
                 .await?;
                 let answer = match resp.outcome {

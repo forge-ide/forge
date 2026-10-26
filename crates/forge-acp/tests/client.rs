@@ -5,9 +5,10 @@ use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use forge_acp::adapters::CommandSource;
 use forge_acp::{
     AcpClient, AcpError, AgentCommand, AllowAll, DenyAll, EventSink, Gate, GateKind, GateRequest,
-    GateVerdict, Root, SessionSetup, Workspace,
+    GateVerdict, McpEndpoint, Root, SessionSetup, Workspace,
 };
 use forge_api::TurnId;
 use forge_api::events::{EventKind, EventPayload};
@@ -72,6 +73,16 @@ impl Fixture {
     }
 
     async fn start_with(&self, script: &str, gate: Arc<dyn Gate>) -> AcpClient {
+        self.start_setup(script, gate, SessionSetup::default())
+            .await
+    }
+
+    async fn start_setup(
+        &self,
+        script: &str,
+        gate: Arc<dyn Gate>,
+        setup: SessionSetup,
+    ) -> AcpClient {
         let path = self.dir.path().join("script.yaml");
         std::fs::write(&path, script).unwrap();
         let workspace = Workspace::new(vec![Root {
@@ -88,7 +99,7 @@ impl Fixture {
         };
         AcpClient::start(
             command,
-            SessionSetup::default(),
+            setup,
             workspace,
             unsandboxed(),
             self.sink.clone(),
@@ -304,6 +315,62 @@ steps:
     let events = fx.sink.0.lock().unwrap().clone();
     assert!(matches!(&events[3], EventPayload::ToolResult(b)
         if b.status == "failed" && b.output.as_deref() == Some("refused by policy: no")));
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn codex_reads_and_forge_tool_approvals_name_what_they_ask() {
+    let fx = Fixture::new();
+    let gate = Arc::new(Recording {
+        verdict: GateVerdict::Allow,
+        asked: Mutex::default(),
+    });
+    let setup = SessionSetup {
+        command_source: CommandSource::ToolCallArgv,
+        mcp_servers: vec![McpEndpoint {
+            name: "forge".into(),
+            url: "http://127.0.0.1:9/mcp".into(),
+        }],
+        ..SessionSetup::default()
+    };
+    let client = fx
+        .start_setup(
+            r#"
+steps:
+  - request_permission: { action: parsed_read, path: README.md, command: "/usr/bin/bash -c \"sed -n '1,5p' README.md\"" }
+  - expect_permission: allow
+  - request_permission: { action: mcp_tool, tool: git_commit }
+  - expect_permission: allow
+  - end_turn
+"#,
+            gate.clone(),
+            setup,
+        )
+        .await;
+    assert_eq!(
+        client.prompt(TurnId::new(), "x".into()).await.unwrap(),
+        "end_turn"
+    );
+    // The read is decided as the command its approval names; Forge's own tool isn't asked
+    // about here, since it asks Forge itself when it runs.
+    let asked: Vec<_> = gate
+        .asked
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| r.action.clone())
+        .collect();
+    assert_eq!(
+        asked,
+        [Some(Action::Exec {
+            argv: vec![
+                "/usr/bin/bash".into(),
+                "-c".into(),
+                "sed -n '1,5p' README.md".into()
+            ],
+            cwd: ".".into()
+        })]
+    );
     client.shutdown().await;
 }
 

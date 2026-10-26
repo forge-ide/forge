@@ -262,6 +262,7 @@ impl AcpClient {
             terminals: terminals.clone(),
             turn: turn.clone(),
             command_source: setup.command_source,
+            own_servers: setup.mcp_servers.iter().map(|s| s.name.clone()).collect(),
             commands: Mutex::new(ToolCommands::default()),
         });
 
@@ -494,6 +495,8 @@ struct Handlers {
     terminals: Arc<Terminals>,
     turn: Arc<Mutex<Option<TurnId>>>,
     command_source: CommandSource,
+    /// The MCP servers Forge offers the agent, whose tools ask Forge themselves.
+    own_servers: Vec<String>,
     /// Commands the agent reported in its tool calls.
     commands: Mutex<ToolCommands>,
 }
@@ -853,6 +856,11 @@ impl Handlers {
             permission::target(&req, &self.workspace, self.command_source, &commands)
         };
         let asks: Vec<(Option<Action>, Unmapped)> = match target {
+            // A tool of Forge's own server asks Forge itself when it runs, as it does for
+            // agents that call it without asking.
+            Target::Action(Action::Mcp { server, .. }) if self.own_servers.contains(&server) => {
+                vec![]
+            }
             Target::Action(action) => vec![(Some(action), Unmapped::Nothing)],
             Target::Edits(edits) => edits
                 .into_iter()
@@ -939,6 +947,20 @@ impl Handlers {
                 let mut commands = lock(&self.commands);
                 commands.record(&call.tool_call_id.0, call.raw_input.as_ref());
                 commands.record_changes(&call.tool_call_id.0, &call.content);
+                commands.record_mcp(
+                    &call.tool_call_id.0,
+                    call.meta.as_ref(),
+                    call.raw_input.as_ref(),
+                );
+                let names_command = call
+                    .raw_input
+                    .as_ref()
+                    .is_some_and(|r| r.get("command").is_some());
+                if matches!(call.kind, acp::ToolKind::Read | acp::ToolKind::Search)
+                    && !names_command
+                {
+                    commands.record_read(&call.tool_call_id.0);
+                }
                 return;
             }
             SessionUpdate::ToolCallUpdate(update) => {
