@@ -36,6 +36,8 @@ use crate::workspace::{PathError, Workspace};
 
 /// Lines of the agent's stderr kept for crash reports.
 const STDERR_TAIL: usize = 20;
+/// Tool calls remembered while they run without asking Forge.
+const REMEMBERED_CALLS: usize = 256;
 /// Longest tool output kept in a `tool.result` event.
 const RESULT_OUTPUT_LIMIT: usize = 4096;
 /// The error code for a write or terminal the gate refused.
@@ -464,6 +466,8 @@ impl AcpClient {
             mcp_meta: setup.mcp_meta,
             own_servers: setup.mcp_servers.iter().map(|s| s.name.clone()).collect(),
             commands: Mutex::new(ToolCommands::default()),
+            unasked: Mutex::new(VecDeque::new()),
+            asked: Mutex::new(VecDeque::new()),
         });
 
         let (exit_tx, exit_rx) = watch::channel(None);
@@ -680,6 +684,11 @@ struct Handlers {
     own_servers: Vec<String>,
     /// Commands the agent reported in its tool calls.
     commands: Mutex<ToolCommands>,
+    /// Tool calls the agent reported that haven't asked Forge, as reported so far: one that
+    /// finishes without asking is recorded then.
+    unasked: Mutex<VecDeque<acp::ToolCall>>,
+    /// Tool calls that asked Forge, which are recorded by their requests.
+    asked: Mutex<VecDeque<acp::ToolCallId>>,
 }
 
 type AcpResult<T> = Result<T, agent_client_protocol::Error>;
@@ -788,6 +797,14 @@ async fn connect(
         )
         .connect_with(transport, main)
         .await
+}
+
+/// Whether a tool call with `status` has finished.
+fn finished(status: Option<acp::ToolCallStatus>) -> bool {
+    matches!(
+        status,
+        Some(acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed)
+    )
 }
 
 fn tool_call_id() -> String {
@@ -1032,6 +1049,17 @@ impl Handlers {
         req: RequestPermissionRequest,
     ) -> AcpResult<RequestPermissionResponse> {
         let fields = &req.tool_call.fields;
+        let id = &req.tool_call.tool_call_id;
+        lock(&self.unasked).retain(|c| c.tool_call_id != *id);
+        {
+            let mut asked = lock(&self.asked);
+            if !asked.contains(id) {
+                if asked.len() == REMEMBERED_CALLS {
+                    asked.pop_front();
+                }
+                asked.push_back(id.clone());
+            }
+        }
         let target = {
             let commands = lock(&self.commands);
             permission::target(
@@ -1128,33 +1156,66 @@ impl Handlers {
         agent_client_protocol::Error::new(REFUSED, reason)
     }
 
+    /// Remember what a tool call reports, for its permission request.
+    fn record_call(&self, call: &acp::ToolCall) {
+        let mut commands = lock(&self.commands);
+        commands.record(&call.tool_call_id.0, call.raw_input.as_ref());
+        commands.record_changes(&call.tool_call_id.0, &call.content);
+        commands.record_mcp(
+            &call.tool_call_id.0,
+            call.meta.as_ref(),
+            call.raw_input.as_ref(),
+        );
+        let names_command = call
+            .raw_input
+            .as_ref()
+            .is_some_and(|r| r.get("command").is_some());
+        if matches!(call.kind, acp::ToolKind::Read | acp::ToolKind::Search) && !names_command {
+            commands.record_read(&call.tool_call_id.0);
+        }
+    }
+
     async fn update(&self, notification: SessionNotification) {
         let payload = match notification.update {
             SessionUpdate::ToolCall(call) => {
-                let mut commands = lock(&self.commands);
-                commands.record(&call.tool_call_id.0, call.raw_input.as_ref());
-                commands.record_changes(&call.tool_call_id.0, &call.content);
-                commands.record_mcp(
-                    &call.tool_call_id.0,
-                    call.meta.as_ref(),
-                    call.raw_input.as_ref(),
-                );
-                let names_command = call
-                    .raw_input
-                    .as_ref()
-                    .is_some_and(|r| r.get("command").is_some());
-                if matches!(call.kind, acp::ToolKind::Read | acp::ToolKind::Search)
-                    && !names_command
-                {
-                    commands.record_read(&call.tool_call_id.0);
+                self.record_call(&call);
+                if lock(&self.asked).contains(&call.tool_call_id) {
+                    return;
+                }
+                if finished(Some(call.status)) {
+                    self.ran_unasked(call).await;
+                } else {
+                    let mut unasked = lock(&self.unasked);
+                    if unasked.len() == REMEMBERED_CALLS {
+                        unasked.pop_front();
+                    }
+                    unasked.push_back(call);
                 }
                 return;
             }
             SessionUpdate::ToolCallUpdate(update) => {
-                let mut commands = lock(&self.commands);
-                commands.record(&update.tool_call_id.0, update.fields.raw_input.as_ref());
-                if let Some(content) = &update.fields.content {
-                    commands.record_changes(&update.tool_call_id.0, content);
+                {
+                    let mut commands = lock(&self.commands);
+                    commands.record(&update.tool_call_id.0, update.fields.raw_input.as_ref());
+                    if let Some(content) = &update.fields.content {
+                        commands.record_changes(&update.tool_call_id.0, content);
+                    }
+                }
+                let done = {
+                    let mut unasked = lock(&self.unasked);
+                    let Some(i) = unasked
+                        .iter()
+                        .position(|c| c.tool_call_id == update.tool_call_id)
+                    else {
+                        return;
+                    };
+                    unasked[i].update(update.fields.clone());
+                    finished(update.fields.status)
+                        .then(|| unasked.remove(i))
+                        .flatten()
+                };
+                if let Some(call) = done {
+                    self.ran_unasked(call).await;
                 }
                 return;
             }
@@ -1191,6 +1252,59 @@ impl Handlers {
             _ => return,
         };
         self.sink.emit(payload).await;
+    }
+
+    /// Record `call`, which finished without asking Forge (an agent runs commands it deems
+    /// read-only by itself), when it names an action: as a tool call and its result, with no
+    /// policy decision.
+    async fn ran_unasked(&self, call: acp::ToolCall) {
+        let fields = acp::ToolCallUpdateFields::new()
+            .kind(call.kind)
+            .title(call.title.clone())
+            .raw_input(call.raw_input.clone())
+            .locations(call.locations.clone());
+        let request = RequestPermissionRequest::new(
+            "unasked",
+            acp::ToolCallUpdate::new(call.tool_call_id.clone(), fields).meta(call.meta.clone()),
+            vec![],
+        );
+        let target = {
+            let commands = lock(&self.commands);
+            permission::target(
+                &request,
+                &self.workspace,
+                self.command_source,
+                self.mcp_meta,
+                &commands,
+            )
+        };
+        let action = match target {
+            // Forge's own tools record themselves when they run.
+            Target::Action(Action::Mcp { server, .. }) if self.own_servers.contains(&server) => {
+                return;
+            }
+            Target::Action(action) => action,
+            _ => return,
+        };
+        let id = call.tool_call_id.0.to_string();
+        self.call(&id, &action, &call.title).await;
+        let status = match call.status {
+            acp::ToolCallStatus::Completed => "completed",
+            _ => "failed",
+        };
+        let text: Vec<&str> = call
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                acp::ToolCallContent::Content(acp::Content {
+                    content: ContentBlock::Text(t),
+                    ..
+                }) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let output = (!text.is_empty()).then(|| tail(&text.join("\n")));
+        self.result(&id, status, output).await;
     }
 
     async fn result(&self, id: &str, status: &str, output: Option<String>) {

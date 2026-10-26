@@ -365,6 +365,27 @@ async fn run_turn(
                 };
                 shared.state().last_permission = Some(answer);
             }
+            Step::RanUnasked(r) => {
+                let id = format!("ran-{}", shared.state().next);
+                let call = ToolCall::new(id.clone(), format!("Run {}", r.command))
+                    .kind(ToolKind::Execute)
+                    .status(ToolCallStatus::InProgress)
+                    .raw_input(json!({ "command": r.command }));
+                update(cx, &session, SessionUpdate::ToolCall(call))?;
+                let status = if r.failed {
+                    ToolCallStatus::Failed
+                } else {
+                    ToolCallStatus::Completed
+                };
+                let fields = ToolCallUpdateFields::new()
+                    .status(status)
+                    .content(vec![ToolCallContent::from(r.output)]);
+                update(
+                    cx,
+                    &session,
+                    SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(id, fields)),
+                )?;
+            }
             Step::ExpectPermission(want) => {
                 let got = shared.state().last_permission;
                 if got != Some(want) {

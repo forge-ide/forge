@@ -62,6 +62,9 @@ pub enum Step {
     /// Call a tool on the MCP server the client named `forge` at session start. The turn
     /// fails unless the call succeeds, or with `expect: deny`, unless the tool refuses.
     McpCall(McpCallStep),
+    /// Report a shell command that runs without asking the client, as agents run commands
+    /// they deem read-only: a tool call, then an update that it finished.
+    RanUnasked(RanUnaskedStep),
     /// Fail the turn unless the last permission request got this answer.
     ExpectPermission(Expected),
     /// Stream an agent message; `{forge_mcp_url}` in it is replaced by the URL of the client's
@@ -113,6 +116,18 @@ impl From<ExecForm> for ExecStep {
             ExecForm::Full(FullExec { argv, expect }) => Self { argv, expect },
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RanUnaskedStep {
+    /// The shell line, as `rawInput.command`.
+    pub command: String,
+    #[serde(default)]
+    pub output: String,
+    /// Whether it failed.
+    #[serde(default)]
+    pub failed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]

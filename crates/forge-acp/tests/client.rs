@@ -375,6 +375,59 @@ steps:
 }
 
 #[tokio::test]
+async fn commands_an_agent_runs_without_asking_are_recorded_but_not_decided() {
+    let fx = Fixture::new();
+    let gate = Arc::new(Recording {
+        verdict: GateVerdict::Allow,
+        asked: Mutex::default(),
+    });
+    let setup = SessionSetup {
+        command_source: CommandSource::RawInput,
+        ..SessionSetup::default()
+    };
+    let client = fx
+        .start_setup(
+            r#"
+steps:
+  - ran_unasked: { command: "ls", output: "README.md" }
+  - ran_unasked: { command: "cat missing", output: "no such file", failed: true }
+  - end_turn
+"#,
+            gate.clone(),
+            setup,
+        )
+        .await;
+    assert_eq!(
+        client.prompt(TurnId::new(), "x".into()).await.unwrap(),
+        "end_turn"
+    );
+    assert!(gate.asked.lock().unwrap().is_empty());
+    let events = fx.sink.0.lock().unwrap().clone();
+    let shell = |line: &str| Action::Exec {
+        argv: vec!["sh".into(), "-c".into(), line.into()],
+        cwd: ".".into(),
+    };
+    let seen: Vec<_> = events
+        .iter()
+        .map(|e| match e {
+            EventPayload::ToolCall(c) => (Some(c.action.clone()), None, None),
+            EventPayload::ToolResult(r) => (None, Some(r.status.clone()), r.output.clone()),
+            other => panic!("unexpected {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            (Some(shell("ls")), None, None),
+            (None, Some("completed".into()), Some("README.md".into())),
+            (Some(shell("cat missing")), None, None),
+            (None, Some("failed".into()), Some("no such file".into())),
+        ]
+    );
+    client.shutdown().await;
+}
+
+#[tokio::test]
 async fn an_agent_that_needs_signing_in_offers_its_methods_and_signs_in_with_authenticate() {
     let fx = Fixture::new();
     let home = fx.dir.path().join("agent-home");
