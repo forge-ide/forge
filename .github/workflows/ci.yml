@@ -22,11 +22,30 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The packages are about 64 MB, and the runners' Ubuntu mirror can take half an hour to
+      # send them, so the downloaded .debs are cached. The key changes with the runner image,
+      # whose package versions move with it; apt fetches only what the cache lacks.
+      - name: Name the apt cache
+        if: runner.os == 'Linux'
+        id: apt
+        run: echo "key=apt-$ImageOS-$ImageVersion-${{ hashFiles('.github/workflows/ci.yml') }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v6
+        if: runner.os == 'Linux'
+        with:
+          path: ~/apt-archives
+          key: ${{ steps.apt.outputs.key }}
+          restore-keys: apt-
+
       - name: Install Linux system packages
         if: runner.os == 'Linux'
         run: |
+          mkdir -p ~/apt-archives/partial
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev libxdo-dev build-essential
+          sudo apt-get install -y -o Dir::Cache::Archives="$HOME/apt-archives" \
+            libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev libxdo-dev build-essential
+          sudo rm -f ~/apt-archives/lock
+          sudo chown -R "$(id -u):$(id -g)" ~/apt-archives
 
       # rustup reads rust-toolchain.toml and installs the pinned channel and components.
       - name: Install Rust toolchain
