@@ -328,6 +328,15 @@ fn sign_in(
     store: &dyn SecretStore,
     home: &Path,
 ) -> (bool, Option<String>) {
+    // An agent that keeps its own login is signed in when it is there.
+    if let Some((manifest, login)) = manifest.and_then(|m| Some((m, m.auth.own_login.as_ref()?)))
+        && profile.env_secrets.is_empty()
+    {
+        return match home.join(login).is_file() {
+            true => (true, None),
+            false => (false, Some(format!("forge agent sign-in {}", manifest.id))),
+        };
+    }
     match credentials(profile, manifest, store, home) {
         Ok(_) => (true, None),
         Err(fixes) => (false, Some(fixes.join("; "))),

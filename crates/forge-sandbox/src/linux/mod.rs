@@ -293,6 +293,10 @@ fn bwrap_args(view: &View, helper: &Path) -> Vec<String> {
         bind(&mut args, "--bind", &w.git_admin, &w.git_admin);
         bind(&mut args, "--bind", &w.path, &w.path);
     }
+    // After the home, so one inside it shows through at its real path.
+    for path in &view.extra_rw {
+        bind(&mut args, "--bind", path, path);
+    }
     bind(&mut args, "--ro-bind", helper, helper);
     args
 }
@@ -420,6 +424,7 @@ mod tests {
             toolchains: vec!["/home/u/.cargo".into()],
             toolchain_env: vec![],
             extra: vec![],
+            extra_rw: vec![],
             worktrees: vec![WorktreeMount {
                 path: "/home/u/repo/.worktrees/feat/x".into(),
                 git_common: "/home/u/repo/.git".into(),

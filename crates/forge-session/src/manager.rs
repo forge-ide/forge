@@ -660,6 +660,7 @@ impl SessionManager {
                 scratch,
                 home: dirs.home,
                 read_only,
+                read_write: launch.home.writable.clone(),
                 proxy: Some(proxy.clone()),
             };
             let sandbox = sandbox

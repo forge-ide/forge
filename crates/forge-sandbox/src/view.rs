@@ -88,6 +88,8 @@ pub struct View {
     pub toolchain_env: Vec<(String, String)>,
     /// The spec's extra read-only paths that exist, canonical.
     pub extra: Vec<PathBuf>,
+    /// The spec's extra read-write paths that exist, canonical.
+    pub extra_rw: Vec<PathBuf>,
     /// Canonical worktrees and git dirs.
     pub worktrees: Vec<WorktreeMount>,
     /// The user's real home, canonical when it exists.
@@ -138,6 +140,11 @@ impl View {
             toolchains: tools.all().into_iter().filter_map(canonical).collect(),
             toolchain_env,
             extra: spec.read_only.iter().filter_map(|p| canonical(p)).collect(),
+            extra_rw: spec
+                .read_write
+                .iter()
+                .filter_map(|p| canonical(p))
+                .collect(),
             worktrees,
             home,
             scratch_home,
@@ -167,6 +174,7 @@ impl View {
         }
         paths.push(self.scratch_home.clone());
         paths.push(self.scratch_tmp.clone());
+        paths.extend(self.extra_rw.iter().cloned());
         paths
     }
 }
@@ -211,6 +219,7 @@ mod tests {
             scratch: root.join("scratch"),
             home: root.join("home"),
             read_only: vec![root.join("missing"), root.join("home/.cargo")],
+            read_write: vec![],
             proxy: None,
         }
     }

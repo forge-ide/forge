@@ -218,6 +218,7 @@ mod tests {
             toolchains: vec![],
             toolchain_env: vec![],
             extra: vec![],
+            extra_rw: vec![],
             worktrees: vec![WorktreeMount {
                 path: "/Users/u/repo/.worktrees/feat/x".into(),
                 git_common: "/Users/u/repo/.git".into(),

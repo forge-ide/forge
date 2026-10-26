@@ -169,6 +169,18 @@ fn sandbox_tier(
         ProfileSandbox::Container => SandboxTier::Container,
         ProfileSandbox::Unsandboxed => SandboxTier::Unsandboxed,
     });
+    // An agent whose processes talk over loopback ports runs only where the sandbox lets them:
+    // Standard on Linux, in its own network namespace. Elsewhere, only the proxy is reachable.
+    let loopback = adapters::manifest(&profile.agent).is_some_and(|m| m.launch.loopback);
+    if loopback && !(tier == SandboxTier::Standard && cfg!(target_os = "linux")) {
+        return Err(ApiError::new(
+            ErrorKind::SandboxUnavailable,
+            format!(
+                "agent profile {id:?} runs only in the Standard tier on Linux: its processes \
+                 talk over loopback ports, which other tiers don't allow"
+            ),
+        ));
+    }
     if tier == SandboxTier::Unsandboxed && !profile.allow_unsandboxed {
         return Err(ApiError::new(
             ErrorKind::SandboxUnavailable,
@@ -312,6 +324,8 @@ impl AgentResolver for ProfileResolver {
             &home.read_only(),
             &protected,
         )?);
+        // Its own login dir, read-write: never one holding the home or Forge's dirs.
+        checked_read_only("the agent's own login", &home.writable, &protected)?;
         Ok(AgentLaunch {
             command: AgentCommand { argv, env: vec![] },
             agent: manifest.map(|m| m.id.clone()),
@@ -368,9 +382,13 @@ fn policy_rules(paths: &Paths, root: &Path) -> Result<Rules, ApiError> {
     Rules::compile(&layers).map_err(|e| ApiError::validation(e.to_string()))
 }
 
-/// The profile's `[network] allow`, as the egress proxy's allowlist.
+/// The profile's `[network] allow`, and its registry agent's own hosts, as the egress proxy's
+/// allowlist.
 fn allowlist(profile: &AgentProfileConfig, id: &str) -> Result<Allowlist, ApiError> {
-    Allowlist::new(&profile.network.allow)
+    let own = adapters::manifest(&profile.agent)
+        .map(|m| m.network.allow.as_slice())
+        .unwrap_or_default();
+    Allowlist::new(profile.network.allow.iter().chain(own))
         .map_err(|e| ApiError::validation(format!("agent profile {id:?}: network.allow: {e}")))
 }
 

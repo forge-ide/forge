@@ -115,6 +115,9 @@ pub struct Spec {
     /// Extra paths visible read-only: the agent program and the user config's
     /// `[sandbox] read_only` entries.
     pub read_only: Vec<PathBuf>,
+    /// Extra paths visible read-write, at their real paths: an agent's own login dir. The
+    /// caller checks they hold nothing else of the user's.
+    pub read_write: Vec<PathBuf>,
     /// The session's egress proxy, the only way out to the network. Without one a sandboxed
     /// session has no network at all. The sandbox keeps it running while it lives.
     pub proxy: Option<Arc<proxy::Proxy>>,

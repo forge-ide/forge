@@ -2,12 +2,13 @@
 
 Run before every release, and to close M5. Real agents only; automated tests use `forge-fake-agent`.
 
-For each agent (Claude Code, Codex, Gemini CLI) × each sample repo in `tests/fixtures/repos/` (Rust, TypeScript, Python, Go), on both Linux and macOS:
+For each agent (Claude Code, Codex, Gemini CLI, and on Linux Antigravity) × each sample repo in `tests/fixtures/repos/` (Rust, TypeScript, Python, Go), on both Linux and macOS:
 
 ## Before you start
 
 - [ ] Each agent's adapter is installed at the version `forge agent list` names as `supportedVersion`; for one that isn't, `installCommand` is the command to run (`npm install -g ...`).
 - [ ] Each agent is signed in: `forge agent list` shows it `authenticated`, or under `signIn` names the command that stores its API key (`secret-tool store --label='Forge NAME' service forge account NAME` on Linux, `security add-generic-password -s forge -a NAME -w` on macOS) or, for Claude Code and Codex, the command that signs in with a subscription (`claude`, `codex login`). Run the checklist once with keys and once with subscription sign-ins; Google sign-ins aren't carried, so Gemini needs a key.
+- [ ] Antigravity: install it with the command `forge agent list` gives, then `forge agent sign-in antigravity --method oauth-personal`, which opens your browser; afterwards `forge agent list` shows it `authenticated`, and `~/.gemini/antigravity-acp/acp_token.json` exists. Run it in the Standard tier; Light refuses it.
 - [ ] Toolchains are visible in the sandbox. It shows the system directories, `~/.cargo`, `~/.rustup`, and `~/.npm`; one installed elsewhere under the home dir (Go from a version manager, a Python virtualenv) needs its directory in `[sandbox] read_only` in `~/.config/forge/config.toml`.
 - [ ] A sample repo outside Forge's own checkout: `just smoke-repo rust /tmp/smoke-rust` (or `typescript`, `python`, `go`), then `forge project open /tmp/smoke-rust`. The repo's README names its test command.
 

@@ -15,6 +15,7 @@ const MANIFESTS: &[(&str, &str)] = &[
     ("claude-code", include_str!("../adapters/claude-code.toml")),
     ("codex", include_str!("../adapters/codex.toml")),
     ("gemini", include_str!("../adapters/gemini.toml")),
+    ("antigravity", include_str!("../adapters/antigravity.toml")),
 ];
 
 /// One agent's manifest.
@@ -30,20 +31,46 @@ pub struct Manifest {
     pub launch: Launch,
     pub auth: Auth,
     pub permissions: Permissions,
+    /// Hosts the agent reaches itself, through the egress proxy: its own sign-in and model
+    /// endpoints, when it keeps its own login rather than one the proxy injects.
+    #[serde(default)]
+    pub network: Network,
     pub quirks: Quirks,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Network {
+    pub allow: Vec<String>,
 }
 
 /// Where the agent comes from.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Package {
-    /// The npm package.
-    pub npm: String,
+    /// The npm package, run under `runtime`; without one, `archive`.
+    #[serde(default)]
+    pub npm: Option<String>,
     /// The exact version Forge is tested with.
     pub version: String,
     /// The program the package installs.
     pub bin: String,
-    pub runtime: Runtime,
+    #[serde(default)]
+    pub runtime: Option<Runtime>,
+    /// A download unpacked into a fixed directory and run where it is.
+    #[serde(default)]
+    pub archive: Option<Archive>,
+}
+
+/// A pinned download, unpacked into `<home>/<dir>/<version>/`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Archive {
+    /// Relative to the home dir.
+    pub dir: String,
+    /// The zip for Linux on x86-64, and its SHA-256; other platforms have none.
+    pub linux_x86_64: Option<String>,
+    pub linux_x86_64_sha256: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -61,6 +88,11 @@ pub struct Launch {
     /// Variables the agent always gets.
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
+    /// Its processes talk to each other over loopback ports they pick, which only the
+    /// Standard tier on Linux allows (its own network namespace); every other tier lets a
+    /// sandboxed process connect only to the egress proxy.
+    #[serde(default)]
+    pub loopback: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -72,6 +104,10 @@ pub struct Auth {
     /// of `secrets`.
     #[serde(default)]
     pub login: Option<crate::logins::LoginKind>,
+    /// The login the agent keeps and refreshes itself, relative to the home dir: signed in
+    /// with its own ACP method (`agent.signIn`), and shown to its sessions read-write.
+    #[serde(default)]
+    pub own_login: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -93,6 +129,8 @@ pub enum CommandSource {
     /// The `rawInput.command` of the tool call the request belongs to, as first reported: the
     /// agent's whole argv, shell-quoted.
     ToolCallArgv,
+    /// `rawInput.CommandLine`, a shell line (Antigravity's).
+    CommandLine,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -104,12 +142,36 @@ pub struct Quirks {
 impl Manifest {
     /// The command that installs the pinned version.
     pub fn install_command(&self) -> Vec<String> {
+        if let Some(archive) = &self.package.archive {
+            let pinned = (&archive.linux_x86_64, &archive.linux_x86_64_sha256);
+            return vec![match pinned {
+                (Some(url), Some(sha))
+                    if cfg!(all(target_os = "linux", target_arch = "x86_64")) =>
+                {
+                    let dir = format!("~/{}/{}", archive.dir, self.package.version);
+                    format!(
+                        "mkdir -p {dir} && curl -fL {url} -o {dir}.zip && echo '{sha}  {dir}.zip' | sha256sum -c && unzip -o {dir}.zip -d {dir} && rm {dir}.zip"
+                    )
+                }
+                _ => format!("{} isn't available for this platform", self.name),
+            }];
+        }
         vec![
             "npm".into(),
             "install".into(),
             "-g".into(),
-            format!("{}@{}", self.package.npm, self.package.version),
+            format!(
+                "{}@{}",
+                self.package.npm.as_deref().unwrap_or_default(),
+                self.package.version
+            ),
         ]
+    }
+
+    /// Where an archive package is unpacked, under `home`.
+    pub fn archive_dir(&self, home: &Path) -> Option<PathBuf> {
+        let archive = self.package.archive.as_ref()?;
+        Some(home.join(&archive.dir).join(&self.package.version))
     }
 
     /// The command that starts the agent speaking ACP, unless a profile names another.
@@ -174,17 +236,51 @@ pub fn plan(
     command: &[String],
     path: Option<&OsStr>,
 ) -> Result<LaunchPlan, LaunchError> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    plan_in(manifest, command, path, home.as_deref())
+}
+
+/// [`plan`], with archive packages unpacked under `home`.
+fn plan_in(
+    manifest: Option<&Manifest>,
+    command: &[String],
+    path: Option<&OsStr>,
+    home: Option<&Path>,
+) -> Result<LaunchPlan, LaunchError> {
     let (first, rest) = command
         .split_first()
         .ok_or_else(|| LaunchError::NotInstalled(String::new()))?;
+    // An archive's program runs from where it was unpacked, with its whole version dir (its
+    // helper binaries) shown read-only.
+    if let Some(manifest) = manifest.filter(|m| m.package.archive.is_some())
+        && *first == manifest.package.bin
+    {
+        let dir = home
+            .and_then(|h| manifest.archive_dir(h))
+            .and_then(|d| std::fs::canonicalize(d).ok())
+            .ok_or_else(|| LaunchError::NotInstalled(first.clone()))?;
+        let program = dir.join(first);
+        if !is_executable(&program) {
+            return Err(LaunchError::NotInstalled(program.display().to_string()));
+        }
+        let argv = std::iter::once(program.display().to_string())
+            .chain(rest.iter().cloned())
+            .collect();
+        return Ok(LaunchPlan {
+            argv,
+            read_only: vec![dir],
+            version: Some(manifest.package.version.clone()),
+        });
+    }
     let program = locate(first, path).ok_or_else(|| LaunchError::NotInstalled(first.clone()))?;
     let package = manifest.and_then(|m| {
-        let root = package_root(&program, &m.package.npm)?;
+        let root = package_root(&program, m.package.npm.as_deref()?)?;
         Some((m, root))
     });
     match package {
         Some((manifest, (root, version))) => match manifest.package.runtime {
-            Runtime::Node => {
+            None => Err(LaunchError::NotExecutable(program.display().to_string())),
+            Some(Runtime::Node) => {
                 let node = locate("node", path)
                     .filter(|p| is_executable(p))
                     .ok_or_else(|| LaunchError::NoRuntime(first.clone()))?;
@@ -257,15 +353,47 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    fn an_archive_runs_from_its_unpacked_version_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let m = manifest("antigravity").unwrap();
+        let plan = |home: &Path| plan_in(Some(m), &m.default_command(), None, Some(home));
+        assert!(matches!(
+            plan(home.path()),
+            Err(LaunchError::NotInstalled(_))
+        ));
+        let dir = m.archive_dir(home.path()).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join(&m.package.bin);
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+        // Not executable yet.
+        assert!(plan(home.path()).is_err());
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let got = plan(home.path()).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        assert_eq!(got.argv, [dir.join(&m.package.bin).display().to_string()]);
+        // The whole version dir, which holds its helper binary too.
+        assert_eq!(got.read_only, [dir]);
+        assert_eq!(got.version.as_deref(), Some("1.4.3"));
+        // Its install command fetches the pinned zip and checks its hash.
+        let install = m.install_command().join(" ");
+        if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            assert!(
+                install.contains("sha256sum -c") && install.contains("1.4.3"),
+                "{install}"
+            );
+        }
+    }
+
+    #[test]
     fn every_manifest_parses_with_a_pinned_version_and_known_secrets() {
         let all = manifests();
         assert_eq!(
             all.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-            ["claude-code", "codex", "gemini"]
+            ["claude-code", "codex", "gemini", "antigravity"]
         );
         let mut profiles: Vec<_> = all.iter().map(|m| m.profile.as_str()).collect();
         profiles.dedup();
-        assert_eq!(profiles, ["claude", "codex", "gemini"]);
+        assert_eq!(profiles, ["claude", "codex", "gemini", "antigravity"]);
         for m in all {
             let exact = m.package.version.split('.').count() == 3
                 && m.package
@@ -277,7 +405,25 @@ mod tests {
                 "{}: version {:?} must be exact",
                 m.id, m.package.version
             );
-            assert!(!m.auth.secrets.is_empty(), "{}", m.id);
+            // Signed in with keyring secrets, or a login it keeps itself.
+            assert!(
+                !m.auth.secrets.is_empty() || m.auth.own_login.is_some(),
+                "{}",
+                m.id
+            );
+            // From npm under a runtime, or a pinned, checksummed download.
+            match (&m.package.npm, &m.package.archive) {
+                (Some(_), None) => assert!(m.package.runtime.is_some(), "{}", m.id),
+                (None, Some(archive)) => {
+                    let sha = archive.linux_x86_64_sha256.as_deref().unwrap_or_default();
+                    assert!(
+                        sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()),
+                        "{}",
+                        m.id
+                    );
+                }
+                _ => panic!("{}: exactly one of npm and archive", m.id),
+            }
             for secret in &m.auth.secrets {
                 assert!(
                     forge_sandbox::secrets::known(secret).is_some(),

@@ -172,6 +172,28 @@ impl ToolCommands {
     }
 }
 
+/// The MCP tool call a request's `_meta` marks (`is_mcp_tool_call`, with `mcp.server` and
+/// `mcp.tool`), with its arguments from `rawInput.arguments`.
+fn mcp_call(
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+    raw: Option<&serde_json::Value>,
+) -> Option<Action> {
+    let meta = meta?;
+    if meta.get("is_mcp_tool_call")?.as_bool() != Some(true) {
+        return None;
+    }
+    let mcp = meta.get("mcp")?;
+    Some(Action::Mcp {
+        server: mcp.get("server")?.as_str()?.to_owned(),
+        tool: mcp.get("tool")?.as_str()?.to_owned(),
+        args: clipped(
+            raw.and_then(|r| r.get("arguments"))
+                .cloned()
+                .unwrap_or_default(),
+        ),
+    })
+}
+
 /// `args`, or past [`MCP_ARGS_LIMIT`] as JSON, only its size and argument names, marked as
 /// clipped. None of the text is kept: a cut through a secret would leave a prefix that redaction
 /// can't recognize.
@@ -209,6 +231,11 @@ pub fn target(
             None => Target::Unknown,
         };
     }
+    // A request that is itself marked as an MCP tool call names its server and tool in
+    // `_meta.mcp`, and the tool's arguments in `rawInput.arguments` (Antigravity's).
+    if let Some(action) = mcp_call(req.tool_call.meta.as_ref(), raw) {
+        return Target::Action(action);
+    }
     let Some(kind) = fields.kind else {
         return Target::Unknown;
     };
@@ -217,6 +244,9 @@ pub fn target(
             let argv = match source {
                 CommandSource::RawInput => raw_command(raw),
                 CommandSource::Title => fields.title.as_deref().map(shell_line),
+                CommandSource::CommandLine => raw
+                    .and_then(|r| r.get("CommandLine")?.as_str())
+                    .map(shell_line),
                 CommandSource::ToolCallArgv => {
                     let id = &req.tool_call.tool_call_id.0;
                     match commands.get(id) {
@@ -658,6 +688,79 @@ mod tests {
         commands.record_mcp("t2", Some(&meta), Some(&small));
         assert!(
             matches!(commands.mcp("t2"), Some(Action::Mcp { args, .. }) if args == &small["arguments"])
+        );
+    }
+
+    #[test]
+    fn a_command_line_is_the_shell_line_it_names() {
+        let (_dir, ws) = workspace();
+        let req = request(acp::ToolKind::Execute, |f| {
+            f.raw_input(
+                serde_json::json!({ "CommandLine": "cargo test && ls", "Cwd": "/elsewhere" }),
+            )
+        });
+        assert_eq!(
+            exec(decide(&req, &ws, CommandSource::CommandLine)),
+            ["sh", "-c", "cargo test && ls"]
+        );
+        // Other agents' requests don't carry it there.
+        assert_eq!(decide(&req, &ws, CommandSource::RawInput), Target::Unknown);
+        let none = request(acp::ToolKind::Execute, |f| f);
+        assert_eq!(
+            decide(&none, &ws, CommandSource::CommandLine),
+            Target::Unknown
+        );
+    }
+
+    #[test]
+    fn a_request_marked_as_an_mcp_call_is_that_call() {
+        let (_dir, ws) = workspace();
+        let mark = |server: Option<&str>| {
+            let mut meta = serde_json::Map::new();
+            meta.insert("is_mcp_tool_call".into(), true.into());
+            let mut mcp = serde_json::json!({ "tool": "git_commit" });
+            if let Some(server) = server {
+                mcp["server"] = server.into();
+            }
+            meta.insert("mcp".into(), mcp);
+            meta
+        };
+        let args = serde_json::json!({ "message": "m" });
+        let req = |meta| {
+            RequestPermissionRequest::new(
+                acp::SessionId::new("s"),
+                acp::ToolCallUpdate::new(
+                    "t1",
+                    acp::ToolCallUpdateFields::new()
+                        .kind(acp::ToolKind::Other)
+                        .raw_input(
+                            serde_json::json!({ "message": "m", "arguments": args.clone() }),
+                        ),
+                )
+                .meta(meta),
+                vec![],
+            )
+        };
+        assert_eq!(
+            decide(&req(mark(Some("forge"))), &ws, CommandSource::CommandLine),
+            Target::Action(Action::Mcp {
+                server: "forge".into(),
+                tool: "git_commit".into(),
+                args: args.clone(),
+            })
+        );
+        // Without its server, or without the mark, nothing Forge can check.
+        assert_eq!(
+            decide(&req(mark(None)), &ws, CommandSource::CommandLine),
+            Target::Unknown
+        );
+        assert_eq!(
+            decide(
+                &req(serde_json::Map::new()),
+                &ws,
+                CommandSource::CommandLine
+            ),
+            Target::Unknown
         );
     }
 

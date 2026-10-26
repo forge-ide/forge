@@ -81,7 +81,33 @@ async fn lists_built_in_and_project_profiles_with_install_and_sign_in_status() {
         .await
         .unwrap();
     let ids: Vec<_> = builtins.iter().map(|p| p.id.as_str()).collect();
-    assert_eq!(ids, ["claude", "codex", "gemini"]);
+    assert_eq!(ids, ["antigravity", "claude", "codex", "gemini"]);
+
+    // Antigravity keeps its own login, signed in with Forge's command.
+    let antigravity = by_id(&builtins, "antigravity");
+    assert!(
+        !antigravity.installed && !antigravity.authenticated,
+        "{antigravity:?}"
+    );
+    assert_eq!(
+        antigravity.sign_in.as_deref(),
+        Some("forge agent sign-in antigravity")
+    );
+    std::fs::create_dir_all(home.path().join(".gemini/antigravity-acp")).unwrap();
+    std::fs::write(
+        home.path().join(".gemini/antigravity-acp/acp_token.json"),
+        "{}",
+    )
+    .unwrap();
+    let listed = client
+        .call::<AgentList>(&AgentListParams::default())
+        .await
+        .unwrap();
+    let antigravity = by_id(&listed, "antigravity");
+    assert!(
+        antigravity.authenticated && antigravity.sign_in.is_none(),
+        "{antigravity:?}"
+    );
 
     let claude = by_id(&builtins, "claude");
     assert_eq!(claude.agent, "claude-code");
@@ -143,7 +169,17 @@ async fn lists_built_in_and_project_profiles_with_install_and_sign_in_status() {
         .await
         .unwrap();
     let ids: Vec<_> = listed.iter().map(|p| p.id.as_str()).collect();
-    assert_eq!(ids, ["broken", "claude", "codex", "custom", "gemini"]);
+    assert_eq!(
+        ids,
+        [
+            "antigravity",
+            "broken",
+            "claude",
+            "codex",
+            "custom",
+            "gemini"
+        ]
+    );
 
     let gemini = by_id(&listed, "gemini");
     assert!(!gemini.installed && !gemini.authenticated, "{gemini:?}");

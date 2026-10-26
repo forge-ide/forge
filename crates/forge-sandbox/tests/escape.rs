@@ -72,6 +72,9 @@ impl Fixture {
         std::fs::create_dir_all(home.join(".ssh")).unwrap();
         std::fs::write(home.join(".ssh/id_test"), "PRIVATE KEY\n").unwrap();
         std::fs::write(home.join("notes.txt"), "private\n").unwrap();
+        // An agent's own login dir, which the session shows read-write; its neighbour isn't.
+        std::fs::create_dir_all(home.join(".agent/login")).unwrap();
+        std::fs::create_dir_all(home.join(".agent/other")).unwrap();
 
         let repo = home.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
@@ -178,6 +181,7 @@ impl Fixture {
                 scratch: self.root.join("data/sessions/s1"),
                 home: self.home.clone(),
                 read_only: vec![PathBuf::from(PROBE)],
+                read_write: vec![self.home.join(".agent/login")],
                 proxy: Some(self.proxy.clone()),
             })
             .unwrap()
@@ -304,6 +308,14 @@ fn escapes(fx: &Fixture) -> Vec<(&'static str, Escape)> {
         ),
         ("write in the real home", Write(fx.home.join(".bashrc"))),
         (
+            "write beside a read-write path",
+            Write(fx.home.join(".agent/other/x")),
+        ),
+        (
+            "read beside a read-write path",
+            List(s(fx.home.join(".agent/other"))),
+        ),
+        (
             "reach a host over TCP",
             Tcp(fx.tcp.local_addr().unwrap().to_string()),
         ),
@@ -392,6 +404,9 @@ async fn escape_suite(tier: SandboxTier) {
     // Normal work: the worktree, its git metadata, and temp files.
     allowed(sb, &cwd, "read", &cwd.join("README.md")).await;
     allowed(sb, &cwd, "write", &cwd.join("new.txt")).await;
+    allowed(sb, &cwd, "write", &fx.home.join(".agent/login/token")).await;
+    // Into the real dir, not a scratch copy.
+    assert!(fx.home.join(".agent/login/token").is_file());
     allowed(sb, &cwd, "write", &fx.mine.git_admin.join("forge-probe")).await;
     allowed(sb, &cwd, "read", &fx.repo.join(".git/HEAD")).await;
     allowed(sb, &cwd, "list", Path::new("/usr")).await;

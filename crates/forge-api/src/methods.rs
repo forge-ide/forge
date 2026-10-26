@@ -490,7 +490,7 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), METHOD_NAMES.len());
-        assert_eq!(METHOD_NAMES.len(), 31);
+        assert_eq!(METHOD_NAMES.len(), 33);
     }
 
     #[test]

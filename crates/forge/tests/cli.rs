@@ -155,7 +155,7 @@ async fn lists_agents_and_approvals_and_checks_wire_names() {
     let agents: Vec<forge_api::model::AgentProfile> =
         stdout_json(&env.forge(env.home.path(), &["agent", "list"]).await);
     let ids: Vec<_> = agents.iter().map(|a| a.id.as_str()).collect();
-    assert_eq!(ids, ["claude", "codex", "gemini"]);
+    assert_eq!(ids, ["antigravity", "claude", "codex", "gemini"]);
     assert!(agents.iter().all(|a| a.supported_version.is_some()));
 
     let pending: Vec<serde_json::Value> =

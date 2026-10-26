@@ -1,0 +1,44 @@
+# Google Antigravity, through Google's own ACP server (a Python archive with the Go agent
+# harness beside it), signed in with the user's Google account.
+id = "antigravity"
+name = "Google Antigravity"
+profile = "antigravity"
+
+[package]
+version = "1.4.3"
+bin = "agy_acp_server.par"
+
+[package.archive]
+dir = ".local/share/forge/agents/antigravity-acp"
+linux-x86-64 = "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.4.3-linux-x86_64.zip"
+linux-x86-64-sha256 = "0634ce5306ba92c932945455e7a83fda78e2d99c33fa8aa6ee0566206a382714"
+
+[launch]
+args = []
+# The login in a file, on macOS too, where it would otherwise go to the keychain.
+env = { AGY_ACP_FORCE_FILE_STORAGE = "1" }
+loopback = true
+
+[auth]
+# It keeps its own Google sign-in, made with `forge agent sign-in antigravity`.
+secrets = []
+own_login = ".gemini/antigravity-acp/acp_token.json"
+
+[permissions]
+command = "command-line"
+
+[network]
+# Its token refresh and the Code Assist endpoints personal accounts are routed to.
+allow = ["oauth2.googleapis.com", "cloudcode-pa.googleapis.com", "daily-cloudcode-pa.googleapis.com"]
+
+[quirks]
+notes = [
+    "Google's official ACP server, a ~1 GB proprietary download (a Python archive and its Go harness, `localharness_external`, run from where they're unpacked). There's no npm package; the install command fetches the pinned zip and checks its SHA-256.",
+    "Keeps its own login in the user's real ~/.gemini/antigravity-acp/ (the user chose this): `forge agent sign-in antigravity` runs its `oauth-personal` method outside the sandbox, which opens a browser. A session sees that one directory read-write, at its real path, and nothing else of ~/.gemini; it refreshes the token itself on every start and writes it back. Google's terms forbid third-party apps on consumer plans from reaching Antigravity except through Google's own clients, and this is Google's client; Forge only runs it.",
+    "A session won't start without the token file: with `oauth-personal` in its settings and no token, `session/new` would try a browser sign-in inside the sandbox, wait 5 minutes, and delete the token file.",
+    "Its processes talk over loopback ports they pick (the harness's websocket, its credential-injection proxy), so it runs only in the Standard tier on Linux; Light and Seatbelt allow connections only to Forge's proxy.",
+    "Runs commands itself, after asking; the request's rawInput.CommandLine is the shell line. Writes and edits go through ACP's file methods; reads of the worktree and its own dirs are its own.",
+    "MCP tool calls ask with kind `other` and `_meta.is_mcp_tool_call`, naming the server and tool; Forge lets its own server's through.",
+    "Its `yolo` mode approves everything without asking the client, and a resumed session restores its mode; Forge sets `default` on every session and never resumes one.",
+    "Runs a repo's .agents/hooks.json only for a trusted workspace; the trust list is in the directory it writes, so a session won't start while it trusts the worktree or a folder above it.",
+]
