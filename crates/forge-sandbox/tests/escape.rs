@@ -469,6 +469,7 @@ const PINNED: &[&str] = &[
     "ZDOTDIR",
     "BASH_ENV",
     "ENV",
+    "SHLVL",
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "ALL_PROXY",
@@ -583,6 +584,31 @@ async fn startup_file_checks(sb: &dyn SessionSandbox, fx: &Fixture) {
                 "{shell} ran a startup file the agent wrote ({env:?})"
             );
         }
+    }
+
+    // bash sources ~/.bashrc for `-c` when its stdin is a socket, as if run by rshd, unless
+    // SHLVL says it's nested; Node gives its children socketpairs for stdio.
+    sh(r#"cp "$HOME/.zshenv" "$HOME/.bashrc""#, &[]).await;
+    if std::path::Path::new("/bin/bash").exists() {
+        let (theirs, _ours) = std::os::unix::net::UnixStream::pair().unwrap();
+        let status = sb
+            .command(
+                "/bin/bash",
+                &["-c".into(), "true".into()],
+                &fx.mine.path,
+                &[],
+            )
+            .stdin(Stdio::from(std::os::fd::OwnedFd::from(theirs)))
+            .status()
+            .await
+            .unwrap();
+        assert!(status.success());
+        let ran = sh(r#"test -e "$HOME/startup-ran" && echo ran; true"#, &[]).await;
+        assert_eq!(
+            ran.trim(),
+            "",
+            "bash on a socket ran the ~/.bashrc the agent wrote"
+        );
     }
 }
 

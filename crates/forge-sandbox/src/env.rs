@@ -9,11 +9,17 @@ pub const PASSTHROUGH_VARS: &[&str] =
     &["PATH", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ", "TERM"];
 
 /// Shell startup files a sandboxed process doesn't read, set in every sandbox: zsh reads
-/// `$ZDOTDIR/.zshenv` (by default in the writable home) before every `-c` script, and bash and
-/// sh read the file `$BASH_ENV` and `$ENV` name, so any of them would run code the agent wrote
-/// ahead of a command Forge decided. `/dev/null` is no directory, so nothing can be put there.
-pub const STARTUP_FILES_OFF: &[(&str, &str)] =
-    &[("ZDOTDIR", "/dev/null"), ("BASH_ENV", ""), ("ENV", "")];
+/// `$ZDOTDIR/.zshenv` (by default in the writable home) before every `-c` script, bash and sh
+/// read the file `$BASH_ENV` and `$ENV` name, and bash reads `~/.bashrc` for `-c` when its
+/// stdin is a socket (as Node gives its children) unless `SHLVL` says it is nested. Any of
+/// them would run code the agent wrote ahead of a command Forge decided. `/dev/null` is no
+/// directory, so nothing can be put there.
+pub const STARTUP_FILES_OFF: &[(&str, &str)] = &[
+    ("ZDOTDIR", "/dev/null"),
+    ("BASH_ENV", ""),
+    ("ENV", ""),
+    ("SHLVL", "1"),
+];
 
 /// [`STARTUP_FILES_OFF`], as variables.
 pub(crate) fn startup_files_off() -> impl Iterator<Item = (String, String)> {

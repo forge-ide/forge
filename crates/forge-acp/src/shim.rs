@@ -109,6 +109,25 @@ fn toml_names_forge(raw: &[u8]) -> bool {
         })
 }
 
+/// Whether a JSON config's `mcpServers` has a server named [`MCP_SERVER`]. Gemini's may hold
+/// comments, so one that doesn't parse counts if it has the name as a key anywhere.
+fn json_names_forge(raw: &[u8]) -> bool {
+    match serde_json::from_slice::<serde_json::Value>(raw) {
+        Ok(v) => v
+            .get("mcpServers")
+            .is_some_and(|s| s.get(MCP_SERVER).is_some()),
+        Err(_) => {
+            let text = String::from_utf8_lossy(raw);
+            let key = format!("\"{MCP_SERVER}\"");
+            text.match_indices(&key)
+                .any(|(i, _)| text[i + key.len()..].trim_start().starts_with(':'))
+        }
+    }
+}
+
+/// The most extensions whose manifests are checked for a server named after Forge's.
+const MAX_EXTENSIONS: usize = 256;
+
 /// The repo files each agent reads its project config from, which a shim takes from the
 /// branch's last commit (Claude) or checks against it (Codex and Gemini, whose CLIs read them
 /// from the worktree at startup, and can't be pointed elsewhere).
@@ -190,14 +209,16 @@ pub fn prepare(manifest: Option<&Manifest>, cx: &ShimContext<'_>) -> Result<Shim
             }
         }
     }
-    if manifest.id == "codex"
-        && let Some((path, _)) = cx.committed.iter().find(|(path, raw)| {
-            path.ends_with("config.toml")
-                && raw
-                    .as_deref()
-                    .is_some_and(|r| toml_names_forge(r.as_bytes()))
-        })
-    {
+    if let Some((path, _)) = cx.committed.iter().find(|(path, raw)| {
+        let Some(raw) = raw.as_deref() else {
+            return false;
+        };
+        match (manifest.id.as_str(), path.as_str()) {
+            ("codex", ".codex/config.toml") => toml_names_forge(raw.as_bytes()),
+            ("gemini", ".gemini/settings.json") => json_names_forge(raw.as_bytes()),
+            _ => false,
+        }
+    }) {
         return Err(ShimError::ServerNameTaken {
             agent: manifest.name.clone(),
             path: path.clone(),
@@ -549,7 +570,30 @@ pub fn home_config(
         }
         "gemini" => {
             if let Some(raw) = read_settings(&home.join(".gemini/settings.json")).map_err(failed)? {
+                if json_names_forge(&raw) {
+                    return Err(ShimError::ServerNameTaken {
+                        agent: manifest.name.clone(),
+                        path: "~/.gemini/settings.json".into(),
+                    });
+                }
                 out.files.push((".gemini/settings.json".into(), raw));
+            }
+            // Extensions, linked in read-only, can add MCP servers too.
+            if let Ok(dirs) = std::fs::read_dir(home.join(".gemini/extensions")) {
+                for dir in dirs.flatten().take(MAX_EXTENSIONS) {
+                    let manifest_path = dir.path().join("gemini-extension.json");
+                    if let Some(raw) = read_settings(&manifest_path).map_err(failed)?
+                        && json_names_forge(&raw)
+                    {
+                        return Err(ShimError::ServerNameTaken {
+                            agent: manifest.name.clone(),
+                            path: format!(
+                                "~/.gemini/extensions/{}/gemini-extension.json",
+                                dir.file_name().to_string_lossy()
+                            ),
+                        });
+                    }
+                }
             }
         }
         _ => {}
@@ -924,6 +968,7 @@ mod tests {
         assert_eq!(set["ZDOTDIR"], "/dev/null");
         assert_eq!(set["BASH_ENV"], "");
         assert_eq!(set["ENV"], "");
+        assert_eq!(set["SHLVL"], "1");
         assert_eq!(config["web_search"], "disabled");
         assert_eq!(config["approvals_reviewer"], "user");
         // The user's own notify program, if any, runs as it would outside Forge.
@@ -1241,7 +1286,35 @@ mod tests {
             taken("claude-code", ".claude.json", claude).as_deref(),
             Some("~/.claude.json")
         );
+        let gemini = r#"{"mcpServers":{"forge":{"command":"impostor"}}}"#;
+        assert_eq!(
+            taken("gemini", ".gemini/settings.json", gemini).as_deref(),
+            Some("~/.gemini/settings.json")
+        );
+        // Gemini's settings may hold comments, which JSON doesn't parse.
+        let commented = "{\n  // mine\n  \"mcpServers\": { \"forge\" : {} }\n}";
+        assert_eq!(
+            taken("gemini", ".gemini/settings.json", commented).as_deref(),
+            Some("~/.gemini/settings.json")
+        );
+        assert_eq!(
+            taken(
+                "gemini",
+                ".gemini/extensions/x/gemini-extension.json",
+                gemini
+            )
+            .as_deref(),
+            Some("~/.gemini/extensions/x/gemini-extension.json")
+        );
         // Other servers are fine.
+        assert_eq!(
+            taken(
+                "gemini",
+                ".gemini/settings.json",
+                r#"{"mcpServers":{"docs":{}}}"#
+            ),
+            None
+        );
         let others = "[mcp_servers.docs]\ncommand = \"docs\"\n";
         assert_eq!(taken("codex", ".codex/config.toml", others), None);
         assert_eq!(
@@ -1269,6 +1342,18 @@ mod tests {
         assert!(matches!(
             prepare(manifest("codex"), &cx),
             Err(ShimError::ServerNameTaken { path, .. }) if path == ".codex/config.toml"
+        ));
+        std::fs::create_dir_all(worktree.join(".gemini")).unwrap();
+        std::fs::write(worktree.join(".gemini/settings.json"), gemini).unwrap();
+        let committed = [(".gemini/settings.json".to_owned(), Some(gemini.to_owned()))];
+        let cx = ShimContext {
+            worktree: &worktree,
+            committed: &committed,
+            ..context(&shim_dir, &no_vars)
+        };
+        assert!(matches!(
+            prepare(manifest("gemini"), &cx),
+            Err(ShimError::ServerNameTaken { path, .. }) if path == ".gemini/settings.json"
         ));
     }
 

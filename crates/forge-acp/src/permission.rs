@@ -172,17 +172,19 @@ impl ToolCommands {
     }
 }
 
-/// `args`, or past [`MCP_ARGS_LIMIT`] as JSON, its start, marked as clipped with its full size.
+/// `args`, or past [`MCP_ARGS_LIMIT`] as JSON, only its size and argument names, marked as
+/// clipped. None of the text is kept: a cut through a secret would leave a prefix that redaction
+/// can't recognize.
 fn clipped(args: serde_json::Value) -> serde_json::Value {
-    let text = args.to_string();
-    if text.len() <= MCP_ARGS_LIMIT {
+    let bytes = args.to_string().len();
+    if bytes <= MCP_ARGS_LIMIT {
         return args;
     }
-    let mut end = MCP_ARGS_LIMIT;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    serde_json::json!({ "clipped": true, "bytes": text.len(), "head": &text[..end] })
+    let keys: Vec<&String> = args
+        .as_object()
+        .map(|o| o.keys().collect())
+        .unwrap_or_default();
+    serde_json::json!({ "clipped": true, "bytes": bytes, "keys": keys })
 }
 
 /// The [`Target`] of a permission request, from an agent whose execute requests carry their
@@ -646,7 +648,10 @@ mod tests {
             args["bytes"],
             serde_json::to_string(&input["arguments"]).unwrap().len()
         );
-        assert!(args["head"].as_str().unwrap().len() <= MCP_ARGS_LIMIT);
+        // Only the argument names: a cut through a secret would leave a prefix the redaction
+        // scanner can't match.
+        assert_eq!(args["keys"], serde_json::json!(["body"]));
+        assert!(!args.to_string().contains("xxx"));
         // Small ones are kept as given.
         let small =
             serde_json::json!({ "server": "docs", "tool": "get", "arguments": { "id": 1 } });
