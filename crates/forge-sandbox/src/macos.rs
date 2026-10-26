@@ -84,6 +84,7 @@ impl Sandbox for Seatbelt {
                 let mut env = crate::env::from_daemon();
                 env.push(("HOME".into(), view.scratch_home.display().to_string()));
                 env.push(("TMPDIR".into(), view.scratch_tmp.display().to_string()));
+                env.extend(crate::env::startup_files_off());
                 env.extend(view.toolchain_env.iter().cloned());
                 let port = spec.proxy.as_ref().map(|p| p.port());
                 if let Some(proxy) = &spec.proxy {

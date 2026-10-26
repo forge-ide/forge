@@ -35,7 +35,7 @@ mod macos;
 #[doc(hidden)]
 pub mod helper;
 
-pub use env::{PASSTHROUGH_VARS, is_passed_through, is_valid_name};
+pub use env::{PASSTHROUGH_VARS, STARTUP_FILES_OFF, is_passed_through, is_valid_name};
 pub use unsandboxed::Unsandboxed;
 pub use view::{SYSTEM_READ_ONLY, View, shows_read_only, toolchains};
 

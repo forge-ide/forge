@@ -398,6 +398,7 @@ async fn escape_suite(tier: SandboxTier) {
 
     proxy_checks(sb, &fx).await;
     env_checks(sb, &fx).await;
+    startup_file_checks(sb, &fx).await;
     #[cfg(target_os = "linux")]
     assert!(
         !preload_escapes(sb, &fx).await,
@@ -465,6 +466,9 @@ const PINNED: &[&str] = &[
     "PATH",
     "HOME",
     "TMPDIR",
+    "ZDOTDIR",
+    "BASH_ENV",
+    "ENV",
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "ALL_PROXY",
@@ -539,6 +543,47 @@ async fn env_checks(sb: &dyn SessionSandbox, fx: &Fixture) {
         baseline["PATH"],
         "a variable named PATH=... replaced PATH for the shell"
     );
+}
+
+/// Shell startup files the agent can write run nothing: zsh reads `$ZDOTDIR/.zshenv` (by
+/// default in the writable home) before every `-c` script, and bash reads `$BASH_ENV`, so
+/// either would run agent code ahead of a command Forge decided as something else.
+async fn startup_file_checks(sb: &dyn SessionSandbox, fx: &Fixture) {
+    let sh = async |script: &str, env: &[(String, String)]| {
+        let output = sb
+            .command("/bin/sh", &["-c".into(), script.into()], &fx.mine.path, env)
+            .stdin(Stdio::null())
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success(), "{script}: {output:?}");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let plant = r#"printf 'touch "$HOME/startup-ran"
+' > "$HOME/.zshenv" && cp "$HOME/.zshenv" "$HOME/bash-env" && rm -f "$HOME/startup-ran""#;
+    sh(plant, &[]).await;
+    let home = sh(r#"printf %s "$HOME""#, &[]).await;
+    // A terminal's own env can't point either shell back at them.
+    let pointed = vec![
+        ("BASH_ENV".to_owned(), format!("{home}/bash-env")),
+        ("ZDOTDIR".to_owned(), home.clone()),
+    ];
+    for env in [vec![], pointed] {
+        for shell in ["zsh", "bash"] {
+            let ran = sh(
+                &format!(
+                    r#"command -v {shell} >/dev/null || exit 0; {shell} -c true; test -e "$HOME/startup-ran" && echo ran; true"#
+                ),
+                &env,
+            )
+            .await;
+            assert_eq!(
+                ran.trim(),
+                "",
+                "{shell} ran a startup file the agent wrote ({env:?})"
+            );
+        }
+    }
 }
 
 /// Where the preloaded library's constructor tries to write: the hidden home.

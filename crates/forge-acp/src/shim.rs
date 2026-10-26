@@ -87,6 +87,26 @@ pub enum ShimError {
          then start {agent} again"
     )]
     RepoConfigChanged { agent: String, path: String },
+    /// A config file names an MCP server after Forge's, whose tools Forge lets through
+    /// without asking.
+    #[error(
+        "{path} defines an MCP server named `{MCP_SERVER}`, the name of Forge's own; rename it \
+         there, then start {agent} again"
+    )]
+    ServerNameTaken { agent: String, path: String },
+}
+
+/// Whether a TOML config defines `[mcp_servers.<MCP_SERVER>]`. One that doesn't parse is
+/// checked by its agent, which refuses it.
+fn toml_names_forge(raw: &[u8]) -> bool {
+    std::str::from_utf8(raw)
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .is_some_and(|t| {
+            t.get("mcp_servers")
+                .and_then(|s| s.as_table())
+                .is_some_and(|s| s.contains_key(MCP_SERVER))
+        })
 }
 
 /// The repo files each agent reads its project config from, which a shim takes from the
@@ -169,6 +189,19 @@ pub fn prepare(manifest: Option<&Manifest>, cx: &ShimContext<'_>) -> Result<Shim
                 });
             }
         }
+    }
+    if manifest.id == "codex"
+        && let Some((path, _)) = cx.committed.iter().find(|(path, raw)| {
+            path.ends_with("config.toml")
+                && raw
+                    .as_deref()
+                    .is_some_and(|r| toml_names_forge(r.as_bytes()))
+        })
+    {
+        return Err(ShimError::ServerNameTaken {
+            agent: manifest.name.clone(),
+            path: path.clone(),
+        });
     }
     let failed = |source| ShimError::Write {
         agent: manifest.id.clone(),
@@ -273,6 +306,14 @@ fn codex(shim: &mut Shim, cx: &ShimContext<'_>) {
     let mut config = json!({
         "allow_login_shell": false,
         "features": { "shell_snapshot": false },
+        // Its commands get the environment its env policy builds, which a config could make
+        // leave out the sandbox's startup-file pins; `set` always applies.
+        "shell_environment_policy": {
+            "set": forge_sandbox::STARTUP_FILES_OFF
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), serde_json::Value::from(*v)))
+                .collect::<serde_json::Map<_, _>>(),
+        },
         // `auto_review` would have a model approve escalated commands, which then never
         // reach Forge.
         "approvals_reviewer": "user",
@@ -479,6 +520,12 @@ pub fn home_config(
                 let state: serde_json::Value = serde_json::from_slice(&raw)
                     .map_err(|e| failed(format!("~/.claude.json: {e}")))?;
                 if let Some(servers) = state.get("mcpServers").filter(|s| s.is_object()) {
+                    if servers.get(MCP_SERVER).is_some() {
+                        return Err(ShimError::ServerNameTaken {
+                            agent: manifest.name.clone(),
+                            path: "~/.claude.json".into(),
+                        });
+                    }
                     let kept = json!({ "mcpServers": servers });
                     out.files
                         .push((".claude.json".into(), kept.to_string().into_bytes()));
@@ -487,6 +534,12 @@ pub fn home_config(
         }
         "codex" => {
             if let Some(raw) = read_settings(&home.join(".codex/config.toml")).map_err(failed)? {
+                if toml_names_forge(&raw) {
+                    return Err(ShimError::ServerNameTaken {
+                        agent: manifest.name.clone(),
+                        path: "~/.codex/config.toml".into(),
+                    });
+                }
                 out.files.push((".codex/config.toml".into(), raw));
             }
             if let Some(account) = login.and_then(|l| l.account.as_ref()) {
@@ -866,6 +919,11 @@ mod tests {
         let config: Value = serde_json::from_str(&env["CODEX_CONFIG"]).unwrap();
         assert_eq!(config["allow_login_shell"], false);
         assert_eq!(config["features"]["shell_snapshot"], false);
+        // Its commands keep the sandbox's startup-file pins whatever a config's env policy.
+        let set = &config["shell_environment_policy"]["set"];
+        assert_eq!(set["ZDOTDIR"], "/dev/null");
+        assert_eq!(set["BASH_ENV"], "");
+        assert_eq!(set["ENV"], "");
         assert_eq!(config["web_search"], "disabled");
         assert_eq!(config["approvals_reviewer"], "user");
         // The user's own notify program, if any, runs as it would outside Forge.
@@ -1156,6 +1214,62 @@ mod tests {
             std::os::unix::fs::symlink("/nonexistent", worktree.join(path)).unwrap();
             assert_eq!(attempt(None).as_deref(), Some(path));
         }
+    }
+
+    /// Forge lets its own server's tools through without asking (they ask Forge when they
+    /// run), so a server of the same name from a config file would get the same pass.
+    #[test]
+    fn a_config_naming_its_own_server_after_forges_is_refused() {
+        let taken = |agent: &str, rel: &str, contents: &str| {
+            let home = tempfile::tempdir().unwrap();
+            let path = home.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+            match home_config(manifest(agent), home.path(), None) {
+                Err(ShimError::ServerNameTaken { path, .. }) => Some(path),
+                Ok(_) => None,
+                Err(e) => panic!("{agent} {rel}: {e}"),
+            }
+        };
+        let codex = "[mcp_servers.forge]\ncommand = \"impostor\"\n";
+        let claude = r#"{"mcpServers":{"forge":{"command":"impostor"}}}"#;
+        assert_eq!(
+            taken("codex", ".codex/config.toml", codex).as_deref(),
+            Some("~/.codex/config.toml")
+        );
+        assert_eq!(
+            taken("claude-code", ".claude.json", claude).as_deref(),
+            Some("~/.claude.json")
+        );
+        // Other servers are fine.
+        let others = "[mcp_servers.docs]\ncommand = \"docs\"\n";
+        assert_eq!(taken("codex", ".codex/config.toml", others), None);
+        assert_eq!(
+            taken(
+                "claude-code",
+                ".claude.json",
+                r#"{"mcpServers":{"docs":{}}}"#
+            ),
+            None
+        );
+
+        // And in the repo's committed config, which Codex reads too.
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("wt");
+        std::fs::create_dir_all(worktree.join(".codex")).unwrap();
+        std::fs::write(worktree.join(".codex/config.toml"), codex).unwrap();
+        let shim_dir = dir.path().join("shim");
+        std::fs::create_dir(&shim_dir).unwrap();
+        let committed = [(".codex/config.toml".to_owned(), Some(codex.to_owned()))];
+        let cx = ShimContext {
+            worktree: &worktree,
+            committed: &committed,
+            ..context(&shim_dir, &no_vars)
+        };
+        assert!(matches!(
+            prepare(manifest("codex"), &cx),
+            Err(ShimError::ServerNameTaken { path, .. }) if path == ".codex/config.toml"
+        ));
     }
 
     #[test]

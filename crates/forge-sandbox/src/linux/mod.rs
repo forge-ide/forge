@@ -126,6 +126,7 @@ impl Light {
         let mut env = crate::env::from_daemon();
         env.push(("HOME".into(), view.scratch_home.display().to_string()));
         env.push(("TMPDIR".into(), view.scratch_tmp.display().to_string()));
+        env.extend(crate::env::startup_files_off());
         env.extend(view.toolchain_env.iter().cloned());
         if let Some(proxy) = &proxy {
             env.extend(proxy.env(&format!("http://127.0.0.1:{}", proxy.port())));
@@ -202,6 +203,7 @@ impl Bwrap {
         let mut env = crate::env::from_daemon();
         env.push(("HOME".into(), view.home.display().to_string()));
         env.push(("TMPDIR".into(), "/tmp".into()));
+        env.extend(crate::env::startup_files_off());
         env.extend(view.toolchain_env.iter().cloned());
         if let (Some(_), Some(proxy)) = (&forward, &proxy) {
             env.extend(proxy.env(&format!("http://127.0.0.1:{PROXY_PORT}")));

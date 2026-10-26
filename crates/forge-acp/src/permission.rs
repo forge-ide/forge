@@ -12,6 +12,9 @@ use crate::workspace::Workspace;
 /// Commands remembered from tool calls, for agents whose permission requests leave them out.
 const REMEMBERED_COMMANDS: usize = 256;
 
+/// The most of an MCP tool call's arguments, as JSON, kept for its approval and events.
+const MCP_ARGS_LIMIT: usize = 64 * 1024;
+
 /// What a permission request asks for.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
@@ -145,7 +148,7 @@ impl ToolCommands {
         let action = Action::Mcp {
             server: server.to_owned(),
             tool: tool.to_owned(),
-            args: raw.get("arguments").cloned().unwrap_or_default(),
+            args: clipped(raw.get("arguments").cloned().unwrap_or_default()),
         };
         self.3.push_back((id.to_owned(), action));
     }
@@ -167,6 +170,19 @@ impl ToolCommands {
             .find(|(known, _)| known == id)
             .map(|(_, command)| command.as_str())
     }
+}
+
+/// `args`, or past [`MCP_ARGS_LIMIT`] as JSON, its start, marked as clipped with its full size.
+fn clipped(args: serde_json::Value) -> serde_json::Value {
+    let text = args.to_string();
+    if text.len() <= MCP_ARGS_LIMIT {
+        return args;
+    }
+    let mut end = MCP_ARGS_LIMIT;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    serde_json::json!({ "clipped": true, "bytes": text.len(), "head": &text[..end] })
 }
 
 /// The [`Target`] of a permission request, from an agent whose execute requests carry their
@@ -610,6 +626,33 @@ mod tests {
         assert_eq!(
             target(&plain, &ws, CommandSource::ToolCallArgv, &commands),
             Target::Unknown
+        );
+    }
+
+    #[test]
+    fn large_mcp_arguments_are_clipped_and_marked() {
+        let mut meta = serde_json::Map::new();
+        meta.insert("is_mcp_tool_call".into(), true.into());
+        let big = "x".repeat(MCP_ARGS_LIMIT * 2);
+        let input =
+            serde_json::json!({ "server": "docs", "tool": "put", "arguments": { "body": big } });
+        let mut commands = ToolCommands::default();
+        commands.record_mcp("t1", Some(&meta), Some(&input));
+        let Some(Action::Mcp { args, .. }) = commands.mcp("t1") else {
+            panic!("not recorded");
+        };
+        assert_eq!(args["clipped"], true);
+        assert_eq!(
+            args["bytes"],
+            serde_json::to_string(&input["arguments"]).unwrap().len()
+        );
+        assert!(args["head"].as_str().unwrap().len() <= MCP_ARGS_LIMIT);
+        // Small ones are kept as given.
+        let small =
+            serde_json::json!({ "server": "docs", "tool": "get", "arguments": { "id": 1 } });
+        commands.record_mcp("t2", Some(&meta), Some(&small));
+        assert!(
+            matches!(commands.mcp("t2"), Some(Action::Mcp { args, .. }) if args == &small["arguments"])
         );
     }
 
