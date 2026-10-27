@@ -187,5 +187,22 @@ async fn lists_agents_and_approvals_and_checks_wire_names() {
         .forge(env.home.path(), &["approval", "decide", "apr_x", "maybe"])
         .await;
     assert!(!output.status.success());
+    // Rewind reaches the daemon, which knows no such session.
+    let (session, checkpoint) = (
+        forge_api::SessionId::new().to_string(),
+        forge_api::CheckpointId::new().to_string(),
+    );
+    let output = env
+        .forge(
+            env.home.path(),
+            &["session", "rewind", &session, &checkpoint],
+        )
+        .await;
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("NotFound"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     env.stop_daemon().await;
 }

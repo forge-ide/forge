@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use forge_api::events::Remember;
 use forge_api::model::{Approval, Mode, Session, SessionState};
-use forge_api::{ApprovalId, ProjectId, SessionId, Timestamp};
+use forge_api::{ApprovalId, CheckpointId, ProjectId, SessionId, Timestamp, TurnId};
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("session store: {0}")]
@@ -33,6 +33,22 @@ pub struct ApprovalRecord {
     pub decided: bool,
 }
 
+/// A checkpoint: one commit per repo, on its shadow ref.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckpointRecord {
+    pub id: CheckpointId,
+    pub session: SessionId,
+    /// Counts up from 1 per session, discarded checkpoints included.
+    pub n: u32,
+    /// The turn it was taken after, if any.
+    pub turn: Option<TurnId>,
+    pub created_at: Timestamp,
+    /// Each repo's commit, by repo name.
+    pub commits: Vec<(String, String)>,
+    /// The checkpoint a rewind went back to, once one discarded this one.
+    pub discarded_by: Option<CheckpointId>,
+}
+
 /// Session persistence. Calls are blocking; the manager runs them on the blocking pool.
 pub trait SessionStore: Send + Sync + 'static {
     fn insert(&self, session: &Session, worktrees: &[WorktreeRecord]) -> Result<(), StoreError>;
@@ -55,6 +71,18 @@ pub trait SessionStore: Send + Sync + 'static {
     /// The live session (not Done or Failed) whose worktree is at `path`, if any.
     fn live_owner(&self, path: &Path) -> Result<Option<SessionId>, StoreError>;
     fn set_mode(&self, id: &SessionId, mode: Mode, at: Timestamp) -> Result<(), StoreError>;
+
+    fn insert_checkpoint(&self, checkpoint: &CheckpointRecord) -> Result<(), StoreError>;
+    /// Every checkpoint of a session, discarded ones included, in order.
+    fn checkpoints(&self, session: &SessionId) -> Result<Vec<CheckpointRecord>, StoreError>;
+    /// Mark the session's checkpoints after the `n`th that aren't discarded yet as discarded
+    /// by a rewind to `by`.
+    fn discard_checkpoints(
+        &self,
+        session: &SessionId,
+        n: u32,
+        by: &CheckpointId,
+    ) -> Result<(), StoreError>;
 
     fn insert_approval(&self, approval: &Approval) -> Result<(), StoreError>;
     fn approval(&self, id: &ApprovalId) -> Result<Option<ApprovalRecord>, StoreError>;

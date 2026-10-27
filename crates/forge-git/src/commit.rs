@@ -58,6 +58,12 @@ pub enum CommitError {
         MAX_COMMIT_BYTES / 1024 / 1024
     )]
     TooLarge,
+    #[error("the worktree changed since its last checkpoint")]
+    WorktreeChanged,
+    #[error(
+        "rewinding stopped partway, so the worktree may hold some files from each checkpoint; what it held before is commit {from} ({reason})"
+    )]
+    PartlyRewound { from: String, reason: String },
     #[error(transparent)]
     Git(#[from] GitError),
 }
@@ -79,6 +85,7 @@ pub fn stage(
             .map(|p| checked_path(p))
             .collect::<Result<_, _>>()?,
     };
+    clear_lock(index);
     let _ = std::fs::remove_file(index);
     if let Some(dir) = index.parent() {
         std::fs::create_dir_all(dir).map_err(|source| GitError::Io {
@@ -97,28 +104,7 @@ pub fn stage(
     .to_owned();
     run(&["read-tree", &parent])?;
     drop_gitlinks(dirs, worktree, index)?;
-    // What would be staged, by size on disk, before any of it is copied into the repo.
-    let mut status = vec![
-        "status",
-        "--porcelain=v1",
-        "-z",
-        "--untracked-files=all",
-        "--no-renames",
-        "--ignore-submodules=all",
-        "--",
-    ];
-    status.extend(pathspecs.iter().map(String::as_str));
-    let mut total: u64 = 0;
-    for entry in run(&status)?.split('\0').filter(|e| e.len() > 3) {
-        if let Ok(meta) = std::fs::symlink_metadata(worktree.join(&entry[3..]))
-            && meta.is_file()
-        {
-            total = total.saturating_add(meta.len());
-            if total > MAX_COMMIT_BYTES {
-                return Err(CommitError::TooLarge);
-            }
-        }
-    }
+    check_size(dirs, worktree, index, &pathspecs, &[])?;
     let mut add = vec!["add", "--all", "--"];
     add.extend(pathspecs.iter().map(String::as_str));
     run(&add)?;
@@ -195,37 +181,146 @@ pub fn commit(
     message: &str,
     index: &Path,
 ) -> Result<String, CommitError> {
-    let commit = run(
+    let reference = format!("refs/heads/{branch}");
+    let commit = record(
         dirs,
         worktree,
         index,
-        &["commit-tree", &staged.tree, "-p", &staged.parent, "-F", "-"],
-        Some(message.as_bytes()),
+        Record {
+            tree: &staged.tree,
+            parent: &staged.parent,
+            message,
+            reference: &reference,
+            old: &staged.parent,
+            log: "forge: git_commit",
+            env: &[],
+        },
+    )
+    .map_err(|e| match e {
+        CommitError::Moved(_) => CommitError::Moved(branch.to_owned()),
+        e => e,
+    })?;
+    let _ = std::fs::remove_file(index);
+    sync_own_index(dirs, worktree, &commit);
+    Ok(commit)
+}
+
+/// Remove the lock git left on `index`, a daemon-owned index file, if it was killed while
+/// holding it (past its time or output limit); otherwise every later use would fail. The
+/// caller makes sure no other git uses `index` meanwhile.
+pub(crate) fn clear_lock(index: &Path) {
+    let mut lock = index.as_os_str().to_owned();
+    lock.push(".lock");
+    let _ = std::fs::remove_file(lock);
+}
+
+/// Refuse, before anything is copied into the repo, when the files that differ between
+/// `worktree` and `index` under `pathspecs`, plus `extra` (repo-relative paths about to be
+/// added besides), hold more than [`MAX_COMMIT_BYTES`] on disk.
+pub(crate) fn check_size(
+    dirs: &GitDirs,
+    worktree: &Path,
+    index: &Path,
+    pathspecs: &[String],
+    extra: &[&str],
+) -> Result<(), CommitError> {
+    let mut status = vec![
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--no-renames",
+        "--ignore-submodules=all",
+        "--",
+    ];
+    status.extend(pathspecs.iter().map(String::as_str));
+    let mut total: u64 = 0;
+    // Only the second column, the worktree against the index, counts: the first compares the
+    // index with the shared git dir's HEAD, the main checkout's branch, not this one.
+    let listed = run(dirs, worktree, index, &status, None)?;
+    let changed = listed
+        .split('\0')
+        .filter(|e| e.len() > 3 && e.as_bytes()[1] != b' ')
+        .map(|e| &e[3..]);
+    for path in changed.chain(extra.iter().copied()) {
+        if let Ok(meta) = std::fs::symlink_metadata(worktree.join(path))
+            && meta.is_file()
+        {
+            total = total.saturating_add(meta.len());
+            if total > MAX_COMMIT_BYTES {
+                return Err(CommitError::TooLarge);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A commit for [`record`] to make.
+pub(crate) struct Record<'a> {
+    pub tree: &'a str,
+    pub parent: &'a str,
+    pub message: &'a str,
+    /// The ref to point at it.
+    pub reference: &'a str,
+    /// Where `reference` must still be: a commit, or empty for a ref that must not exist yet.
+    pub old: &'a str,
+    /// The reflog message.
+    pub log: &'a str,
+    /// Extra environment for `commit-tree`, such as an identity.
+    pub env: &'a [(&'a str, &'a str)],
+}
+
+/// Make `r`'s commit and move its ref to it, if the ref is still at `r.old` (compare and
+/// swap, so a ref that moved meanwhile isn't overwritten: [`CommitError::Moved`] naming the
+/// ref). Returns the new commit.
+pub(crate) fn record(
+    dirs: &GitDirs,
+    worktree: &Path,
+    index: &Path,
+    r: Record<'_>,
+) -> Result<String, CommitError> {
+    let commit = run_env(
+        dirs,
+        worktree,
+        index,
+        &["commit-tree", r.tree, "-p", r.parent, "-F", "-"],
+        Some(r.message.as_bytes()),
+        r.env,
     )?
     .trim()
     .to_owned();
-    let reference = format!("refs/heads/{branch}");
+    point(dirs, worktree, index, r.reference, &commit, r.old, r.log)?;
+    Ok(commit)
+}
+
+/// Move `reference` to `commit` if it is still at `old` (empty: if it doesn't exist).
+pub(crate) fn point(
+    dirs: &GitDirs,
+    worktree: &Path,
+    index: &Path,
+    reference: &str,
+    commit: &str,
+    old: &str,
+    log: &str,
+) -> Result<(), CommitError> {
     run(
         dirs,
         worktree,
         index,
-        &[
-            "update-ref",
-            "-m",
-            "forge: git_commit",
-            &reference,
-            &commit,
-            &staged.parent,
-        ],
+        &["update-ref", "-m", log, reference, commit, old],
         None,
     )
-    .map_err(|_| CommitError::Moved(branch.to_owned()))?;
-    let _ = std::fs::remove_file(index);
-    // The worktree's index lives in its git dir, which the agent can write. Git replaces it
-    // through a lock file it creates exclusively and renames over it, so a symlink planted
-    // there is replaced, not followed; if the agent holds the lock, its index just stays stale.
+    .map(drop)
+    .map_err(|_| CommitError::Moved(reference.to_owned()))
+}
+
+/// Reset the worktree's own index to `commit`, so the agent's `git status` compares against
+/// it. The index lives in the worktree's git dir, which the agent can write. Git replaces it
+/// through a lock file it creates exclusively and renames over it, so a symlink planted there
+/// is replaced, not followed; if the agent holds the lock, its index just stays stale.
+pub(crate) fn sync_own_index(dirs: &GitDirs, worktree: &Path, commit: &str) {
     let own = dirs.admin.join("index");
-    if run(dirs, worktree, &own, &["read-tree", &commit], None).is_ok() {
+    if run(dirs, worktree, &own, &["read-tree", commit], None).is_ok() {
         let _ = run(
             dirs,
             worktree,
@@ -234,7 +329,6 @@ pub fn commit(
             None,
         );
     }
-    Ok(commit)
 }
 
 /// Paths `index` holds as gitlinks: nested repositories, submodules or not.
@@ -249,7 +343,7 @@ fn gitlinks(dirs: &GitDirs, worktree: &Path, index: &Path) -> Result<Vec<String>
 /// Take every gitlink out of `index`. While one is there, `status`, `add`, and `diff-files`
 /// look inside that nested repo with a git of their own, which reads the nested repo's config,
 /// filters included; and inside a worktree, that config is the agent's to write.
-fn drop_gitlinks(dirs: &GitDirs, worktree: &Path, index: &Path) -> Result<(), GitError> {
+pub(crate) fn drop_gitlinks(dirs: &GitDirs, worktree: &Path, index: &Path) -> Result<(), GitError> {
     let links = gitlinks(dirs, worktree, index)?;
     if links.is_empty() {
         return Ok(());
@@ -269,7 +363,7 @@ fn drop_gitlinks(dirs: &GitDirs, worktree: &Path, index: &Path) -> Result<(), Gi
 /// Make `index`'s gitlinks exactly `parent`'s: nested repos are committed as the branch has
 /// them, whatever the worktree holds, since the daemon never looks inside one. Only reads and
 /// writes the index.
-fn pin_gitlinks(
+pub(crate) fn pin_gitlinks(
     dirs: &GitDirs,
     worktree: &Path,
     index: &Path,
@@ -359,7 +453,7 @@ fn launcher(
 }
 
 /// Run git on `worktree` with the repo's shared git dir and `index`; its stdout on success.
-fn run(
+pub(crate) fn run(
     dirs: &GitDirs,
     worktree: &Path,
     index: &Path,
@@ -370,7 +464,7 @@ fn run(
 }
 
 /// [`run`], with `env` added to git's environment.
-fn run_env(
+pub(crate) fn run_env(
     dirs: &GitDirs,
     worktree: &Path,
     index: &Path,
@@ -697,6 +791,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(staged.changed, ["small.txt"]);
+    }
+
+    #[test]
+    fn the_size_cap_counts_each_commit_not_what_the_branch_already_holds() {
+        let (_dir, repo, wt, dirs, private) = setup();
+        let index = index_path(&private);
+        // Each under the scan's budget, so it can be committed at all; together over the cap.
+        let size = 14 * 1024 * 1024;
+        let names = ["1.bin", "2.bin", "3.bin", "4.bin", "5.bin"];
+        assert!((size * names.len()) as u64 > MAX_COMMIT_BYTES);
+        for name in names {
+            std::fs::write(wt.join(name), vec![name.as_bytes()[0]; size]).unwrap();
+            let staged = stage(&dirs, &wt, "feat/x", None, &index).unwrap();
+            assert_eq!(staged.changed, [name]);
+            assert!(!staged.cut);
+            commit(&dirs, &wt, "feat/x", &staged, name, &index).unwrap();
+        }
+        assert_eq!(
+            git(&repo, &["rev-list", "--count", "main..feat/x"]).trim(),
+            "5"
+        );
     }
 
     #[test]

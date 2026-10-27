@@ -115,7 +115,7 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 
 ### M6: Review store and review pane
 
-- [ ] Checkpoints on shadow refs after each turn; `session.rewind`.
+- [x] Checkpoints on shadow refs after each turn; `session.rewind` (the worktree and branch; the agent's conversation isn't rewound, and hears about it with its next prompt).
 - [ ] Changeset and per-file diffs; hunk-to-turn mapping.
 - [ ] Threads, replies, resolve, outdated detection.
 - [ ] Request changes as one structured agent message; per-thread replies.

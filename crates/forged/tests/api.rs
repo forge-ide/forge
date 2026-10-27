@@ -326,7 +326,7 @@ async fn unknown_and_unimplemented_methods_are_method_not_found() {
     let home = temp_home();
     let daemon = Daemon::start(home.path());
     let mut client = daemon.client().await;
-    for method in ["nope.nothing", "session.rewind"] {
+    for method in ["nope.nothing", "lsp.request"] {
         match client.call_raw(method, json!({})).await {
             Err(ClientError::Rpc { code, .. }) => {
                 assert_eq!(code, codes::METHOD_NOT_FOUND, "{method}")

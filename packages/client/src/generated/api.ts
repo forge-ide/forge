@@ -1,6 +1,6 @@
 // Generated from crates/forge-api by `just gen`. Do not edit.
 
-export const API_VERSION = "0.4.0";
+export const API_VERSION = "0.5.0";
 
 export const EVENT_NOTIFICATION = "event";
 
@@ -302,6 +302,7 @@ export type Event = {
   | { kind: "terminal.output"; body: TerminalOutputBody }
   | { kind: "network"; body: NetworkBody }
   | { kind: "checkpoint"; body: CheckpointBody }
+  | { kind: "session.rewound"; body: SessionRewoundBody }
   | { kind: "review.thread"; body: ReviewThreadBody }
   | { kind: "usage"; body: Usage }
   | { kind: "error"; body: ErrorData }
@@ -327,6 +328,7 @@ export type EventPayload =
   | { kind: "terminal.output"; body: TerminalOutputBody }
   | { kind: "network"; body: NetworkBody }
   | { kind: "checkpoint"; body: CheckpointBody }
+  | { kind: "session.rewound"; body: SessionRewoundBody }
   | { kind: "review.thread"; body: ReviewThreadBody }
   | { kind: "usage"; body: Usage }
   | { kind: "error"; body: ErrorData };
@@ -351,6 +353,7 @@ export type EventKind =
   | "terminal.output"
   | "network"
   | "checkpoint"
+  | "session.rewound"
   | "review.thread"
   | "usage"
   | "error";
@@ -448,7 +451,26 @@ export type NetworkBody = {
   durationMs: number;
 };
 
-export type CheckpointBody = { checkpointId: CheckpointId; turnId: TurnId; ref: string };
+export type CheckpointBody = {
+  checkpointId: CheckpointId;
+  /**
+   * The turn it was taken after; absent for one Forge took between turns (before a
+   * rewind, say).
+   */
+  turnId?: TurnId;
+  ref: string;
+};
+
+/**
+ * The worktree went back to a checkpoint; the turns after it were discarded.
+ */
+export type SessionRewoundBody = {
+  checkpointId: CheckpointId;
+  /**
+   * The turns whose changes are gone, oldest first.
+   */
+  discardedTurns: Array<TurnId>;
+};
 
 export type ThreadChange = "created" | "reply" | "resolved" | "outdated";
 

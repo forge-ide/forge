@@ -241,6 +241,12 @@ async fn dispatch(
             })
             .await
         }
+        SessionRewind::NAME => {
+            run::<SessionRewind>(params, async |p| {
+                Ok(manager.rewind(&p.session_id, &p.checkpoint_id).await?)
+            })
+            .await
+        }
         SessionSetMode::NAME => {
             run::<SessionSetMode>(params, async |p| sessions::set_mode(state, p).await).await
         }

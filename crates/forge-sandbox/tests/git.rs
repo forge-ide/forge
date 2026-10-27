@@ -303,3 +303,79 @@ fn a_link_swapped_in_while_staging_never_reaches_the_users_secrets() {
     race(&f, &f.home, ".gitconfig", &gitconfig);
     race(&f, &f.home, "inc", INCLUDED);
 }
+
+/// A process the agent left running keeps swapping a worktree dir for a link to a dir outside
+/// while the daemon rewinds back and forth: nothing outside is written or removed. Unconfined,
+/// the swap wins only now and then; `confined_git_writes_only_what_it_was_given` checks the
+/// same boundary every time.
+#[test]
+#[ignore = "needs a sandbox-capable host; run `just test-sandbox`"]
+fn a_link_swapped_in_while_rewinding_never_writes_outside() {
+    use forge_git::checkpoint;
+    let f = Fixture::new();
+    let index = checkpoint::index_path(&f.index_dir, "repo");
+    let outside = f.home.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("keep.txt"), "the user's\n").unwrap();
+    let d = f.wt.join("d");
+    std::fs::create_dir(&d).unwrap();
+    std::fs::write(d.join("keep.txt"), "one\n").unwrap();
+    let take = |n: u32, previous: Option<&str>| {
+        checkpoint::take(
+            &f.dirs,
+            &f.wt,
+            "feat/x",
+            previous,
+            &index,
+            &checkpoint::checkpoint_ref("ses_1", n),
+            "cp",
+        )
+    };
+    let one = take(1, None).unwrap();
+    std::fs::write(d.join("keep.txt"), "two\n").unwrap();
+    std::fs::write(d.join("new.txt"), "two\n").unwrap();
+    let two = take(2, Some(&one)).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let (stop, d, outside) = (stop.clone(), d.clone(), outside.clone());
+        let aside = f.wt.join("d.aside");
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                if std::fs::rename(&d, &aside).is_ok() {
+                    let _ = std::os::unix::fs::symlink(&outside, &d);
+                    let _ = std::fs::remove_file(&d);
+                    let _ = std::fs::rename(&aside, &d);
+                }
+            }
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let (mut n, mut previous, mut rounds) = (3, two.clone(), 0);
+    while Instant::now() < deadline {
+        // Snapshot what's there now, then rewind to whichever checkpoint it isn't.
+        let Ok(now) = take(n, Some(&previous)) else {
+            continue;
+        };
+        n += 1;
+        let to = if rounds % 2 == 0 { &one } else { &two };
+        if checkpoint::rewind(&f.dirs, &f.wt, "feat/x", &now, to, &index).is_ok() {
+            previous = to.clone();
+        } else {
+            previous = now;
+        }
+        rounds += 1;
+    }
+    stop.store(true, Ordering::Relaxed);
+    swapper.join().unwrap();
+    assert!(rounds > 10, "only {rounds} rounds");
+    let mut left: Vec<String> = std::fs::read_dir(&outside)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["keep.txt"], "wrote outside the worktree");
+    assert_eq!(
+        std::fs::read_to_string(outside.join("keep.txt")).unwrap(),
+        "the user's\n"
+    );
+}

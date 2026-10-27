@@ -19,7 +19,7 @@ pub use ids::*;
 pub use timestamp::Timestamp;
 
 /// API version (semver). Adding a field or method is a minor bump; removing or changing one is major.
-pub const API_VERSION: &str = "0.4.0";
+pub const API_VERSION: &str = "0.5.0";
 
 /// The major component of a semver string, if it has one.
 pub fn major_version(version: &str) -> Option<u64> {
