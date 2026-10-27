@@ -59,7 +59,8 @@ impl SecretRedactor {
         lock(&self.sessions).remove(session);
     }
 
-    fn scanner(&self, session: &SessionId) -> Arc<SecretScanner> {
+    /// The session's scanner, or the built-in patterns' when it has none yet.
+    pub(crate) fn scanner(&self, session: &SessionId) -> Arc<SecretScanner> {
         lock(&self.sessions)
             .get(session)
             .cloned()

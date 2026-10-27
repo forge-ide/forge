@@ -66,6 +66,8 @@ pub enum EventPayload {
     Network(NetworkBody),
     #[serde(rename = "checkpoint")]
     Checkpoint(CheckpointBody),
+    #[serde(rename = "session.rewound")]
+    SessionRewound(SessionRewoundBody),
     #[serde(rename = "review.thread")]
     ReviewThread(ReviewThreadBody),
     #[serde(rename = "usage")]
@@ -93,6 +95,7 @@ impl EventPayload {
             EventPayload::TerminalOutput(_) => EventKind::TerminalOutput,
             EventPayload::Network(_) => EventKind::Network,
             EventPayload::Checkpoint(_) => EventKind::Checkpoint,
+            EventPayload::SessionRewound(_) => EventKind::SessionRewound,
             EventPayload::ReviewThread(_) => EventKind::ReviewThread,
             EventPayload::Usage(_) => EventKind::Usage,
             EventPayload::Error(_) => EventKind::Error,
@@ -135,6 +138,8 @@ pub enum EventKind {
     Network,
     #[serde(rename = "checkpoint")]
     Checkpoint,
+    #[serde(rename = "session.rewound")]
+    SessionRewound,
     #[serde(rename = "review.thread")]
     ReviewThread,
     #[serde(rename = "usage")]
@@ -337,10 +342,23 @@ pub struct NetworkBody {
 #[serde(rename_all = "camelCase")]
 pub struct CheckpointBody {
     pub checkpoint_id: CheckpointId,
-    pub turn_id: TurnId,
+    /// The turn it was taken after; absent for one Forge took between turns (before a
+    /// rewind, say).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub turn_id: Option<TurnId>,
     #[serde(rename = "ref")]
     #[ts(rename = "ref")]
     pub git_ref: String,
+}
+
+/// The worktree went back to a checkpoint; the turns after it were discarded.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRewoundBody {
+    pub checkpoint_id: CheckpointId,
+    /// The turns whose changes are gone, oldest first.
+    pub discarded_turns: Vec<TurnId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
@@ -475,13 +493,12 @@ mod tests {
     fn checkpoint_body_uses_ref() {
         let body = CheckpointBody {
             checkpoint_id: CheckpointId::new(),
-            turn_id: TurnId::new(),
+            turn_id: None,
             git_ref: "refs/forge/x/cp/1".into(),
         };
-        assert_eq!(
-            serde_json::to_value(&body).unwrap()["ref"],
-            "refs/forge/x/cp/1"
-        );
+        let value = serde_json::to_value(&body).unwrap();
+        assert_eq!(value["ref"], "refs/forge/x/cp/1");
+        assert!(value.get("turnId").is_none(), "{value}");
     }
 
     #[test]

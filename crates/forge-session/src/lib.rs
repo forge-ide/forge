@@ -14,4 +14,6 @@ pub use manager::{
     AgentLaunch, AgentResolver, CreateRequest, SandboxDirs, SessionError, SessionManager,
 };
 pub use redact::SecretRedactor;
-pub use store::{ApprovalOutcome, ApprovalRecord, SessionStore, StoreError, WorktreeRecord};
+pub use store::{
+    ApprovalOutcome, ApprovalRecord, CheckpointRecord, SessionStore, StoreError, WorktreeRecord,
+};

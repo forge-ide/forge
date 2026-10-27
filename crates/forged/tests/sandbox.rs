@@ -294,6 +294,21 @@ async fn fake_agent_in(tier: SandboxTier) {
         common::git(&s.repo, &["log", "-1", "--format=%s", "feat/add-greeting"]).trim(),
         "add lib"
     );
+    // The turn was checkpointed, with the daemon's git confined in the sandboxed tiers.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::Checkpoint(_))),
+        "no checkpoint"
+    );
+    let errors: Vec<_> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::Error(d) => Some(d.detail.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
     // The daemon's git never ran the agent's program, whatever the tier.
     for program in ["lfsx", "git"] {
         let mark = s.repo.join(format!(".git/objects/path-mark-{program}"));

@@ -11,7 +11,7 @@ use forge_api::client::Client;
 use forge_api::events::{ApprovalDecision, EventPayload, Remember, Topic};
 use forge_api::methods::*;
 use forge_api::model::{Mode, SandboxTier, SessionState};
-use forge_api::{API_VERSION, ApprovalId, ProjectId, SessionId, major_version};
+use forge_api::{API_VERSION, ApprovalId, CheckpointId, ProjectId, SessionId, major_version};
 use forge_config::Paths;
 use serde::Serialize;
 
@@ -90,6 +90,12 @@ enum SessionCmd {
     },
     Cancel {
         session_id: SessionId,
+    },
+    /// Rewind the session's worktree and branch to a checkpoint (`forge session watch` shows
+    /// each checkpoint's ID); later changes are discarded.
+    Rewind {
+        session_id: SessionId,
+        checkpoint_id: CheckpointId,
     },
     /// Close a session, keeping its worktree.
     Close {
@@ -259,6 +265,17 @@ async fn session(client: &mut Client, cmd: SessionCmd) -> anyhow::Result<()> {
         SessionCmd::Cancel { session_id } => print(
             &client
                 .call::<SessionCancel>(&SessionIdParams { session_id })
+                .await?,
+        ),
+        SessionCmd::Rewind {
+            session_id,
+            checkpoint_id,
+        } => print(
+            &client
+                .call::<SessionRewind>(&SessionRewindParams {
+                    session_id,
+                    checkpoint_id,
+                })
                 .await?,
         ),
         SessionCmd::Close {

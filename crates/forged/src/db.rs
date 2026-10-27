@@ -6,8 +6,10 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, bail};
 use forge_api::events::Remember;
 use forge_api::model::{Approval, Mode, Project, Repo, Session, SessionState, Usage};
-use forge_api::{ApprovalId, ProjectId, SessionId, Timestamp};
-use forge_session::{ApprovalOutcome, ApprovalRecord, SessionStore, StoreError, WorktreeRecord};
+use forge_api::{ApprovalId, CheckpointId, ProjectId, SessionId, Timestamp};
+use forge_session::{
+    ApprovalOutcome, ApprovalRecord, CheckpointRecord, SessionStore, StoreError, WorktreeRecord,
+};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -17,6 +19,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_projects.sql"),
     include_str!("../migrations/0002_sessions.sql"),
     include_str!("../migrations/0003_approvals.sql"),
+    include_str!("../migrations/0004_checkpoints.sql"),
 ];
 
 /// The daemon's database. Every call runs on the blocking pool.
@@ -312,6 +315,80 @@ impl SessionStore for Db {
             .map_err(store_err)
     }
 
+    fn insert_checkpoint(&self, checkpoint: &CheckpointRecord) -> Result<(), StoreError> {
+        let mut conn = self.lock();
+        let tx = conn.transaction().map_err(store_err)?;
+        tx.execute(
+            "INSERT INTO checkpoints (id, session_id, n, turn_id, created_at, discarded_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                checkpoint.id.as_str(),
+                checkpoint.session.as_str(),
+                checkpoint.n,
+                checkpoint.turn.as_ref().map(|t| t.as_str()),
+                checkpoint.created_at.to_string(),
+                checkpoint.discarded_by.as_ref().map(|c| c.as_str()),
+            ],
+        )
+        .map_err(store_err)?;
+        for (repo, commit) in &checkpoint.commits {
+            tx.execute(
+                "INSERT INTO checkpoint_refs (checkpoint_id, repo_name, commit_sha)
+                 VALUES (?1, ?2, ?3)",
+                params![checkpoint.id.as_str(), repo, commit],
+            )
+            .map_err(store_err)?;
+        }
+        tx.commit().map_err(store_err)
+    }
+
+    fn checkpoints(&self, session: &SessionId) -> Result<Vec<CheckpointRecord>, StoreError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, n, turn_id, created_at, discarded_by FROM checkpoints
+                 WHERE session_id = ?1 ORDER BY n",
+            )
+            .map_err(store_err)?;
+        let rows = stmt
+            .query_map([session.as_str()], |r| checkpoint_row(r, session))
+            .map_err(store_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(store_err)?;
+        let mut refs = conn
+            .prepare(
+                "SELECT repo_name, commit_sha FROM checkpoint_refs
+                 WHERE checkpoint_id = ?1 ORDER BY repo_name",
+            )
+            .map_err(store_err)?;
+        rows.into_iter()
+            .map(|mut c| {
+                c.commits = refs
+                    .query_map([c.id.as_str()], |r| Ok((r.get(0)?, r.get(1)?)))
+                    .map_err(store_err)?
+                    .collect::<Result<_, _>>()
+                    .map_err(store_err)?;
+                Ok(c)
+            })
+            .collect()
+    }
+
+    fn discard_checkpoints(
+        &self,
+        session: &SessionId,
+        n: u32,
+        by: &CheckpointId,
+    ) -> Result<(), StoreError> {
+        self.lock()
+            .execute(
+                "UPDATE checkpoints SET discarded_by = ?1
+                 WHERE session_id = ?2 AND n > ?3 AND discarded_by IS NULL",
+                params![by.as_str(), session.as_str(), n],
+            )
+            .map(drop)
+            .map_err(store_err)
+    }
+
     fn insert_approval(&self, approval: &Approval) -> Result<(), StoreError> {
         let action = serde_json::to_string(&approval.action)
             .map_err(|e| StoreError(format!("encoding an action: {e}")))?;
@@ -441,6 +518,34 @@ fn outcome_name(outcome: ApprovalOutcome) -> &'static str {
     }
 }
 
+fn checkpoint_row(r: &Row<'_>, session: &SessionId) -> rusqlite::Result<CheckpointRecord> {
+    let bad = |i: usize, e: String| {
+        rusqlite::Error::FromSqlConversionFailure(i, rusqlite::types::Type::Text, e.into())
+    };
+    let id = |i: usize| -> rusqlite::Result<Option<String>> { r.get(i) };
+    Ok(CheckpointRecord {
+        id: r
+            .get::<_, String>(0)?
+            .parse()
+            .map_err(|e: forge_api::InvalidId| bad(0, e.to_string()))?,
+        session: session.clone(),
+        n: r.get(1)?,
+        turn: id(2)?
+            .map(|t| t.parse())
+            .transpose()
+            .map_err(|e: forge_api::InvalidId| bad(2, e.to_string()))?,
+        created_at: r
+            .get::<_, String>(3)?
+            .parse()
+            .map_err(|e| bad(3, format!("{e}")))?,
+        commits: Vec::new(),
+        discarded_by: id(4)?
+            .map(|c| c.parse())
+            .transpose()
+            .map_err(|e: forge_api::InvalidId| bad(4, e.to_string()))?,
+    })
+}
+
 fn session_row(r: &Row<'_>) -> rusqlite::Result<Session> {
     let text = |i: usize| r.get::<_, String>(i);
     let bad = |i: usize, e: String| {
@@ -508,6 +613,34 @@ fn migrate(conn: &mut Connection) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    /// A session in a new project, stored in `db`.
+    fn test_session(db: &Db) -> Session {
+        use forge_api::model::{Mode, SandboxTier};
+        let project = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(db.upsert_project("/p".into(), "p".into(), vec![repo("p", "main")]))
+            .unwrap();
+        let session = Session {
+            id: SessionId::new(),
+            project_id: project.id,
+            title: "t".into(),
+            agent_profile: "fake".into(),
+            state: SessionState::Ready,
+            mode: Mode::AcceptEdits,
+            sandbox: SandboxTier::Unsandboxed,
+            branch: "feat/t".into(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
+            usage: Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_usd: None,
+            },
+        };
+        db.insert(&session, &[]).unwrap();
+        session
+    }
+
     fn repo(name: &str, branch: &str) -> Repo {
         Repo {
             name: name.into(),
@@ -550,6 +683,46 @@ mod tests {
         drop(conn);
         let err = Db::open(&path).err().unwrap();
         assert!(format!("{err:#}").contains("newer"), "{err:#}");
+    }
+
+    #[test]
+    fn checkpoints_round_trip_in_order_and_rewinds_discard_later_ones() {
+        use forge_api::TurnId;
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("forge.db")).unwrap();
+        let session = test_session(&db);
+        let checkpoint = |n: u32, turn: Option<TurnId>| CheckpointRecord {
+            id: CheckpointId::new(),
+            session: session.id.clone(),
+            n,
+            turn,
+            created_at: Timestamp::now(),
+            commits: vec![
+                ("p".into(), format!("{n:040}")),
+                ("q".into(), "b".repeat(40)),
+            ],
+            discarded_by: None,
+        };
+        let cps = [
+            checkpoint(1, Some(TurnId::new())),
+            checkpoint(2, None),
+            checkpoint(3, Some(TurnId::new())),
+        ];
+        // Inserted out of order, read back in order.
+        for cp in [&cps[2], &cps[0], &cps[1]] {
+            db.insert_checkpoint(cp).unwrap();
+        }
+        assert_eq!(db.checkpoints(&session.id).unwrap(), cps);
+        // A number is never reused.
+        assert!(db.insert_checkpoint(&checkpoint(2, None)).is_err());
+
+        db.discard_checkpoints(&session.id, 1, &cps[0].id).unwrap();
+        // A later rewind doesn't relabel what an earlier one discarded.
+        db.discard_checkpoints(&session.id, 0, &cps[1].id).unwrap();
+        let read = db.checkpoints(&session.id).unwrap();
+        assert_eq!(read[0].discarded_by.as_ref(), Some(&cps[1].id));
+        assert_eq!(read[1].discarded_by.as_ref(), Some(&cps[0].id));
+        assert_eq!(read[2].discarded_by.as_ref(), Some(&cps[0].id));
     }
 
     #[test]

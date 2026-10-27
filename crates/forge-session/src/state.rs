@@ -30,6 +30,14 @@ pub fn accepts_prompt(state: SessionState) -> bool {
     )
 }
 
+/// States `session.rewind` accepts: the agent isn't mid-turn.
+pub fn can_rewind(state: SessionState) -> bool {
+    matches!(
+        state,
+        SessionState::Ready | SessionState::Review | SessionState::Paused
+    )
+}
+
 /// States `session.close` accepts.
 pub fn can_close(state: SessionState) -> bool {
     can_transition(state, SessionState::Done)
@@ -86,6 +94,8 @@ mod tests {
     fn prompts_and_close() {
         let prompts: Vec<_> = ALL.into_iter().filter(|s| accepts_prompt(*s)).collect();
         assert_eq!(prompts, [Ready, Paused, Review]);
+        let rewinds: Vec<_> = ALL.into_iter().filter(|s| can_rewind(*s)).collect();
+        assert_eq!(rewinds, [Ready, Paused, Review]);
         let closes: Vec<_> = ALL.into_iter().filter(|s| can_close(*s)).collect();
         assert_eq!(closes, [Ready, Paused, Review, Failed]);
         let live: Vec<_> = ALL.into_iter().filter(|s| is_live(*s)).collect();

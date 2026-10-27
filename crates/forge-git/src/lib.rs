@@ -1,5 +1,6 @@
 //! Worktrees, branches, and shadow refs.
 
+pub mod checkpoint;
 pub mod commit;
 pub mod confine;
 pub mod naming;

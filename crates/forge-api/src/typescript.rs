@@ -99,6 +99,7 @@ pub fn generate() -> String {
         .add::<TerminalOutputBody>()
         .add::<NetworkBody>()
         .add::<CheckpointBody>()
+        .add::<SessionRewoundBody>()
         .add::<ThreadChange>()
         .add::<ReviewThreadBody>()
         .add::<Topic>()

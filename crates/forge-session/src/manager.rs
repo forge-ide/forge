@@ -39,6 +39,7 @@ use crate::state::{accepts_prompt, can_close, can_transition, is_live};
 use crate::store::{SessionStore, StoreError, WorktreeRecord};
 
 mod approvals;
+mod checkpoints;
 mod commit;
 
 use approvals::{Pending, SessionGate};
@@ -150,6 +151,10 @@ struct Live {
     grants: Mutex<Vec<Action>>,
     /// For the agent with the next prompt: approvals a daemon restart cancelled.
     resume_note: Mutex<Option<String>>,
+    /// For the agent with the next prompt: the human rewound the worktree.
+    rewind_note: Mutex<Option<String>>,
+    /// Where checkpoints of each worktree go, found at the first one.
+    checkpoint_targets: Mutex<Option<Vec<checkpoints::RepoTarget>>>,
     /// The running agent's hooks.
     hooks: Mutex<Option<Arc<dyn HookRunner>>>,
     /// The running agent's event sink, whose held-back stream text is flushed when a turn
@@ -614,7 +619,9 @@ impl SessionManager {
         values.push(proxy.token().to_owned());
         values.extend(launch.home.secrets.iter().cloned());
         let scanner = Arc::new(SecretScanner::new(values));
-        target.dirs.launch = self.git_launch(session, &target.dirs, &scanner).await;
+        target.dirs.launch = self
+            .git_launch(session, &target.dirs, &scanner, "git-config")
+            .await;
         let record = session.clone();
         let manifest = launch.agent.as_deref().and_then(adapters::manifest);
         let repo_git = (
@@ -927,6 +934,8 @@ impl SessionManager {
             }),
         )
         .await?;
+        // Before anything else, so the next turn's changes are told apart from this one's.
+        self.checkpoint_turn(&session, turn).await;
         let (to, reason) = match outcome {
             Ok(stop) if stop == "end_turn" && interrupted => {
                 live.cancel_requested.store(false, Ordering::SeqCst);
@@ -1079,11 +1088,12 @@ impl SessionManager {
     /// How the session's git commands that open its worktree run (see [`git_confinement`]).
     /// Confined git reads a snapshot of the user's git config, written to the session's
     /// daemon-owned dir, without values the session's scanner flags as secrets.
-    async fn git_launch(
+    pub(super) async fn git_launch(
         &self,
         session: &Session,
         dirs: &forge_git::GitDirs,
         scanner: &Arc<SecretScanner>,
+        config_name: &str,
     ) -> Launch {
         let confine = match git_confinement(session.sandbox, self.sandbox.as_ref()) {
             Ok(None) => {
@@ -1099,7 +1109,7 @@ impl SessionManager {
             .dirs
             .sessions
             .join(session.id.to_string())
-            .join("git-config");
+            .join(config_name);
         let home = self.dirs.home.clone();
         let xdg = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
@@ -1154,10 +1164,11 @@ struct RepoPlan {
 }
 
 /// `text` for the agent, after the notes it should hear first: approvals a restart cancelled,
-/// and hook notes from writes and allowed actions.
+/// a rewind, and hook notes from writes and allowed actions.
 fn agent_text(live: &Live, text: String) -> String {
     let mut parts = Vec::new();
     parts.extend(lock(&live.resume_note).take());
+    parts.extend(lock(&live.rewind_note).take());
     let notes = std::mem::take(&mut *lock(&live.notes));
     if !notes.is_empty() {
         parts.push(format!(
