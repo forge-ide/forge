@@ -342,8 +342,11 @@ fn launcher(
                 .confine
                 .git(&read, &write)
                 .map_err(GitError::NotConfined)?;
-            // The user's own config, as far as confined git may see it.
-            cmd.env("GIT_CONFIG_GLOBAL", &confined.config);
+            // The user's own config, as far as confined git may see it; and no default ignore or
+            // attributes file of theirs, which it couldn't read: the snapshot names the ones in
+            // use.
+            cmd.env("GIT_CONFIG_GLOBAL", &confined.config)
+                .env("XDG_CONFIG_HOME", confined.config.with_extension("none"));
             Ok(cmd)
         }
         Launch::Refused(why) => Err(GitError::NotConfined(why.clone())),
@@ -925,10 +928,19 @@ mod tests {
         std::fs::write(wt.join("a.txt"), "changed\n").unwrap();
         let staged = stage(&dirs, &wt, "feat/x", None, &index).unwrap();
         commit(&dirs, &wt, "feat/x", &staged, "m", &index).unwrap();
-        let calls = recording.0.lock().unwrap();
+        let calls = recording.0.lock().unwrap().clone();
         // Staging's read-tree, status, add, and write-tree, then the worktree's own read-tree
         // and refresh: everything but reading objects and refs, and moving the branch.
         assert_eq!(calls.len(), 6, "{calls:?}");
+        // Git's default ignore and attributes files are looked for where nothing is.
+        let launched = launcher(&dirs, &wt, &index, &["status"]).unwrap();
+        let xdg = launched
+            .get_envs()
+            .find(|(k, _)| *k == "XDG_CONFIG_HOME")
+            .and_then(|(_, v)| v)
+            .map(PathBuf::from)
+            .unwrap();
+        assert!(!xdg.exists(), "{xdg:?}");
         let objects = dirs.common.join("objects");
         assert!(calls.iter().any(|(_, write)| write.contains(&objects)));
         for (read, write) in calls.iter() {
