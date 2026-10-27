@@ -41,6 +41,7 @@ use crate::store::{SessionStore, StoreError, WorktreeRecord};
 mod approvals;
 mod checkpoints;
 mod commit;
+mod review;
 
 use approvals::{Pending, SessionGate};
 use commit::CommitTool;

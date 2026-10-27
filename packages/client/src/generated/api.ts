@@ -236,11 +236,31 @@ export type Hunk = {
 export type FileStatus = "added" | "modified" | "deleted" | "renamed";
 
 export type FileChange = {
+  /**
+   * The repo the file is in, by its name in `forge.toml`.
+   */
+  repo?: string;
   path: string;
   status: FileStatus;
   oldPath?: string;
+  /**
+   * Each side's mode, in octal as git prints it (`100644`, `100755`, `120000` for a
+   * symlink, `160000` for a submodule), when the file is on that side.
+   */
+  oldMode?: string;
+  newMode?: string;
   additions: number;
   deletions: number;
+  /**
+   * A side held a NUL byte or bytes that aren't UTF-8. Its hunks and counts are still
+   * there, with each such byte shown as U+FFFD; clients collapse it by default.
+   */
+  binary: boolean;
+  /**
+   * A side is over 16 MiB or 1,000,000 lines: no line counts, and `review.fileDiff`
+   * refuses it. Clients show it as a warning, never as an unchanged-looking 0/0.
+   */
+  tooLarge: boolean;
 };
 
 export type Changeset = {
@@ -634,6 +654,10 @@ export type ReviewChangesetParams = { sessionId: SessionId; fromCheckpoint?: Che
 
 export type ReviewFileDiffParams = {
   sessionId: SessionId;
+  /**
+   * The repo the file is in; may be left out when the session has only one.
+   */
+  repo?: string;
   path: string;
   fromCheckpoint?: CheckpointId;
 };

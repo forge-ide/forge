@@ -1,4 +1,16 @@
-//! Changesets and comment threads.
+//! Changesets and comment threads: diffs of a session's files between checkpoints, which turn
+//! each hunk came from, and stable hunk IDs. Everything here works on text already read out
+//! of git; nothing in it reads the worktree.
+
+pub mod diff;
+pub mod history;
+pub mod id;
+
+pub use diff::{
+    CONTEXT, DiffHunk, FileDiff, counts, diff, diff_lines, display, is_binary, line_count, split,
+};
+pub use history::{History, history};
+pub use id::hunk_id;
 
 /// This crate's package name.
 pub const NAME: &str = env!("CARGO_PKG_NAME");

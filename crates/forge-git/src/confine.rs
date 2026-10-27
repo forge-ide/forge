@@ -94,9 +94,10 @@ pub(crate) enum Reach {
 pub(crate) fn reach(args: &[&str]) -> Reach {
     let has = |flag: &str| args.contains(&flag);
     match args.first().copied() {
-        Some("rev-parse" | "ls-tree" | "commit-tree" | "update-ref" | "cat-file" | "diff-tree") => {
-            Reach::Repo
-        }
+        Some(
+            "rev-parse" | "ls-tree" | "commit-tree" | "update-ref" | "cat-file" | "diff-tree"
+            | "merge-base",
+        ) => Reach::Repo,
         Some("ls-files") if has("-s") && !has("--others") && !has("-o") => Reach::Repo,
         Some("read-tree") if has("-u") => Reach::Checkout,
         _ => Reach::Scan,
@@ -374,6 +375,9 @@ mod tests {
             &["update-ref", "-m", "m", "r", "n", "o"],
             &["cat-file", "-s", "x"],
             &["diff-tree", "-r", "a", "b"],
+            &["diff-tree", "--stdin", "-r", "-z", "-M", "--raw"],
+            &["cat-file", "--batch"],
+            &["merge-base", "a", "b"],
             &["ls-files", "-s", "-z"],
         ] {
             assert_eq!(reach(repo), Reach::Repo, "{repo:?}");

@@ -472,6 +472,39 @@ pub(crate) fn run_env(
     stdin: Option<&[u8]>,
     env: &[(&str, &str)],
 ) -> Result<String, GitError> {
+    let out = exec(
+        dirs,
+        worktree,
+        index,
+        args,
+        stdin,
+        env,
+        "; commit fewer paths at a time",
+    )?;
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// [`run`], with git's stdout as it wrote it.
+pub(crate) fn run_bytes(
+    dirs: &GitDirs,
+    worktree: &Path,
+    index: &Path,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+) -> Result<Vec<u8>, GitError> {
+    exec(dirs, worktree, index, args, stdin, &[], "")
+}
+
+/// Run git, with `hint` after the error for output over the cap.
+fn exec(
+    dirs: &GitDirs,
+    worktree: &Path,
+    index: &Path,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+    env: &[(&str, &str)],
+    hint: &str,
+) -> Result<Vec<u8>, GitError> {
     let mut cmd = launcher(dirs, worktree, index, args)?;
     cmd.envs(env.iter().copied());
     // Nothing recurses into nested repos (their config is the agent's to write), and Git LFS
@@ -570,7 +603,7 @@ pub(crate) fn run_env(
         return Err(GitError::Command {
             args: args.join(" "),
             stderr: format!(
-                "output over {} MiB, too large to check; commit fewer paths at a time",
+                "output over {} MiB, too large to check{hint}",
                 MAX_GIT_OUTPUT / 1024 / 1024
             ),
         });
@@ -581,7 +614,7 @@ pub(crate) fn run_env(
             stderr: String::from_utf8_lossy(&stderr).trim().to_owned(),
         });
     }
-    Ok(String::from_utf8_lossy(&stdout).into_owned())
+    Ok(stdout)
 }
 
 /// The largest committed file [`committed_file`] reads.

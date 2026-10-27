@@ -18,16 +18,16 @@ use crate::store::CheckpointRecord;
 /// One repo's worktree, as checkpoints see it.
 #[derive(Clone, Debug)]
 pub(super) struct RepoTarget {
-    repo: String,
-    worktree: PathBuf,
-    dirs: GitDirs,
-    index: PathBuf,
+    pub(super) repo: String,
+    pub(super) worktree: PathBuf,
+    pub(super) dirs: GitDirs,
+    pub(super) index: PathBuf,
 }
 
 /// Why a checkpoint or rewind failed, for the human.
-struct Failed {
-    kind: ErrorKind,
-    detail: String,
+pub(super) struct Failed {
+    pub(super) kind: ErrorKind,
+    pub(super) detail: String,
 }
 
 impl From<CommitError> for Failed {
@@ -238,7 +238,10 @@ impl SessionManager {
     /// dirs are found once per session (and again after a daemon restart), as `git_commit`'s
     /// are at launch: the worktree's `.git` link is believed only when it points back at the
     /// repo, and rewriting it later doesn't change where the daemon's git goes.
-    async fn checkpoint_targets(&self, session: &Session) -> Result<Vec<RepoTarget>, Failed> {
+    pub(super) async fn checkpoint_targets(
+        &self,
+        session: &Session,
+    ) -> Result<Vec<RepoTarget>, Failed> {
         let live = self.live(&session.id);
         if let Some(targets) = lock(&live.checkpoint_targets).clone() {
             return Ok(targets);

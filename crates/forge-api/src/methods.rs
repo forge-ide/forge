@@ -246,6 +246,10 @@ pub struct ReviewChangesetParams {
 #[serde(rename_all = "camelCase")]
 pub struct ReviewFileDiffParams {
     pub session_id: SessionId,
+    /// The repo the file is in; may be left out when the session has only one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub repo: Option<String>,
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]

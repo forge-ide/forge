@@ -16,6 +16,7 @@ forge-git.workspace = true
 forge-hooks.workspace = true
 forge-mcp.workspace = true
 forge-policy.workspace = true
+forge-review.workspace = true
 forge-sandbox.workspace = true
 futures-util.workspace = true
 serde_json.workspace = true

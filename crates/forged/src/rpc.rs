@@ -298,6 +298,31 @@ async fn dispatch(
             run::<EventsUnsubscribe>(params, async |p| unsubscribe(state, conn, p)).await
         }
         EventsQuery::NAME => run::<EventsQuery>(params, async |p| query(state, p).await).await,
+        ReviewChangeset::NAME => {
+            run::<ReviewChangeset>(params, async |p| {
+                let bases = base_branches(state, &p.session_id).await?;
+                Ok(manager
+                    .changeset(&p.session_id, p.from_checkpoint.as_ref(), bases)
+                    .await?)
+            })
+            .await
+        }
+        ReviewFileDiff::NAME => {
+            run::<ReviewFileDiff>(params, async |p| {
+                let bases = base_branches(state, &p.session_id).await?;
+                let hunks = manager
+                    .file_diff(
+                        &p.session_id,
+                        p.repo.as_deref(),
+                        &p.path,
+                        p.from_checkpoint.as_ref(),
+                        bases,
+                    )
+                    .await?;
+                Ok(FileDiffResult { hunks })
+            })
+            .await
+        }
         name if METHOD_NAMES.contains(&name) => Err(RpcError::protocol(
             codes::METHOD_NOT_FOUND,
             format!("{name} is part of API {API_VERSION} but not implemented by this daemon yet"),
@@ -350,6 +375,20 @@ fn hello(state: &State) -> HelloResult {
             .map(|t| t.tier)
             .collect(),
     }
+}
+
+/// Each repo of the session's project, with its base branch as the project configures it now.
+async fn base_branches(
+    state: &State,
+    session: &forge_api::SessionId,
+) -> Result<Vec<(String, String)>, HandlerError> {
+    let session = state.sessions.get(session).await?;
+    let project = get_project(state, session.project_id).await?;
+    Ok(project
+        .repos
+        .into_iter()
+        .map(|r| (r.name, r.base_branch))
+        .collect())
 }
 
 async fn get_project(state: &State, id: forge_api::ProjectId) -> Result<Project, HandlerError> {
