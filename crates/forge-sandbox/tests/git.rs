@@ -17,6 +17,15 @@ const HELPER: &str = env!("CARGO_BIN_EXE_forge-sandbox-exec");
 const SECRET: &str = "PRIVATE KEY that only the user may read\n";
 const CREDENTIALS: &str = "https://user:tok-credentials@example.com\n";
 const INCLUDED: &str = "[http]\n\textraHeader = Authorization: tok-include\n";
+/// A race runs at least this many rounds and this long, however slow the host's confinement.
+const ROUNDS: u32 = 20;
+const RACE: Duration = Duration::from_secs(3);
+/// Past this, a race that still hasn't reached `ROUNDS` fails instead of spinning on.
+const RACE_CAP: Duration = Duration::from_secs(60);
+
+fn racing(start: Instant, rounds: u32) -> bool {
+    (rounds < ROUNDS || start.elapsed() < RACE) && start.elapsed() < RACE_CAP
+}
 
 /// A home with a key, a repo inside it with a session worktree, a dir for the daemon's index,
 /// and the confinement.
@@ -269,9 +278,9 @@ fn race(f: &Fixture, dir: &Path, name: &str, secret: &str) {
             .unwrap();
         String::from_utf8(out.stdout).unwrap().trim().to_owned()
     };
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let start = Instant::now();
     let mut rounds = 0;
-    while Instant::now() < deadline {
+    while racing(start, rounds) {
         std::fs::write(f.wt.join("a.txt"), format!("round {rounds}\n")).unwrap();
         match commit::stage(&f.dirs, &f.wt, "feat/x", None, &index) {
             Ok(_) | Err(CommitError::NothingToCommit) | Err(CommitError::Git(_)) => {}
@@ -284,7 +293,7 @@ fn race(f: &Fixture, dir: &Path, name: &str, secret: &str) {
     let _ = std::fs::remove_file(&d);
     let _ = std::fs::remove_dir_all(&real);
     let _ = std::fs::remove_dir_all(&d);
-    assert!(rounds > 10, "only {rounds} rounds");
+    assert!(rounds >= ROUNDS, "only {rounds} rounds");
     let found = Command::new("git")
         .args(["cat-file", "-e", &secret_blob])
         .current_dir(&f.repo)
@@ -349,9 +358,9 @@ fn a_link_swapped_in_while_rewinding_never_writes_outside() {
             }
         })
     };
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let start = Instant::now();
     let (mut n, mut previous, mut rounds) = (3, two.clone(), 0);
-    while Instant::now() < deadline {
+    while racing(start, rounds) {
         // Snapshot what's there now, then rewind to whichever checkpoint it isn't.
         let Ok(now) = take(n, Some(&previous)) else {
             continue;
@@ -367,7 +376,7 @@ fn a_link_swapped_in_while_rewinding_never_writes_outside() {
     }
     stop.store(true, Ordering::Relaxed);
     swapper.join().unwrap();
-    assert!(rounds > 10, "only {rounds} rounds");
+    assert!(rounds >= ROUNDS, "only {rounds} rounds");
     let mut left: Vec<String> = std::fs::read_dir(&outside)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
