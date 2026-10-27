@@ -58,6 +58,9 @@ impl Fixture {
         let repo = home.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "--quiet", "--initial-branch=main"]);
+        // The repo's own identity, so commits don't depend on the machine's git config.
+        git(&repo, &["config", "user.name", "T"]);
+        git(&repo, &["config", "user.email", "t@example.com"]);
         std::fs::write(repo.join("a.txt"), "a\n").unwrap();
         git(&repo, &["add", "a.txt"]);
         git(&repo, &["commit", "--quiet", "-m", "initial"]);
