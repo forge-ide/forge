@@ -3,8 +3,9 @@
 //! `unsafe` code, which rules out `Command::pre_exec`.
 //!
 //! ```text
-//! forge-sandbox-exec light|standard <policy-json> [--env NAME=value]... -- <program> [args...]
+//! forge-sandbox-exec light|standard|confine <policy-json> [--env NAME=value]... -- <program> [args...]
 //! forge-sandbox-exec check-light
+//! forge-sandbox-exec check-confine
 //! ```
 //!
 //! `--env` variables are set on the command only, after the restrictions apply, so a loader
@@ -37,8 +38,8 @@ fn run(args: Vec<OsString>) -> Result<Never, (u8, String)> {
     let usage = || {
         (
             SETUP_FAILED,
-            "usage: forge-sandbox-exec light|standard <policy-json> [--env NAME=value]... -- \
-             <program> [args...]"
+            "usage: forge-sandbox-exec light|standard|confine <policy-json> [--env NAME=value]... \
+             -- <program> [args...]"
                 .to_owned(),
         )
     };
@@ -46,6 +47,17 @@ fn run(args: Vec<OsString>) -> Result<Never, (u8, String)> {
     let mode = args.next().ok_or_else(usage)?;
     if mode == "check-light" {
         check_light().map_err(|e| (SETUP_FAILED, e))?;
+        std::process::exit(0);
+    }
+    if mode == "check-confine" {
+        enforce(&Policy {
+            mode: crate::policy::Mode::Confine,
+            read: vec![],
+            write: vec![],
+            connect_ports: vec![],
+            forward: None,
+        })
+        .map_err(|e| (SETUP_FAILED, e))?;
         std::process::exit(0);
     }
     let policy = args.next().ok_or_else(usage)?;
@@ -70,6 +82,7 @@ fn run(args: Vec<OsString>) -> Result<Never, (u8, String)> {
     let expected = match mode.to_str() {
         Some("light") => crate::policy::Mode::Light,
         Some("standard") => crate::policy::Mode::Standard,
+        Some("confine") => crate::policy::Mode::Confine,
         _ => return Err(usage()),
     };
     if policy.mode != expected {
@@ -116,10 +129,15 @@ fn check_light() -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 fn enforce(policy: &Policy) -> Result<(), String> {
-    if policy.mode == crate::policy::Mode::Light {
-        crate::linux::landlock::restrict(policy)?;
+    use crate::policy::Mode;
+    match policy.mode {
+        Mode::Light => {
+            crate::linux::landlock::restrict(policy)?;
+            crate::linux::seccomp::apply(policy.mode)
+        }
+        Mode::Standard => crate::linux::seccomp::apply(policy.mode),
+        Mode::Confine => crate::linux::landlock::confine(policy),
     }
-    crate::linux::seccomp::apply(policy.mode)
 }
 
 #[cfg(not(target_os = "linux"))]

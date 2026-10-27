@@ -20,6 +20,7 @@ use forge_api::model::SandboxTier;
 use tokio::process::Command;
 
 mod env;
+mod git;
 pub mod policy;
 pub mod proxy;
 pub mod secrets;
@@ -36,6 +37,7 @@ mod macos;
 pub mod helper;
 
 pub use env::{PASSTHROUGH_VARS, STARTUP_FILES_OFF, is_passed_through, is_valid_name};
+pub use git::{GitConfinement, PlainGit};
 pub use unsandboxed::{SIGN_IN_VARS, Unsandboxed};
 pub use view::{HOME_WRITABLE, SYSTEM_READ_ONLY, View, shows_read_only, toolchains};
 
@@ -164,6 +166,10 @@ pub trait Sandbox: Send + Sync + 'static {
 
     /// Build the sandbox for one session. Blocking: creates the session's scratch dirs.
     fn prepare(&self, spec: Spec) -> Result<Arc<dyn SessionSandbox>, SandboxError>;
+
+    /// The daemon's own git, confined (see [`GitConfinement`]), or why this machine can't
+    /// confine it.
+    fn git_confinement(&self) -> Result<Arc<GitConfinement>, Unavailable>;
 }
 
 /// One session's sandbox. Every process the session starts goes through [`Self::command`].
@@ -209,8 +215,7 @@ pub fn system(helper: PathBuf) -> Arc<dyn Sandbox> {
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = helper;
-        Arc::new(macos::Seatbelt::probe())
+        Arc::new(macos::Seatbelt::probe(helper))
     }
 }
 

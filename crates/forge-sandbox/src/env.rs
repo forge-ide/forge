@@ -61,6 +61,32 @@ pub(crate) fn from_daemon() -> Vec<(String, String)> {
     passthrough(std::env::vars())
 }
 
+/// The environment the daemon's own git runs with, in every tier: the daemon's allowlisted
+/// variables and `HOME`, with only `PATH` entries that are absolute and exist, so a filter
+/// that git runs from the worktree never finds a program there by a relative entry (`.`,
+/// an empty one).
+pub(crate) fn for_git(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, String)> {
+    let vars: Vec<(String, String)> = vars.collect();
+    let mut env: Vec<(String, String)> = passthrough(vars.iter().cloned())
+        .into_iter()
+        .map(|(k, v)| {
+            let v = if k == "PATH" { absolute_path(&v) } else { v };
+            (k, v)
+        })
+        .collect();
+    env.extend(vars.into_iter().filter(|(k, _)| k == "HOME"));
+    env
+}
+
+/// `path` without entries that are relative or don't exist.
+pub(crate) fn absolute_path(path: &str) -> String {
+    std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute() && dir.is_dir())
+        .map(|dir| dir.display().to_string())
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
 /// Whether `name` can be an environment variable's name: not empty, and no `=` or NUL, either
 /// of which would make the entry mean something else to the process (`PATH=x=` is read as a
 /// second `PATH` by shells).
@@ -91,6 +117,22 @@ pub(crate) fn lookup(env: &[(String, String)], name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_gets_only_absolute_existing_path_entries_and_home() {
+        let vars = [
+            ("PATH", ".::bin:/usr/bin:/nonexistent-forge-dir"),
+            ("HOME", "/home/u"),
+            ("SSH_AUTH_SOCK", "/run/agent"),
+            ("GIT_TRACE", "/tmp/trace"),
+        ]
+        .map(|(k, v)| (k.to_owned(), v.to_owned()));
+        let env = for_git(vars.into_iter());
+        assert_eq!(lookup(&env, "PATH").as_deref(), Some("/usr/bin"));
+        assert_eq!(lookup(&env, "HOME").as_deref(), Some("/home/u"));
+        assert_eq!(lookup(&env, "SSH_AUTH_SOCK"), None);
+        assert_eq!(lookup(&env, "GIT_TRACE"), None);
+    }
 
     #[test]
     fn extra_variables_never_replace_the_sandboxs_or_smuggle_names() {

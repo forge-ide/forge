@@ -21,8 +21,10 @@ use forge_api::model::{SandboxTier, SessionState};
 
 /// Edits two files and runs one command, as in the session tests, then tries to read an SSH
 /// key from the real home and to reach a host off the allowlist, through terminals, runs a
-/// command a hook denies, and tries to change a hook script.
-fn script(key: &Path, probe: &Path, hooks: &Path) -> String {
+/// command a hook denies, tries to change a hook script, writes programs named `git` and
+/// `lfsx` into its worktree, and commits with `git_commit`, whose git runs confined in each
+/// sandboxed tier and never runs those.
+fn script(key: &Path, probe: &Path, hooks: &Path, marks: &Path) -> String {
     format!(
         r#"
 steps:
@@ -37,12 +39,15 @@ steps:
   - exec: ["sh", "-c", "echo key=$ANTHROPIC_API_KEY url=$ANTHROPIC_BASE_URL"]
   - exec: {{ argv: ["rm", "hello.txt"], expect: deny }}
   - exec: ["sh", "-c", "echo x >> {}/no-rm.sh || echo hooks-read-only"]
+  - exec: ["sh", "-c", "for p in lfsx git gpg; do printf '#!/bin/sh\\ntouch {}/path-mark-'$p'\\n' > $p && chmod +x $p; done"]
+  - mcp_call: {{ tool: git_commit, arguments: {{ message: "add lib", paths: ["src/lib.txt"] }} }}
   - message: "Done."
   - end_turn
 "#,
         key.display(),
         probe.display(),
-        hooks.display()
+        hooks.display(),
+        marks.display()
     )
 }
 
@@ -60,12 +65,33 @@ fn setup(tier: &str) -> Setup {
     std::fs::create_dir_all(key.parent().unwrap()).unwrap();
     std::fs::write(&key, "PRIVATE KEY\n").unwrap();
     let repo = git_repo_with_commit(home.path(), "demo");
+    // A filter the user set in the repo's own config, which the daemon's git runs when it
+    // stages `src/`: it leaves a mark in the home, which only an unconfined git can write,
+    // and runs `lfsx`, which the agent writes into the worktree and which the daemon's `.` in
+    // `PATH` would find there.
+    let mark = home.path().join("filter-ran");
+    common::git(
+        &repo,
+        &[
+            "config",
+            "filter.probe.clean",
+            &format!("touch {}; lfsx </dev/null; cat", mark.display()),
+        ],
+    );
+    std::fs::write(repo.join(".gitattributes"), "src/* filter=probe\n").unwrap();
+    common::git(&repo, &["add", ".gitattributes"]);
+    common::git(&repo, &["commit", "--quiet", "-m", "attributes"]);
+    let _ = std::fs::remove_file(&mark);
     let scripts = home.path().join("scripts");
     std::fs::create_dir_all(&scripts).unwrap();
     let script_path = scripts.join("fake.yaml");
     let probe = &sandbox_bins()[1];
     let hooks = repo.join(".forge/hooks");
-    std::fs::write(&script_path, script(&key, probe, &hooks)).unwrap();
+    std::fs::write(
+        &script_path,
+        script(&key, probe, &hooks, &repo.join(".git/objects")),
+    )
+    .unwrap();
     write_hooks(&repo);
     std::fs::create_dir_all(repo.join(".forge/agents")).unwrap();
     let opt_in = if tier == "unsandboxed" {
@@ -140,7 +166,14 @@ fn start_daemon(s: &Setup) -> Daemon {
     std::fs::write(&tool, script).unwrap();
     std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
     Daemon::start_with(s.home.path(), |cmd| {
-        cmd.env("FORGE_KEYRING_TOOL", &tool);
+        // A relative entry first: the daemon's git must never use it.
+        let path = format!(".:{}", std::env::var("PATH").unwrap_or_default());
+        cmd.env("FORGE_KEYRING_TOOL", &tool)
+            .env("PATH", path)
+            .env("GIT_AUTHOR_NAME", "Dev")
+            .env("GIT_AUTHOR_EMAIL", "dev@example.com")
+            .env("GIT_COMMITTER_NAME", "Dev")
+            .env("GIT_COMMITTER_EMAIL", "dev@example.com");
     })
 }
 
@@ -256,6 +289,21 @@ async fn fake_agent_in(tier: SandboxTier) {
     assert_eq!(
         std::fs::read_to_string(worktree.join("hello.txt")).unwrap(),
         "hello\n"
+    );
+    assert_eq!(
+        common::git(&s.repo, &["log", "-1", "--format=%s", "feat/add-greeting"]).trim(),
+        "add lib"
+    );
+    // The daemon's git never ran the agent's program, whatever the tier.
+    for program in ["lfsx", "git"] {
+        let mark = s.repo.join(format!(".git/objects/path-mark-{program}"));
+        assert!(!mark.exists(), "the daemon ran the agent's {program}");
+    }
+    // The daemon's git staged it confined in a sandboxed tier; unconfined, for the control.
+    assert_eq!(
+        s.home.path().join("filter-ran").exists(),
+        tier == SandboxTier::Unsandboxed,
+        "the daemon's git ran confined only in sandboxed tiers"
     );
     assert!(s.key.exists());
 }

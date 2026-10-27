@@ -12,6 +12,8 @@ pub enum Mode {
     Light,
     /// Inside bubblewrap: the Standard seccomp filter only; namespaces do the rest.
     Standard,
+    /// The daemon's own git: Landlock's file rules only (see `GitConfinement`).
+    Confine,
 }
 
 /// Passed to the helper as one JSON argument.
