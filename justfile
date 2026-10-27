@@ -65,6 +65,7 @@ _gen-into client schemas: install
 # can't run fails the suite instead of being skipped.
 test-sandbox:
     cargo test -p forge-sandbox --test escape -- --include-ignored
+    cargo test -p forge-sandbox --test git -- --include-ignored
     cargo test -p forged --test sandbox -- --include-ignored
 
 # UI end-to-end tests with the fake agent.

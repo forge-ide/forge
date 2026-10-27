@@ -24,7 +24,7 @@ use forge_api::{
 };
 use forge_config::{PolicyRule, RuleListName};
 use forge_events::EventLog;
-use forge_git::{CreateMode, GitError, Worktrees, worktree_path};
+use forge_git::{CreateMode, GitError, Launch, Worktrees, worktree_path};
 use forge_hooks::{HookContext, HookLog, HookRunner, HookSet, ShellHooks, TaskCheck};
 use forge_policy::{Engine, NoClassifier, Policy, Rules, SecretScanner};
 use forge_sandbox::proxy::{
@@ -582,7 +582,7 @@ impl SessionManager {
         })
         .await
         .map_err(|e| e.to_string())??;
-        let (mut launch, worktrees, workspace, upstream, target) = found;
+        let (mut launch, worktrees, workspace, upstream, mut target) = found;
         let secrets = std::mem::take(&mut launch.secrets);
         let (rules, hook_set) = (launch.rules.clone(), launch.hooks.clone());
         let project_root = launch.project_root.clone();
@@ -614,6 +614,7 @@ impl SessionManager {
         values.push(proxy.token().to_owned());
         values.extend(launch.home.secrets.iter().cloned());
         let scanner = Arc::new(SecretScanner::new(values));
+        target.dirs.launch = self.git_launch(session, &target.dirs, &scanner).await;
         let record = session.clone();
         let manifest = launch.agent.as_deref().and_then(adapters::manifest);
         let repo_git = (
@@ -1075,6 +1076,56 @@ impl SessionManager {
         .map_err(|e| SessionError::Internal(e.to_string()))?
     }
 
+    /// How the session's git commands that open its worktree run (see [`git_confinement`]).
+    /// Confined git reads a snapshot of the user's git config, written to the session's
+    /// daemon-owned dir, without values the session's scanner flags as secrets.
+    async fn git_launch(
+        &self,
+        session: &Session,
+        dirs: &forge_git::GitDirs,
+        scanner: &Arc<SecretScanner>,
+    ) -> Launch {
+        let confine = match git_confinement(session.sandbox, self.sandbox.as_ref()) {
+            Ok(None) => {
+                return match forge_sandbox::PlainGit::new() {
+                    Ok(plain) => Launch::Plain(Arc::new(plain)),
+                    Err(why) => Launch::Refused(why.to_string()),
+                };
+            }
+            Ok(Some(confine)) => confine,
+            Err(why) => return Launch::Refused(why),
+        };
+        let config = self
+            .dirs
+            .sessions
+            .join(session.id.to_string())
+            .join("git-config");
+        let home = self.dirs.home.clone();
+        let xdg = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"));
+        let (dirs, scanner, id) = (dirs.clone(), scanner.clone(), session.id.clone());
+        let built = tokio::task::spawn_blocking(move || {
+            let looks_secret = |value: &str| !scanner.scan(value).is_empty();
+            let snap = forge_git::confine::snapshot(&dirs, &home, &xdg, &looks_secret)?;
+            for key in &snap.dropped {
+                tracing::warn!(session_id = %id, key, "left a git config setting that looks like it holds a secret out of the daemon's git");
+            }
+            forge_git::confine::write_snapshot(&snap, &config)?;
+            Ok::<_, GitError>(forge_git::confine::Confined {
+                confine,
+                config,
+                read: snap.read,
+            })
+        })
+        .await;
+        match built {
+            Ok(Ok(confined)) => Launch::Confined(confined),
+            Ok(Err(e)) => Launch::Refused(format!("reading the user's git config: {e}")),
+            Err(e) => Launch::Refused(e.to_string()),
+        }
+    }
+
     fn live(&self, id: &SessionId) -> Arc<Live> {
         lock(&self.live).entry(id.clone()).or_default().clone()
     }
@@ -1174,6 +1225,22 @@ impl EventSink for SessionSink {
     }
 }
 
+/// The confinement for the session's git commands that open its worktree: `None` when the
+/// session itself runs unsandboxed, whose agent can reach whatever the daemon's git could;
+/// an error when this machine can't confine git, which then doesn't run at all.
+fn git_confinement(
+    tier: SandboxTier,
+    sandbox: &dyn Sandbox,
+) -> Result<Option<Arc<forge_sandbox::GitConfinement>>, String> {
+    if tier == SandboxTier::Unsandboxed {
+        return Ok(None);
+    }
+    sandbox
+        .git_confinement()
+        .map(Some)
+        .map_err(|why| format!("this machine can't confine it ({why})"))
+}
+
 fn repo_error(e: GitError) -> SessionError {
     match e {
         GitError::Command { .. } | GitError::Io { .. } => SessionError::Internal(e.to_string()),
@@ -1206,6 +1273,43 @@ fn repo_of(path: &Path, branch: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sandbox that can't confine git.
+    struct NoConfinement;
+
+    impl Sandbox for NoConfinement {
+        fn tiers(&self) -> Vec<forge_sandbox::TierStatus> {
+            vec![]
+        }
+        fn prepare(
+            &self,
+            _: forge_sandbox::Spec,
+        ) -> Result<Arc<dyn forge_sandbox::SessionSandbox>, forge_sandbox::SandboxError> {
+            unreachable!()
+        }
+        fn git_confinement(
+            &self,
+        ) -> Result<Arc<forge_sandbox::GitConfinement>, forge_sandbox::Unavailable> {
+            Err(forge_sandbox::Unavailable {
+                reason: "no Landlock".into(),
+                fix: "boot with landlock".into(),
+            })
+        }
+    }
+
+    #[test]
+    fn git_runs_confined_or_not_at_all_unless_the_session_is_unsandboxed() {
+        assert!(matches!(
+            git_confinement(SandboxTier::Unsandboxed, &NoConfinement),
+            Ok(None)
+        ));
+        for tier in [SandboxTier::Light, SandboxTier::Standard] {
+            match git_confinement(tier, &NoConfinement) {
+                Err(why) => assert!(why.contains("no Landlock"), "{why}"),
+                other => panic!("{other:?}"),
+            }
+        }
+    }
 
     #[test]
     fn repo_of_strips_the_worktree_suffix_only() {

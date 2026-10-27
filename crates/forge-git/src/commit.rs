@@ -13,10 +13,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::confine::{self, Launch};
 use crate::worktree::{GitDirs, GitError};
 
-/// Most diff text kept for the secret scan; a larger change is reported as cut.
-const MAX_DIFF: usize = 4 * 1024 * 1024;
+/// Most diff text kept for the secret scan; a larger change is reported as cut. Binary files
+/// count too, since a file git would call binary can still hold a secret.
+const MAX_DIFF: usize = 16 * 1024 * 1024;
 
 /// Most bytes of changed files one commit may hold. Checked before anything is staged, so
 /// an agent can't fill the daemon's memory, or the repo's object store, through `git_commit`.
@@ -78,6 +80,12 @@ pub fn stage(
             .collect::<Result<_, _>>()?,
     };
     let _ = std::fs::remove_file(index);
+    if let Some(dir) = index.parent() {
+        std::fs::create_dir_all(dir).map_err(|source| GitError::Io {
+            context: format!("creating {}", dir.display()),
+            source,
+        })?;
+    }
     let run = |args: &[&str]| run(dirs, worktree, index, args, None);
     let parent = run(&[
         "rev-parse",
@@ -88,6 +96,7 @@ pub fn stage(
     .trim()
     .to_owned();
     run(&["read-tree", &parent])?;
+    drop_gitlinks(dirs, worktree, index)?;
     // What would be staged, by size on disk, before any of it is copied into the repo.
     let mut status = vec![
         "status",
@@ -95,6 +104,7 @@ pub fn stage(
         "-z",
         "--untracked-files=all",
         "--no-renames",
+        "--ignore-submodules=all",
         "--",
     ];
     status.extend(pathspecs.iter().map(String::as_str));
@@ -112,6 +122,7 @@ pub fn stage(
     let mut add = vec!["add", "--all", "--"];
     add.extend(pathspecs.iter().map(String::as_str));
     run(&add)?;
+    pin_gitlinks(dirs, worktree, index, &parent)?;
     let tree = run(&["write-tree"])?.trim().to_owned();
     let changed: Vec<String> = run(&[
         "diff-tree",
@@ -129,16 +140,27 @@ pub fn stage(
     if changed.is_empty() {
         return Err(CommitError::NothingToCommit);
     }
-    let diff = run(&[
-        "diff-tree",
-        "-p",
-        "-U0",
-        "--no-renames",
-        "--no-ext-diff",
-        "--no-textconv",
-        &parent,
-        &tree,
-    ])?;
+    // Every added line, as text: neither git's binary guess (a NUL byte near the start) nor an
+    // attribute (`-diff`, `binary`) may keep one from the scan. Attributes come from the
+    // branch tip, so this never reads the worktree.
+    let diff = run_env(
+        dirs,
+        worktree,
+        index,
+        &[
+            "diff-tree",
+            "-p",
+            "-U0",
+            "--text",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            &parent,
+            &tree,
+        ],
+        None,
+        &[("GIT_ATTR_SOURCE", &parent)],
+    )?;
     let mut added = String::new();
     let mut cut = false;
     for line in diff.lines() {
@@ -215,6 +237,70 @@ pub fn commit(
     Ok(commit)
 }
 
+/// Paths `index` holds as gitlinks: nested repositories, submodules or not.
+fn gitlinks(dirs: &GitDirs, worktree: &Path, index: &Path) -> Result<Vec<String>, GitError> {
+    Ok(run(dirs, worktree, index, &["ls-files", "-s", "-z"], None)?
+        .split('\0')
+        .filter(|e| e.starts_with("160000 "))
+        .filter_map(|e| e.split_once('\t').map(|(_, path)| path.to_owned()))
+        .collect())
+}
+
+/// Take every gitlink out of `index`. While one is there, `status`, `add`, and `diff-files`
+/// look inside that nested repo with a git of their own, which reads the nested repo's config,
+/// filters included; and inside a worktree, that config is the agent's to write.
+fn drop_gitlinks(dirs: &GitDirs, worktree: &Path, index: &Path) -> Result<(), GitError> {
+    let links = gitlinks(dirs, worktree, index)?;
+    if links.is_empty() {
+        return Ok(());
+    }
+    let mut input = links.join("\0");
+    input.push('\0');
+    run(
+        dirs,
+        worktree,
+        index,
+        &["update-index", "-z", "--force-remove", "--stdin"],
+        Some(input.as_bytes()),
+    )
+    .map(drop)
+}
+
+/// Make `index`'s gitlinks exactly `parent`'s: nested repos are committed as the branch has
+/// them, whatever the worktree holds, since the daemon never looks inside one. Only reads and
+/// writes the index.
+fn pin_gitlinks(
+    dirs: &GitDirs,
+    worktree: &Path,
+    index: &Path,
+    parent: &str,
+) -> Result<(), GitError> {
+    drop_gitlinks(dirs, worktree, index)?;
+    let listed = run(
+        dirs,
+        worktree,
+        index,
+        &["ls-tree", "-r", "-z", parent],
+        None,
+    )?;
+    let pinned: String = listed
+        .split('\0')
+        .filter(|e| e.starts_with("160000 commit "))
+        .map(|e| format!("{e}\0"))
+        .collect();
+    if pinned.is_empty() {
+        return Ok(());
+    }
+    run(
+        dirs,
+        worktree,
+        index,
+        &["update-index", "-z", "--index-info"],
+        Some(pinned.as_bytes()),
+    )
+    .map(drop)
+}
+
 /// `path` as a literal pathspec, if it is relative and stays inside the working directory.
 fn checked_path(path: &str) -> Result<String, CommitError> {
     let p = Path::new(path);
@@ -228,6 +314,50 @@ fn checked_path(path: &str) -> Result<String, CommitError> {
     }
 }
 
+/// The command that starts git for `args` on `worktree`: confined, for a command that opens
+/// the worktree's files, as `dirs.launch` says.
+fn launcher(
+    dirs: &GitDirs,
+    worktree: &Path,
+    index: &Path,
+    args: &[&str],
+) -> Result<Command, GitError> {
+    let reach = confine::reach(args);
+    // Never a bare `git`, which a relative `PATH` entry would find in the worktree.
+    let plain = confine::plain;
+    if reach == confine::Reach::Repo {
+        // Out of the worktree too: it never opens its files, so it never runs in it.
+        let mut cmd = plain()?;
+        cmd.current_dir(&dirs.common);
+        return Ok(cmd);
+    }
+    let mut cmd = match &dirs.launch {
+        Launch::Unconfined => plain(),
+        Launch::Plain(plain) => plain.git(&[], &[]).map_err(GitError::NotConfined),
+        Launch::Confined(confined) => {
+            let (mut read, write) = confine::paths(reach, dirs, worktree, index);
+            read.extend(confined.read.iter().cloned());
+            read.push(confined.config.clone());
+            let mut cmd = confined
+                .confine
+                .git(&read, &write)
+                .map_err(GitError::NotConfined)?;
+            // The user's own config, as far as confined git may see it; and no default ignore or
+            // attributes file of theirs, which it couldn't read: the snapshot names the ones in
+            // use.
+            cmd.env("GIT_CONFIG_GLOBAL", &confined.config)
+                .env("XDG_CONFIG_HOME", confined.config.with_extension("none"));
+            Ok(cmd)
+        }
+        Launch::Refused(why) => Err(GitError::NotConfined(why.clone())),
+        Launch::Unset => Err(GitError::NotConfined(
+            "no confinement was chosen for this worktree".into(),
+        )),
+    }?;
+    cmd.current_dir(worktree);
+    Ok(cmd)
+}
+
 /// Run git on `worktree` with the repo's shared git dir and `index`; its stdout on success.
 fn run(
     dirs: &GitDirs,
@@ -236,15 +366,34 @@ fn run(
     args: &[&str],
     stdin: Option<&[u8]>,
 ) -> Result<String, GitError> {
-    let mut cmd = Command::new("git");
+    run_env(dirs, worktree, index, args, stdin, &[])
+}
+
+/// [`run`], with `env` added to git's environment.
+fn run_env(
+    dirs: &GitDirs,
+    worktree: &Path,
+    index: &Path,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+    env: &[(&str, &str)],
+) -> Result<String, GitError> {
+    let mut cmd = launcher(dirs, worktree, index, args)?;
+    cmd.envs(env.iter().copied());
+    // Nothing recurses into nested repos (their config is the agent's to write), and Git LFS
+    // never downloads on the daemon's behalf because of an attribute the agent wrote.
     cmd.args([
         "-c",
         "core.hooksPath=/dev/null",
         "-c",
         "core.fsmonitor=false",
+        "-c",
+        "submodule.recurse=false",
+        "-c",
+        "advice.addEmbeddedRepo=false",
     ])
+    .env("GIT_LFS_SKIP_SMUDGE", "1")
     .args(args)
-    .current_dir(worktree)
     .env("GIT_DIR", &dirs.common)
     .env("GIT_WORK_TREE", worktree)
     .env("GIT_INDEX_FILE", index)
@@ -387,10 +536,11 @@ pub fn committed_file(
     run(dirs, worktree, index, &["cat-file", "blob", object], None).map(Some)
 }
 
-/// Where a session keeps the index its commits are staged in: a daemon-owned dir no sandbox
-/// can write.
+/// Where a session keeps the index its commits are staged in: a dir of its own in the
+/// session's daemon-owned dir, which no sandbox can write, and the only part of it that the
+/// daemon's confined git may (see [`crate::confine`]).
 pub fn index_path(private_dir: &Path) -> PathBuf {
-    private_dir.join("git_commit.index")
+    private_dir.join("git").join("git_commit.index")
 }
 
 #[cfg(test)]
@@ -428,7 +578,8 @@ mod tests {
         let wt = GitCli
             .create(&repo, "feat/x", "main", CreateMode::New)
             .unwrap();
-        let dirs = GitCli.git_dirs(&repo, &wt).unwrap();
+        let mut dirs = GitCli.git_dirs(&repo, &wt).unwrap();
+        dirs.launch = Launch::Unconfined;
         let private = root.join("private");
         std::fs::create_dir(&private).unwrap();
         (dir, repo, wt, dirs, private)
@@ -596,6 +747,230 @@ mod tests {
             Err(CommitError::Moved(_))
         ));
         assert_eq!(git(&repo, &["rev-parse", "feat/x"]).trim(), other.trim());
+    }
+
+    /// A filter in `repo`'s own config that leaves `mark` when anything runs it, and a file it
+    /// applies to.
+    fn plant_filter(repo: &Path, mark: &Path) {
+        git(
+            repo,
+            &[
+                "config",
+                "filter.x.clean",
+                &format!("touch {}; cat", mark.display()),
+            ],
+        );
+        std::fs::write(repo.join(".gitattributes"), "* filter=x\n").unwrap();
+    }
+
+    /// A repo at `dir` with one commit.
+    fn nested_repo(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        git(dir, &["init", "--quiet"]);
+        std::fs::write(dir.join("f"), "x\n").unwrap();
+        git(dir, &[&ID[..], &["add", "f"]].concat());
+        git(dir, &[&ID[..], &["commit", "--quiet", "-m", "f"]].concat());
+    }
+
+    const ID: [&str; 4] = ["-c", "user.name=A", "-c", "user.email=a@x"];
+
+    #[test]
+    fn a_nested_repo_the_agent_made_never_makes_the_daemon_run_its_config() {
+        let (_dir, repo, wt, dirs, private) = setup();
+        let index = index_path(&private);
+        let mark = private.join("filter-ran");
+        let sub = wt.join("sub");
+        nested_repo(&sub);
+        plant_filter(&sub, &mark);
+        std::fs::write(wt.join("a.txt"), "changed\n").unwrap();
+        let staged = stage(&dirs, &wt, "feat/x", None, &index).unwrap();
+        // The branch has no nested repo there, so the commit doesn't either.
+        assert_eq!(staged.changed, ["a.txt"]);
+        commit(&dirs, &wt, "feat/x", &staged, "m", &index).unwrap();
+        // Same size, new contents: stat-dirty, so git would look inside again.
+        std::fs::write(sub.join("f"), "y\n").unwrap();
+        std::fs::write(wt.join("a.txt"), "again\n").unwrap();
+        let staged = stage(&dirs, &wt, "feat/x", None, &index).unwrap();
+        assert_eq!(staged.changed, ["a.txt"]);
+        assert!(!mark.exists(), "the nested repo's filter ran");
+        assert!(
+            !git(&repo, &["ls-tree", "-r", "feat/x"]).contains("sub"),
+            "a nested repo reached the branch"
+        );
+    }
+
+    #[test]
+    fn a_nested_repo_the_branch_holds_stays_where_the_branch_has_it() {
+        let (_dir, repo, wt, dirs, private) = setup();
+        let index = index_path(&private);
+        let mark = private.join("filter-ran");
+        let sub = wt.join("sub");
+        nested_repo(&sub);
+        // Committed on the branch by hand as an embedded repo: a gitlink, no .gitmodules.
+        git(&wt, &[&ID[..], &["add", "sub"]].concat());
+        git(
+            &wt,
+            &[&ID[..], &["commit", "--quiet", "-m", "sub"]].concat(),
+        );
+        let pinned = git(&repo, &["rev-parse", "feat/x:sub"]);
+        // The agent moves the nested repo on, plants a filter, and dirties a file.
+        std::fs::write(sub.join("g"), "g\n").unwrap();
+        git(&sub, &[&ID[..], &["add", "g"]].concat());
+        git(&sub, &[&ID[..], &["commit", "--quiet", "-m", "g"]].concat());
+        plant_filter(&sub, &mark);
+        std::fs::write(sub.join("f"), "y\n").unwrap();
+        // Nothing but the nested repo changed: nothing to commit.
+        assert!(matches!(
+            stage(&dirs, &wt, "feat/x", None, &index),
+            Err(CommitError::NothingToCommit)
+        ));
+        std::fs::write(wt.join("a.txt"), "changed\n").unwrap();
+        let staged = stage(&dirs, &wt, "feat/x", None, &index).unwrap();
+        assert_eq!(staged.changed, ["a.txt"]);
+        commit(&dirs, &wt, "feat/x", &staged, "m", &index).unwrap();
+        std::fs::write(sub.join("f"), "z\n").unwrap();
+        std::fs::write(wt.join("a.txt"), "again\n").unwrap();
+        stage(&dirs, &wt, "feat/x", None, &index).unwrap();
+        assert!(!mark.exists(), "the nested repo's filter ran");
+        assert_eq!(git(&repo, &["rev-parse", "feat/x:sub"]), pinned);
+    }
+
+    #[test]
+    fn a_submodule_stays_where_the_branch_has_it() {
+        let (_dir, repo, wt, dirs, private) = setup();
+        let index = index_path(&private);
+        let mark = private.join("filter-ran");
+        let lib = private.join("lib");
+        nested_repo(&lib);
+        let url = lib.display().to_string();
+        git(
+            &wt,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "--quiet",
+                &url,
+                "lib",
+            ],
+        );
+        git(
+            &wt,
+            &[&ID[..], &["commit", "--quiet", "-m", "lib"]].concat(),
+        );
+        let pinned = git(&repo, &["rev-parse", "feat/x:lib"]);
+        let sub = wt.join("lib");
+        std::fs::write(sub.join("g"), "g\n").unwrap();
+        git(&sub, &[&ID[..], &["add", "g"]].concat());
+        git(&sub, &[&ID[..], &["commit", "--quiet", "-m", "g"]].concat());
+        plant_filter(&sub, &mark);
+        std::fs::write(sub.join("f"), "y\n").unwrap();
+        std::fs::write(wt.join("a.txt"), "changed\n").unwrap();
+        let staged = stage(&dirs, &wt, "feat/x", None, &index).unwrap();
+        assert_eq!(staged.changed, ["a.txt"]);
+        commit(&dirs, &wt, "feat/x", &staged, "m", &index).unwrap();
+        std::fs::write(sub.join("f"), "z\n").unwrap();
+        std::fs::write(wt.join("a.txt"), "again\n").unwrap();
+        stage(&dirs, &wt, "feat/x", None, &index).unwrap();
+        assert!(!mark.exists(), "the submodule's filter ran");
+        assert_eq!(git(&repo, &["rev-parse", "feat/x:lib"]), pinned);
+    }
+
+    #[test]
+    fn without_a_confinement_nothing_opens_the_worktree() {
+        for launch in [Launch::Unset, Launch::Refused("no Landlock".into())] {
+            let (_dir, repo, wt, mut dirs, private) = setup();
+            dirs.launch = launch;
+            let index = index_path(&private);
+            std::fs::write(wt.join("a.txt"), "changed\n").unwrap();
+            match stage(&dirs, &wt, "feat/x", None, &index) {
+                Err(CommitError::Git(GitError::NotConfined(_))) => {}
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(
+                git(&repo, &["rev-parse", "feat/x"]),
+                git(&repo, &["rev-parse", "main"])
+            );
+            // What only reads the repo's objects still works.
+            assert_eq!(
+                committed_file(&dirs, &wt, &index, "feat/x", "a.txt")
+                    .unwrap()
+                    .as_deref(),
+                Some("a\n")
+            );
+        }
+    }
+
+    /// Runs git plainly, recording what each command was allowed.
+    #[derive(Default)]
+    struct Recording(std::sync::Mutex<Vec<(Vec<PathBuf>, Vec<PathBuf>)>>);
+
+    impl crate::Confine for Recording {
+        fn git(&self, read: &[PathBuf], write: &[PathBuf]) -> Result<Command, String> {
+            self.0.lock().unwrap().push((read.to_vec(), write.to_vec()));
+            Ok(Command::new("git"))
+        }
+    }
+
+    #[test]
+    fn commands_that_open_the_worktree_go_through_the_confinement() {
+        let (_dir, repo, wt, mut dirs, private) = setup();
+        let recording = std::sync::Arc::new(Recording::default());
+        let config = private.join("git-config");
+        crate::confine::write_snapshot(&Default::default(), &config).unwrap();
+        dirs.launch = Launch::Confined(crate::confine::Confined {
+            confine: recording.clone(),
+            config: config.clone(),
+            read: vec![],
+        });
+        let index = index_path(&private);
+        std::fs::write(wt.join("a.txt"), "changed\n").unwrap();
+        let staged = stage(&dirs, &wt, "feat/x", None, &index).unwrap();
+        commit(&dirs, &wt, "feat/x", &staged, "m", &index).unwrap();
+        let calls = recording.0.lock().unwrap().clone();
+        // Staging's read-tree, status, add, and write-tree, then the worktree's own read-tree
+        // and refresh: everything but reading objects and refs, and moving the branch.
+        assert_eq!(calls.len(), 6, "{calls:?}");
+        // Git's default ignore and attributes files are looked for where nothing is.
+        let launched = launcher(&dirs, &wt, &index, &["status"]).unwrap();
+        let xdg = launched
+            .get_envs()
+            .find(|(k, _)| *k == "XDG_CONFIG_HOME")
+            .and_then(|(_, v)| v)
+            .map(PathBuf::from)
+            .unwrap();
+        assert!(!xdg.exists(), "{xdg:?}");
+        let objects = dirs.common.join("objects");
+        assert!(calls.iter().any(|(_, write)| write.contains(&objects)));
+        for (read, write) in calls.iter() {
+            assert!(read.contains(&wt) && read.contains(&config));
+            assert!(write.contains(&private.join("git")) || write.contains(&dirs.admin));
+            assert!(!write.contains(&dirs.common) && !write.contains(&private));
+            assert!(!write.iter().any(|w| w.starts_with(repo.join(".git/refs"))));
+        }
+    }
+
+    #[test]
+    fn worktree_attributes_dont_hide_added_lines_from_the_scan() {
+        let (_dir, _repo, wt, dirs, private) = setup();
+        let index = index_path(&private);
+        // Not committed, so not among the changed paths: only the attributes git would read.
+        std::fs::write(wt.join(".gitattributes"), "* -diff binary\n").unwrap();
+        std::fs::write(wt.join("a.txt"), "token = sk-live-1234\n").unwrap();
+        let paths = vec!["a.txt".to_owned()];
+        let staged = stage(&dirs, &wt, "feat/x", Some(&paths), &index).unwrap();
+        assert_eq!(staged.changed, ["a.txt"]);
+        assert!(staged.added.contains("sk-live-1234"), "{staged:?}");
+    }
+
+    #[test]
+    fn a_file_git_would_call_binary_still_reaches_the_scan() {
+        let (_dir, _repo, wt, dirs, private) = setup();
+        let index = index_path(&private);
+        std::fs::write(wt.join("blob.bin"), "\0token = sk-live-5678\n").unwrap();
+        let staged = stage(&dirs, &wt, "feat/x", None, &index).unwrap();
+        assert!(staged.added.contains("sk-live-5678"), "{staged:?}");
     }
 
     #[test]

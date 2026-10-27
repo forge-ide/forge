@@ -34,6 +34,8 @@ pub enum GitError {
     NotAWorktree { path: PathBuf, branch: String },
     #[error("{path} is not a link to one of the repo's worktrees: {reason}")]
     BadWorktreeLink { path: PathBuf, reason: String },
+    #[error("Forge doesn't run git on a worktree's files unconfined: {0}")]
+    NotConfined(String),
     #[error("git {args}: {stderr}")]
     Command { args: String, stderr: String },
     #[error("{context}: {source}")]
@@ -85,6 +87,8 @@ pub struct GitDirs {
     pub common: PathBuf,
     /// The worktree's own git dir, `<common>/worktrees/<name>`.
     pub admin: PathBuf,
+    /// How git commands that open the worktree's files run. Unset, they don't.
+    pub launch: crate::confine::Launch,
 }
 
 /// Worktree and branch management, behind a trait so callers can be tested with fakes.
@@ -303,7 +307,11 @@ impl Worktrees for GitCli {
         if back != canonical(&link)? {
             return Err(bad("its gitdir belongs to another worktree"));
         }
-        Ok(GitDirs { common, admin })
+        Ok(GitDirs {
+            common,
+            admin,
+            launch: Default::default(),
+        })
     }
 }
 
@@ -352,7 +360,7 @@ fn is_branch_name(repo: &Path, name: &str) -> bool {
 }
 
 fn branch_exists(repo: &Path, branch: &str) -> Result<bool, GitError> {
-    let mut cmd = command(repo);
+    let mut cmd = command(repo)?;
     cmd.args([
         "show-ref",
         "--verify",
@@ -410,25 +418,28 @@ fn canonical(path: &Path) -> Result<PathBuf, GitError> {
     })
 }
 
-fn command(repo: &Path) -> Command {
-    let mut cmd = Command::new("git");
+/// Git on `repo`, through [`crate::confine::plain`]: git and the filters a checkout runs
+/// (in the new worktree) are found through absolute `PATH` entries only. Unconfined: it runs
+/// on the branch the human chose, before any agent has the worktree, as the user's own git
+/// would, Git LFS content included.
+fn command(repo: &Path) -> Result<Command, GitError> {
+    let mut cmd = crate::confine::plain()?;
     cmd.arg("-C")
         .arg(repo)
         // Never run the repo's hooks; /dev/null is not a directory, so no hook is found.
         .args(["-c", "core.hooksPath=/dev/null"])
-        .env("GIT_TERMINAL_PROMPT", "0")
         // Inherited repository overrides would point git at some other repo.
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
         .env_remove("GIT_COMMON_DIR")
         .stdin(std::process::Stdio::null());
-    cmd
+    Ok(cmd)
 }
 
 /// Run git in `repo`; its stdout on success.
 fn git(repo: &Path, args: &[&str]) -> Result<String, GitError> {
-    let output = command(repo)
+    let output = command(repo)?
         .args(args)
         .output()
         .map_err(|source| GitError::Io {

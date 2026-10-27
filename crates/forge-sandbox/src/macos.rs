@@ -17,11 +17,11 @@ use tokio::process::Command;
 
 use crate::proxy::Proxy;
 use crate::{
-    Sandbox, SandboxError, SessionSandbox, Spec, TierStatus, Unsandboxed, View, not_implemented,
-    require,
+    GitConfinement, Sandbox, SandboxError, SessionSandbox, Spec, TierStatus, Unavailable,
+    Unsandboxed, View, not_implemented, require,
 };
 
-const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+pub(crate) const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
 /// Mach services the system libraries need for user lookups, logging, and notifications.
 const MACH_SERVICES: &[&str] = &[
@@ -36,11 +36,12 @@ const MACH_SERVICES: &[&str] = &[
 
 pub struct Seatbelt {
     statuses: Vec<TierStatus>,
+    git: Result<Arc<GitConfinement>, Unavailable>,
 }
 
 impl Seatbelt {
-    /// Probe `sandbox-exec` with a trivial profile. Blocking.
-    pub fn probe() -> Self {
+    /// Probe `sandbox-exec` with a trivial profile, and confining git. Blocking.
+    pub fn probe(helper: std::path::PathBuf) -> Self {
         let works = std::process::Command::new(SANDBOX_EXEC)
             .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
             .stdin(Stdio::null())
@@ -66,6 +67,7 @@ impl Seatbelt {
                 not_implemented(SandboxTier::Container),
                 TierStatus::available(SandboxTier::Unsandboxed),
             ],
+            git: GitConfinement::probe(helper).map(Arc::new),
         }
     }
 }
@@ -73,6 +75,10 @@ impl Seatbelt {
 impl Sandbox for Seatbelt {
     fn tiers(&self) -> Vec<TierStatus> {
         self.statuses.clone()
+    }
+
+    fn git_confinement(&self) -> Result<Arc<GitConfinement>, Unavailable> {
+        self.git.clone()
     }
 
     fn prepare(&self, spec: Spec) -> Result<Arc<dyn SessionSandbox>, SandboxError> {
@@ -199,6 +205,40 @@ fn profile(view: &View, proxy_port: Option<u16>) -> String {
     p
 }
 
+/// The Seatbelt profile for the daemon's confined git: read `read`, read and write `write`,
+/// and nothing else of the user's; no network, and signals only to itself.
+pub(crate) fn git_profile(read: &[std::path::PathBuf], write: &[std::path::PathBuf]) -> String {
+    let mut p = String::from(
+        "(version 1)\n\
+         (deny default)\n\
+         (allow process-exec)\n\
+         (allow file-map-executable)\n\
+         (allow process-fork)\n\
+         (allow signal (target same-sandbox))\n\
+         (allow sysctl-read)\n\
+         (allow user-preference-read)\n\
+         (allow file-read-metadata)\n\
+         (allow file-read-data (literal \"/\"))\n",
+    );
+    p.push_str("(allow mach-lookup\n");
+    for service in MACH_SERVICES {
+        p.push_str(&format!("  (global-name {})\n", quote(service)));
+    }
+    p.push_str(")\n(allow file-read*\n");
+    for path in read.iter().chain(write) {
+        p.push_str(&format!("  (subpath {})\n", quote_path(path)));
+    }
+    for dev in ["/dev/urandom", "/dev/random", "/dev/fd"] {
+        p.push_str(&format!("  (subpath {})\n", quote(dev)));
+    }
+    p.push_str(")\n(allow file-write*\n");
+    for path in write.iter().filter(|p| !p.starts_with("/dev")) {
+        p.push_str(&format!("  (subpath {})\n", quote_path(path)));
+    }
+    p.push_str(")\n(allow file-write-data file-ioctl (literal \"/dev/null\"))\n");
+    p
+}
+
 fn quote_path(path: &Path) -> String {
     quote(&path.display().to_string())
 }
@@ -260,6 +300,21 @@ mod tests {
         let with_proxy = profile(&view, Some(41234));
         assert!(with_proxy.contains("(allow network-outbound (remote ip \"localhost:41234\"))"));
         assert_eq!(with_proxy.matches("network-outbound").count(), 1);
+    }
+
+    #[test]
+    fn git_profile_writes_only_what_it_was_given_and_has_no_network() {
+        let p = git_profile(
+            &["/usr".into(), "/Users/u/repo/.git".into()],
+            &["/Users/u/repo/.git/objects".into(), "/dev/null".into()],
+        );
+        assert!(p.starts_with("(version 1)\n(deny default)"));
+        let writes = &p[p.find("(allow file-write*").unwrap()..];
+        let writes = &writes[..writes.find(")\n(").unwrap()];
+        assert!(writes.contains("\"/Users/u/repo/.git/objects\""));
+        assert!(!writes.contains("\"/Users/u/repo/.git\""));
+        assert!(!writes.contains("/dev"));
+        assert!(!p.contains("network"));
     }
 
     #[test]

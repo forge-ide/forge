@@ -141,14 +141,8 @@ async fn default_config(root: &Path) -> Result<ProjectConfig, HandlerError> {
 
 /// Run a read-only git command in `dir`; its trimmed stdout on success.
 async fn git(dir: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .await
-        .ok()?;
+    let mut cmd = Command::from(forge_git::confine::plain().ok()?);
+    let output = cmd.arg("-C").arg(dir).args(args).output().await.ok()?;
     if !output.status.success() {
         return None;
     }

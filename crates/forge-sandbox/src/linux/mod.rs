@@ -13,8 +13,8 @@ use tokio::process::Command;
 use crate::policy::{Forward, Mode, Policy};
 use crate::proxy::Proxy;
 use crate::{
-    Sandbox, SandboxError, SessionSandbox, Spec, TierStatus, Unsandboxed, View, not_implemented,
-    require,
+    GitConfinement, Sandbox, SandboxError, SessionSandbox, Spec, TierStatus, Unavailable,
+    Unsandboxed, View, not_implemented, require,
 };
 
 /// Where a Standard sandbox sees the egress proxy's socket, and the loopback port the helper
@@ -40,6 +40,7 @@ pub struct Linux {
     helper: PathBuf,
     bwrap: Option<PathBuf>,
     statuses: Vec<TierStatus>,
+    git: Result<Arc<GitConfinement>, Unavailable>,
 }
 
 impl Linux {
@@ -57,10 +58,15 @@ impl Linux {
                 tracing::info!(tier = crate::tier_name(status.tier), %why, "sandbox tier unavailable");
             }
         }
+        let git = GitConfinement::probe(helper.clone()).map(Arc::new);
+        if let Err(why) = &git {
+            tracing::info!(%why, "the daemon can't confine its own git");
+        }
         Self {
             helper,
             bwrap,
             statuses,
+            git,
         }
     }
 }
@@ -68,6 +74,10 @@ impl Linux {
 impl Sandbox for Linux {
     fn tiers(&self) -> Vec<TierStatus> {
         self.statuses.clone()
+    }
+
+    fn git_confinement(&self) -> Result<Arc<GitConfinement>, Unavailable> {
+        self.git.clone()
     }
 
     fn prepare(&self, spec: Spec) -> Result<Arc<dyn SessionSandbox>, SandboxError> {
