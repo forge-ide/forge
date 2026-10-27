@@ -4,6 +4,7 @@ pub mod checkpoint;
 pub mod commit;
 pub mod confine;
 pub mod naming;
+pub mod review;
 pub mod worktree;
 
 pub use confine::{Confine, Launch};

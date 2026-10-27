@@ -309,6 +309,29 @@ async fn fake_agent_in(tier: SandboxTier) {
         })
         .collect();
     assert!(errors.is_empty(), "{errors:?}");
+    // Reviewing it reads the checkpoint through the same git.
+    let changeset = client
+        .call::<ReviewChangeset>(&ReviewChangesetParams {
+            session_id: session.id.clone(),
+            from_checkpoint: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        changeset.files.iter().any(|f| f.path == "hello.txt"),
+        "{changeset:?}"
+    );
+    let hunks = client
+        .call::<ReviewFileDiff>(&ReviewFileDiffParams {
+            session_id: session.id.clone(),
+            repo: None,
+            path: "hello.txt".into(),
+            from_checkpoint: None,
+        })
+        .await
+        .unwrap()
+        .hunks;
+    assert_eq!(hunks[0].lines, ["+hello"]);
     // The daemon's git never ran the agent's program, whatever the tier.
     for program in ["lfsx", "git"] {
         let mark = s.repo.join(format!(".git/objects/path-mark-{program}"));

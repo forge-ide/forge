@@ -19,6 +19,7 @@ forge-git = { path = "crates/forge-git" }
 forge-hooks = { path = "crates/forge-hooks" }
 forge-mcp = { path = "crates/forge-mcp" }
 forge-policy = { path = "crates/forge-policy" }
+forge-review = { path = "crates/forge-review" }
 forge-sandbox = { path = "crates/forge-sandbox" }
 forge-session = { path = "crates/forge-session" }
 
@@ -41,6 +42,7 @@ seccompiler = "0.5.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 serde_norway = "0.9.42"
+sha2 = "0.10.9"
 similar = "3.2.0"
 tauri = { version = "2", features = [] }
 tauri-build = { version = "2", features = [] }

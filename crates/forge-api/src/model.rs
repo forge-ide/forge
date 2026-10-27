@@ -248,13 +248,33 @@ pub enum FileStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct FileChange {
+    /// The repo the file is in, by its name in `forge.toml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub repo: Option<String>,
     pub path: String,
     pub status: FileStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub old_path: Option<String>,
+    /// Each side's mode, in octal as git prints it (`100644`, `100755`, `120000` for a
+    /// symlink, `160000` for a submodule), when the file is on that side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub old_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub new_mode: Option<String>,
     pub additions: u32,
     pub deletions: u32,
+    /// A side held a NUL byte or bytes that aren't UTF-8. Its hunks and counts are still
+    /// there, with each such byte shown as U+FFFD; clients collapse it by default.
+    #[serde(default)]
+    pub binary: bool,
+    /// A side is over 16 MiB or 1,000,000 lines: no line counts, and `review.fileDiff`
+    /// refuses it. Clients show it as a warning, never as an unchanged-looking 0/0.
+    #[serde(default)]
+    pub too_large: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]

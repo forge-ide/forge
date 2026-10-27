@@ -232,6 +232,40 @@ fn git_commit_works_confined() {
 
 #[test]
 #[ignore = "needs a sandbox-capable host; run `just test-sandbox`"]
+fn reviews_reads_work_confined() {
+    use forge_git::{checkpoint, review};
+    let f = Fixture::new();
+    let index = checkpoint::index_path(&f.index_dir, "repo");
+    let take = |n: u32, previous: Option<&str>| {
+        checkpoint::take(
+            &f.dirs,
+            &f.wt,
+            "feat/x",
+            previous,
+            &index,
+            &checkpoint::checkpoint_ref("ses_1", n),
+            "cp",
+        )
+        .unwrap()
+    };
+    let text: String = (0..10).map(|n| format!("line {n}\n")).collect();
+    std::fs::write(f.wt.join("a.txt"), &text).unwrap();
+    let one = take(1, None);
+    std::fs::rename(f.wt.join("a.txt"), f.wt.join("b.txt")).unwrap();
+    let two = take(2, Some(&one));
+    let base = review::merge_base(&f.dirs, &f.wt, &index, "refs/heads/main", &two).unwrap();
+    let changes = review::changes(&f.dirs, &f.wt, &index, &base, &two).unwrap();
+    let paths: Vec<&[u8]> = changes.iter().map(|c| c.path()).collect();
+    assert_eq!(paths, [&b"a.txt"[..], b"b.txt"]);
+    let steps = review::steps(&f.dirs, &f.wt, &index, &[&base, &one, &two]).unwrap();
+    assert_eq!(steps[1][0].kind, review::ChangeKind::Renamed);
+    let id = changes[1].new.as_ref().unwrap().id.clone();
+    let blobs = review::blobs(&f.dirs, &f.wt, &index, &[&id]).unwrap();
+    assert_eq!(blobs[&id], review::Blob::Bytes(text.into_bytes()));
+}
+
+#[test]
+#[ignore = "needs a sandbox-capable host; run `just test-sandbox`"]
 fn confined_git_still_honors_the_users_ignores_and_filters() {
     let f = Fixture::new();
     let index = f.index_dir.join("git_commit.index");

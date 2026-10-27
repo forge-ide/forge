@@ -1260,6 +1260,12 @@ dependencies = [
 [[package]]
 name = "forge-review"
 version = "0.0.0"
+dependencies = [
+ "forge-api",
+ "sha2",
+ "similar 3.2.0",
+ "ulid",
+]
 
 [[package]]
 name = "forge-sandbox"
@@ -1294,6 +1300,7 @@ dependencies = [
  "forge-hooks",
  "forge-mcp",
  "forge-policy",
+ "forge-review",
  "forge-sandbox",
  "futures-util",
  "serde_json",

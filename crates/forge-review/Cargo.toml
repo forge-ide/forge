@@ -9,3 +9,9 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+forge-api.workspace = true
+sha2.workspace = true
+similar = { workspace = true, features = ["bytes"] }
+ulid.workspace = true
