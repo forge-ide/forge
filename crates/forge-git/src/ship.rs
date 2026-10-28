@@ -755,6 +755,9 @@ mod tests {
             let repo = dir.path().canonicalize().unwrap().join("repo");
             std::fs::create_dir(&repo).unwrap();
             git(&repo, &["init", "--quiet", "--initial-branch=main"]);
+            // Merge commits use the user's identity, which a CI machine may not have.
+            git(&repo, &["config", "user.name", "T"]);
+            git(&repo, &["config", "user.email", "t@example.com"]);
             commit_file(&repo, "a.txt", "base\n");
             let wt = GitCli
                 .create(&repo, "feat/x", "main", CreateMode::New)
@@ -973,6 +976,8 @@ mod tests {
                 &format!("--separate-git-dir={}", gd.display()),
             ],
         );
+        git(&repo, &["config", "user.name", "T"]);
+        git(&repo, &["config", "user.email", "t@example.com"]);
         commit_file(&repo, "a.txt", "a\n");
         let wt = GitCli
             .create(&repo, "feat/x", "main", CreateMode::New)
