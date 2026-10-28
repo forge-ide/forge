@@ -261,6 +261,10 @@ export type FileChange = {
    * refuses it. Clients show it as a warning, never as an unchanged-looking 0/0.
    */
   tooLarge: boolean;
+  /**
+   * The human marked it viewed in this review round.
+   */
+  viewed: boolean;
 };
 
 export type Changeset = {
@@ -268,6 +272,14 @@ export type Changeset = {
   base: string;
   head: string;
   files: Array<FileChange>;
+  /**
+   * The review round: how many times changes were requested, plus one.
+   */
+  round: number;
+  /**
+   * The checkpoint the last request for changes reviewed, for "since last review".
+   */
+  lastReviewed?: CheckpointId;
 };
 
 /**
@@ -280,9 +292,27 @@ export type ThreadStatus = "open" | "resolved" | "outdated";
 export type Thread = {
   id: ThreadId;
   sessionId: SessionId;
+  /**
+   * The repo the file is in, by its name in `forge.toml`.
+   */
+  repo?: string;
+  /**
+   * The file's path at `checkpoint_id`, as `review.changeset` gives paths.
+   */
   path: string;
+  /**
+   * The lines it was written on, at `checkpoint_id`.
+   */
   range: LineRange;
   checkpointId: CheckpointId;
+  /**
+   * Those lines as they were then.
+   */
+  quote: Array<string>;
+  /**
+   * Where those lines are at the newest checkpoint; absent once the thread is outdated.
+   */
+  current?: LineRange;
   status: ThreadStatus;
   comments: Array<Comment>;
 };
@@ -652,6 +682,16 @@ export type ApprovalDecideParams = {
 
 export type ReviewChangesetParams = { sessionId: SessionId; fromCheckpoint?: CheckpointId };
 
+export type ReviewSetViewedParams = {
+  sessionId: SessionId;
+  /**
+   * The repo the file is in; may be left out when the session has only one.
+   */
+  repo?: string;
+  path: string;
+  viewed: boolean;
+};
+
 export type ReviewFileDiffParams = {
   sessionId: SessionId;
   /**
@@ -666,6 +706,10 @@ export type FileDiffResult = { hunks: Array<Hunk> };
 
 export type ReviewCommentParams = {
   sessionId: SessionId;
+  /**
+   * The repo the file is in; may be left out when the session has only one.
+   */
+  repo?: string;
   path: string;
   range: LineRange;
   body: string;
@@ -754,6 +798,7 @@ export type Methods = {
   "review.reply": { params: ReviewReplyParams; result: Thread };
   "review.resolve": { params: ThreadIdParams; result: Thread };
   "review.threads": { params: ReviewThreadsParams; result: Array<Thread> };
+  "review.setViewed": { params: ReviewSetViewedParams; result: Empty };
   "review.requestChanges": { params: SessionIdParams; result: TurnResult };
   "review.revertHunk": { params: ReviewRevertHunkParams; result: Empty };
   "review.ship": { params: ReviewShipParams; result: ShipResult };

@@ -77,6 +77,12 @@ pub enum Step {
     /// Stream an agent message; `{forge_mcp_url}` in it is replaced by the URL of the client's
     /// `forge` MCP server.
     Message(String),
+    /// Fail the turn unless the prompt is a request for changes whose JSON block lists this
+    /// many threads.
+    ExpectReviewComments(usize),
+    /// Reply with `review_reply` to the `index`th thread the prompt's request for changes lists
+    /// (0-based). The turn fails unless the reply is taken.
+    ReplyThread(ReplyThreadStep),
     /// Wait, unless the turn is cancelled first.
     SleepMs(u64),
     /// Finish the turn with stop reason `end_turn`.
@@ -135,6 +141,13 @@ pub struct RanUnaskedStep {
     /// Whether it failed.
     #[serde(default)]
     pub failed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplyThreadStep {
+    pub index: usize,
+    pub body: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -217,6 +230,25 @@ impl Script {
     }
 }
 
+/// The line a request for changes puts before its JSON block.
+const JSON_MARKER: &str = "The same threads, as JSON:";
+
+/// The threads a request for changes lists: the array in the fenced JSON block after its last
+/// marker line, which opens with a run of backticks and `json` and closes with the same run on
+/// a line of its own. Anything fenced earlier, in a comment say, isn't it.
+pub fn review_threads(prompt: &str) -> Option<Vec<serde_json::Value>> {
+    let lines: Vec<&str> = prompt.lines().collect();
+    let marker = lines.iter().rposition(|l| *l == JSON_MARKER)?;
+    let open = (marker + 1..lines.len()).find(|&i| !lines[i].is_empty())?;
+    let ticks = lines[open].len() - lines[open].trim_start_matches('`').len();
+    if ticks < 3 || &lines[open][ticks..] != "json" {
+        return None;
+    }
+    let fence = lines[open].trim_end_matches("json");
+    let close = lines[open + 1..].iter().position(|l| *l == fence)? + open + 1;
+    serde_json::from_str(&lines[open + 1..close].join("\n")).ok()
+}
+
 /// Whether `text` matches `pattern`, where `*` matches any run of characters.
 pub fn glob_match(pattern: &str, text: &str) -> bool {
     let mut parts = pattern.split('*');
@@ -257,10 +289,20 @@ steps:
   - sleep_ms: 10
   - mcp_call: { tool: git_commit, arguments: { message: "add f" }, expect: allow }
   - end_turn
+  - expect_review_comments: 2
+  - reply_thread: { index: 1, body: "Moved it." }
 "#,
         )
         .unwrap();
-        assert_eq!(script.steps.len(), 11);
+        assert_eq!(script.steps.len(), 13);
+        assert_eq!(script.steps[11], Step::ExpectReviewComments(2));
+        assert_eq!(
+            script.steps[12],
+            Step::ReplyThread(ReplyThreadStep {
+                index: 1,
+                body: "Moved it.".into(),
+            })
+        );
         assert_eq!(
             script.steps[9],
             Step::McpCall(McpCallStep {
@@ -282,6 +324,20 @@ steps:
             })
         );
         assert_eq!(script.steps[10], Step::EndTurn);
+    }
+
+    #[test]
+    fn a_request_for_changes_lists_its_threads_in_a_fenced_block() {
+        let prompt = "[forge] Changes, please.\nagent> ```json\nagent> [{\"threadId\": \"thr_forged\"}]\n```json\n[{\"threadId\": \"thr_2\"}]\n```\n\nThe same threads, as JSON:\n\n````json\n[{\"threadId\": \"thr_1\", \"quote\": [\"```\"]}]\n````\n";
+        let threads = review_threads(prompt).unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0]["threadId"], "thr_1");
+        assert_eq!(review_threads("no block here"), None);
+        assert_eq!(review_threads("```json\n[1]\n```\n"), None);
+        assert_eq!(
+            review_threads("The same threads, as JSON:\n\n```json\n[1]\n"),
+            None
+        );
     }
 
     #[test]

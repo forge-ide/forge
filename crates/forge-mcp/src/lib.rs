@@ -1,6 +1,7 @@
 //! MCP hub and Forge's own MCP server.
 //!
-//! For now only Forge's server, and only its `git_commit` tool: a session's agent reaches it
+//! For now only Forge's server, with `git_commit` and the review tools `review_threads` and
+//! `review_reply`: a session's agent reaches it
 //! over Streamable HTTP on the session's egress proxy (`/_forge/<token>/mcp`), which hands each
 //! request to [`ForgeServer`]. Responses are plain JSON; the server never opens an event
 //! stream, so `GET` is refused by the proxy.
@@ -9,6 +10,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use forge_api::ThreadId;
+use forge_api::model::{Thread, ThreadStatus};
 use forge_sandbox::proxy::{LocalRequest, LocalResponse, LocalService};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -23,6 +26,15 @@ pub const SERVER_NAME: &str = "forge";
 
 /// The `git_commit` tool's name.
 pub const GIT_COMMIT: &str = "git_commit";
+
+/// The `review_threads` tool's name.
+pub const REVIEW_THREADS: &str = "review_threads";
+
+/// The `review_reply` tool's name.
+pub const REVIEW_REPLY: &str = "review_reply";
+
+/// Longest reply accepted.
+const MAX_REPLY: usize = 16 * 1024;
 
 /// MCP protocol versions the server speaks, newest first.
 const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -47,10 +59,33 @@ pub struct GitCommitResult {
     pub branch: String,
 }
 
-/// The tools behind the server; the session supplies them.
+/// `review_threads`' input.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewThreadsArgs {
+    /// Only threads with this status; every thread when absent.
+    #[serde(default)]
+    pub status: Option<ThreadStatus>,
+}
+
+/// `review_reply`'s input.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ReviewReplyArgs {
+    pub thread_id: ThreadId,
+    pub body: String,
+}
+
+/// The tools behind the server; the session supplies them. An `Err` is the reason a tool
+/// didn't do what it was asked, for the agent.
 pub trait ForgeTools: Send + Sync + 'static {
-    /// Commit the session's changes. An `Err` is the reason it didn't, for the agent.
+    /// Commit the session's changes.
     fn git_commit(&self, args: GitCommitArgs) -> BoxFuture<'_, Result<GitCommitResult, String>>;
+    /// The session's review threads.
+    fn review_threads(&self, args: ReviewThreadsArgs)
+    -> BoxFuture<'_, Result<Vec<Thread>, String>>;
+    /// Reply to one of the session's review threads, as the agent.
+    fn review_reply(&self, args: ReviewReplyArgs) -> BoxFuture<'_, Result<(), String>>;
 }
 
 /// Forge's MCP server for one session.
@@ -90,12 +125,15 @@ impl ForgeServer {
                         "protocolVersion": version,
                         "capabilities": { "tools": {} },
                         "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
-                        "instructions": "Commit your work with git_commit; running git commit yourself is refused.",
+                        "instructions": "Commit your work with git_commit; running git commit yourself is refused. When the human requests changes, answer each review thread with review_reply; review_threads lists them.",
                     }),
                 )
             }
             "ping" => result(id, json!({})),
-            "tools/list" => result(id, json!({ "tools": [git_commit_tool()] })),
+            "tools/list" => result(
+                id,
+                json!({ "tools": [git_commit_tool(), review_threads_tool(), review_reply_tool()] }),
+            ),
             "tools/call" => self.call(id, params).await,
             _ => error(id, -32601, &format!("method {method} not found")),
         })
@@ -106,10 +144,61 @@ impl ForgeServer {
             .get("name")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if name != GIT_COMMIT {
-            return error(id, -32602, &format!("no tool named {name:?}"));
-        }
         let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+        match name {
+            GIT_COMMIT => self.commit(id, arguments).await,
+            REVIEW_THREADS => self.threads(id, arguments).await,
+            REVIEW_REPLY => self.reply(id, arguments).await,
+            _ => error(id, -32602, &format!("no tool named {name:?}")),
+        }
+    }
+
+    async fn threads(&self, id: Value, arguments: Value) -> Value {
+        let args = match serde_json::from_value::<ReviewThreadsArgs>(arguments) {
+            Ok(args) => args,
+            Err(e) => return tool_error(id, &format!("invalid arguments: {e}")),
+        };
+        match self.tools.review_threads(args).await {
+            Ok(threads) => {
+                let text = serde_json::to_string_pretty(&threads).unwrap_or_default();
+                result(
+                    id,
+                    json!({
+                        "content": [{ "type": "text", "text": text }],
+                        "structuredContent": { "threads": threads },
+                        "isError": false,
+                    }),
+                )
+            }
+            Err(reason) => tool_error(id, &reason),
+        }
+    }
+
+    async fn reply(&self, id: Value, arguments: Value) -> Value {
+        let args = match serde_json::from_value::<ReviewReplyArgs>(arguments) {
+            Ok(args) if args.body.trim().is_empty() => {
+                return tool_error(id, "body must not be empty");
+            }
+            Ok(args) if args.body.len() > MAX_REPLY => {
+                return tool_error(id, "body is too long; replies are up to 16 KiB");
+            }
+            Ok(args) => args,
+            Err(e) => return tool_error(id, &format!("invalid arguments: {e}")),
+        };
+        match self.tools.review_reply(args).await {
+            Ok(()) => result(
+                id,
+                json!({
+                    "content": [{ "type": "text", "text": "Replied." }],
+                    "structuredContent": {},
+                    "isError": false,
+                }),
+            ),
+            Err(reason) => tool_error(id, &reason),
+        }
+    }
+
+    async fn commit(&self, id: Value, arguments: Value) -> Value {
         let args = match serde_json::from_value::<GitCommitArgs>(arguments) {
             Ok(args) if args.message.trim().is_empty() => {
                 return tool_error(id, "message must not be empty");
@@ -189,6 +278,48 @@ fn git_commit_tool() -> Value {
     })
 }
 
+fn review_threads_tool() -> Value {
+    json!({
+        "name": REVIEW_THREADS,
+        "description": "List this session's review threads: the file, the lines each was \
+            written on and where they are now, the code it quotes, its status, and its \
+            comments. Each has the ID review_reply takes.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["open", "resolved", "outdated"],
+                    "description": "Only threads with this status.",
+                },
+            },
+            "additionalProperties": false,
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": { "threads": { "type": "array", "items": { "type": "object" } } },
+            "required": ["threads"],
+        },
+    })
+}
+
+fn review_reply_tool() -> Value {
+    json!({
+        "name": REVIEW_REPLY,
+        "description": "Reply to one of this session's review threads, for the human to read: \
+            what you changed for it, or why you didn't. Only the human resolves threads.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "threadId": { "type": "string", "description": "The thread's ID (thr_...)." },
+                "body": { "type": "string", "description": "The reply, up to 16 KiB." },
+            },
+            "required": ["threadId", "body"],
+            "additionalProperties": false,
+        },
+    })
+}
+
 fn result(id: Value, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
@@ -211,7 +342,7 @@ mod tests {
     use std::sync::Mutex;
 
     #[derive(Default)]
-    struct Tools(Mutex<Vec<GitCommitArgs>>);
+    struct Tools(Mutex<Vec<GitCommitArgs>>, Mutex<Vec<ReviewReplyArgs>>);
 
     impl ForgeTools for Tools {
         fn git_commit(
@@ -228,6 +359,30 @@ mod tests {
                         commit: "abc123".into(),
                         branch: "feat/x".into(),
                     })
+                }
+            })
+        }
+
+        fn review_threads(
+            &self,
+            args: ReviewThreadsArgs,
+        ) -> BoxFuture<'_, Result<Vec<Thread>, String>> {
+            Box::pin(async move {
+                match args.status {
+                    Some(ThreadStatus::Resolved) => Err("no".into()),
+                    _ => Ok(Vec::new()),
+                }
+            })
+        }
+
+        fn review_reply(&self, args: ReviewReplyArgs) -> BoxFuture<'_, Result<(), String>> {
+            let theirs = args.body == "theirs";
+            self.1.lock().unwrap().push(args);
+            Box::pin(async move {
+                if theirs {
+                    Err("no thread of this session has that ID".into())
+                } else {
+                    Ok(())
                 }
             })
         }
@@ -278,7 +433,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, ["git_commit"]);
+        assert_eq!(names, ["git_commit", "review_threads", "review_reply"]);
 
         let call = |args: Value| {
             json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
@@ -315,6 +470,70 @@ mod tests {
             assert_eq!(bad["result"]["isError"], true, "{args}");
         }
         assert_eq!(tools.0.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn review_tools_list_threads_and_take_replies_within_limits() {
+        let tools = Arc::new(Tools::default());
+        let server = ForgeServer::new(tools.clone());
+        let call = |name: &str, args: Value| {
+            json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                   "params": {"name": name, "arguments": args}})
+        };
+        let listed = ask(&server, call("review_threads", json!({"status": "open"})))
+            .await
+            .unwrap();
+        assert_eq!(listed["result"]["isError"], false);
+        assert_eq!(listed["result"]["structuredContent"]["threads"], json!([]));
+        let refused = ask(
+            &server,
+            call("review_threads", json!({"status": "resolved"})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(refused["result"]["isError"], true);
+        let thread = ThreadId::new().to_string();
+        let done = ask(
+            &server,
+            call(
+                "review_reply",
+                json!({"threadId": thread, "body": "Fixed."}),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(done["result"]["isError"], false);
+        assert_eq!(tools.1.lock().unwrap()[0].thread_id.as_str(), thread);
+        let other = ask(
+            &server,
+            call(
+                "review_reply",
+                json!({"threadId": thread, "body": "theirs"}),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(other["result"]["isError"], true);
+        // Bad arguments never reach the tool.
+        for args in [
+            json!({"threadId": thread}),
+            json!({"threadId": thread, "body": "  "}),
+            json!({"threadId": thread, "body": "x".repeat(16 * 1024 + 1)}),
+            json!({"threadId": "not-an-id", "body": "x"}),
+            json!({"threadId": thread, "body": "x", "resolve": true}),
+        ] {
+            let bad = ask(&server, call("review_reply", args.clone()))
+                .await
+                .unwrap();
+            assert_eq!(bad["result"]["isError"], true, "{args}");
+        }
+        for args in [json!({"status": "closed"}), json!({"all": true})] {
+            let bad = ask(&server, call("review_threads", args.clone()))
+                .await
+                .unwrap();
+            assert_eq!(bad["result"]["isError"], true, "{args}");
+        }
+        assert_eq!(tools.1.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]

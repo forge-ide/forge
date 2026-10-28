@@ -3,8 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use forge_api::events::Remember;
-use forge_api::model::{Approval, Mode, Session, SessionState};
-use forge_api::{ApprovalId, CheckpointId, ProjectId, SessionId, Timestamp, TurnId};
+use forge_api::model::{Approval, Comment, Mode, Session, SessionState, ThreadStatus};
+use forge_api::{ApprovalId, CheckpointId, ProjectId, SessionId, ThreadId, Timestamp, TurnId};
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("session store: {0}")]
@@ -49,6 +49,33 @@ pub struct CheckpointRecord {
     pub discarded_by: Option<CheckpointId>,
 }
 
+/// A review thread as stored: where it was written, its status, and its comments, oldest
+/// first. Where its lines are now is worked out from git.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThreadRecord {
+    pub id: ThreadId,
+    pub session: SessionId,
+    pub repo: String,
+    /// The file's path at `checkpoint`, as `review.changeset` gives paths.
+    pub path: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub checkpoint: CheckpointId,
+    /// The file's blob at `checkpoint`.
+    pub blob: String,
+    pub status: ThreadStatus,
+    pub created_at: Timestamp,
+    pub comments: Vec<Comment>,
+}
+
+/// A round of review: the checkpoint a request for changes reviewed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoundRecord {
+    pub n: u32,
+    pub checkpoint: CheckpointId,
+    pub created_at: Timestamp,
+}
+
 /// Session persistence. Calls are blocking; the manager runs them on the blocking pool.
 pub trait SessionStore: Send + Sync + 'static {
     fn insert(&self, session: &Session, worktrees: &[WorktreeRecord]) -> Result<(), StoreError>;
@@ -83,6 +110,40 @@ pub trait SessionStore: Send + Sync + 'static {
         n: u32,
         by: &CheckpointId,
     ) -> Result<(), StoreError>;
+
+    /// A new thread, with its comments.
+    fn insert_thread(&self, thread: &ThreadRecord) -> Result<(), StoreError>;
+    fn add_comment(&self, thread: &ThreadId, comment: &Comment) -> Result<(), StoreError>;
+    /// Set the thread's status to `to` if it's one of `from`; whether it was.
+    fn transition_thread(
+        &self,
+        thread: &ThreadId,
+        from: &[ThreadStatus],
+        to: ThreadStatus,
+    ) -> Result<bool, StoreError>;
+    fn thread(&self, id: &ThreadId) -> Result<Option<ThreadRecord>, StoreError>;
+    /// A session's threads, oldest first.
+    fn threads(&self, session: &SessionId) -> Result<Vec<ThreadRecord>, StoreError>;
+    /// Record the next review round, on `checkpoint`; its number.
+    fn add_round(
+        &self,
+        session: &SessionId,
+        checkpoint: &CheckpointId,
+        at: Timestamp,
+    ) -> Result<u32, StoreError>;
+    /// A session's review rounds, in order.
+    fn rounds(&self, session: &SessionId) -> Result<Vec<RoundRecord>, StoreError>;
+    /// Mark `path` in `repo` viewed, or not, in review round `round`.
+    fn set_viewed(
+        &self,
+        session: &SessionId,
+        round: u32,
+        repo: &str,
+        path: &str,
+        viewed: bool,
+    ) -> Result<(), StoreError>;
+    /// The `(repo, path)` pairs viewed in review round `round`.
+    fn viewed(&self, session: &SessionId, round: u32) -> Result<Vec<(String, String)>, StoreError>;
 
     fn insert_approval(&self, approval: &Approval) -> Result<(), StoreError>;
     fn approval(&self, id: &ApprovalId) -> Result<Option<ApprovalRecord>, StoreError>;

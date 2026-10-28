@@ -43,6 +43,7 @@ Agent notes: Codex runs its commands only by escalating them, which asks Forge; 
 From the review milestone on:
 
 - [ ] Leave one line comment and click Request changes; the agent replies in the thread and the fix appears under "Since last review".
+- [ ] Per agent: its reply arrives through `review_reply` without an approval prompt (it is pre-allowed: Claude's `allowedTools`, Codex's tool approval, Gemini's policy rule with its list of tool names), and `git_commit` still asks as before.
 - [ ] Revert one hunk; the agent sees the revert on its next turn.
 - [ ] Rewind to an earlier checkpoint (`forge session rewind <session> <checkpoint>`, with the checkpoint's ID from `forge session watch`); the worktree and `git log <branch>` match that point, and the agent's next reply shows it heard about the rewind.
 

@@ -23,8 +23,8 @@ const DIFF_TIME: Duration = Duration::from_secs(5);
 
 /// The checkpoints a review spans: from the merge-base, or checkpoint `from`, to `head`.
 #[derive(Clone)]
-struct Span {
-    head: CheckpointRecord,
+pub(super) struct Span {
+    pub(super) head: CheckpointRecord,
     from: Option<CheckpointRecord>,
     /// The live checkpoints after the start, in order, ending with `head`.
     steps: Vec<CheckpointRecord>,
@@ -62,11 +62,26 @@ impl SessionManager {
         })
         .await
         .map_err(|e| SessionError::Internal(e.to_string()))??;
+        let key = id.clone();
+        let rounds = self.blocking(move |store| store.rounds(&key)).await?;
+        let round = rounds.len() as u32 + 1;
+        let key = id.clone();
+        let viewed = self
+            .blocking(move |store| store.viewed(&key, round))
+            .await?;
+        let mut files = files;
+        for f in &mut files {
+            f.viewed = viewed
+                .iter()
+                .any(|(repo, path)| Some(repo) == f.repo.as_ref() && path == &f.path);
+        }
         Ok(Changeset {
             session_id: id.clone(),
             base,
             head: head.to_string(),
             files,
+            round,
+            last_reviewed: rounds.last().map(|r| r.checkpoint.clone()),
         })
     }
 
@@ -81,18 +96,7 @@ impl SessionManager {
         bases: Vec<(String, String)>,
     ) -> Result<Vec<Hunk>, SessionError> {
         let span = self.span(id, from).await?;
-        let targets = self.review_targets(id).await?;
-        let target = match repo {
-            Some(name) => targets.into_iter().find(|t| t.repo == name),
-            None if targets.len() == 1 => targets.into_iter().next(),
-            None => {
-                return Err(ApiError::validation(
-                    "the session spans more than one repo; say which one".to_owned(),
-                )
-                .into());
-            }
-        }
-        .ok_or_else(|| ApiError::not_found(format!("repo {:?} of session {id}", repo)))?;
+        let target = pick(self.review_targets(id).await?, repo, id)?;
         let path = path.to_owned();
         tokio::task::spawn_blocking(move || {
             let start = start_of(&target, &span, &bases)?;
@@ -103,7 +107,7 @@ impl SessionManager {
         .map_err(SessionError::from)
     }
 
-    async fn span(
+    pub(super) async fn span(
         &self,
         id: &SessionId,
         from: Option<&CheckpointId>,
@@ -147,7 +151,10 @@ impl SessionManager {
         })
     }
 
-    async fn review_targets(&self, id: &SessionId) -> Result<Vec<RepoTarget>, SessionError> {
+    pub(super) async fn review_targets(
+        &self,
+        id: &SessionId,
+    ) -> Result<Vec<RepoTarget>, SessionError> {
         let session = self.get(id).await?;
         self.checkpoint_targets(&session)
             .await
@@ -155,12 +162,30 @@ impl SessionManager {
     }
 }
 
-fn git_failed(e: GitError) -> ApiError {
+/// The target for `repo`, which may be left out when the session has one.
+pub(super) fn pick(
+    targets: Vec<RepoTarget>,
+    repo: Option<&str>,
+    id: &SessionId,
+) -> Result<RepoTarget, ApiError> {
+    match repo {
+        Some(name) => targets.into_iter().find(|t| t.repo == name),
+        None if targets.len() == 1 => targets.into_iter().next(),
+        None => {
+            return Err(ApiError::validation(
+                "the session spans more than one repo; say which one".to_owned(),
+            ));
+        }
+    }
+    .ok_or_else(|| ApiError::not_found(format!("repo {repo:?} of session {id}")))
+}
+
+pub(super) fn git_failed(e: GitError) -> ApiError {
     ApiError::new(ErrorKind::InvalidState, e.to_string())
 }
 
 /// `checkpoint`'s commit in `repo`.
-fn commit_of(checkpoint: &CheckpointRecord, repo: &str) -> Result<String, ApiError> {
+pub(super) fn commit_of(checkpoint: &CheckpointRecord, repo: &str) -> Result<String, ApiError> {
     checkpoint
         .commits
         .iter()
@@ -176,7 +201,11 @@ fn commit_of(checkpoint: &CheckpointRecord, repo: &str) -> Result<String, ApiErr
 
 /// The commit `t`'s diff starts from: the `from` checkpoint's, or the merge-base of the base
 /// branch and the head checkpoint.
-fn start_of(t: &RepoTarget, span: &Span, bases: &[(String, String)]) -> Result<String, ApiError> {
+pub(super) fn start_of(
+    t: &RepoTarget,
+    span: &Span,
+    bases: &[(String, String)],
+) -> Result<String, ApiError> {
     if let Some(from) = &span.from {
         return commit_of(from, &t.repo);
     }
@@ -209,7 +238,7 @@ const MAX_HELD: u64 = 256 * 1024 * 1024;
 /// The most lines a side may have to be diffed; past it, as past 16 MiB, a file is too
 /// large to show. Only generated or padded files get there, and a diff of millions of lines
 /// would hold far more memory than its bytes.
-const MAX_LINES: usize = 1_000_000;
+pub(super) const MAX_LINES: usize = 1_000_000;
 
 /// The most changed lines `review.fileDiff` returns for a file; the changeset still counts
 /// them all.
@@ -337,6 +366,7 @@ fn describe(
                 deletions,
                 binary,
                 too_large,
+                viewed: false,
             })
         })
         .collect()

@@ -59,10 +59,12 @@ type Hunk = { id: string; oldStart: number; oldLines: number; newStart: number;
 type FileChange = { repo?: string; path: string;
   status: 'added' | 'modified' | 'deleted' | 'renamed'; oldPath?: string;
   oldMode?: string; newMode?: string; additions: number; deletions: number;
-  binary: boolean; tooLarge: boolean };
-type Changeset = { sessionId: string; base: string; head: string; files: FileChange[] };
-type Thread = { id: string; sessionId: string; path: string;
-  range: { startLine: number; endLine: number }; checkpointId: string;
+  binary: boolean; tooLarge: boolean; viewed: boolean };
+type Changeset = { sessionId: string; base: string; head: string; files: FileChange[];
+  round: number; lastReviewed?: string };
+type LineRange = { startLine: number; endLine: number };
+type Thread = { id: string; sessionId: string; repo?: string; path: string;
+  range: LineRange; checkpointId: string; quote: string[]; current?: LineRange;
   status: 'open' | 'resolved' | 'outdated'; comments: Comment[] };
 type Comment = { id: string; author: 'human' | 'agent'; body: string; createdAt: string };
 type CollisionResolution = 'reuse-branch' | 'adopt-worktree';
@@ -92,11 +94,12 @@ type BranchCollision = { repo: string;
 | `approval.decide` | `{ approvalId, decision: 'allow' \| 'deny', remember?: 'session' \| 'project', note? }` | `{}` |
 | `review.changeset` | `{ sessionId, fromCheckpoint? }` | `Changeset` |
 | `review.fileDiff` | `{ sessionId, repo?, path, fromCheckpoint? }` | `{ hunks: Hunk[] }` |
-| `review.comment` | `{ sessionId, path, range, body }` | `Thread` |
+| `review.comment` | `{ sessionId, repo?, path, range, body }` | `Thread` |
 | `review.reply` | `{ threadId, body }` | `Thread` |
 | `review.resolve` | `{ threadId }` | `Thread` |
 | `review.threads` | `{ sessionId, status? }` | `Thread[]` |
 | `review.requestChanges` | `{ sessionId }` | `{ turnId }` |
+| `review.setViewed` | `{ sessionId, repo?, path, viewed }` | `{}` |
 | `review.revertHunk` | `{ sessionId, path, hunkId }` | `{}` |
 | `review.ship` | `{ sessionId, strategy: 'push-branch' \| 'merge-local', branch? }` | `{ ref }` |
 | `file.read` | `{ projectId, path, sessionId? }` | `{ content, hash }` |
@@ -124,6 +127,9 @@ Method notes:
 - **Approvals.** When the policy engine asks, the agent's request waits: an `approval.requested` event goes out, the session moves to `waiting` (and back to `working` once nothing is pending), and the agent gets its answer when a human calls `approval.decide`. **`approval.list`** returns pending approvals, oldest first (`NotFound` for an unknown `projectId`). An approval's action and reason have secrets redacted, as in events. **`approval.decide`**: `NotFound` for an unknown ID, `InvalidState` once the approval has ended. `note` is passed to the agent as the reason for a denial. `remember: 'session'` applies the decision to the same argv or path for the rest of the session; `'project'` also appends a `[[allow]]` or `[[deny]]` rule matching exactly that command to `<root>/.forge/policy.toml`. Only a single simple command (see Commands in component-architecture.md) whose words hold no spaces or tabs, and nothing the secret scan flags, can be remembered there: a pattern matches the space-joined argv, so `rm -rf "build cache"` would also match `rm -rf build cache`, and the file is usually committed. Edits can't be remembered for the project yet, since an edit pattern also matches everything under its path. Remembering an allow that couldn't change later decisions, because the ask came from an ask rule or a guard rather than the mode, is `ValidationFailed`, as is a project rule the file can't take; either way nothing is decided, so the client can retry. A turn that ends, `session.cancel`, or a daemon restart ends pending approvals as cancelled: the agent's request is refused, and no `approval.decided` event is sent, since cancelled isn't a decision; clients drop the approval when the session leaves `waiting` or on reload. Approvals cancelled by a restart likewise have no closing event in the log.
 - **`review.changeset`**: what the session changed, from each repo's merge-base with its base branch (as `forge.toml` names it now), or from checkpoint `fromCheckpoint`, to the newest checkpoint not discarded by a rewind; see Review store in component-architecture.md. `head` is that checkpoint's ID and `base` the commit the diff starts from (the first repo's, until changesets are per repo). Each file names its `repo`; a deleted file's `path` is where it was. A `path` or `oldPath` that isn't UTF-8, or holds a control character, `"`, or `\`, is C-quoted as git prints it with `core.quotePath` (`"a\376.sh"`), so no two files share one; `review.fileDiff` takes it quoted the same way. `oldMode` and `newMode` are each side's mode in octal as git prints it (`100644`, `100755`, `120000` for a symlink, whose line is its target, `160000` for a submodule, whose line is the commit it pins), so a file made executable or replaced by a link shows as such. `binary` is set when either side holds a NUL byte or isn't UTF-8; its counts and hunks are still there, since one byte in a comment would otherwise hide a script's whole edit. Diffs compare the bytes, so a change only to bytes that aren't text is still a hunk; each such byte is shown as U+FFFD. Clients collapse binary files by default. `tooLarge` is set when a side is over 16 MiB or 1,000,000 lines (lines as git counts them: each ends at a `\n`, and a last one without one counts too): it has no line counts, `review.fileDiff` refuses it (`ValidationFailed`), and clients show it as a warning, never as an unchanged-looking 0/0. A `tooLarge` file, or one whose diff `review.fileDiff` refuses, is withheld, never shown as an empty diff; clients mark it as not reviewed. A changeset too large for git to list (over 32 MiB of names) is `InvalidState`. A session with no checkpoint yet is `InvalidState`, as is a `fromCheckpoint` a rewind discarded; one the session doesn't have is `NotFound`.
 - **`review.fileDiff`**: one file of that changeset, as unified hunks with three lines of context. Each line in `lines` starts with ` `, `-`, or `+` and has no line break; a side's last line without one is followed by `\ No newline at end of file`, as git shows it. `turnId` is the turn whose checkpoint last changed one of the hunk's lines, absent when that checkpoint was taken between turns, or when the file's versions at the checkpoints in between total over 256 MiB and aren't read. A hunk's `id` is derived from the checkpoints, repo, path, ranges, and lines, so the same diff always gives the same IDs. `repo` may be left out when the session has one repo. A path that isn't in the changeset is `NotFound`, and one not spelled as `review.changeset` gives it is `ValidationFailed`. Lines can hold any character but NUL, control and bidi characters included (a lone `\r` is part of its line, as in git); clients render them visibly and never interpret them. A file with more than 200,000 changed lines is `ValidationFailed`, naming the count; the changeset still counts them all. A diff that reaches its time limit settles for a larger set of changes than the smallest, still exact, so its counts can then differ a little from the changeset's.
+- **Threads.** **`review.comment`** starts a thread on lines `range` (1-based, inclusive) of a file in the changeset as it is at the newest checkpoint, with the human's first comment; `path` is spelled as `review.changeset` gives it. A file that isn't in the changeset, was deleted, is a submodule, or is too large, and a range that isn't in it, are `ValidationFailed`; so is a body that's empty or over 16 KiB, for every comment and reply. A session with no checkpoint yet is `InvalidState`. `quote` is the lines as they were then, at most 100 and then a `… (N more lines)` entry; `current` is where they are at the newest checkpoint, absent once the thread is `outdated` (or when the diff ran out of time to tell), which happens by itself the first checkpoint they changed at and is never undone. **`review.reply`** adds the human's comment; a reply never changes the status. **`review.resolve`** resolves an open or outdated thread; a resolved one is `InvalidState`. **`review.threads`** lists a session's threads, oldest first. Each change goes out as a `review.thread` event; comment bodies are untrusted text, never logged. Unknown threads are `NotFound`.
+- **`review.requestChanges`**: sends the agent, as a turn of source `review`, every thread that isn't resolved and whose last comment is the human's (see Review store in component-architecture.md for the message), records the newest checkpoint as the round's, and starts the next round. Accepted in the states `session.prompt` is; with no such thread it's `ValidationFailed`. `Changeset.round` is the number of requests so far plus one, and `lastReviewed` the last request's checkpoint.
+- **`review.setViewed`**: marks a file viewed, or not, in the current round; `FileChange.viewed` reports it, and each round starts with none viewed.
 - **`events.query`**: `limit` is 1 to 1000. Returns the newest matching events below `before`, oldest first. `text` matches as a phrase.
 - **Methods not yet implemented** return the standard JSON-RPC `-32601` (method not found) with a message naming the method.
 
@@ -312,7 +318,7 @@ scopes = ["project.read", "events.read"]
 
 ## Forge MCP tools
 
-Forge's MCP server ships in v0.2, but its tool names and schemas are fixed now so the review store and LSP host expose the right data from v0.1. v0.1 ships a minimal per-session endpoint with `git_commit` only, so agents have a commit path.
+Forge's MCP server ships in v0.2, but its tool names and schemas are fixed now so the review store and LSP host expose the right data from v0.1. v0.1 ships a minimal per-session endpoint with `git_commit`, so agents have a commit path, and `review_threads` and `review_reply`, so they can answer review threads.
 
 | Tool | Input | Output |
 | --- | --- | --- |
@@ -323,8 +329,8 @@ Forge's MCP server ships in v0.2, but its tool names and schemas are fixed now s
 | `lsp_rename_preview` | `{ path, line, column, newName }` | `{ edits: { path, hunks }[] }` (not applied) |
 | `task_get` | `{}` | `{ title, spec, acceptanceChecks: string[] }` |
 | `task_update_plan` | `{ entries: { content, status }[] }` | `{ approved: boolean }` (waits if approval required) |
-| `review_threads` | `{ status? }` | `Thread[]` |
-| `review_reply` | `{ threadId, body }` | `{}` |
+| `review_threads` | `{ status? }` | `{ threads: Thread[] }` (this session's) |
+| `review_reply` | `{ threadId, body }` | `{}` (as the agent, to this session's threads only, up to 16 KiB, secrets redacted; it can't resolve) |
 | `checks_run` | `{ names? }` | `{ results: { name, passed, output }[] }` |
 | `ask_human` | `{ question, options? }` | `{ answer }` (blocks until answered) |
 | `git_commit` | `{ message, paths? }` | `{ commit, branch }` (all changes, including untracked files, when `paths` is omitted; `paths` are literal and must stay inside the working directory; policy-checked, runs the `commit.pre` hook; nothing to commit, a guard, a denial, or a blocking hook is a tool error with the reason) |
@@ -392,12 +398,19 @@ CREATE TABLE threads (
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   repo_name TEXT NOT NULL, path TEXT NOT NULL,
   start_line INTEGER NOT NULL, end_line INTEGER NOT NULL,
-  checkpoint_id TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL
+  checkpoint_id TEXT NOT NULL,
+  blob_id TEXT NOT NULL,   -- the file's blob at checkpoint_id, which the lines are followed from
+  status TEXT NOT NULL, created_at TEXT NOT NULL
 );
 CREATE TABLE comments (
   id TEXT PRIMARY KEY,
   thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
   author TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TABLE review_viewed (   -- files marked viewed, per review round
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  round INTEGER NOT NULL, repo_name TEXT NOT NULL, path TEXT NOT NULL,
+  PRIMARY KEY (session_id, round, repo_name, path)
 );
 CREATE TABLE events_index (
   session_id TEXT NOT NULL, seq INTEGER NOT NULL, kind TEXT NOT NULL,

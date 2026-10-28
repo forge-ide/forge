@@ -2,7 +2,9 @@
 //! system defers to Forge's, its only commit path is Forge's `git_commit`, and it is told so.
 //!
 //! A shim never turns on an agent mode that skips Forge's permission requests, and pre-allows
-//! nothing but `git_commit` (which Forge's endpoint decides itself). The agent reads its user's
+//! nothing but Forge's own tools ([`FORGE_TOOLS`]), which its endpoint decides itself:
+//! `git_commit` goes through the policy, and the review tools only read and reply to this
+//! session's own threads. The agent reads its user's
 //! own settings and the repo's, as it would outside Forge: the user's from copies Forge makes
 //! at each launch (see [`home_config`]), never the real files, which stay hidden with the rest
 //! of the real home. Settings Forge must win over go where the agent ranks them above anything
@@ -20,12 +22,16 @@ use crate::logins::{Login, LoginKind, unsigned_jwt};
 /// The name agents know Forge's MCP server by.
 pub const MCP_SERVER: &str = "forge";
 
+/// The tools on Forge's MCP server, which every agent is let call without asking.
+pub const FORGE_TOOLS: [&str; 3] = ["git_commit", "review_threads", "review_reply"];
+
 /// What every agent is told about working in Forge.
 pub const INSTRUCTIONS: &str = "You are working in a Forge session: a git worktree on its own \
 branch, inside a sandbox. Commit with the git_commit tool from the forge MCP server (a message, \
 and optionally the paths to commit); running git commit, push, stash, or branch yourself is \
 refused. Forge decides each command and edit by its policy and may ask a human or refuse; when \
-it refuses, it says why, so adjust instead of retrying the same thing. The repository's own \
+it refuses, it says why, so adjust instead of retrying the same thing. When the human requests \
+changes, answer each review thread with the review_reply tool. The repository's own \
 instructions, if any, are in AGENTS.md or CLAUDE.md at its root; read them before you start.";
 
 /// What Codex is told besides: its own sandbox can't start inside Forge's, so a command it
@@ -326,7 +332,7 @@ pub fn prepare(manifest: Option<&Manifest>, cx: &ShimContext<'_>) -> Result<Shim
 /// Claude Code: one settings file, the user's settings merged with the repo's committed
 /// `.claude/settings.json`, in the read-only shim dir, and no settings files of its own (it
 /// watches them, so one an approved command wrote in the worktree or the sandbox home would
-/// take effect at once); its bypass mode refused, its web tools off, only `git_commit`
+/// take effect at once); its bypass mode refused, its web tools off, only Forge's tools
 /// pre-allowed, and the `default` mode, in which every tool the settings don't allow asks the
 /// client.
 fn claude(shim: &mut Shim, cx: &ShimContext<'_>, manifest: &Manifest) -> Result<(), ShimError> {
@@ -351,7 +357,10 @@ fn claude(shim: &mut Shim, cx: &ShimContext<'_>, manifest: &Manifest) -> Result<
     let mut options = json!({
         "settingSources": [],
         "allowDangerouslySkipPermissions": false,
-        "allowedTools": [format!("mcp__{MCP_SERVER}__git_commit")],
+        "allowedTools": FORGE_TOOLS
+            .iter()
+            .map(|tool| format!("mcp__{MCP_SERVER}__{tool}"))
+            .collect::<Vec<_>>(),
         "disallowedTools": ["WebFetch", "WebSearch"],
         "promptSuggestions": false,
     });
@@ -407,7 +416,7 @@ fn merge_settings(base: &mut serde_json::Value, over: serde_json::Value) {
 
 /// Codex: the read-only mode (see the manifest's quirks), plain `-c` shells, escalations
 /// decided by the user (through Forge) rather than Codex's own reviewer, Forge's endpoint with
-/// `git_commit` pre-approved, and its web search and phoning home off. `CODEX_CONFIG` is
+/// its tools pre-approved, and its web search and phoning home off. `CODEX_CONFIG` is
 /// applied as overrides above every config file, the user's and the repo's.
 fn codex(shim: &mut Shim, cx: &ShimContext<'_>) {
     let mut config = json!({
@@ -455,7 +464,10 @@ fn codex(shim: &mut Shim, cx: &ShimContext<'_>) {
         config["mcp_servers"] = json!({
             MCP_SERVER: {
                 "url": url,
-                "tools": { "git_commit": { "approval_mode": "approve" } },
+                "tools": FORGE_TOOLS
+                    .iter()
+                    .map(|tool| ((*tool).to_owned(), json!({ "approval_mode": "approve" })))
+                    .collect::<serde_json::Map<_, _>>(),
             }
         });
     }
@@ -480,7 +492,7 @@ fn antigravity(shim: &mut Shim, cx: &ShimContext<'_>) {
 /// Gemini CLI: a policy file passed with `--policy`, which replaces `~/.gemini/policies` (the
 /// user's own policies included) and ranks above the workspace's. It asks for every shell
 /// command, edit, write, and MCP tool at the top of its tier, above every settings-derived
-/// allow, the user's and a repo's, and allows only Forge's `git_commit`. Gemini reads its
+/// allow, the user's and a repo's, and allows only Forge's own tools. Gemini reads its
 /// user settings from the copy in the sandbox home, and a trusted repo's `.gemini/settings.json`
 /// and `.env` as it would outside Forge.
 fn gemini(shim: &mut Shim, cx: &ShimContext<'_>) -> std::io::Result<()> {
@@ -505,7 +517,7 @@ const GEMINI_POLICY: &str = r#"# Written by Forge for one session. Forge decides
 
 [[rule]]
 mcpName = "forge"
-toolName = "git_commit"
+toolName = ["git_commit", "review_threads", "review_reply"]
 decision = "allow"
 priority = 999
 
@@ -1053,7 +1065,14 @@ mod tests {
         // home's and the worktree's.
         assert_eq!(options["settingSources"], json!([]));
         assert_eq!(options["allowDangerouslySkipPermissions"], false);
-        assert_eq!(allowed_tools(&meta), ["mcp__forge__git_commit"]);
+        assert_eq!(
+            allowed_tools(&meta),
+            [
+                "mcp__forge__git_commit",
+                "mcp__forge__review_threads",
+                "mcp__forge__review_reply"
+            ]
+        );
         assert_eq!(options["disallowedTools"], json!(["WebFetch", "WebSearch"]));
         assert!(options.get("strictMcpConfig").is_none());
         assert!(
@@ -1124,7 +1143,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_runs_read_only_without_login_shells_and_approves_only_git_commit() {
+    fn codex_runs_read_only_without_login_shells_and_approves_only_forges_tools() {
         let dir = tempfile::tempdir().unwrap();
         let var = |name: &str| {
             (name == "OPENAI_BASE_URL").then(|| "http://127.0.0.1:9/_forge/tok/openai/v1".into())
@@ -1155,7 +1174,11 @@ mod tests {
         assert_eq!(forge["url"], "http://127.0.0.1:9/_forge/tok/mcp");
         assert_eq!(
             forge["tools"],
-            json!({ "git_commit": { "approval_mode": "approve" } })
+            json!({
+                "git_commit": { "approval_mode": "approve" },
+                "review_threads": { "approval_mode": "approve" },
+                "review_reply": { "approval_mode": "approve" },
+            })
         );
         assert_eq!(config["mcp_servers"].as_object().unwrap().len(), 1);
         // Nothing that would let Codex skip asking.
@@ -1244,7 +1267,7 @@ mod tests {
                 &dir.path().join("gemini-policies").display().to_string()
             ]
         );
-        // The policy parses, allows only git_commit, and asks for every shell command.
+        // The policy parses, allows only Forge's own tools, and asks for every shell command.
         let policy: toml::Value = toml::from_str(GEMINI_POLICY).unwrap();
         let rules = policy["rule"].as_array().unwrap();
         let allows: Vec<_> = rules
@@ -1252,7 +1275,14 @@ mod tests {
             .filter(|r| r["decision"].as_str() == Some("allow"))
             .collect();
         assert_eq!(allows.len(), 1);
-        assert_eq!(allows[0]["toolName"].as_str(), Some("git_commit"));
+        assert_eq!(
+            allows[0]["toolName"],
+            toml::Value::Array(
+                ["git_commit", "review_threads", "review_reply"]
+                    .map(|t| toml::Value::String(t.into()))
+                    .to_vec()
+            )
+        );
         assert_eq!(allows[0]["mcpName"].as_str(), Some("forge"));
         assert!(
             rules

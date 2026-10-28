@@ -15,5 +15,6 @@ pub use manager::{
 };
 pub use redact::SecretRedactor;
 pub use store::{
-    ApprovalOutcome, ApprovalRecord, CheckpointRecord, SessionStore, StoreError, WorktreeRecord,
+    ApprovalOutcome, ApprovalRecord, CheckpointRecord, RoundRecord, SessionStore, StoreError,
+    ThreadRecord, WorktreeRecord,
 };

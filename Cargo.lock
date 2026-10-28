@@ -1231,6 +1231,7 @@ version = "0.0.0"
 name = "forge-mcp"
 version = "0.0.0"
 dependencies = [
+ "forge-api",
  "forge-sandbox",
  "futures-util",
  "serde",
@@ -1262,6 +1263,8 @@ name = "forge-review"
 version = "0.0.0"
 dependencies = [
  "forge-api",
+ "serde",
+ "serde_json",
  "sha2",
  "similar 3.2.0",
  "ulid",
