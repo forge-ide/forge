@@ -119,10 +119,10 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 - [x] Changeset and per-file diffs; hunk-to-turn mapping.
 - [x] Threads, replies, resolve, outdated detection.
 - [x] Request changes as one structured agent message; per-thread replies.
-- [ ] Changes since last review; per-hunk revert.
+- [x] Changes since last review; per-hunk revert.
 - [ ] Review pane UI (ui-screens.md).
-- [ ] `review.ship` with `push-branch` and `merge-local`.
-- [ ] Checkpoints and ship share their commit code with `git_commit` (the endpoint itself landed in M5).
+- [x] `review.ship` with `push-branch` and `merge-local`.
+- [x] Checkpoints and ship share their commit code with `git_commit` (the endpoint itself landed in M5).
 
 **Done when:** an end-to-end test drives the fake agent through change → comment → request changes → agent reply → thread resolved; the review pane meets the large-diff performance target on WebKitGTK and macOS.
 

@@ -313,8 +313,17 @@ pub struct ReviewThreadsParams {
 #[serde(rename_all = "camelCase")]
 pub struct ReviewRevertHunkParams {
     pub session_id: SessionId,
+    /// Which repo, when the session spans more than one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub repo: Option<String>,
+    /// Spelled as `review.changeset` gives it.
     pub path: String,
     pub hunk_id: HunkId,
+    /// The `fromCheckpoint` of the diff the hunk was shown in, such as Since last review's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub from_checkpoint: Option<CheckpointId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
@@ -328,10 +337,18 @@ pub enum ShipStrategy {
 #[serde(rename_all = "camelCase")]
 pub struct ReviewShipParams {
     pub session_id: SessionId,
+    /// The checkpoint the human reviewed: the changeset's `head`. Ship refuses if it is no
+    /// longer the newest, or the worktree or branch changed since.
+    pub checkpoint_id: CheckpointId,
     pub strategy: ShipStrategy,
+    /// `push-branch` only: the remote branch to push to; the session's branch by default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub branch: Option<String>,
+    /// Ship even though some files were withheld from review (too large to show).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub include_withheld: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]

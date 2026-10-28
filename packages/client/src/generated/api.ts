@@ -721,11 +721,42 @@ export type ThreadIdParams = { threadId: ThreadId };
 
 export type ReviewThreadsParams = { sessionId: SessionId; status?: ThreadStatus };
 
-export type ReviewRevertHunkParams = { sessionId: SessionId; path: string; hunkId: HunkId };
+export type ReviewRevertHunkParams = {
+  sessionId: SessionId;
+  /**
+   * Which repo, when the session spans more than one.
+   */
+  repo?: string;
+  /**
+   * Spelled as `review.changeset` gives it.
+   */
+  path: string;
+  hunkId: HunkId;
+  /**
+   * The `fromCheckpoint` of the diff the hunk was shown in, such as Since last review's.
+   */
+  fromCheckpoint?: CheckpointId;
+};
 
 export type ShipStrategy = "push-branch" | "merge-local";
 
-export type ReviewShipParams = { sessionId: SessionId; strategy: ShipStrategy; branch?: string };
+export type ReviewShipParams = {
+  sessionId: SessionId;
+  /**
+   * The checkpoint the human reviewed: the changeset's `head`. Ship refuses if it is no
+   * longer the newest, or the worktree or branch changed since.
+   */
+  checkpointId: CheckpointId;
+  strategy: ShipStrategy;
+  /**
+   * `push-branch` only: the remote branch to push to; the session's branch by default.
+   */
+  branch?: string;
+  /**
+   * Ship even though some files were withheld from review (too large to show).
+   */
+  includeWithheld?: boolean;
+};
 
 export type ShipResult = { ref: string };
 

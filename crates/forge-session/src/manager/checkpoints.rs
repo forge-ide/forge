@@ -36,7 +36,9 @@ impl From<CommitError> for Failed {
             CommitError::Moved(_)
             | CommitError::WorktreeChanged
             | CommitError::PartlyRewound { .. } => ErrorKind::Conflict,
-            CommitError::TooLarge => ErrorKind::ValidationFailed,
+            CommitError::TooLarge | CommitError::BadPath(_) | CommitError::Reserved(_) => {
+                ErrorKind::ValidationFailed
+            }
             _ => ErrorKind::InvalidState,
         };
         Failed {
@@ -167,7 +169,7 @@ impl SessionManager {
 
     /// Snapshot every worktree of the session as its next checkpoint, record it, and emit its
     /// event. The caller holds the session's lock.
-    async fn take_checkpoint(
+    pub(super) async fn take_checkpoint(
         &self,
         session: &Session,
         turn: Option<TurnId>,

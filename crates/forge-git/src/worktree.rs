@@ -11,6 +11,34 @@ use std::process::Command;
 /// Folder in each repo root that holds session worktrees.
 pub const WORKTREES_DIR: &str = ".worktrees";
 
+/// Whether a file name, as a tree or index holds it, may resolve to [`WORKTREES_DIR`] on some
+/// filesystem: compared ignoring case (as macOS and Linux's casefold dirs do, Kelvin sign and
+/// long s included) and the code points HFS+ ignores, as git's own `.git` check does.
+pub fn is_worktrees_dir(name: &[u8]) -> bool {
+    let name = String::from_utf8_lossy(name);
+    let folded: String = name
+        .chars()
+        .filter(|c| !hfs_ignorable(*c))
+        .flat_map(char::to_uppercase)
+        .flat_map(char::to_lowercase)
+        .collect();
+    folded == WORKTREES_DIR
+}
+
+/// Whether any component of `path` (git's bytes, `/`-separated) is [`is_worktrees_dir`]:
+/// every session worktree lives under one, in this repo or in a repo nested inside it.
+pub fn in_worktrees_dir(path: &[u8]) -> bool {
+    path.split(|b| *b == b'/').any(is_worktrees_dir)
+}
+
+/// Code points HFS+ drops when comparing names (git's `next_hfs_char`).
+fn hfs_ignorable(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200C}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{206A}'..='\u{206F}' | '\u{FEFF}'
+    )
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
     #[error("repo path {path:?} resolves to {resolved}, outside the project root")]
@@ -458,6 +486,35 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, GitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_worktrees_dir_is_recognized_in_any_spelling_a_filesystem_folds() {
+        for name in [
+            ".worktrees",
+            ".WORKTREES",
+            ".Worktrees",
+            ".wor\u{212A}trees",
+            ".work\u{200D}trees",
+            "\u{FEFF}.worktrees",
+            ".worktree\u{17F}",
+        ] {
+            assert!(is_worktrees_dir(name.as_bytes()), "{name:?}");
+        }
+        for name in [".worktrees2", "worktrees", ".worktree", ".worktrees/x", ""] {
+            assert!(!is_worktrees_dir(name.as_bytes()), "{name:?}");
+        }
+        for path in [
+            ".worktrees/x",
+            "a/.WORKTREES/b",
+            "./.worktrees",
+            "front/end/.worktrees",
+        ] {
+            assert!(in_worktrees_dir(path.as_bytes()), "{path:?}");
+        }
+        for path in ["a/worktrees/b", "a.worktrees", ".worktrees2/x", ""] {
+            assert!(!in_worktrees_dir(path.as_bytes()), "{path:?}");
+        }
+    }
 
     fn run(dir: &Path, args: &[&str]) -> String {
         let out = Command::new("git")
