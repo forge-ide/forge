@@ -66,19 +66,24 @@ impl SessionManager {
     /// git error) is recorded as an `error` event, and the session carries on without one.
     /// The caller holds the session's lock.
     pub(super) async fn checkpoint_turn(&self, session: &Session, turn: &TurnId) {
-        if let Err(failed) = self.take_checkpoint(session, Some(turn.clone())).await {
-            tracing::warn!(session_id = %session.id, error = %failed.detail, "checkpoint failed");
-            let _ = self
-                .emit(
-                    &session.id,
-                    EventPayload::Error(ErrorData {
-                        kind: failed.kind,
-                        detail: format!("no checkpoint after this turn: {}", failed.detail),
-                        retryable: false,
-                    }),
-                )
-                .await;
+        match self.take_checkpoint(session, Some(turn.clone())).await {
+            Ok(_) => self.sweep_threads(&session.id).await,
+            Err(failed) => self.checkpoint_failed(session, failed).await,
         }
+    }
+
+    async fn checkpoint_failed(&self, session: &Session, failed: Failed) {
+        tracing::warn!(session_id = %session.id, error = %failed.detail, "checkpoint failed");
+        let _ = self
+            .emit(
+                &session.id,
+                EventPayload::Error(ErrorData {
+                    kind: failed.kind,
+                    detail: format!("no checkpoint after this turn: {}", failed.detail),
+                    retryable: false,
+                }),
+            )
+            .await;
     }
 
     /// Rewind the session's worktrees, and its branch, to `to`. What they held just before is
@@ -140,6 +145,8 @@ impl SessionManager {
         let (key, n, by) = (id.clone(), target.n, target.id.clone());
         self.blocking(move |store| store.discard_checkpoints(&key, n, &by))
             .await?;
+        // Against the checkpoint rewound to, now the newest.
+        self.sweep_threads(id).await;
         self.emit(
             id,
             EventPayload::SessionRewound(SessionRewoundBody {

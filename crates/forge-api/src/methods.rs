@@ -266,9 +266,25 @@ pub struct FileDiffResult {
 #[serde(rename_all = "camelCase")]
 pub struct ReviewCommentParams {
     pub session_id: SessionId,
+    /// The repo the file is in; may be left out when the session has only one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub repo: Option<String>,
     pub path: String,
     pub range: LineRange,
     pub body: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewSetViewedParams {
+    pub session_id: SessionId,
+    /// The repo the file is in; may be left out when the session has only one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub repo: Option<String>,
+    pub path: String,
+    pub viewed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -472,6 +488,7 @@ methods! {
     ReviewReply = "review.reply": ReviewReplyParams => Thread;
     ReviewResolve = "review.resolve": ThreadIdParams => Thread;
     ReviewThreads = "review.threads": ReviewThreadsParams => Vec<Thread>;
+    ReviewSetViewed = "review.setViewed": ReviewSetViewedParams => Empty;
     ReviewRequestChanges = "review.requestChanges": SessionIdParams => TurnResult;
     ReviewRevertHunk = "review.revertHunk": ReviewRevertHunkParams => Empty;
     ReviewShip = "review.ship": ReviewShipParams => ShipResult;
@@ -494,7 +511,7 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), METHOD_NAMES.len());
-        assert_eq!(METHOD_NAMES.len(), 33);
+        assert_eq!(METHOD_NAMES.len(), 34);
     }
 
     #[test]

@@ -130,6 +130,7 @@ pub fn generate() -> String {
         .add::<ApprovalListParams>()
         .add::<ApprovalDecideParams>()
         .add::<ReviewChangesetParams>()
+        .add::<ReviewSetViewedParams>()
         .add::<ReviewFileDiffParams>()
         .add::<FileDiffResult>()
         .add::<ReviewCommentParams>()

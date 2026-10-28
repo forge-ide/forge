@@ -1,20 +1,22 @@
-//! `git_commit`, the agent's only way to commit: Forge's MCP endpoint calls it, and the daemon
-//! commits on the session branch once the policy and the `commit.pre` hooks let it.
+//! The tools behind a session's MCP endpoint. `git_commit` is the agent's only way to commit:
+//! the daemon commits on the session branch once the policy and the `commit.pre` hooks let
+//! it. `review_threads` and `review_reply` read and answer the session's own review threads.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use forge_acp::{Gate, GateKind, GateRequest, GateVerdict, Unmapped};
+use forge_api::SessionId;
 use forge_api::events::{EventPayload, PolicyDecisionBody, ToolCallBody, ToolResultBody, Verdict};
-use forge_api::model::Action;
+use forge_api::model::{Action, Thread};
 use forge_git::GitDirs;
 use forge_git::commit::{self, CommitError};
 use forge_hooks::{CommitCheck, CommitInput};
-use forge_mcp::{ForgeTools, GitCommitArgs, GitCommitResult};
+use forge_mcp::{ForgeTools, GitCommitArgs, GitCommitResult, ReviewReplyArgs, ReviewThreadsArgs};
 use futures_util::future::BoxFuture;
 
 use super::approvals::SessionGate;
-use super::lock;
+use super::{SessionManager, lock};
 use forge_acp::EventSink;
 
 /// Where a session's commits go.
@@ -28,16 +30,31 @@ pub(super) struct Target {
     pub index: PathBuf,
 }
 
-/// The tool behind the session's MCP endpoint. The endpoint starts with the proxy, before the
-/// agent and its gate exist, so the tool is filled in once they do.
-#[derive(Default)]
+/// The tools behind the session's MCP endpoint. The endpoint starts with the proxy, before the
+/// agent and its gate exist, so `git_commit` is filled in once they do. The review tools
+/// reach the manager without keeping it alive.
 pub(super) struct CommitTool {
     ready: Mutex<Option<(Arc<SessionGate>, Target)>>,
     /// One commit at a time.
     running: tokio::sync::Mutex<()>,
+    /// One `review_threads` at a time: each can read two 16 MiB blobs and diff them for
+    /// seconds per thread on the shared blocking pool.
+    reading: tokio::sync::Mutex<()>,
+    manager: Weak<SessionManager>,
+    session: SessionId,
 }
 
 impl CommitTool {
+    pub fn new(manager: Weak<SessionManager>, session: SessionId) -> Self {
+        Self {
+            ready: Mutex::default(),
+            running: tokio::sync::Mutex::new(()),
+            reading: tokio::sync::Mutex::new(()),
+            manager,
+            session,
+        }
+    }
+
     pub fn set(&self, gate: Arc<SessionGate>, target: Target) {
         *lock(&self.ready) = Some((gate, target));
     }
@@ -51,6 +68,29 @@ impl ForgeTools for CommitTool {
                 return Err("Forge's tools aren't ready yet; try again".into());
             };
             run(&gate, &target, args).await
+        })
+    }
+
+    fn review_threads(
+        &self,
+        args: ReviewThreadsArgs,
+    ) -> BoxFuture<'_, Result<Vec<Thread>, String>> {
+        Box::pin(async move {
+            let _one = self.reading.lock().await;
+            let manager = self.manager.upgrade().ok_or("Forge is shutting down")?;
+            manager
+                .threads(&self.session, args.status)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    fn review_reply(&self, args: ReviewReplyArgs) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            let manager = self.manager.upgrade().ok_or("Forge is shutting down")?;
+            manager
+                .agent_reply(&self.session, &args.thread_id, &args.body)
+                .await
         })
     }
 }

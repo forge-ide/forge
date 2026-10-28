@@ -307,6 +307,53 @@ async fn dispatch(
             })
             .await
         }
+        ReviewComment::NAME => {
+            run::<ReviewComment>(params, async |p| {
+                let bases = base_branches(state, &p.session_id).await?;
+                Ok(manager
+                    .comment(
+                        &p.session_id,
+                        p.repo.as_deref(),
+                        &p.path,
+                        p.range,
+                        p.body,
+                        bases,
+                    )
+                    .await?)
+            })
+            .await
+        }
+        ReviewReply::NAME => {
+            run::<ReviewReply>(params, async |p| {
+                Ok(manager.reply(&p.thread_id, p.body).await?)
+            })
+            .await
+        }
+        ReviewResolve::NAME => {
+            run::<ReviewResolve>(params, async |p| Ok(manager.resolve(&p.thread_id).await?)).await
+        }
+        ReviewThreads::NAME => {
+            run::<ReviewThreads>(params, async |p| {
+                Ok(manager.threads(&p.session_id, p.status).await?)
+            })
+            .await
+        }
+        ReviewSetViewed::NAME => {
+            run::<ReviewSetViewed>(params, async |p| {
+                manager
+                    .set_viewed(&p.session_id, p.repo.as_deref(), &p.path, p.viewed)
+                    .await?;
+                Ok(Empty {})
+            })
+            .await
+        }
+        ReviewRequestChanges::NAME => {
+            run::<ReviewRequestChanges>(params, async |p| {
+                let turn_id = manager.request_changes(&p.session_id).await?;
+                Ok(TurnResult { turn_id })
+            })
+            .await
+        }
         ReviewFileDiff::NAME => {
             run::<ReviewFileDiff>(params, async |p| {
                 let bases = base_branches(state, &p.session_id).await?;

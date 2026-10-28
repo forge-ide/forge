@@ -8,6 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+forge-api.workspace = true
 forge-sandbox.workspace = true
 futures-util.workspace = true
 serde.workspace = true

@@ -5,10 +5,13 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, bail};
 use forge_api::events::Remember;
-use forge_api::model::{Approval, Mode, Project, Repo, Session, SessionState, Usage};
-use forge_api::{ApprovalId, CheckpointId, ProjectId, SessionId, Timestamp};
+use forge_api::model::{
+    Approval, Comment, Mode, Project, Repo, Session, SessionState, ThreadStatus, Usage,
+};
+use forge_api::{ApprovalId, CheckpointId, ProjectId, SessionId, ThreadId, Timestamp};
 use forge_session::{
-    ApprovalOutcome, ApprovalRecord, CheckpointRecord, SessionStore, StoreError, WorktreeRecord,
+    ApprovalOutcome, ApprovalRecord, CheckpointRecord, RoundRecord, SessionStore, StoreError,
+    ThreadRecord, WorktreeRecord,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
@@ -20,6 +23,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0002_sessions.sql"),
     include_str!("../migrations/0003_approvals.sql"),
     include_str!("../migrations/0004_checkpoints.sql"),
+    include_str!("../migrations/0005_review.sql"),
 ];
 
 /// The daemon's database. Every call runs on the blocking pool.
@@ -389,6 +393,172 @@ impl SessionStore for Db {
             .map_err(store_err)
     }
 
+    fn insert_thread(&self, thread: &ThreadRecord) -> Result<(), StoreError> {
+        let mut conn = self.lock();
+        let tx = conn.transaction().map_err(store_err)?;
+        tx.execute(
+            "INSERT INTO threads (id, session_id, repo_name, path, start_line, end_line,
+                                  checkpoint_id, blob_id, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                thread.id.as_str(),
+                thread.session.as_str(),
+                thread.repo,
+                thread.path,
+                thread.start_line,
+                thread.end_line,
+                thread.checkpoint.as_str(),
+                thread.blob,
+                wire(thread.status),
+                thread.created_at.to_string(),
+            ],
+        )
+        .map_err(store_err)?;
+        for comment in &thread.comments {
+            insert_comment(&tx, &thread.id, comment)?;
+        }
+        tx.commit().map_err(store_err)
+    }
+
+    fn add_comment(&self, thread: &ThreadId, comment: &Comment) -> Result<(), StoreError> {
+        insert_comment(&self.lock(), thread, comment)
+    }
+
+    fn transition_thread(
+        &self,
+        thread: &ThreadId,
+        from: &[ThreadStatus],
+        to: ThreadStatus,
+    ) -> Result<bool, StoreError> {
+        // One statement, so nothing can change the status between the check and the write.
+        let from: Vec<String> = from.iter().map(|s| wire(*s)).collect();
+        let json = serde_json::to_string(&from).map_err(|e| StoreError(e.to_string()))?;
+        self.lock()
+            .execute(
+                "UPDATE threads SET status = ?1
+                 WHERE id = ?2 AND status IN (SELECT value FROM json_each(?3))",
+                params![wire(to), thread.as_str(), json],
+            )
+            .map(|changed| changed == 1)
+            .map_err(store_err)
+    }
+
+    fn thread(&self, id: &ThreadId) -> Result<Option<ThreadRecord>, StoreError> {
+        let conn = self.lock();
+        let thread = conn
+            .query_row(
+                &format!("SELECT {THREAD_COLUMNS} FROM threads WHERE id = ?1"),
+                [id.as_str()],
+                thread_row,
+            )
+            .optional()
+            .map_err(store_err)?;
+        thread.map(|t| with_comments(&conn, t)).transpose()
+    }
+
+    fn threads(&self, session: &SessionId) -> Result<Vec<ThreadRecord>, StoreError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {THREAD_COLUMNS} FROM threads WHERE session_id = ?1 ORDER BY rowid"
+            ))
+            .map_err(store_err)?;
+        let threads = stmt
+            .query_map([session.as_str()], thread_row)
+            .map_err(store_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(store_err)?;
+        threads
+            .into_iter()
+            .map(|t| with_comments(&conn, t))
+            .collect()
+    }
+
+    fn add_round(
+        &self,
+        session: &SessionId,
+        checkpoint: &CheckpointId,
+        at: Timestamp,
+    ) -> Result<u32, StoreError> {
+        // The number is taken in the same statement, so two rounds never get one.
+        self.lock()
+            .query_row(
+                "INSERT INTO review_rounds (session_id, n, checkpoint_id, created_at)
+                 SELECT ?1, COALESCE(MAX(n), 0) + 1, ?2, ?3
+                 FROM review_rounds WHERE session_id = ?1
+                 RETURNING n",
+                params![session.as_str(), checkpoint.as_str(), at.to_string()],
+                |r| r.get(0),
+            )
+            .map_err(store_err)
+    }
+
+    fn rounds(&self, session: &SessionId) -> Result<Vec<RoundRecord>, StoreError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT n, checkpoint_id, created_at FROM review_rounds
+                 WHERE session_id = ?1 ORDER BY n",
+            )
+            .map_err(store_err)?;
+        stmt.query_map([session.as_str()], |r| {
+            let bad = |i, e: String| {
+                rusqlite::Error::FromSqlConversionFailure(i, rusqlite::types::Type::Text, e.into())
+            };
+            Ok(RoundRecord {
+                n: r.get(0)?,
+                checkpoint: r
+                    .get::<_, String>(1)?
+                    .parse()
+                    .map_err(|e| bad(1, format!("{e}")))?,
+                created_at: r
+                    .get::<_, String>(2)?
+                    .parse()
+                    .map_err(|e| bad(2, format!("{e}")))?,
+            })
+        })
+        .map_err(store_err)?
+        .collect::<Result<_, _>>()
+        .map_err(store_err)
+    }
+
+    fn set_viewed(
+        &self,
+        session: &SessionId,
+        round: u32,
+        repo: &str,
+        path: &str,
+        viewed: bool,
+    ) -> Result<(), StoreError> {
+        let sql = if viewed {
+            "INSERT OR IGNORE INTO review_viewed (session_id, round, repo_name, path)
+             VALUES (?1, ?2, ?3, ?4)"
+        } else {
+            "DELETE FROM review_viewed
+             WHERE session_id = ?1 AND round = ?2 AND repo_name = ?3 AND path = ?4"
+        };
+        self.lock()
+            .execute(sql, params![session.as_str(), round, repo, path])
+            .map(drop)
+            .map_err(store_err)
+    }
+
+    fn viewed(&self, session: &SessionId, round: u32) -> Result<Vec<(String, String)>, StoreError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT repo_name, path FROM review_viewed
+                 WHERE session_id = ?1 AND round = ?2 ORDER BY repo_name, path",
+            )
+            .map_err(store_err)?;
+        stmt.query_map(params![session.as_str(), round], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .map_err(store_err)?
+        .collect::<Result<_, _>>()
+        .map_err(store_err)
+    }
+
     fn insert_approval(&self, approval: &Approval) -> Result<(), StoreError> {
         let action = serde_json::to_string(&approval.action)
             .map_err(|e| StoreError(format!("encoding an action: {e}")))?;
@@ -574,6 +744,76 @@ fn session_row(r: &Row<'_>) -> rusqlite::Result<Session> {
     })
 }
 
+const THREAD_COLUMNS: &str = "id, session_id, repo_name, path, start_line, end_line, \
+                              checkpoint_id, blob_id, status, created_at";
+
+fn thread_row(r: &Row<'_>) -> rusqlite::Result<ThreadRecord> {
+    let text = |i: usize| r.get::<_, String>(i);
+    let bad = |i, e: String| {
+        rusqlite::Error::FromSqlConversionFailure(i, rusqlite::types::Type::Text, e.into())
+    };
+    Ok(ThreadRecord {
+        id: text(0)?.parse().map_err(|e| bad(0, format!("{e}")))?,
+        session: text(1)?.parse().map_err(|e| bad(1, format!("{e}")))?,
+        repo: text(2)?,
+        path: text(3)?,
+        start_line: r.get(4)?,
+        end_line: r.get(5)?,
+        checkpoint: text(6)?.parse().map_err(|e| bad(6, format!("{e}")))?,
+        blob: text(7)?,
+        status: from_wire(&text(8)?).map_err(|e| bad(8, e))?,
+        created_at: text(9)?.parse().map_err(|e| bad(9, format!("{e}")))?,
+        comments: Vec::new(),
+    })
+}
+
+/// `thread` with its comments, oldest first.
+fn with_comments(conn: &Connection, mut thread: ThreadRecord) -> Result<ThreadRecord, StoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, author, body, created_at FROM comments
+             WHERE thread_id = ?1 ORDER BY rowid",
+        )
+        .map_err(store_err)?;
+    thread.comments = stmt
+        .query_map([thread.id.as_str()], |r| {
+            let text = |i: usize| r.get::<_, String>(i);
+            let bad = |i, e: String| {
+                rusqlite::Error::FromSqlConversionFailure(i, rusqlite::types::Type::Text, e.into())
+            };
+            Ok(Comment {
+                id: text(0)?.parse().map_err(|e| bad(0, format!("{e}")))?,
+                author: from_wire(&text(1)?).map_err(|e| bad(1, e))?,
+                body: text(2)?,
+                created_at: text(3)?.parse().map_err(|e| bad(3, format!("{e}")))?,
+            })
+        })
+        .map_err(store_err)?
+        .collect::<Result<_, _>>()
+        .map_err(store_err)?;
+    Ok(thread)
+}
+
+fn insert_comment(
+    conn: &Connection,
+    thread: &ThreadId,
+    comment: &Comment,
+) -> Result<(), StoreError> {
+    conn.execute(
+        "INSERT INTO comments (id, thread_id, author, body, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            comment.id.as_str(),
+            thread.as_str(),
+            wire(comment.author),
+            comment.body,
+            comment.created_at.to_string(),
+        ],
+    )
+    .map(drop)
+    .map_err(store_err)
+}
+
 /// An enum's wire spelling, as stored in text columns.
 fn wire<T: Serialize>(value: T) -> String {
     match serde_json::to_value(value) {
@@ -723,6 +963,101 @@ mod tests {
         assert_eq!(read[0].discarded_by.as_ref(), Some(&cps[1].id));
         assert_eq!(read[1].discarded_by.as_ref(), Some(&cps[0].id));
         assert_eq!(read[2].discarded_by.as_ref(), Some(&cps[0].id));
+    }
+
+    #[test]
+    fn threads_comments_rounds_and_viewed_files_round_trip() {
+        use forge_api::model::{Comment, CommentAuthor, ThreadStatus};
+        use forge_api::{CommentId, ThreadId};
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("forge.db")).unwrap();
+        let session = test_session(&db);
+        let comment = |author, body: &str| Comment {
+            id: CommentId::new(),
+            author,
+            body: body.into(),
+            created_at: Timestamp::now(),
+        };
+        let thread = |path: &str| ThreadRecord {
+            id: ThreadId::new(),
+            session: session.id.clone(),
+            repo: "p".into(),
+            path: path.into(),
+            start_line: 3,
+            end_line: 5,
+            checkpoint: CheckpointId::new(),
+            blob: "b".repeat(40),
+            status: ThreadStatus::Open,
+            created_at: Timestamp::now(),
+            comments: vec![comment(CommentAuthor::Human, "first")],
+        };
+        let (mut a, b) = (thread("src/a.rs"), thread("\"odd\\376\""));
+        db.insert_thread(&a).unwrap();
+        db.insert_thread(&b).unwrap();
+        // Comments keep their order, even made within the same instant.
+        let replies = [
+            comment(CommentAuthor::Agent, "done"),
+            comment(CommentAuthor::Human, "thanks"),
+        ];
+        for reply in &replies {
+            db.add_comment(&a.id, reply).unwrap();
+        }
+        a.comments.extend(replies);
+        use ThreadStatus::*;
+        assert!(
+            db.transition_thread(&a.id, &[Open, Outdated], Resolved)
+                .unwrap()
+        );
+        a.status = Resolved;
+        // A status moves only from the ones given: a resolved thread isn't outdated after,
+        // nor resolved again.
+        assert!(!db.transition_thread(&a.id, &[Open], Outdated).unwrap());
+        assert!(
+            !db.transition_thread(&a.id, &[Open, Outdated], Resolved)
+                .unwrap()
+        );
+        assert!(
+            !db.transition_thread(&ThreadId::new(), &[Open], Outdated)
+                .unwrap()
+        );
+        assert_eq!(db.thread(&a.id).unwrap(), Some(a.clone()));
+        assert_eq!(db.threads(&session.id).unwrap(), [a, b]);
+        assert_eq!(db.thread(&ThreadId::new()).unwrap(), None);
+        assert!(
+            db.add_comment(&ThreadId::new(), &comment(CommentAuthor::Human, "x"))
+                .is_err()
+        );
+
+        // Each round takes the next number.
+        let at = Timestamp::now();
+        let checkpoints = [CheckpointId::new(), CheckpointId::new()];
+        assert_eq!(db.add_round(&session.id, &checkpoints[0], at).unwrap(), 1);
+        assert_eq!(db.add_round(&session.id, &checkpoints[1], at).unwrap(), 2);
+        let rounds: Vec<_> = db
+            .rounds(&session.id)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.n, r.checkpoint))
+            .collect();
+        assert_eq!(
+            rounds,
+            [(1, checkpoints[0].clone()), (2, checkpoints[1].clone())]
+        );
+
+        db.set_viewed(&session.id, 1, "p", "src/a.rs", true)
+            .unwrap();
+        db.set_viewed(&session.id, 1, "p", "src/a.rs", true)
+            .unwrap();
+        db.set_viewed(&session.id, 1, "p", "src/b.rs", true)
+            .unwrap();
+        db.set_viewed(&session.id, 2, "p", "src/c.rs", true)
+            .unwrap();
+        db.set_viewed(&session.id, 1, "p", "src/b.rs", false)
+            .unwrap();
+        assert_eq!(
+            db.viewed(&session.id, 1).unwrap(),
+            [("p".to_owned(), "src/a.rs".to_owned())]
+        );
     }
 
     #[test]

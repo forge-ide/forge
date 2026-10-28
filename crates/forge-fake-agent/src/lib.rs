@@ -18,7 +18,7 @@ pub mod script;
 
 pub use script::{
     ExecStep, Expected, McpCallStep, PermissionAction, Script, ScriptError, Step, WriteStep,
-    glob_match,
+    glob_match, review_threads,
 };
 
 /// Script position and per-connection state.
@@ -455,6 +455,34 @@ async fn run_turn(
                         return Err(format!("{}: expected a refusal", call.tool));
                     }
                     (None, _) => {}
+                }
+            }
+            Step::ExpectReviewComments(want) => {
+                let threads = review_threads(&prompt)
+                    .ok_or_else(|| format!("prompt {prompt:?} is not a request for changes"))?;
+                if threads.len() != want {
+                    return Err(format!(
+                        "expected {want} review threads, got {}",
+                        threads.len()
+                    ));
+                }
+            }
+            Step::ReplyThread(reply) => {
+                let threads = review_threads(&prompt)
+                    .ok_or_else(|| format!("prompt {prompt:?} is not a request for changes"))?;
+                let thread = threads
+                    .get(reply.index)
+                    .and_then(|t| t["threadId"].as_str())
+                    .ok_or_else(|| format!("the request lists no thread {}", reply.index))?
+                    .to_owned();
+                let url = shared
+                    .state()
+                    .mcp
+                    .clone()
+                    .ok_or("the client offered no forge MCP server")?;
+                let arguments = json!({ "threadId": thread, "body": reply.body });
+                if let Some(why) = mcp_call(&url, "review_reply", arguments).await? {
+                    return Err(format!("review_reply refused: {why}"));
                 }
             }
             Step::SleepMs(ms) => {

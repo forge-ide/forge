@@ -275,6 +275,9 @@ pub struct FileChange {
     /// refuses it. Clients show it as a warning, never as an unchanged-looking 0/0.
     #[serde(default)]
     pub too_large: bool,
+    /// The human marked it viewed in this review round.
+    #[serde(default)]
+    pub viewed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -284,6 +287,12 @@ pub struct Changeset {
     pub base: String,
     pub head: String,
     pub files: Vec<FileChange>,
+    /// The review round: how many times changes were requested, plus one.
+    pub round: u32,
+    /// The checkpoint the last request for changes reviewed, for "since last review".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_reviewed: Option<CheckpointId>,
 }
 
 /// Inclusive, 1-based line range.
@@ -307,9 +316,21 @@ pub enum ThreadStatus {
 pub struct Thread {
     pub id: ThreadId,
     pub session_id: SessionId,
+    /// The repo the file is in, by its name in `forge.toml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub repo: Option<String>,
+    /// The file's path at `checkpoint_id`, as `review.changeset` gives paths.
     pub path: String,
+    /// The lines it was written on, at `checkpoint_id`.
     pub range: LineRange,
     pub checkpoint_id: CheckpointId,
+    /// Those lines as they were then.
+    pub quote: Vec<String>,
+    /// Where those lines are at the newest checkpoint; absent once the thread is outdated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub current: Option<LineRange>,
     pub status: ThreadStatus,
     pub comments: Vec<Comment>,
 }

@@ -42,6 +42,7 @@ mod approvals;
 mod checkpoints;
 mod commit;
 mod review;
+mod threads;
 
 use approvals::{Pending, SessionGate};
 use commit::CommitTool;
@@ -605,7 +606,7 @@ impl SessionManager {
         .map_err(|e| e.to_string())?;
         // Forge's MCP endpoint is served on the proxy; its tool is filled in once the gate
         // exists, below.
-        let tools = Arc::new(CommitTool::default());
+        let tools = Arc::new(CommitTool::new(Arc::downgrade(self), session.id.clone()));
         let proxy = self
             .start_proxy(
                 session,
