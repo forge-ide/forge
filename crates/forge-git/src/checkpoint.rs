@@ -10,7 +10,7 @@
 use std::path::Path;
 
 use crate::commit::{self, CommitError, Record};
-use crate::worktree::{GitDirs, GitError};
+use crate::worktree::{GitDirs, GitError, in_worktrees_dir};
 
 /// Who checkpoint commits are by. They live on Forge's own refs, so they don't need the
 /// user's identity, and a machine without one can still take them.
@@ -40,35 +40,8 @@ pub fn take(
     reference: &str,
     message: &str,
 ) -> Result<String, CommitError> {
-    let run = |args: &[&str]| commit::run(dirs, worktree, index, args, None);
     let parent = tip(dirs, worktree, index, branch)?;
-    let base = previous.unwrap_or(&parent);
-    load(dirs, worktree, index, base)?;
-    commit::drop_gitlinks(dirs, worktree, index)?;
-    // Ignored dirs are listed as one entry each, so a `.gitignore` only shows here when it is
-    // itself ignored by a rule beside it or below an unignored dir.
-    let ignored = run(&[
-        "ls-files",
-        "-z",
-        "--others",
-        "--ignored",
-        "--exclude-standard",
-        "--directory",
-    ])?;
-    let hiding: Vec<&str> = ignored
-        .split('\0')
-        .filter(|p| *p == ".gitignore" || p.ends_with("/.gitignore"))
-        .collect();
-    let all = [".".to_owned()];
-    commit::check_size(dirs, worktree, index, &all, &hiding)?;
-    run(&["add", "--all", "--", "."])?;
-    if !hiding.is_empty() {
-        let mut add = vec!["add", "--force", "--"];
-        add.extend(hiding);
-        run(&add)?;
-    }
-    commit::pin_gitlinks(dirs, worktree, index, &parent)?;
-    let tree = run(&["write-tree"])?.trim().to_owned();
+    let tree = snapshot(dirs, worktree, index, previous.unwrap_or(&parent), &parent)?;
     if let Some(previous) = previous
         && tree_of(dirs, worktree, index, previous)? == tree
         && parent_of(dirs, worktree, index, previous)? == parent
@@ -98,6 +71,75 @@ pub fn take(
             env: &IDENTITY,
         },
     )
+}
+
+/// Stage `worktree` as a checkpoint would, into `index` loaded with `base`'s tree, with
+/// nested repos pinned as `parent` has them; returns the tree.
+fn snapshot(
+    dirs: &GitDirs,
+    worktree: &Path,
+    index: &Path,
+    base: &str,
+    parent: &str,
+) -> Result<String, CommitError> {
+    let run = |args: &[&str]| commit::run(dirs, worktree, index, args, None);
+    load(dirs, worktree, index, base)?;
+    commit::drop_gitlinks(dirs, worktree, index)?;
+    // Ignored dirs are listed as one entry each, so a `.gitignore` only shows here when it is
+    // itself ignored by a rule beside it or below an unignored dir.
+    let ignored = run(&[
+        "ls-files",
+        "-z",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+    ])?;
+    let hiding: Vec<&str> = ignored
+        .split('\0')
+        .filter(|p| *p == ".gitignore" || p.ends_with("/.gitignore"))
+        .filter(|p| !in_worktrees_dir(p.as_bytes()))
+        .collect();
+    let all = [".".to_owned()];
+    commit::check_size(dirs, worktree, index, &all, &hiding)?;
+    run(&["add", "--all", "--", "."])?;
+    if !hiding.is_empty() {
+        let mut add = vec!["add", "--force", "--"];
+        add.extend(hiding);
+        run(&add)?;
+    }
+    commit::drop_worktrees_dir(dirs, worktree, index, parent)?;
+    commit::pin_gitlinks(dirs, worktree, index, parent)?;
+    Ok(run(&["write-tree"])?.trim().to_owned())
+}
+
+/// Refuse unless `worktree` and `branch` are still exactly as checkpoint `checkpoint` has
+/// them: the branch at its parent, or at a commit on top of it with the checkpoint's own tree
+/// (what was uncommitted, committed since by Forge), and a snapshot taken now the same tree.
+/// Leaves `index` holding that tree. Returns the branch tip.
+pub fn unchanged(
+    dirs: &GitDirs,
+    worktree: &Path,
+    branch: &str,
+    checkpoint: &str,
+    index: &Path,
+) -> Result<String, CommitError> {
+    let parent = parent_of(dirs, worktree, index, checkpoint)?;
+    let tip = tip(dirs, worktree, index, branch)?;
+    if tip != parent
+        && (parent_of(dirs, worktree, index, &tip).ok().as_deref() != Some(parent.as_str())
+            || tree_of(dirs, worktree, index, &tip)? != tree_of(dirs, worktree, index, checkpoint)?)
+    {
+        return Err(CommitError::Moved(branch.to_owned()));
+    }
+    let tree = match snapshot(dirs, worktree, index, checkpoint, &parent) {
+        Err(CommitError::TooLarge) => return Err(CommitError::WorktreeChanged),
+        tree => tree?,
+    };
+    if tree != tree_of(dirs, worktree, index, checkpoint)? {
+        return Err(CommitError::WorktreeChanged);
+    }
+    Ok(tip)
 }
 
 /// Rewind `worktree` from checkpoint `from`, taken just now, to checkpoint `to`, and move
@@ -177,7 +219,12 @@ pub fn rewind(
 
 /// Make `index` hold `commit`'s tree, keeping it as it is when it already does, so its stat
 /// cache is kept. Callers serialize their uses of `index`.
-fn load(dirs: &GitDirs, worktree: &Path, index: &Path, commit: &str) -> Result<(), CommitError> {
+pub(crate) fn load(
+    dirs: &GitDirs,
+    worktree: &Path,
+    index: &Path,
+    commit: &str,
+) -> Result<(), CommitError> {
     if let Some(dir) = index.parent() {
         std::fs::create_dir_all(dir).map_err(|source| GitError::Io {
             context: format!("creating {}", dir.display()),
@@ -199,7 +246,12 @@ fn load(dirs: &GitDirs, worktree: &Path, index: &Path, commit: &str) -> Result<(
     Ok(())
 }
 
-fn tip(dirs: &GitDirs, worktree: &Path, index: &Path, branch: &str) -> Result<String, CommitError> {
+pub(crate) fn tip(
+    dirs: &GitDirs,
+    worktree: &Path,
+    index: &Path,
+    branch: &str,
+) -> Result<String, CommitError> {
     rev(
         dirs,
         worktree,
@@ -208,7 +260,7 @@ fn tip(dirs: &GitDirs, worktree: &Path, index: &Path, branch: &str) -> Result<St
     )
 }
 
-fn tree_of(
+pub(crate) fn tree_of(
     dirs: &GitDirs,
     worktree: &Path,
     index: &Path,
@@ -217,7 +269,7 @@ fn tree_of(
     rev(dirs, worktree, index, &format!("{commit}^{{tree}}"))
 }
 
-fn parent_of(
+pub(crate) fn parent_of(
     dirs: &GitDirs,
     worktree: &Path,
     index: &Path,

@@ -99,6 +99,15 @@ pub(crate) fn reach(args: &[&str]) -> Reach {
             | "merge-base",
         ) => Reach::Repo,
         Some("ls-files") if has("-s") && !has("--others") && !has("-o") => Reach::Repo,
+        // Objects from stdin, as they are: no filter, so no file of the worktree's is read.
+        Some("hash-object") if has("--stdin") && has("--no-filters") => Reach::Repo,
+        // Merges trees into objects, never touching an index or a worktree; attributes come
+        // from the tree `GIT_ATTR_SOURCE` names.
+        Some("merge-tree") if has("--write-tree") => Reach::Repo,
+        Some("config") if has("--get") => Reach::Repo,
+        Some("worktree") if args.get(1) == Some(&"list") => Reach::Repo,
+        // Sends objects and updates the remote's refs; local refs only as tracking refs.
+        Some("push") => Reach::Repo,
         Some("read-tree") if has("-u") => Reach::Checkout,
         _ => Reach::Scan,
     }
@@ -379,6 +388,11 @@ mod tests {
             &["cat-file", "--batch"],
             &["merge-base", "a", "b"],
             &["ls-files", "-s", "-z"],
+            &["hash-object", "-w", "--stdin", "--no-filters"],
+            &["merge-tree", "--write-tree", "-z", "a", "b"],
+            &["config", "--get", "branch.main.remote"],
+            &["worktree", "list", "--porcelain", "-z"],
+            &["push", "--porcelain", "origin", "a:refs/heads/b"],
         ] {
             assert_eq!(reach(repo), Reach::Repo, "{repo:?}");
         }
@@ -395,6 +409,10 @@ mod tests {
             &["update-index", "-z", "--index-info"],
             &["update-index", "-z", "--force-remove", "--stdin"],
             &["hash-object", "x"],
+            &["hash-object", "-w", "--stdin"],
+            &["merge-tree", "a", "b"],
+            &["config", "x"],
+            &["worktree", "add", "x"],
             &["something-new"],
             &[],
         ] {

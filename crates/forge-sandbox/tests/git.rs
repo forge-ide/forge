@@ -422,3 +422,122 @@ fn a_link_swapped_in_while_rewinding_never_writes_outside() {
         "the user's\n"
     );
 }
+
+/// Reverting a hunk and merging locally, with every git that opens files confined: the
+/// session's worktree for the revert, the repo's main checkout for the merge.
+#[test]
+#[ignore = "needs a sandbox-capable host; run `just test-sandbox`"]
+fn reverts_and_local_merges_work_confined() {
+    use forge_git::{checkpoint, ship};
+    let f = Fixture::new();
+    let index = checkpoint::index_path(&f.index_dir, "repo");
+    std::fs::write(f.wt.join("a.txt"), "agent\n").unwrap();
+    std::fs::write(f.wt.join("b.txt"), "b\n").unwrap();
+    let cp = checkpoint::take(
+        &f.dirs,
+        &f.wt,
+        "feat/x",
+        None,
+        &index,
+        &checkpoint::checkpoint_ref("ses_1", 1),
+        "cp",
+    )
+    .unwrap();
+    let edit = ship::FileEdit {
+        path: b"a.txt",
+        content: Some(("100644", b"a\n")),
+        message: "revert",
+    };
+    let tip = ship::edit_file(&f.dirs, &f.wt, "feat/x", &cp, &index, &edit, "settle").unwrap();
+    assert_eq!(std::fs::read_to_string(f.wt.join("a.txt")).unwrap(), "a\n");
+    let merge = {
+        let sessions = [f.wt.clone()];
+        let into = ship::MergeInto {
+            base: "main",
+            repo: &f.repo,
+            sessions: &sessions,
+        };
+        ship::plan_merge(&f.dirs, &f.wt, &index, &into, &tip, "merge").unwrap()
+    };
+    assert_eq!(merge.checkout.as_deref(), Some(f.repo.as_path()));
+    ship::apply_merge(&f.dirs, &f.wt, &index, &merge).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(f.repo.join("b.txt")).unwrap(),
+        "b\n"
+    );
+}
+
+/// A process keeps swapping a dir of the main checkout for a link to a dir outside the repo
+/// while the daemon merges into it and back: the update is confined to the repo, so nothing
+/// outside is written or removed.
+#[test]
+#[ignore = "needs a sandbox-capable host; run `just test-sandbox`"]
+fn a_link_swapped_in_while_merging_never_writes_outside() {
+    use forge_git::ship;
+    let f = Fixture::new();
+    let index = f.index_dir.join("merge.index");
+    let outside = f.home.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("keep.txt"), "the user's\n").unwrap();
+    std::fs::create_dir(f.wt.join("d")).unwrap();
+    for n in 0..20 {
+        std::fs::write(f.wt.join(format!("d/f{n}.txt")), "agent\n").unwrap();
+    }
+    git(&f.wt, &["add", "d"]);
+    git(&f.wt, &["commit", "--quiet", "-m", "d"]);
+    let tip = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "feat/x"])
+            .current_dir(&f.repo)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    let merge = {
+        let sessions = [f.wt.clone()];
+        let into = ship::MergeInto {
+            base: "main",
+            repo: &f.repo,
+            sessions: &sessions,
+        };
+        ship::plan_merge(&f.dirs, &f.wt, &index, &into, &tip, "merge").unwrap()
+    };
+    let d = f.repo.join("d");
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let (stop, d, outside) = (stop.clone(), d.clone(), outside.clone());
+        let aside = f.repo.join("d.aside");
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                if std::fs::rename(&d, &aside).is_ok() {
+                    let _ = std::os::unix::fs::symlink(&outside, &d);
+                    let _ = std::fs::remove_file(&d);
+                    let _ = std::fs::rename(&aside, &d);
+                } else {
+                    let _ = std::os::unix::fs::symlink(&outside, &d);
+                    let _ = std::fs::remove_file(&d);
+                }
+            }
+        })
+    };
+    let start = Instant::now();
+    let mut rounds = 0;
+    while racing(start, rounds) {
+        if ship::apply_merge(&f.dirs, &f.wt, &index, &merge).is_ok() {
+            let _ = ship::undo_merge(&f.dirs, &f.wt, &index, &merge);
+        }
+        rounds += 1;
+    }
+    stop.store(true, Ordering::Relaxed);
+    swapper.join().unwrap();
+    assert!(rounds >= ROUNDS, "only {rounds} rounds");
+    let mut left: Vec<String> = std::fs::read_dir(&outside)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["keep.txt"], "wrote outside the repo");
+}

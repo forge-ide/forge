@@ -7,6 +7,7 @@ pub mod diff;
 pub mod history;
 pub mod id;
 pub mod request;
+pub mod revert;
 
 pub use anchor::{Followed, LineMap, follow, line_map, quote};
 pub use diff::{
@@ -15,6 +16,7 @@ pub use diff::{
 pub use history::{History, history};
 pub use id::hunk_id;
 pub use request::request_changes;
+pub use revert::revert;
 
 /// This crate's package name.
 pub const NAME: &str = env!("CARGO_PKG_NAME");

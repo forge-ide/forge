@@ -370,6 +370,40 @@ async fn dispatch(
             })
             .await
         }
+        ReviewRevertHunk::NAME => {
+            run::<ReviewRevertHunk>(params, async |p| {
+                let bases = base_branches(state, &p.session_id).await?;
+                manager
+                    .revert_hunk(
+                        &p.session_id,
+                        p.repo.as_deref(),
+                        &p.path,
+                        &p.hunk_id,
+                        p.from_checkpoint.as_ref(),
+                        bases,
+                    )
+                    .await?;
+                Ok(Empty {})
+            })
+            .await
+        }
+        ReviewShip::NAME => {
+            run::<ReviewShip>(params, async |p| {
+                let bases = base_branches(state, &p.session_id).await?;
+                let git_ref = manager
+                    .ship(
+                        &p.session_id,
+                        &p.checkpoint_id,
+                        p.strategy,
+                        p.branch,
+                        p.include_withheld.unwrap_or(false),
+                        bases,
+                    )
+                    .await?;
+                Ok(ShipResult { git_ref })
+            })
+            .await
+        }
         name if METHOD_NAMES.contains(&name) => Err(RpcError::protocol(
             codes::METHOD_NOT_FOUND,
             format!("{name} is part of API {API_VERSION} but not implemented by this daemon yet"),

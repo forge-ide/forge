@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::confine::{self, Launch};
-use crate::worktree::{GitDirs, GitError};
+use crate::worktree::{GitDirs, GitError, WORKTREES_DIR, in_worktrees_dir};
 
 /// Most diff text kept for the secret scan; a larger change is reported as cut. Binary files
 /// count too, since a file git would call binary can still hold a secret.
@@ -51,6 +51,10 @@ pub enum CommitError {
     NothingToCommit,
     #[error("path {0:?} must be relative to the working directory and stay inside it")]
     BadPath(String),
+    #[error(
+        "{0:?} is under {WORKTREES_DIR}/, where Forge keeps session worktrees; it is never committed"
+    )]
+    Reserved(String),
     #[error("the branch {0} moved while committing; try again")]
     Moved(String),
     #[error(
@@ -108,6 +112,7 @@ pub fn stage(
     let mut add = vec!["add", "--all", "--"];
     add.extend(pathspecs.iter().map(String::as_str));
     run(&add)?;
+    drop_worktrees_dir(dirs, worktree, index, &parent)?;
     pin_gitlinks(dirs, worktree, index, &parent)?;
     let tree = run(&["write-tree"])?.trim().to_owned();
     let changed: Vec<String> = run(&[
@@ -401,11 +406,75 @@ fn checked_path(path: &str) -> Result<String, CommitError> {
     let ok = !path.is_empty()
         && p.components()
             .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
-    if ok {
-        Ok(path.to_owned())
-    } else {
-        Err(CommitError::BadPath(path.to_owned()))
+    if !ok {
+        return Err(CommitError::BadPath(path.to_owned()));
     }
+    if in_worktrees_dir(path.as_bytes()) {
+        return Err(CommitError::Reserved(path.to_owned()));
+    }
+    Ok(path.to_owned())
+}
+
+/// Put every path under a `.worktrees/` dir, at any depth and in any spelling a filesystem
+/// could resolve to it ([`in_worktrees_dir`]), back in `index` as `parent` has it: nothing new
+/// there is ever staged, and nothing the branch already tracks there is lost. Session
+/// worktrees live in such dirs inside the main checkout (this repo's, or a repo's nested in
+/// it), so a tree with new files there would, once merged and checked out, write into them;
+/// an agent's `.gitignore` can un-ignore them, so this runs after staging, whatever the rules.
+pub(crate) fn drop_worktrees_dir(
+    dirs: &GitDirs,
+    worktree: &Path,
+    index: &Path,
+    parent: &str,
+) -> Result<(), GitError> {
+    let listed = run_bytes(dirs, worktree, index, &["ls-files", "-s", "-z"], None)?;
+    let mut paths = Vec::new();
+    for entry in listed.split(|b| *b == 0).filter(|e| !e.is_empty()) {
+        let Some(tab) = entry.iter().position(|b| *b == b'\t') else {
+            continue;
+        };
+        let path = &entry[tab + 1..];
+        if in_worktrees_dir(path) {
+            paths.extend_from_slice(path);
+            paths.push(0);
+        }
+    }
+    if !paths.is_empty() {
+        run(
+            dirs,
+            worktree,
+            index,
+            &["update-index", "-z", "--force-remove", "--stdin"],
+            Some(&paths),
+        )?;
+    }
+    let tracked = run_bytes(
+        dirs,
+        worktree,
+        index,
+        &["ls-tree", "-r", "-z", "--full-tree", parent],
+        None,
+    )?;
+    let mut kept = Vec::new();
+    for entry in tracked.split(|b| *b == 0).filter(|e| !e.is_empty()) {
+        let Some(tab) = entry.iter().position(|b| *b == b'\t') else {
+            continue;
+        };
+        if in_worktrees_dir(&entry[tab + 1..]) {
+            kept.extend_from_slice(entry);
+            kept.push(0);
+        }
+    }
+    if !kept.is_empty() {
+        run(
+            dirs,
+            worktree,
+            index,
+            &["update-index", "-z", "--index-info"],
+            Some(&kept),
+        )?;
+    }
+    Ok(())
 }
 
 /// The command that starts git for `args` on `worktree`: confined, for a command that opens
@@ -505,13 +574,95 @@ fn exec(
     env: &[(&str, &str)],
     hint: &str,
 ) -> Result<Vec<u8>, GitError> {
+    let (status, stdout, stderr) = exec_status(dirs, worktree, index, args, stdin, env, hint)?;
+    if !status.success() {
+        return Err(GitError::Command {
+            args: args.join(" "),
+            stderr: printable(&stderr),
+        });
+    }
+    Ok(stdout)
+}
+
+/// Format and separator characters `char::is_control` misses, which can reorder or hide text.
+fn invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E007F}'
+    )
+}
+
+/// The most of git's stderr an error keeps.
+const MAX_STDERR: usize = 4 * 1024;
+
+/// Git's stderr as an error shows it: file names in it are the agent's, so control characters
+/// (an ANSI escape, a line break inside a name) are escaped, and it is cut to [`MAX_STDERR`].
+pub(crate) fn printable(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let mut out = String::with_capacity(text.len().min(MAX_STDERR));
+    for c in text.trim().chars() {
+        if out.len() >= MAX_STDERR {
+            out.push_str(" \u{2026}");
+            break;
+        }
+        if c.is_control() || invisible(c) {
+            out.extend(c.escape_unicode());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// [`run_env`], whatever git's exit status: the status, stdout, and stderr.
+pub(crate) fn run_status(
+    dirs: &GitDirs,
+    worktree: &Path,
+    index: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Result<(std::process::ExitStatus, Vec<u8>, String), GitError> {
+    let (status, stdout, stderr) = exec_status(dirs, worktree, index, args, None, env, "")?;
+    Ok((status, stdout, printable(&stderr)))
+}
+
+fn exec_status(
+    dirs: &GitDirs,
+    worktree: &Path,
+    index: &Path,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+    env: &[(&str, &str)],
+    hint: &str,
+) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), GitError> {
     let mut cmd = launcher(dirs, worktree, index, args)?;
+    // Tracing could print a request's credentials.
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("GIT_TRACE") {
+            cmd.env_remove(key);
+        }
+    }
     cmd.envs(env.iter().copied());
     // Nothing recurses into nested repos (their config is the agent's to write), and Git LFS
     // never downloads on the daemon's behalf because of an attribute the agent wrote.
     cmd.args([
         "-c",
         "core.hooksPath=/dev/null",
+        // Refuse tree entries any filesystem could take for `.git` (`.GIT`, `git~1`), on every
+        // platform, whatever the user's config says.
+        "-c",
+        "core.protectHFS=true",
+        "-c",
+        "core.protectNTFS=true",
         "-c",
         "core.fsmonitor=false",
         "-c",
@@ -532,6 +683,7 @@ fn exec(
     .env_remove("GIT_NAMESPACE")
     .env_remove("GIT_CONFIG_PARAMETERS")
     .env_remove("GIT_CONFIG_COUNT")
+    .env_remove("GIT_CURL_VERBOSE")
     .stdin(if stdin.is_some() {
         Stdio::piped()
     } else {
@@ -608,13 +760,7 @@ fn exec(
             ),
         });
     }
-    if !status.success() {
-        return Err(GitError::Command {
-            args: args.join(" "),
-            stderr: String::from_utf8_lossy(&stderr).trim().to_owned(),
-        });
-    }
-    Ok(stdout)
+    Ok((status, stdout, stderr))
 }
 
 /// The largest committed file [`committed_file`] reads.

@@ -221,6 +221,20 @@ async fn a_comment_goes_to_the_agent_and_its_reply_comes_back_to_the_thread() {
     );
     // Viewed is per round.
     assert!(second.files.iter().all(|f| !f.viewed));
+    // Since last review: only the fix, not the notes file the first round already saw.
+    let since = client
+        .call::<ReviewChangeset>(&ReviewChangesetParams {
+            session_id: id.clone(),
+            from_checkpoint: second.last_reviewed.clone(),
+        })
+        .await
+        .unwrap();
+    let changed: Vec<_> = since
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), f.additions, f.deletions))
+        .collect();
+    assert_eq!(changed, [("lib.rs", 1, 1)]);
 
     // The agent's fix changed the quoted line, so the thread is outdated, and its reply is in.
     let after = threads(&mut client, &id).await;

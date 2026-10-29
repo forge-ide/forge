@@ -11,7 +11,9 @@ use forge_api::model::{Changeset, FileChange, FileStatus, Hunk};
 use forge_api::{ApiError, CheckpointId, ErrorKind, SessionId};
 use forge_git::GitError;
 use forge_git::review::{self as git, Blob, Change, ChangeKind, GITLINK, Side};
-use forge_review::{counts, diff_lines, display, history, hunk_id, is_binary, line_count, split};
+use forge_review::{
+    DiffHunk, counts, diff_lines, display, history, hunk_id, is_binary, line_count, split,
+};
 
 use super::checkpoints::RepoTarget;
 use super::{SessionError, SessionManager};
@@ -242,7 +244,7 @@ pub(super) const MAX_LINES: usize = 1_000_000;
 
 /// The most changed lines `review.fileDiff` returns for a file; the changeset still counts
 /// them all.
-const MAX_DIFF_LINES: u32 = 200_000;
+pub(super) const MAX_DIFF_LINES: u32 = 200_000;
 
 /// A file's contents as review reads them.
 enum Body<'a> {
@@ -382,6 +384,28 @@ fn status(c: &Change) -> FileStatus {
 }
 
 fn file_hunks(t: &RepoTarget, span: &Span, start: &str, path: &str) -> Result<Vec<Hunk>, ApiError> {
+    Ok(file_parts(t, span, start, path)?
+        .hunks
+        .into_iter()
+        .map(|(hunk, _)| hunk)
+        .collect())
+}
+
+/// A file of a changeset, with what its hunks are made of.
+pub(super) struct FileParts {
+    pub(super) change: Change,
+    /// The file at the diff's start and at its head (empty where it isn't there).
+    pub(super) old: Vec<u8>,
+    pub(super) new: Vec<u8>,
+    pub(super) hunks: Vec<(Hunk, DiffHunk)>,
+}
+
+pub(super) fn file_parts(
+    t: &RepoTarget,
+    span: &Span,
+    start: &str,
+    path: &str,
+) -> Result<FileParts, ApiError> {
     let wanted = git::unquote_path(path).ok_or_else(|| {
         ApiError::validation(format!(
             "{path:?} isn't a path as review.changeset gives one"
@@ -457,22 +481,32 @@ fn file_hunks(t: &RepoTarget, span: &Span, start: &str, path: &str) -> Result<Ve
             .map_or_else(|| "base".to_owned(), |c| c.id.to_string()),
     );
     let scope = [head_id.as_str(), from_id.as_str(), t.repo.as_str(), path];
-    Ok(d.hunks
-        .iter()
-        .map(|h| Hunk {
-            id: hunk_id(&scope, h),
-            old_start: h.old_start,
-            old_lines: h.old_lines,
-            new_start: h.new_start,
-            new_lines: h.new_lines,
-            lines: h.lines.iter().map(|l| display(l)).collect(),
-            turn_id: history
-                .last_step(h)
-                .filter(|_| attribute)
-                .and_then(|step| span.steps.get(owners[step] - 1))
-                .and_then(|cp| cp.turn.clone()),
+    let hunks = d
+        .hunks
+        .into_iter()
+        .map(|h| {
+            let hunk = Hunk {
+                id: hunk_id(&scope, &h),
+                old_start: h.old_start,
+                old_lines: h.old_lines,
+                new_start: h.new_start,
+                new_lines: h.new_lines,
+                lines: h.lines.iter().map(|l| display(l)).collect(),
+                turn_id: history
+                    .last_step(&h)
+                    .filter(|_| attribute)
+                    .and_then(|step| span.steps.get(owners[step] - 1))
+                    .and_then(|cp| cp.turn.clone()),
+            };
+            (hunk, h)
         })
-        .collect())
+        .collect();
+    Ok(FileParts {
+        change,
+        old: lines[0].to_vec(),
+        new: lines[lines.len() - 1].to_vec(),
+        hunks,
+    })
 }
 
 /// The file `change` names at each commit along `steps` (one more commit than steps), traced

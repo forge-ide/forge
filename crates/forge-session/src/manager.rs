@@ -42,6 +42,7 @@ mod approvals;
 mod checkpoints;
 mod commit;
 mod review;
+mod ship;
 mod threads;
 
 use approvals::{Pending, SessionGate};
@@ -421,6 +422,17 @@ impl SessionManager {
         if !can_close(session.state) {
             return Err(invalid_state(&session, "close"));
         }
+        self.close_locked(&live, &session, reason).await
+    }
+
+    /// [`Self::close`], for a caller that holds the session's lock and checked its state.
+    async fn close_locked(
+        &self,
+        live: &Live,
+        session: &Session,
+        reason: &str,
+    ) -> Result<(), SessionError> {
+        let id = &session.id;
         let agent = lock(&live.agent).take();
         if let Some(agent) = agent {
             agent.shutdown().await;
@@ -430,7 +442,7 @@ impl SessionManager {
         if let Some(sink) = sink {
             sink.release_all().await;
         }
-        self.transition(&session, SessionState::Done, Some(reason.to_owned()))
+        self.transition(session, SessionState::Done, Some(reason.to_owned()))
             .await?;
         // The copies of the user's agent settings don't outlive the session.
         let scratch = self.dirs.sessions.join(id.to_string());
