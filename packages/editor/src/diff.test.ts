@@ -1,4 +1,5 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
+import { RangeSet } from "@codemirror/state";
 import { mountDiff, diffRows } from "./diff";
 const hunks = [
   {
@@ -83,4 +84,34 @@ it("keeps gutter targets mounted while a drag updates the selected range", () =>
   expect(parent.querySelector('button[data-line="4"]')).toBe(line);
   diff.destroy();
   parent.remove();
+});
+it("does not rebuild full-document marker sets when changing a line selection", () => {
+  const parent = document.createElement("div");
+  document.body.append(parent);
+  const diff = mountDiff(
+    parent,
+    [
+      {
+        id: "large",
+        oldStart: 1,
+        oldLines: 0,
+        newStart: 1,
+        newLines: 5000,
+        lines: Array.from({ length: 5000 }, (_, i) => `+line ${i + 1}`),
+      },
+    ],
+    { onSelect: () => {}, onRevert: () => {}, onWhy: () => {}, onCopy: () => {} },
+  );
+  const builds = vi.spyOn(RangeSet, "of");
+  try {
+    diff.setSelection({ startLine: 2, endLine: 2 });
+    diff.setSelection({ startLine: 3, endLine: 3 });
+    expect(
+      builds.mock.calls.filter(([ranges]) => Array.isArray(ranges) && ranges.length >= 5000),
+    ).toHaveLength(0);
+  } finally {
+    builds.mockRestore();
+    diff.destroy();
+    parent.remove();
+  }
 });

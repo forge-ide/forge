@@ -126,7 +126,7 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 
 **Done when:** an end-to-end test drives the fake agent through change → comment → request changes → agent reply → thread resolved; the review pane meets the large-diff performance target on WebKitGTK and macOS.
 
-**Verification:** `just test-e2e` implements these checks with the real app on Linux and a labelled Playwright WebKit proxy on macOS. Linux passes locally; macOS CI verification is pending. This milestone is not yet complete.
+**Verification:** `just test-e2e` implements these checks with the real app on Linux and a labelled Playwright WebKit proxy on macOS. Linux passes locally. The first macOS proxy CI run completed the review flow but exceeded both performance targets (627 ms opening median, 793 ms maximum scrolling frame); the targeted gutter-marker cache fix awaits CI verification. This milestone is not yet complete.
 
 ### M7: Editor, LSP, and agent files
 
