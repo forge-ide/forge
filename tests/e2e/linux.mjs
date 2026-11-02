@@ -2,6 +2,7 @@ import { remote } from "webdriverio";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:net";
 import { once } from "node:events";
+import { writeFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { startProcess } from "./process.mjs";
 import { until } from "./rpc.mjs";
@@ -19,6 +20,18 @@ export async function startBrowser(fixture, artifactDir) {
   const driverPath = resolve("target/e2e-tools/bin/tauri-driver");
   const driverArgs = ["--port", String(port), "--native-port", String(nativePort)];
   const headed = !!fixture.env.DISPLAY;
+  const webkitVersion = execFileSync("pkg-config", ["--modversion", "webkit2gtk-4.1"], {
+    encoding: "utf8",
+  }).trim();
+  const launch = {
+    webkitVersion,
+    display: headed ? "existing" : "Xvfb",
+    startedAt: new Date().toISOString(),
+    connected: false,
+    elapsedMs: 0,
+  };
+  const launchStarted = performance.now();
+  await writeFile(join(artifactDir, "launch.json"), JSON.stringify(launch, null, 2));
   const driver = await startProcess(
     headed ? driverPath : "xvfb-run",
     headed
@@ -41,13 +54,21 @@ export async function startBrowser(fixture, artifactDir) {
       port,
       logLevel: "error",
       connectionRetryCount: 0,
-      connectionRetryTimeout: 15000,
+      connectionRetryTimeout: 60000,
       capabilities: { "tauri:options": { application: resolve("target/debug/forge-desktop") } },
     });
+    await writeFile(
+      join(artifactDir, "launch.json"),
+      JSON.stringify(
+        { ...launch, connected: true, elapsedMs: performance.now() - launchStarted },
+        null,
+        2,
+      ),
+    );
     await browser.setTimeout({ script: 20000, implicit: 0, pageLoad: 20000 });
     return {
       platform: "Linux real Tauri / WebKitGTK",
-      version: `WebKitGTK ${execFileSync("pkg-config", ["--modversion", "webkit2gtk-4.1"], { encoding: "utf8" }).trim()} / Wry ${browser.capabilities.browserVersion ?? "unknown"}`,
+      version: `WebKitGTK ${webkitVersion} / Wry ${browser.capabilities.browserVersion ?? "unknown"}`,
       evaluate: (fn, arg) => browser.execute(fn, arg),
       click: async (selector) => {
         const el = await browser.$(selector);
@@ -69,6 +90,10 @@ export async function startBrowser(fixture, artifactDir) {
       },
     };
   } catch (error) {
+    await writeFile(
+      join(artifactDir, "launch.json"),
+      JSON.stringify({ ...launch, elapsedMs: performance.now() - launchStarted }, null, 2),
+    ).catch(() => {});
     if (browser) await browser.deleteSession().catch(() => {});
     await driver.close();
     throw error;

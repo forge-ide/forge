@@ -12,7 +12,7 @@ packages are `webkitgtk-6.0`, `xorg-server-xvfb` and, if absent, `xorg-xauth`.
 Ubuntu CI uses `just e2e-system-deps`. The Linux adapter starts its driver under xvfb-run when
 DISPLAY is absent, with its normal Xauthority authentication and TCP disabled.
 It drives the real Tauri application with WebdriverIO and pinned tauri-driver
-2.1.0; it does not replace the Linux app with a browser build.
+2.1.0; it does not replace the Linux app with a browser build. WebDriver requests have a bounded 60-second transport timeout, including native session creation; launch timing/version evidence is recorded in `launch.json`. The browser probes retain their own deadlines and the exact pane-opening/scrolling limits.
 
 On macOS, `just e2e-drivers` installs the pinned Playwright WebKit browser, and
 `just test-e2e` builds the browser host and runs WebKit. Every macOS result is a
