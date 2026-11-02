@@ -110,4 +110,4 @@ test-e2e-unit: ui-build e2e-web-build
 e2e-system-deps:
     sudo apt-get update
     sudo apt-get install -y libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev libxdo-dev build-essential xvfb xauth
-    if apt-cache show webkitgtk-webdriver >/dev/null 2>&1; then sudo apt-get install -y webkitgtk-webdriver; else sudo apt-get install -y webkit2gtk-driver; fi
+    sudo apt-get install -y webkit2gtk-driver

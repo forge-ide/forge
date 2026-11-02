@@ -64,6 +64,8 @@ jobs:
       - uses: extractions/setup-just@v4
 
       - run: just ci
+        env:
+          GIT_CONFIG_GLOBAL: /dev/null
 
   sandbox:
     strategy:
@@ -95,6 +97,8 @@ jobs:
       - uses: extractions/setup-just@v4
 
       - run: just test-sandbox
+        env:
+          GIT_CONFIG_GLOBAL: /dev/null
 
       # Seatbelt reports what it denied only to the unified log.
       - name: Show Seatbelt denials
@@ -118,8 +122,6 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
-    env:
-      GIT_CONFIG_GLOBAL: /dev/null
     steps:
       - uses: actions/checkout@v7
       - uses: extractions/setup-just@v4
@@ -138,6 +140,8 @@ jobs:
         run: just e2e-drivers
       - name: Review flow and exact performance targets
         run: just test-e2e
+        env:
+          GIT_CONFIG_GLOBAL: /dev/null
       - name: Preserve platform measurements and failure evidence
         if: always()
         uses: actions/upload-artifact@v7
