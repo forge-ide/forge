@@ -405,8 +405,8 @@ packages/ui/src/
   ui/            # shared primitives: split panes, virtual lists, command palette
 ```
 
-- **State.** Each store is a Solid `createStore` fed by daemon notifications through a reducer per event kind. Streaming agent output updates one message's text signal, so only that node re-renders.
-- **Review pane.** The file list is virtualized; each file's diff is a CodeMirror instance created when scrolled into view and destroyed when far away. Comment threads and diagnostics are CodeMirror widgets and gutter markers. This is the performance hot spot to test on WebKitGTK first.
+- **State.** Each store is a Solid `createStore` fed by daemon notifications through a reducer or authoritative refresh per event kind. Review thread notifications are debounced. The approved exception is `review.setViewed`, which emits no event: its successful acknowledgement triggers a store-owned authoritative changeset reload, without optimistic state. Streaming agent output updates one message's text signal, so only that node re-renders.
+- **Review pane.** The file list is virtualized; the selected file's diff is a read-only CodeMirror instance created when loaded and destroyed on deselection, with code viewport virtualization. Collapsed files are loaded explicitly. Session, file, thread/comment and transcript collections use TanStack Solid Virtual when they exceed 100 entries. Comment previews are CodeMirror widgets linking to the full session thread list; diagnostics widgets and gutter markers arrive with the LSP host. Show why opens a focused read-only originating-turn transcript beside the diff. This is the performance hot spot to test on WebKitGTK first.
 - **Editor.** One CodeMirror instance per open tab, with `@codemirror/lsp-client` pointed at the daemon. Agent files get schema-driven completion and lint extensions from `packages/editor`.
 - **Commands.** Every action is a named command with a keybinding and a palette entry, so the CLI, palette, and keymaps share one list.
 - **Layout.** Dockable split panes; the default layout puts the board and inbox left, review center, transcript right. Layouts are saved per project.

@@ -11,6 +11,8 @@
   },
   "dependencies": {
     "@forge/client": "workspace:*",
+    "@forge/editor": "workspace:*",
+    "@tanstack/solid-virtual": "3.13.52",
     "@tauri-apps/api": "2.12.4",
     "solid-js": "1.9.17"
   },
