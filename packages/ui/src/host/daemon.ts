@@ -3,18 +3,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-export type DaemonInfo = { socket: string; log: string };
-
-/** Moves JSON-RPC text frames between the UI and the daemon. */
-export interface DaemonTransport {
-  /** Open a connection, starting the daemon if it isn't running. */
-  connect(): Promise<void>;
-  send(text: string): Promise<void>;
-  onMessage(listener: (text: string) => void): () => void;
-  /** Called once per connection when it ends. */
-  onClose(listener: (reason: string) => void): () => void;
-  info(): Promise<DaemonInfo>;
-}
+import type { DaemonInfo, DaemonTransport } from "./transport";
+export type { DaemonInfo, DaemonTransport } from "./transport";
 
 const MESSAGE_EVENT = "forge://daemon-message";
 const CLOSED_EVENT = "forge://daemon-closed";

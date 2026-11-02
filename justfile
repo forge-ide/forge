@@ -69,9 +69,20 @@ test-sandbox:
     cargo test -p forged --test sandbox -- --include-ignored
 
 # UI end-to-end tests with the fake agent.
-test-e2e:
-    @echo "just test-e2e: end-to-end tests are not implemented yet" >&2
-    @exit 1
+test-e2e: e2e-build
+    node tests/e2e/run.mjs
+
+# Build the real test binaries and the appropriate UI variant.
+e2e-build: ui-build
+    cargo build -p forged -p forge-fake-agent -p forge-desktop --features tauri/custom-protocol
+    if [[ "$(uname -s)" == "Darwin" ]]; then just e2e-web-build; fi
+
+e2e-web-build: install
+    pnpm --filter @forge/ui exec vite build --mode e2e-web --outDir ../../target/e2e-web
+
+# The system WebKit driver and Xvfb are installed by the platform package manager.
+e2e-drivers: install
+    if [[ "$(uname -s)" == "Darwin" ]]; then pnpm exec playwright install webkit; else cargo install tauri-driver --locked --version 2.1.0 --root target/e2e-tools; fi
 
 # Everything CI runs.
 # Copy a sample repo (rust, typescript, python, go) into DEST as a fresh git repo, for the
@@ -85,8 +96,18 @@ smoke-repo lang dest:
     git -C "{{dest}}" -c user.name=Forge -c user.email=forge@localhost commit --quiet -m "Sample {{lang}} repo"
     @echo "{{dest}}: open it with forge project open {{dest}}"
 
-ci: fmt-check lint test gen-check
+ci: fmt-check lint test gen-check test-e2e-unit
 
 # Focused UI and editor tests, including rendered component security checks.
 test-ui *args:
     pnpm exec vitest run {{args}}
+
+# Focused harness unit tests; no browser or user data required.
+test-e2e-unit: ui-build e2e-web-build
+    node --test --test-timeout=15000 tests/e2e/*.test.mjs
+
+# Ubuntu CI prerequisites; Arch users install webkitgtk-6.0 and xorg-server-xvfb.
+e2e-system-deps:
+    sudo apt-get update
+    sudo apt-get install -y libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev libxdo-dev build-essential xvfb xauth
+    if apt-cache show webkitgtk-webdriver >/dev/null 2>&1; then sudo apt-get install -y webkitgtk-webdriver; else sudo apt-get install -y webkit2gtk-driver; fi

@@ -126,6 +126,8 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 
 **Done when:** an end-to-end test drives the fake agent through change → comment → request changes → agent reply → thread resolved; the review pane meets the large-diff performance target on WebKitGTK and macOS.
 
+**Verification:** `just test-e2e` implements these checks with the real app on Linux and a labelled Playwright WebKit proxy on macOS. Linux passes locally; macOS CI verification is pending. This milestone is not yet complete.
+
 ### M7: Editor, LSP, and agent files
 
 - [ ] File tree and editor tabs; `file.read`, `file.write` with conflict detection by content hash.

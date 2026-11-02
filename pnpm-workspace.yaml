@@ -1,3 +1,8 @@
 packages:
   - apps/desktop
   - packages/*
+
+# The Tauri harness uses tauri-driver, not downloaded Edge/Firefox drivers.
+allowBuilds:
+  edgedriver: false
+  geckodriver: false

@@ -410,4 +410,4 @@ packages/ui/src/
 - **Editor.** One CodeMirror instance per open tab, with `@codemirror/lsp-client` pointed at the daemon. Agent files get schema-driven completion and lint extensions from `packages/editor`.
 - **Commands.** Every action is a named command with a keybinding and a palette entry, so the CLI, palette, and keymaps share one list.
 - **Layout.** Dockable split panes; the default layout puts the board and inbox left, review center, transcript right. Layouts are saved per project.
-- **Host boundary.** Components import from `host/`, never from `@tauri-apps/*`. A browser build swaps `host/` for a web implementation, which is also how the remote and mobile clients start.
+- **Host boundary.** Components import from `host/`, never from `@tauri-apps/*`. An explicit browser-test build mode swaps the host factory for `host/web.ts`; normal desktop builds retain only the Tauri transport. The test web host connects only to its loopback page origin with a per-run capability. Its Node WebSocket-to-Unix bridge lives under `tests/e2e`, never in `forged`; future remote and mobile hosts remain separate work.
