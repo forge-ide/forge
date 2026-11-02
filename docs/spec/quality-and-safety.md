@@ -58,6 +58,8 @@ Measured on a reference machine: a 4-core laptop with 16 GB RAM, on Linux (WebKi
 | Review pane: scroll that changeset | No frame over 32 ms |
 | Transcript with 2,000 events | Scrolls without dropped frames; memory < 150 MB for the webview |
 
+Review end-to-end checks run through `just test-e2e`: Linux uses the real Tauri/WebKitGTK app with WebdriverIO/tauri-driver; macOS uses a browser build with Playwright WebKit and is explicitly a proxy measurement. The Node loopback bridge is test-only and never adds a TCP listener to `forged`. Opening times include RPC and rendered visible code, with the median of five required to be <400 ms; all scrolling rAF samples must be <=32 ms. Fixtures cover five 1,000-line files and explicit loading/scrolling of a collapsed 5,000-line file. Exact methodology and platform artifacts are described in `tests/e2e/README.md`.
+
 ## Threat model
 
 Forge assumes the agent is well-meaning but fallible and steerable by anything it reads. It protects the user's machine, credentials, and other code from that agent. It does not protect against a compromised user account or a malicious Forge build.

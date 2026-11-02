@@ -64,6 +64,8 @@ jobs:
       - uses: extractions/setup-just@v4
 
       - run: just ci
+        env:
+          GIT_CONFIG_GLOBAL: /dev/null
 
   sandbox:
     strategy:
@@ -95,6 +97,8 @@ jobs:
       - uses: extractions/setup-just@v4
 
       - run: just test-sandbox
+        env:
+          GIT_CONFIG_GLOBAL: /dev/null
 
       # Seatbelt reports what it denied only to the unified log.
       - name: Show Seatbelt denials
@@ -110,3 +114,38 @@ jobs:
             head -c 6000 "$report"
             echo
           done
+
+  e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: extractions/setup-just@v4
+      - name: Install Linux browser prerequisites
+        if: runner.os == 'Linux'
+        run: just e2e-system-deps
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install browser drivers
+        run: just e2e-drivers
+      - name: Review flow and exact performance targets
+        run: just test-e2e
+        env:
+          GIT_CONFIG_GLOBAL: /dev/null
+      - name: Preserve platform measurements and failure evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: review-e2e-${{ matrix.os }}
+          path: target/e2e-artifacts/
+          if-no-files-found: warn

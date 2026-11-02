@@ -1,0 +1,21 @@
+steps:
+  - expect_prompt: "*retry*"
+  - write:
+      path: retry.rs
+      content: |
+        pub fn retry_limit() -> usize {
+            3
+        }
+  - message: "Added the initial retry limit."
+  - end_turn
+  - expect_review_comments: 1
+  - expect_prompt: "*Read the retry limit from configuration*"
+  - write:
+      path: retry.rs
+      content: |
+        pub fn retry_limit(config: &RetryConfig) -> usize {
+            config.max_attempts
+        }
+  - reply_thread: { index: 0, body: "Moved to RetryConfig::max_attempts." }
+  - message: "Updated the retry limit from configuration."
+  - end_turn

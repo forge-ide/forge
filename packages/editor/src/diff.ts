@@ -217,17 +217,17 @@ export function mountDiff(parent: HTMLElement, hunks: DiffHunk[], options: DiffO
         ".cm-gutterElement": { lineHeight: "22px" },
         ".cm-gutters": { backgroundColor: "transparent", border: "none" },
       }),
-      ...[false, true].map((head) =>
-        gutter({
+      ...[false, true].map((head) => {
+        const markers = RangeSet.of(
+          rows.map((r, i) =>
+            new NumberMarker(head ? r.new : r.old, head).range(doc.line(i + 1).from),
+          ),
+        );
+        return gutter({
           class: head ? "diff-head-numbers" : "diff-old-numbers",
-          markers: (view) =>
-            RangeSet.of(
-              rows.map((r, i) =>
-                new NumberMarker(head ? r.new : r.old, head).range(view.state.doc.line(i + 1).from),
-              ),
-            ),
-        }),
-      ),
+          markers: () => markers,
+        });
+      }),
       EditorView.decorations.of(makeDecorations()),
     ],
   });
