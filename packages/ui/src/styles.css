@@ -196,3 +196,355 @@ main {
 .hint {
   font-size: 12px;
 }
+
+/* Review surfaces extend the shell's existing neutral tokens. */
+main.review-open {
+  max-width: none;
+  padding: 16px 20px;
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+article:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+input,
+textarea,
+select {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px;
+}
+label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+textarea {
+  display: block;
+  width: 100%;
+  min-height: 90px;
+  resize: vertical;
+}
+pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+h2,
+h3 {
+  margin: 0;
+}
+.warning {
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  padding: 10px 12px;
+  overflow-wrap: anywhere;
+}
+.session-list {
+  grid-column: 1 / -1;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+.session-row {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  text-align: left;
+  border: none;
+  border-radius: 0;
+  padding: 10px 0;
+}
+.review-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+.review-header > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+.review-header h2 {
+  font-size: 18px;
+}
+.review-actions {
+  flex-shrink: 0;
+}
+.review-layout {
+  display: flex;
+  min-width: 0;
+  margin-top: 16px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.review-files {
+  flex: 0 0 240px;
+  min-width: 0;
+  border-right: 1px solid var(--border);
+}
+.review-file {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  gap: 4px;
+}
+.review-file.selected {
+  box-shadow: inset 3px 0 var(--accent);
+  background: var(--bg);
+}
+.review-file label {
+  font-size: 11px;
+  color: var(--muted);
+}
+.file-path {
+  text-align: left;
+  border: none;
+  background: transparent;
+  border-radius: 0;
+  padding: 2px 0;
+  overflow-wrap: anywhere;
+}
+.review-content {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.file-header {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+.review-content > .empty {
+  margin: 16px;
+  display: grid;
+  justify-items: start;
+  gap: 12px;
+}
+.diff-editor {
+  height: 58vh;
+  min-height: 200px;
+}
+.cm-editor {
+  color: var(--text);
+}
+.cm-gutters {
+  color: var(--muted);
+}
+.cm-gutterElement button {
+  min-width: 36px;
+  padding: 0 6px;
+  border: 0;
+  background: none;
+  font: inherit;
+}
+.diff-added {
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+}
+.diff-removed {
+  background: color-mix(in srgb, #c44 12%, transparent);
+}
+.diff-header {
+  color: var(--muted);
+  background: var(--bg);
+}
+.diff-hunk-menu {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-height: 36px;
+  padding: 4px 8px;
+  border-block: 1px solid var(--border);
+  background: var(--bg);
+  font: 11px system-ui;
+}
+.diff-hunk-menu button {
+  padding: 3px 8px;
+}
+.inline-thread {
+  border-left: 3px solid var(--accent);
+  margin: 8px 20px;
+  padding: 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 12px system-ui;
+}
+.comment-composer {
+  padding: 12px 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+}
+.comment-composer label {
+  width: 100%;
+  display: block;
+}
+.threads {
+  margin-top: 24px;
+}
+.threads h3 {
+  margin-bottom: 12px;
+}
+.threads h3 .hint {
+  font-weight: 400;
+  margin-left: 12px;
+}
+.thread {
+  border: 1px solid var(--border);
+  margin: 0 0 12px;
+  padding: 12px 16px;
+  background: var(--surface);
+}
+.thread > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.comment {
+  border-left: 2px solid var(--border);
+  padding: 8px 12px;
+  margin-top: 8px;
+}
+.comment p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 4px 0;
+}
+.thread-actions,
+.dialog-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.thread form label {
+  display: block;
+}
+.why-panel {
+  flex: 0 0 340px;
+  min-width: 0;
+  border-left: 1px solid var(--border);
+  padding: 12px;
+}
+.why-panel header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.transcript-row {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+summary {
+  cursor: pointer;
+}
+.ship-dialog {
+  position: fixed;
+  inset: 0;
+  width: min(620px, calc(100vw - 32px));
+  max-height: 85vh;
+  overflow: auto;
+  margin: auto;
+  padding: 24px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 16px 60px #0004;
+  z-index: 5;
+}
+.ship-dialog::backdrop {
+  background: #0006;
+}
+.ship-dialog h2 {
+  margin-bottom: 12px;
+}
+.ship-dialog label {
+  margin-top: 16px;
+}
+.ship-dialog .acknowledgement {
+  align-items: start;
+}
+@media (max-width: 1000px) {
+  .review-header {
+    flex-wrap: wrap;
+  }
+  .review-files {
+    flex-basis: 200px;
+  }
+  .why-panel {
+    flex-basis: 280px;
+  }
+}
+@media (max-width: 760px) {
+  .review-layout {
+    flex-wrap: wrap;
+  }
+  .review-files {
+    flex: 1 1 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+  .review-files .virtual-list {
+    max-height: 160px;
+  }
+  .review-content {
+    flex-basis: 100%;
+  }
+  .why-panel {
+    flex-basis: 100%;
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
+  main.review-open {
+    padding: 12px;
+  }
+}
+.diff-selected {
+  box-shadow: inset 4px 0 var(--accent);
+  background: color-mix(in srgb, var(--accent) 22%, var(--surface));
+}
+.range-selector {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+.range-selector input {
+  width: 7ch;
+}
+.focused-thread {
+  border-left: 3px solid var(--accent);
+  padding: 10px;
+  margin-bottom: 12px;
+}
+@media (max-width: 760px) {
+  .review-header > div {
+    min-width: 0;
+    max-width: 100%;
+  }
+  .review-actions {
+    flex: 1 1 100%;
+  }
+}

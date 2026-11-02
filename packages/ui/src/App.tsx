@@ -1,5 +1,6 @@
-import { Show } from "solid-js";
+import { Show, createSignal } from "solid-js";
 import type { DaemonConnection } from "./client/connection";
+import { ReviewPane } from "./features/review/ReviewPane";
 import { ProjectList } from "./features/projects/ProjectList";
 import { createConnectionState } from "./stores/connection";
 import { createProjectsStore } from "./stores/projects";
@@ -12,6 +13,7 @@ export function App(props: { connection: DaemonConnection }) {
   const conn = props.connection;
   const connection = createConnectionState(conn);
   const projects = createProjectsStore(conn);
+  const [selectedSession, setSelectedSession] = createSignal<string>();
 
   const status = () => {
     const s = connection();
@@ -36,9 +38,28 @@ export function App(props: { connection: DaemonConnection }) {
           {status()}
         </span>
       </header>
-      <main>
+      <main classList={{ "review-open": !!selectedSession() }}>
         <Show when={connection().kind !== "starting"}>
-          <ProjectList state={projects.state} onRetry={() => void projects.refresh()} />
+          <Show
+            when={selectedSession()}
+            keyed
+            fallback={
+              <ProjectList
+                connection={conn}
+                onSelectSession={setSelectedSession}
+                state={projects.state}
+                onRetry={() => void projects.refresh()}
+              />
+            }
+          >
+            {(id) => (
+              <ReviewPane
+                connection={conn}
+                sessionId={id}
+                onClose={() => setSelectedSession(undefined)}
+              />
+            )}
+          </Show>
         </Show>
       </main>
     </>

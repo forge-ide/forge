@@ -1,8 +1,17 @@
 import { For, Match, Switch } from "solid-js";
+import { VirtualList } from "../../ui/VirtualList";
+import { SessionList } from "./SessionList";
+import type { DaemonConnection } from "../../client/connection";
+import { visibleText } from "../review/text";
 import type { ProjectsState } from "../../stores/projects";
 
 /** The welcome view's project list, with loading, empty, error, and stale states. */
-export function ProjectList(props: { state: ProjectsState; onRetry: () => void }) {
+export function ProjectList(props: {
+  state: ProjectsState;
+  onRetry: () => void;
+  connection: DaemonConnection;
+  onSelectSession: (id: string) => void;
+}) {
   return (
     <section
       class="projects"
@@ -33,25 +42,30 @@ export function ProjectList(props: { state: ProjectsState; onRetry: () => void }
           </div>
         </Match>
         <Match when={true}>
-          <ul class="project-list">
-            <For each={props.state.projects}>
+          <div class="project-list">
+            <VirtualList items={props.state.projects} label="Projects" height="70vh" estimate={200}>
               {(project) => (
-                <li class="project">
-                  <span class="project-name">{project.name}</span>
-                  <span class="project-root">{project.root}</span>
+                <div class="project">
+                  <span class="project-name">{visibleText(project.name)}</span>
+                  <span class="project-root">{visibleText(project.root)}</span>
                   <span class="project-repos">
                     <For each={project.repos}>
                       {(repo) => (
                         <span class="repo">
-                          {repo.name} · {repo.baseBranch}
+                          {visibleText(repo.name)} · {visibleText(repo.baseBranch)}
                         </span>
                       )}
                     </For>
                   </span>
-                </li>
+                  <SessionList
+                    connection={props.connection}
+                    projectId={project.id}
+                    onSelect={props.onSelectSession}
+                  />
+                </div>
               )}
-            </For>
-          </ul>
+            </VirtualList>
+          </div>
         </Match>
       </Switch>
     </section>

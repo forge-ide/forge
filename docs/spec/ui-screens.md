@@ -100,7 +100,7 @@ The Session tab in the center column shows the plan and the timeline; the transc
 
 ## Review pane
 
-The Review tab is the home screen for any session in Review. It behaves like a GitHub pull request's Files tab.
+The Review pane is the home screen for any session in Review. It behaves like a GitHub pull request's Files tab. Until the board and Session view arrive, a per-project session list under ProjectList opens a full-width pane through `selectedSession` in App.tsx; Back to projects closes it. No router is used. The docked center-tab layout above is the eventual shell.
 
 ```
 +------------------------------------------------------------------------+
@@ -122,14 +122,18 @@ The Review tab is the home screen for any session in Review. It behaves like a G
 +-------------------+----------------------------------------------------+
 ```
 
-- **Header:** title, file count, totals, review round, a toggle between full changeset and **Since last review**, the Request changes button with the count of open comments, Ship (push branch or merge locally), and a diagnostics summary.
-- **File list:** viewed checkboxes persist per review round; generated and lock files are collapsed by default.
-- **Diff:** split or unified (toggle, remembered). Click or drag across line numbers to comment on a line or range. Comments draft locally until Request changes sends them all.
+- **Header:** title, file count, totals, review round, a toggle between full changeset and **Since last review**, the Request changes button with the count of open comments, Ship (push branch or merge locally), and, once the LSP host arrives, a diagnostics summary.
+- **File list:** viewed checkboxes persist per review round; generated and lock files and binary files are collapsed by default with Load diff. Too-large and refused files show warnings marked not reviewed, never an empty diff or 0/0. Viewed is unavailable for those files.
+- **Diff:** a read-only unified CodeMirror view initially; a remembered split/unified toggle is a later enhancement. Click or drag across line numbers to comment on a line or range; selected lines are highlighted. Labeled start/end line inputs provide keyboard and assistive-technology access outside the code gutter. Comments and replies are saved immediately as daemon threads, surviving restarts; nothing is sent to the agent until Request changes. Line selection anchors to the new side at the latest checkpoint.
 - **Hunk menu (`...` per hunk):** Revert hunk, Copy, Show why.
-- **Why panel `(?)`:** opens beside the diff with the transcript turn and plan entry that produced the hunk.
-- **Diagnostics:** gutter markers on lines with new errors or warnings since the base.
+- **Why panel `(?)`:** opens beside the diff with the originating transcript turn, loaded lazily through paged event history. Prompt, agent messages, tool actions, policy decisions and results are read-only text, with visible control/bidi and Unicode default-ignorable characters (while preserving U+FFFD). Missing attribution or incomplete history is labeled explicitly. The plan entry is deferred.
+- **Diagnostics:** gutter markers on lines with new errors or warnings since the base, deferred with the header summary until the LSP host arrives.
 - **Threads** show author, body, and the agent's reply; resolved threads collapse; outdated ones show the original code they were written on.
 - **Large diffs:** files over 1,500 changed lines start collapsed with a Load diff button.
+
+Ship sends the changeset’s reviewed `head` as `checkpointId` for either strategy. Conflict details name refused files. Withheld files from the full changeset remain visible even in Since last review and require an explicit unchecked acknowledgement before `includeWithheld` can be sent; changing the reviewed head invalidates the confirmation. Full and scoped changesets must have matching heads before shipping. Acknowledgement is bound to the checkpoint, comparison scope and sorted original repo/path identities of withheld files; an inventory change requires fresh acknowledgement, while equivalent reordering does not. The daemon remains the authority for permitted actions.
+
+`review.thread` refreshes are debounced in the store. `review.setViewed` has no event: after its successful acknowledgement, the store reloads the authoritative changeset, without an optimistic checkbox update. On disconnect, content stays visible and marked stale, and mutations are disabled. Hunk revert uses the exact repo, quoted path and comparison checkpoint of the displayed diff.
 
 ## Editor and agent files
 

@@ -86,3 +86,7 @@ smoke-repo lang dest:
     @echo "{{dest}}: open it with forge project open {{dest}}"
 
 ci: fmt-check lint test gen-check
+
+# Focused UI and editor tests, including rendered component security checks.
+test-ui *args:
+    pnpm exec vitest run {{args}}

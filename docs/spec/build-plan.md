@@ -120,7 +120,7 @@ M0 through M2 are strictly in order. After M2, M3 and M4 can run in parallel, an
 - [x] Threads, replies, resolve, outdated detection.
 - [x] Request changes as one structured agent message; per-thread replies.
 - [x] Changes since last review; per-hunk revert.
-- [ ] Review pane UI (ui-screens.md).
+- [x] Review pane UI (ui-screens.md); exact large-diff performance checks remain part of the end-to-end done-when check below.
 - [x] `review.ship` with `push-branch` and `merge-local`.
 - [x] Checkpoints and ship share their commit code with `git_commit` (the endpoint itself landed in M5).
 
